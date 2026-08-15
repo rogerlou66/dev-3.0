@@ -135,6 +135,31 @@ export function getModeLeafLabel(config: AgentConfiguration): string {
 	return stripped || config.name;
 }
 
+/**
+ * Who serves the models a preset is bound to, for the caption under a Model
+ * option. A provider is a property of the model, never a field the user picks
+ * (AGENTS.md § Model routing glossary), so it is shown and never selected.
+ *
+ * Null for a preset with no catalog bindings: dev3 knows a built-in preset's
+ * model name but not who is behind it, and inventing a vendor would be a guess.
+ * A preset whose roles span several providers names them all — that mix is the
+ * whole point of roles, and collapsing it to one name would misreport it.
+ */
+export function providerCaptionForConfig(
+	config: AgentConfiguration,
+	catalog: { providers: { id: string; label: string }[]; models: { id: string; providerId: string }[] } | null,
+): string | null {
+	const bound = Object.values(config.modelRoles ?? {});
+	if (!catalog || bound.length === 0) return null;
+	const labels: string[] = [];
+	for (const modelId of bound) {
+		const model = catalog.models.find((m) => m.id === modelId);
+		const label = model && catalog.providers.find((p) => p.id === model.providerId)?.label;
+		if (label && !labels.includes(label)) labels.push(label);
+	}
+	return labels.length > 0 ? labels.join(" · ") : null;
+}
+
 export interface PickerGroup {
 	/** The 2nd-field label. */
 	label: string;

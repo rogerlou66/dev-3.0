@@ -184,6 +184,37 @@ rename around it (the repo forbids leaving two ways to do one thing), but that i
 it hinges on the catalog covering Amazon Bedrock. The vendored bifrost-http binary carries Bedrock
 strings, so it is plausible; nobody has run it. Until that is proven, `llmProvider` stays.
 
+### Follow-up: the provider is a caption, and the pin file is a matrix
+
+Two consequences of the three-axis settlement landed after it.
+
+**The caption.** `providerCaptionForConfig` (`src/mainview/utils/agentPicker.ts`) resolves a
+preset's `modelRoles` to the labels of the providers behind them, and the Model field renders it
+next to the option — `DS-Flash · OpenRouter`, in both the open list and the closed trigger. A
+preset with no catalog binding gets no caption: dev3 knows a built-in preset's model name but not
+who serves it, and a guessed vendor is worse than silence. A preset whose roles span several
+providers names them all, because that mix is the point. Passing `renderOption` to that `Select`
+would have swallowed the padlock on the pxpipe-gated group, so `Select` now draws the lock
+*around* a caller's `renderOption` instead of instead of it — the lock is the option's state, not
+its content.
+
+**The pin file.** `scripts/bifrost-pinned.json` held only `darwin-arm64` while release CI runs
+`fetch-bifrost.ts` on all five targets, and that script exits non-zero on an unpinned one: the
+next release would have failed four of five build jobs with nothing visible beforehand. Recording
+is now a batch operation (`--record --all`) and `src/bun/__tests__/bifrost-release.test.ts`
+asserts the pin file covers exactly `BIFROST_TARGETS`. There is no platform allowlist in the app
+— `resolveSidecarBinary` only asks whether the binary was staged — so pinning *is* multi-platform
+support.
+
+### Follow-up: preset reordering removed rather than repaired
+
+The preset list is grouped by model, so `moveConfig`/`moveAgent` permuted an order the list does
+not display; the drag handle beside them was `draggable: false` with no drop target anywhere and
+had never worked. Both are deleted, with `moveItem` and six i18n keys per locale. Reordering by
+dragging in the list — what the user actually wants — is not a straight replacement: list order is
+*derived* from grouping, so a drop between two groups has no meaning until order becomes stored
+state. That design is open.
+
 ## Alternatives considered
 
 - **Extend the provider registry with a "bifrost" provider.** Rejected: the registry is shaped

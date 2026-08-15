@@ -193,9 +193,18 @@ function SelectListbox({
 									: "text-fg-2 hover:bg-elevated-hover hover:text-fg"
 						}`}
 					>
+						{/* The lock is the option's state, not its content, so it survives a
+						    caller's renderOption — a custom row must not silently drop it. */}
 						<span className="flex-1 min-w-0 truncate">
 							{renderOption && !opt.custom ? (
-								renderOption(opt)
+								opt.disabled ? (
+									<span className="flex items-center gap-1.5 opacity-70">
+										{renderOption(opt)}
+										<LockIcon />
+									</span>
+								) : (
+									renderOption(opt)
+								)
 							) : opt.disabled ? (
 								<span className="flex items-center gap-1.5 opacity-70">
 									{opt.label}

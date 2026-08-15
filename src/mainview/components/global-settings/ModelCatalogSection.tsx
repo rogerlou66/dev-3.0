@@ -367,6 +367,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 				{/* Providers come first: nothing below exists without one. */}
 				<div className="space-y-3">
 					<p className="text-fg text-sm font-semibold">{t("catalog.providers")}</p>
+					{/* The one thing a key field cannot say for itself: a subscription is
+					    not a key here, and pasting one is the first thing people try. */}
+					<p className="text-fg-3 text-xs leading-relaxed">{t("catalog.subscriptionNote")}</p>
 					{draft.providers.length === 0 ? (
 						<p className="text-fg-3 text-sm">{t("catalog.noProviders")}</p>
 					) : (

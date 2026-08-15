@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 
@@ -12,6 +12,10 @@ vi.mock("../../rpc", () => ({
 				codex: { accounts: [], activeId: null, currentIdentity: null },
 			}),
 			setActiveAgentAccount: vi.fn(),
+			modelCatalogGet: vi.fn().mockResolvedValue({
+				providers: [{ id: "p-or", kind: "openrouter", label: "OpenRouter", hasKey: true }],
+				models: [{ id: "m-flash", providerId: "p-or", name: "ds-flash", modelId: "deepseek/flash" }],
+			}),
 		},
 	},
 }));
@@ -141,5 +145,47 @@ describe("AgentConfigPicker", () => {
 		await pick(user, mode(), "Bypass · X-High");
 
 		expect(onChange).toHaveBeenLastCalledWith({ agentId: "builtin-claude", configId: "fable-bypass-xhigh" });
+	});
+
+	// Provider is a property of the model, so it is a caption on the Model field —
+	// never a fourth thing to pick (AGENTS.md § Model routing glossary).
+	describe("the provider caption", () => {
+		const routedAgent: CodingAgent = {
+			id: "builtin-codex",
+			name: "Codex",
+			baseCommand: "codex",
+			configurations: [
+				{ id: "codex-default", name: "Default (GPT-5.5)", model: "gpt-5.5" },
+				{ id: "ds-flash", name: "DS-Flash", modelRoles: { main: "m-flash" } },
+			],
+			defaultConfigId: "ds-flash",
+		};
+
+		function RoutedHarness() {
+			const [sel, setSel] = useState<AgentConfigSelection>({ agentId: "builtin-codex", configId: "ds-flash" });
+			return (
+				<I18nProvider>
+					<AgentConfigPicker idPrefix="test" agents={[routedAgent]} agentId={sel.agentId} configId={sel.configId} onChange={setSel} />
+				</I18nProvider>
+			);
+		}
+
+		it("names who serves a catalog-bound preset, on the closed field", async () => {
+			render(<RoutedHarness />);
+			await waitFor(() => expect(text(model())).toContain("OpenRouter"));
+			expect(text(model())).toContain("DS-Flash");
+		});
+
+		it("leaves a built-in preset uncaptioned rather than guessing a vendor", async () => {
+			const user = userEvent.setup();
+			render(<RoutedHarness />);
+			await waitFor(() => expect(text(model())).toContain("OpenRouter"));
+
+			await user.click(model());
+			const overlays = document.querySelectorAll(".bg-overlay.border");
+			const rows = Array.from(overlays[overlays.length - 1]?.querySelectorAll("button") ?? []);
+			const builtin = rows.find((b) => b.textContent?.includes("GPT-5.5"));
+			expect(builtin?.textContent).not.toContain("OpenRouter");
+		});
 	});
 });

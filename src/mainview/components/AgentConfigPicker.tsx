@@ -13,8 +13,10 @@ import {
 	groupLabelForConfig,
 	groupRequiresPxpipeProxy,
 	pickConfigForModelChange,
+	providerCaptionForConfig,
 	resolveFavoriteChips,
 } from "../utils/agentPicker";
+import { useModelCatalog } from "../hooks/useModelCatalog";
 
 export interface AgentConfigSelection {
 	agentId: string | null;
@@ -120,6 +122,9 @@ function AgentConfigPicker({
 }: AgentConfigPickerProps) {
 	const t = useT();
 	const renderAgentOption = useAgentRenderOption(agentAvailability, t("settings.agentNotInstalled"));
+	// Only to caption Model options with who serves them; null until it loads, and
+	// a caption that is not there yet costs nothing.
+	const catalog = useModelCatalog();
 	// Favorites popover (anchored to the leading star trigger). Per-picker so the
 	// global list is never duplicated across variant rows (decision 125).
 	// Escape closes the favorites menu before the surrounding modal: the menu is
@@ -144,6 +149,12 @@ function AgentConfigPicker({
 	// Provider → Model → Mode cascade: group the flat presets by model (UI-only;
 	// the leaf is still a plain configId).
 	const groups = buildPickerGroups(selectedAgent);
+	// Keyed by group label, which is what the Model field's option values are.
+	const providerCaptions = new Map(
+		groups
+			.map((group) => [group.label, providerCaptionForConfig(group.configs[0], catalog)] as const)
+			.filter(([, caption]) => caption !== null),
+	);
 	const currentGroupLabel = groupLabelForConfig(selectedAgent, configId) ?? groups[0]?.label ?? "";
 	const currentGroup = groups.find((g) => g.label === currentGroupLabel) ?? groups[0];
 	const modeConfigs = currentGroup?.configs ?? [];
@@ -258,6 +269,15 @@ function AgentConfigPicker({
 						}))}
 						onChange={handleModelChange}
 						onOptionDisabledClick={handleGatedConfigClick}
+						renderOption={(option) => {
+							const caption = providerCaptions.get(option.value);
+							return (
+								<span className="flex items-baseline gap-1.5 min-w-0">
+									<span className="truncate">{option.label}</span>
+									{caption ? <span className="text-fg-3 text-micro shrink-0">{caption}</span> : null}
+								</span>
+							);
+						}}
 					/>
 				</div>
 
