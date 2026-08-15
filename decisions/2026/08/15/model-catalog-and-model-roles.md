@@ -58,7 +58,7 @@ Two separate concepts, defined in AGENTS.md § Model routing glossary:
   and then builds named **catalog models** (`fast-gremlin` → OpenRouter `deepseek-flash`).
   Each entry belongs to exactly one provider, so it maps one-to-one onto a static alias on that
   provider's key in the sidecar's config. dev3 generates the config skeleton (loopback bind,
-  isolated app dir, file-only config store, per-run local session key, secrets only as `env.*`
+  isolated app dir, file-only config store, a local session key remembered across restarts, secrets only as `env.*`
   references); the user owns the contents. The model id field is a combobox fed by the sidecar's
   live model listing, with free text still allowed for models a provider does not list.
 - **Model roles** (per preset): a preset binds catalog models to the roles its own CLI exposes.
@@ -133,6 +133,18 @@ is written literally — it is a URL, not a credential.
 - **Both SQLite stores live under `~/.dev3.0/model-catalog-runtime/`** and grow with use. Only
   the log store is wanted; the config store exists because governance demands it. Nothing
   prunes either yet.
+
+## Follow-up: the endpoint is remembered, not fresh per start
+
+The first implementation picked a fresh ephemeral port and a fresh session key on every start,
+described as a per-run secret. That is wrong for a sidecar other processes talk to: an agent's
+`ANTHROPIC_BASE_URL` and token are baked into its launch environment, so restarting the app —
+or merely saving the catalog, which restarts the proxy — stranded every running agent on a dead
+port (`ConnectionRefused`, then Claude Code retrying a permanent failure ten times). Both values
+are now written to `endpoint.json` (0600) in the runtime dir and reused on the next start;
+the port only when it is still bindable, so a squatter costs a new address instead of a failed
+start. The key gains no new exposure — it already lives in every agent's process environment and
+in the sidecar's own config store.
 
 ## Alternatives considered
 

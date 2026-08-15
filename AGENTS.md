@@ -254,7 +254,7 @@ Vocabulary for running an agent CLI against arbitrary LLM providers through dev3
 - **Catalog model** — one entry in the catalog: a user-chosen name bound to exactly one provider and one provider-native model id (`fast-gremlin` → OpenRouter, `deepseek-flash`). The name is what travels on the wire as `<provider>/<name>`, so it is limited to letters, digits, dot, dash and underscore; the sidecar resolves it. An entry belongs to a single provider — a name that could resolve to two providers is not a catalog model.
 - **Model roles** — the per-preset binding of catalog models to the roles an agent CLI actually exposes. Roles are that CLI's own, never a dev3-invented common vocabulary: Claude Code has its alias slots, Codex has its main / default-subagent / review models. A preset carrying roles is its own picker group (`groupLabel`), because its "model" is a set, not one model.
 - **Proxy sidecar** — the dev3-managed local process that realizes the catalog. Bound to loopback on a dev3-chosen random port, launched with an isolated app dir, credentials reaching it only through its child environment. One per app, started on demand, dies with the app.
-- **Local session key** — the per-run secret the agent CLI presents to the sidecar instead of any upstream API key. Upstream keys never leave dev3's own storage and the sidecar's environment.
+- **Local session key** — the secret the agent CLI presents to the sidecar instead of any upstream API key. Remembered with the sidecar's port in its runtime dir and reused across restarts, because both are baked into a running agent's launch environment. Upstream keys never leave dev3's own storage and the sidecar's environment.
 
 ### RPC protocol
 

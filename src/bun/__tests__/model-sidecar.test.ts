@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import type { ModelCatalog } from "../../shared/model-catalog";
 
 const h = vi.hoisted(() => ({
@@ -7,6 +9,9 @@ const h = vi.hoisted(() => ({
 	fs: {
 		existsSync: vi.fn((p: string) => p === "/opt/dev3/bifrost-http"),
 		mkdirSync: vi.fn(),
+		readFileSync: vi.fn((_p: string): string => {
+			throw new Error("ENOENT");
+		}),
 		writeFileSync: vi.fn(),
 		chmodSync: vi.fn(),
 		realpathSync: vi.fn(() => "/apps/dev3.app/Contents/MacOS/bun"),
@@ -97,6 +102,9 @@ beforeEach(() => {
 	h.catalog.mockReturnValue(CATALOG);
 	h.keys.mockReturnValue({ "p-or": "sk-or-live", "p-custom": "sk-custom" });
 	h.fs.existsSync.mockImplementation((p: string) => p === "/opt/dev3/bifrost-http");
+	h.fs.readFileSync.mockImplementation(() => {
+		throw new Error("ENOENT");
+	});
 	h.spawnMock.mockImplementation(() => liveProcess());
 	stubHttp();
 });
@@ -201,6 +209,73 @@ describe("starting", () => {
 		const { ensureModelSidecar, getModelSidecarStatus } = await freshModule();
 		await expect(ensureModelSidecar()).rejects.toThrow(/missing from this build/);
 		expect(getModelSidecarStatus().binaryAvailable).toBe(false);
+	});
+});
+
+describe("surviving a restart", () => {
+	/** What the last start wrote to endpoint.json, or null. */
+	function rememberedEndpoint(): { port: number; sessionKey: string } | null {
+		const call = h.fs.writeFileSync.mock.calls.find(([target]) => String(target).endsWith("endpoint.json"));
+		return call ? JSON.parse(String(call[1])) : null;
+	}
+
+	function remember(endpoint: unknown) {
+		h.fs.readFileSync.mockImplementation((target: string) => {
+			if (String(target).endsWith("endpoint.json")) return JSON.stringify(endpoint);
+			throw new Error("ENOENT");
+		});
+	}
+
+	it("remembers the port and the session key it launched on", async () => {
+		const { ensureModelSidecar } = await freshModule();
+		const runtime = await ensureModelSidecar();
+		const saved = rememberedEndpoint();
+		expect(saved).toBeTruthy();
+		expect(runtime.baseUrl).toBe(`http://127.0.0.1:${saved?.port}`);
+		expect(saved?.sessionKey).toBe(runtime.sessionKey);
+	});
+
+	// A running agent has the base URL and token baked into its launch env, so a
+	// proxy that comes back elsewhere strands every session it was serving.
+	it("comes back on the same address, so running agents keep working", async () => {
+		remember({ port: 47311, sessionKey: "sk-bf-rememberedkey" });
+		const { ensureModelSidecar } = await freshModule();
+		const runtime = await ensureModelSidecar();
+		expect(runtime.baseUrl).toBe("http://127.0.0.1:47311");
+		expect(runtime.sessionKey).toBe("sk-bf-rememberedkey");
+	});
+
+	it("takes a fresh port when something else holds the remembered one", async () => {
+		const squatter = createServer();
+		const taken = await new Promise<number>((done) => {
+			squatter.listen({ host: "127.0.0.1", port: 0 }, () => done((squatter.address() as AddressInfo).port));
+		});
+		try {
+			remember({ port: taken, sessionKey: "sk-bf-rememberedkey" });
+			const { ensureModelSidecar } = await freshModule();
+			const runtime = await ensureModelSidecar();
+			expect(runtime.baseUrl).not.toBe(`http://127.0.0.1:${taken}`);
+			// Starting elsewhere beats not starting; the key still carries over.
+			expect(runtime.sessionKey).toBe("sk-bf-rememberedkey");
+		} finally {
+			await new Promise((done) => squatter.close(done));
+		}
+	});
+
+	it("ignores a corrupt endpoint file instead of failing to start", async () => {
+		h.fs.readFileSync.mockImplementation(() => "{not json");
+		const { ensureModelSidecar } = await freshModule();
+		const runtime = await ensureModelSidecar();
+		expect(runtime.sessionKey).toMatch(/^sk-bf-/);
+		expect(runtime.sessionKey).not.toBe("sk-bf-rememberedkey");
+	});
+
+	it("refuses a key that is not one of ours", async () => {
+		remember({ port: 47311, sessionKey: "hijacked" });
+		const { ensureModelSidecar } = await freshModule();
+		const runtime = await ensureModelSidecar();
+		expect(runtime.sessionKey).toMatch(/^sk-bf-/);
+		expect(runtime.baseUrl).not.toBe("http://127.0.0.1:47311");
 	});
 });
 

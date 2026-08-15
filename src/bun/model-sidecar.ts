@@ -6,7 +6,7 @@
  */
 
 import { createServer } from "node:net";
-import { chmodSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
 	ENCRYPTION_KEY_ENV,
@@ -33,6 +33,9 @@ const log = createLogger("model-sidecar");
 /** Runtime dir: 0700, holds the generated config and nothing the user edits. */
 const RUNTIME_DIR = `${DEV3_HOME}/model-catalog-runtime`;
 const CONFIG_PATH = `${RUNTIME_DIR}/config.json`;
+/** Where the port and session key of the last start are remembered, so a
+ *  restarted proxy keeps the address the running agents were launched with. */
+const ENDPOINT_PATH = `${RUNTIME_DIR}/endpoint.json`;
 
 const BINARY_NAME = process.platform === "win32" ? "bifrost-http.exe" : "bifrost-http";
 
@@ -104,6 +107,47 @@ export async function chooseCandidatePort(): Promise<number> {
 	});
 }
 
+/** True when the port can be bound right now. Advisory: the gap before the
+ *  sidecar binds is the same race `chooseCandidatePort` lives with. */
+export async function isPortFree(port: number): Promise<boolean> {
+	return await new Promise<boolean>((resolveFree) => {
+		const server = createServer();
+		server.unref();
+		server.once("error", () => resolveFree(false));
+		server.listen({ host: "127.0.0.1", port }, () => server.close(() => resolveFree(true)));
+	});
+}
+
+export interface SidecarEndpoint {
+	port: number;
+	sessionKey: string;
+}
+
+/** The remembered endpoint, or null when there is none / it is unreadable. */
+export function loadSidecarEndpoint(path = ENDPOINT_PATH): SidecarEndpoint | null {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<SidecarEndpoint>;
+		const port = parsed.port;
+		const sessionKey = parsed.sessionKey;
+		if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+		if (typeof sessionKey !== "string" || !sessionKey.startsWith("sk-bf-")) return null;
+		return { port, sessionKey };
+	} catch {
+		return null;
+	}
+}
+
+function saveSidecarEndpoint(endpoint: SidecarEndpoint): void {
+	try {
+		mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+		writeFileSync(ENDPOINT_PATH, JSON.stringify(endpoint), { mode: 0o600 });
+		chmodSync(ENDPOINT_PATH, 0o600);
+	} catch (err) {
+		// A forgotten endpoint costs the next restart its running agents, nothing more.
+		log.warn("Could not remember the model proxy endpoint", { error: String(err) });
+	}
+}
+
 function randomSecret(bytes: number): string {
 	const buf = new Uint8Array(bytes);
 	crypto.getRandomValues(buf);
@@ -169,8 +213,7 @@ function makeOutputBuffer(): { push: (chunk: string) => void; text: () => string
 	};
 }
 
-async function launchOnce(binary: string, env: Record<string, string>, sessionKey: string): Promise<RunningSidecar> {
-	const port = await chooseCandidatePort();
+async function launchOnce(binary: string, env: Record<string, string>, sessionKey: string, port: number): Promise<RunningSidecar> {
 	const baseUrl = `http://127.0.0.1:${port}`;
 	const buffer = makeOutputBuffer();
 
@@ -242,7 +285,10 @@ async function startSidecar(): Promise<RunningSidecar> {
 	const catalog = loadModelCatalog();
 	writeConfig(catalog);
 
-	const sessionKey = `sk-bf-${randomSecret(24)}`;
+	// Reuse the last endpoint: an agent's base URL and token are baked into its
+	// launch env, so a fresh port or key would strand every running session.
+	const remembered = loadSidecarEndpoint();
+	const sessionKey = remembered?.sessionKey ?? `sk-bf-${randomSecret(24)}`;
 	const env = buildSidecarEnv(catalog, loadProviderKeys(), {
 		sessionKey,
 		encryptionKey: loadOrCreateEncryptionKey(),
@@ -251,8 +297,13 @@ async function startSidecar(): Promise<RunningSidecar> {
 	let failure: unknown;
 	for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
 		try {
-			const instance = await launchOnce(binary, env, sessionKey);
+			// Only the first attempt insists on the remembered port; if something
+			// else holds it, a fresh one beats refusing to start at all.
+			const reuse = attempt === 1 && remembered && (await isPortFree(remembered.port));
+			const port = reuse ? remembered.port : await chooseCandidatePort();
+			const instance = await launchOnce(binary, env, sessionKey, port);
 			running = instance;
+			saveSidecarEndpoint({ port: instance.port, sessionKey });
 			lastError = undefined;
 			log.info("Model proxy started", { pid: instance.pid, port: instance.port, attempt });
 			return instance;
