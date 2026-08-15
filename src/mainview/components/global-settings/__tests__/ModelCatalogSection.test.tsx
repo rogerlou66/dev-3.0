@@ -148,7 +148,15 @@ describe("editing the catalog", () => {
 });
 
 describe("the live model list", () => {
+	it("does not offer to load models when the build ships no proxy", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ binaryAvailable: false }));
+		renderSection();
+		await screen.findByText("catalog.binaryMissing");
+		expect(screen.getByRole("button", { name: "catalog.refreshModels" })).toHaveProperty("disabled", true);
+	});
+
 	it("never lets a failed listing look like an empty provider", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ running: true, port: 1 }));
 		vi.mocked(api.request.modelCatalogListModels).mockRejectedValue(new Error("proxy down"));
 		renderSection();
 		await userEvent.click(await screen.findByRole("button", { name: "catalog.refreshModels" }));

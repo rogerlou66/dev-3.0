@@ -245,6 +245,12 @@ describe("validation", () => {
 		]);
 	});
 
+	it("calls a half-typed row unfinished rather than malformed", () => {
+		const fresh = catalog();
+		fresh.models.push({ id: "m-new", providerId: "p-oai", name: "", modelId: "" });
+		expect(validateCatalog(fresh)).toEqual([expect.objectContaining({ code: "incomplete", modelId: "m-new" })]);
+	});
+
 	it("reports a name that cannot travel on the wire", () => {
 		const bad = catalog();
 		bad.models[0].name = "fast/gremlin";

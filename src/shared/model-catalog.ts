@@ -386,6 +386,7 @@ export function roleUnsetEnv(plan: RoleLaunchPlan): Record<string, string> {
 // ------------------------------------------------------------ validation ---
 
 export type CatalogIssueCode =
+	| "incomplete"
 	| "duplicate-name"
 	| "invalid-name"
 	| "unknown-provider"
@@ -418,10 +419,13 @@ export function validateCatalog(catalog: ModelCatalog): CatalogIssue[] {
 	const seenNames = new Set<string>();
 	for (const model of catalog.models) {
 		const name = model.name.trim().toLowerCase();
-		if (!isValidCatalogModelName(model.name)) issues.push({ code: "invalid-name", modelId: model.id });
+		// A row the user has just added and not filled in yet is unfinished, not
+		// malformed — saying "invalid characters" about an empty field is a lie.
+		if (!model.name.trim()) issues.push({ code: "incomplete", modelId: model.id });
+		else if (!isValidCatalogModelName(model.name)) issues.push({ code: "invalid-name", modelId: model.id });
 		else if (seenNames.has(name)) issues.push({ code: "duplicate-name", modelId: model.id });
-		seenNames.add(name);
-		if (!model.modelId.trim()) issues.push({ code: "missing-model-id", modelId: model.id });
+		if (name) seenNames.add(name);
+		if (!model.modelId.trim() && model.name.trim()) issues.push({ code: "missing-model-id", modelId: model.id });
 		if (!catalog.providers.some((p) => p.id === model.providerId)) {
 			issues.push({ code: "unknown-provider", modelId: model.id });
 		}

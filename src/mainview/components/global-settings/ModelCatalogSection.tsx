@@ -268,7 +268,12 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 								{t("catalog.startProxy")}
 							</button>
 						)}
-						<button type="button" onClick={loadAvailable} disabled={busy} className={BUTTON_CLASS}>
+						<button
+							type="button"
+							onClick={loadAvailable}
+							disabled={busy || !status?.binaryAvailable}
+							className={BUTTON_CLASS}
+						>
 							{t("catalog.refreshModels")}
 						</button>
 						{listError ? <span className="text-xs text-warning">{t("catalog.listUnavailable")}</span> : null}

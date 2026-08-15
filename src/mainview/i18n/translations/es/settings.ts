@@ -554,6 +554,7 @@ const settings = {
 	"catalog.restartWarning": "Guardar reinicia el proxy de modelos. Las sesiones que ya pasan por él pierden su ruta.",
 	"catalog.save": "Guardar y reiniciar el proxy",
 	"catalog.discard": "Descartar cambios",
+	"catalog.issue.incomplete": "Termina el modelo que acabas de añadir — le falta el nombre.",
 	"catalog.issue.duplicate-name": "Dos modelos comparten nombre — la asignación de rol sería ambigua.",
 	"catalog.issue.invalid-name": "Un nombre de modelo tiene caracteres que no pueden viajar en la petición.",
 	"catalog.issue.unknown-provider": "Un modelo apunta a un proveedor que ya no existe.",

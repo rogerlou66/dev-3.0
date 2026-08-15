@@ -554,6 +554,7 @@ const settings = {
 	"catalog.restartWarning": "Saving restarts the model proxy. Agent sessions already running through it lose their route.",
 	"catalog.save": "Save and restart proxy",
 	"catalog.discard": "Discard changes",
+	"catalog.issue.incomplete": "Finish the model you just added — it needs a name.",
 	"catalog.issue.duplicate-name": "Two models share a name — a role binding would be ambiguous.",
 	"catalog.issue.invalid-name": "A model name contains characters that cannot travel on the wire.",
 	"catalog.issue.unknown-provider": "A model points at a provider that no longer exists.",
