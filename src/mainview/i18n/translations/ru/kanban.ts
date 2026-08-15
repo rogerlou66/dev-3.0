@@ -240,7 +240,7 @@ const kanban = {
 	"launch.modelAgentDefault": "Собственный дефолт агента",
 	"launch.modelSectionBuiltin": "По подписке",
 	"launch.modelSectionOpenSource": "Дешёвые open-source · нужен ключ",
-	"launch.lockedCaption": "{price} / 1M вместо {builtin}",
+	"launch.lockedCaption": "{price}/M вместо {builtin}",
 	"launch.connectProvider": "+ Подключить провайдера…",
 	"launch.mode": "Режим",
 	"launch.variantGroup": "Вариант {n}",

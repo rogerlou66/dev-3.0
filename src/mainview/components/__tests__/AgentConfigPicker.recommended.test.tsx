@@ -5,7 +5,7 @@ import { DEFAULT_AGENTS, type ModelCatalogView } from "../../../shared/types";
 import { I18nProvider } from "../../i18n";
 import AgentConfigPicker from "../AgentConfigPicker";
 
-const modelCatalogGet = vi.fn<[], Promise<ModelCatalogView>>();
+const modelCatalogGet = vi.fn<() => Promise<ModelCatalogView>>();
 const modelCatalogSave = vi.fn();
 const getAgents = vi.fn();
 const saveAgents = vi.fn();
@@ -59,7 +59,7 @@ describe("AgentConfigPicker — models the user has not connected", () => {
 		expect(offered.closest("button")).toHaveAttribute("aria-disabled", "true");
 		// The number is the whole argument. A row that says only "DeepSeek" asks
 		// the user to go and look the price up somewhere else.
-		expect(screen.getByText("$0.87 / 1M instead of Claude Opus 5")).toBeTruthy();
+		expect(screen.getByText("$0.87/M vs Opus 5")).toBeTruthy();
 	});
 
 	it("goes quiet once the user has a provider of their own — any provider", async () => {

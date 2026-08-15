@@ -173,6 +173,8 @@ describe("seeding a freshly connected provider", () => {
 		expect(preset.permissionMode).toBe("auto");
 		expect(preset.model).toBeUndefined();
 		expect(preset.groupLabel).toBe(SEEDED_GROUP_LABEL);
+		// The clone's name names the model it no longer uses.
+		expect(preset.name).not.toContain("Opus 5");
 	});
 
 	it("refuses to seed an agent dev3 cannot route", () => {

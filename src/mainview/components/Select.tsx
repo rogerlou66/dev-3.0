@@ -294,6 +294,7 @@ function Select({
 	options,
 	onChange,
 	renderOption,
+	renderValue,
 	onOptionDisabledClick,
 	searchable,
 	allowCustom,
@@ -310,6 +311,11 @@ function Select({
 	options: SelectOption[];
 	onChange: (value: string) => void;
 	renderOption?: (option: SelectOption) => ReactNode;
+	/** How the *selected* option is drawn on the trigger. Defaults to
+	 *  `renderOption`, which is right until a row is taller than one line: the
+	 *  trigger is one row in a fixed grid, so a two-line option would make this
+	 *  field taller than the fields beside it. */
+	renderValue?: (option: SelectOption) => ReactNode;
 	/** Called when a `disabled` option is clicked (instead of `onChange`). */
 	onOptionDisabledClick?: (value: string) => void;
 	/** Show a filter field inside the panel. Implied by `allowCustom`. */
@@ -486,7 +492,7 @@ function Select({
 			>
 				<span className={`truncate ${selected ? "" : "text-fg-muted"}`}>
 					{selected
-						? (renderOption && !selected.custom ? renderOption(selected) : selected.label)
+						? ((renderValue ?? renderOption) && !selected.custom ? (renderValue ?? renderOption)!(selected) : selected.label)
 						: (placeholder ?? "")}
 				</span>
 				<svg

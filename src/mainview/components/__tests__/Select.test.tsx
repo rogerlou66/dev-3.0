@@ -259,3 +259,37 @@ describe("section headings", () => {
 		expect(activeOptionLabel()).toMatch(/Gamma/);
 	});
 });
+
+describe("the trigger versus the rows", () => {
+	function ValueHarness() {
+		return (
+			<Select
+				value="a"
+				options={[{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }]}
+				onChange={() => {}}
+				renderOption={(o) => <span>{o.label} in the list</span>}
+				renderValue={(o) => <span>{o.label} on the trigger</span>}
+			/>
+		);
+	}
+
+	it("draws the selected option with renderValue, and the rows with renderOption", async () => {
+		const user = userEvent.setup();
+		render(<ValueHarness />);
+		// The trigger is the only thing on screen before it opens.
+		expect(screen.getByText("Alpha on the trigger")).toBeTruthy();
+		expect(screen.queryByText("Alpha in the list")).toBeNull();
+
+		await user.click(screen.getByRole("combobox"));
+		expect(screen.getByText("Alpha in the list")).toBeTruthy();
+		expect(screen.getByText("Beta in the list")).toBeTruthy();
+	});
+
+	it("falls back to renderOption on the trigger when no renderValue is given", async () => {
+		render(
+			<Select value="a" options={[{ value: "a", label: "Alpha" }]} onChange={() => {}}
+				renderOption={(o) => <span>{o.label} everywhere</span>} />,
+		);
+		expect(screen.getByText("Alpha everywhere")).toBeTruthy();
+	});
+});

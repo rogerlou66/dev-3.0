@@ -203,7 +203,10 @@ export function seedPresetForAgent(
 	const base = agent.configurations.find((c) => c.id === agent.defaultConfigId) ?? agent.configurations[0];
 	if (!base) return null;
 	const { model: _model, requiresPxpipeProxy: _gated, ...rest } = base;
-	return { ...rest, id: newId(), name: `${SEEDED_GROUP_LABEL} (${base.name})`, groupLabel: SEEDED_GROUP_LABEL, modelRoles };
+	// Named after the group, not after the preset it was cloned from: that name
+	// carries the old model ("Auto (Opus 5, Medium)"), which is exactly what this
+	// preset no longer uses. The mode label is derived from the fields anyway.
+	return { ...rest, id: newId(), name: SEEDED_GROUP_LABEL, groupLabel: SEEDED_GROUP_LABEL, modelRoles };
 }
 
 /** Every agent with its seeded preset appended, agents that cannot be routed

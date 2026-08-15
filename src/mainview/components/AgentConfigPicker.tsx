@@ -67,7 +67,9 @@ function lockedCaption(model: RecommendedModel, t: ReturnType<typeof useT>): str
 	if (!rate) return null;
 	return t("launch.lockedCaption", {
 		price: formatRate(rate.output),
-		builtin: prettifyModel(CLAUDE_ROLE_BUILTIN_MODEL[model.claudeRole]),
+		// "Claude Opus 5" does not fit a dropdown that is one third of a launch
+		// dialog wide, and the vendor is not the point — the slot is.
+		builtin: prettifyModel(CLAUDE_ROLE_BUILTIN_MODEL[model.claudeRole]).replace(/^Claude /, ""),
 	});
 }
 
@@ -328,13 +330,27 @@ function AgentConfigPicker({
 						]}
 						onChange={handleModelChange}
 						onOptionDisabledClick={handleGatedConfigClick}
-						renderOption={(option) => {
-							const offered = lockedByLabel.get(option.value);
-							const caption = offered ? lockedCaption(offered, t) : providerCaptions.get(option.value);
+						renderValue={(option) => {
+							// One line on the trigger: it sits in a grid row with Harness and
+							// Mode, and a second line would make this field taller than both.
+							const caption = providerCaptions.get(option.value);
 							return (
 								<span className="flex items-baseline gap-1.5 min-w-0">
 									<span className="truncate">{option.label}</span>
 									{caption ? <span className="text-fg-3 text-micro shrink-0">{caption}</span> : null}
+								</span>
+							);
+						}}
+						renderOption={(option) => {
+							const offered = lockedByLabel.get(option.value);
+							// The caption gets its own line. Beside the name it wins the space
+							// — both captions are longer than what they annotate — and the
+							// model name is what the user is actually reading for.
+							const caption = offered ? lockedCaption(offered, t) : providerCaptions.get(option.value);
+							return (
+								<span className="flex flex-col min-w-0">
+									<span className="truncate">{option.label}</span>
+									{caption ? <span className="text-fg-3 text-micro truncate">{caption}</span> : null}
 								</span>
 							);
 						}}

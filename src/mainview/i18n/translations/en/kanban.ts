@@ -230,7 +230,7 @@ const kanban = {
 	"launch.modelAgentDefault": "Agent's own default",
 	"launch.modelSectionBuiltin": "On your subscription",
 	"launch.modelSectionOpenSource": "Cheap open-source · needs a key",
-	"launch.lockedCaption": "{price} / 1M instead of {builtin}",
+	"launch.lockedCaption": "{price}/M vs {builtin}",
 	"launch.connectProvider": "+ Connect a provider…",
 	"launch.mode": "Mode",
 	"launch.variantGroup": "Variant {n}",
