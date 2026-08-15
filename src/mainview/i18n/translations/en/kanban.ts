@@ -225,7 +225,7 @@ const kanban = {
 	"launch.retryTitle": "New variant",
 	"launch.agent": "Agent",
 	"launch.config": "Configuration",
-	"launch.provider": "Provider",
+	"launch.harness": "Harness",
 	"launch.model": "Model",
 	"launch.modelAgentDefault": "Agent's own default",
 	"launch.mode": "Mode",

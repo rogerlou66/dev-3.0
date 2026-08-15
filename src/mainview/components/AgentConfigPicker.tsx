@@ -55,7 +55,7 @@ interface AgentConfigPickerProps {
 	/** Availability results so the Provider dropdown can flag uninstalled agents. */
 	agentAvailability?: AgentCheckResult[];
 	/** Unique prefix for the three control ids (label htmlFor targets):
-	 *  `${idPrefix}-provider` / `-model` / `-mode`. */
+	 *  `${idPrefix}-harness` / `-model` / `-mode`. */
 	idPrefix: string;
 	/** Classes for the picker's outer box (sizing inside the parent's own row).
 	 *  The field rails themselves are owned by the picker. */
@@ -149,7 +149,7 @@ function AgentConfigPicker({
 	const modeConfigs = currentGroup?.configs ?? [];
 
 	function handleProviderChange(nextAgentId: string | null) {
-		// Reset config to the new provider's default (which also picks its default
+		// Reset config to the new harness's default (which also picks its default
 		// Model group + Mode via decomposition on render).
 		const agent = agents.find((a) => a.id === nextAgentId);
 		const nextConfigId = agent?.defaultConfigId ?? agent?.configurations[0]?.id ?? null;
@@ -231,11 +231,11 @@ function AgentConfigPicker({
 
 				{/* Provider */}
 				<div className="min-w-0">
-					<label htmlFor={`${idPrefix}-provider`} className={labelClass}>
-						{t("launch.provider")}
+					<label htmlFor={`${idPrefix}-harness`} className={labelClass}>
+						{t("launch.harness")}
 					</label>
 					<Select
-						id={`${idPrefix}-provider`}
+						id={`${idPrefix}-harness`}
 						value={agentId ?? ""}
 						options={agents.map((a) => ({ value: a.id, label: a.name }))}
 						onChange={(val) => handleProviderChange(val || null)}
@@ -279,7 +279,7 @@ function AgentConfigPicker({
 
 				{/* The account belongs to the whole selection, not to Provider: its own
 				    full-width line keeps the field columns the same height. Progressive
-				    disclosure — the indicator renders only when the provider has managed
+				    disclosure — the indicator renders only when the harness has managed
 				    accounts, and `empty:hidden` then drops this line entirely. */}
 				<div className="col-span-full min-w-0 empty:hidden">
 					<AgentAccountIndicator agent={selectedAgent} value={accountId} onSelect={onAccountChange} />

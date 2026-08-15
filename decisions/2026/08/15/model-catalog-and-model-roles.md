@@ -165,6 +165,25 @@ still answers `/v1/models`, and that a provider with no key logs a warning inste
 process. On screen the proxy panel moved between the two tables, matching the real order:
 providers → ask them what they offer → name what you want.
 
+## Follow-up: three axes, and "provider" means one thing
+
+The launcher labelled its first column `Provider` while listing Claude, Codex, Gemini and Cursor
+Agent — none of which is a provider. Counting the strings, `provider` meant three different things
+on screen: the agent CLI (`launch.provider`), the pre-catalog backend switch
+(`settings.llmProvider`: Native / Anthropic / OpenAI / Bedrock), and the catalog's own provider.
+
+Settled with the user: a launch has **three** axes — harness → model → mode — and a provider is a
+property of the model, not a fourth axis. `launch.provider` is now `launch.harness`, and the
+concept is renamed through the components, the element ids (`${idPrefix}-harness`) and the tests;
+`harness` was chosen over `agent` deliberately, even though it is jargon, because "agent" in dev3
+already means the running process in a task.
+
+Two mechanisms still overlap: the pre-catalog `llmProvider` setting and the catalog do the same
+job in the same preset editor. The decision is to fold the first into the second rather than
+rename around it (the repo forbids leaving two ways to do one thing), but that is not done here —
+it hinges on the catalog covering Amazon Bedrock. The vendored bifrost-http binary carries Bedrock
+strings, so it is plausible; nobody has run it. Until that is proven, `llmProvider` stays.
+
 ## Alternatives considered
 
 - **Extend the provider registry with a "bifrost" provider.** Rejected: the registry is shaped

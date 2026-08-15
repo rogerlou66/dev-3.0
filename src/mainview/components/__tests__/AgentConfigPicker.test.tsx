@@ -69,7 +69,7 @@ function Harness({ initial, onChange, showLabels }: { initial: AgentConfigSelect
 	);
 }
 
-const provider = () => document.getElementById("test-provider") as HTMLButtonElement;
+const harnessBtn = () => document.getElementById("test-harness") as HTMLButtonElement;
 const model = () => document.getElementById("test-model") as HTMLButtonElement;
 const mode = () => document.getElementById("test-mode") as HTMLButtonElement;
 const text = (b: HTMLButtonElement) => b?.textContent?.trim() ?? "";
@@ -84,22 +84,22 @@ async function pick(user: ReturnType<typeof userEvent.setup>, button: HTMLButton
 }
 
 describe("AgentConfigPicker", () => {
-	it("decomposes the current config into Provider/Model/Mode", () => {
+	it("decomposes the current config into Harness/Model/Mode", () => {
 		render(<Harness initial={{ agentId: "builtin-claude", configId: "opus-bypass-xhigh" }} />);
-		expect(text(provider())).toBe("Claude");
+		expect(text(harnessBtn())).toBe("Claude");
 		expect(text(model())).toBe("Opus 4.8");
 		expect(text(mode())).toBe("Bypass · X-High");
 	});
 
-	it("changing Provider resets to the new agent's default config", async () => {
+	it("changing Harness resets to the new agent's default config", async () => {
 		const user = userEvent.setup();
 		const onChange = vi.fn();
 		render(<Harness initial={{ agentId: "builtin-claude", configId: "opus-bypass-xhigh" }} onChange={onChange} />);
 
-		await pick(user, provider(), "Codex");
+		await pick(user, harnessBtn(), "Codex");
 
 		expect(onChange).toHaveBeenLastCalledWith({ agentId: "builtin-codex", configId: "codex-default" });
-		expect(text(provider())).toBe("Codex");
+		expect(text(harnessBtn())).toBe("Codex");
 		expect(text(model())).toBe("GPT-5.5");
 		expect(text(mode())).toBe("Default");
 	});
@@ -118,8 +118,8 @@ describe("AgentConfigPicker", () => {
 
 	it("shows the field labels by default (Settings and single-picker dialogs)", () => {
 		render(<Harness initial={{ agentId: "builtin-claude", configId: "fable-auto-medium" }} />);
-		const label = document.querySelector('label[for="test-provider"]');
-		expect(label?.textContent).toBe("Provider");
+		const label = document.querySelector('label[for="test-harness"]');
+		expect(label?.textContent).toBe("Harness");
 		expect(label?.className).not.toContain("sr-only");
 	});
 
