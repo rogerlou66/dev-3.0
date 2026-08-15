@@ -23,13 +23,22 @@ const INPUT_CLASS =
 const BUTTON_CLASS =
 	"px-2.5 py-1 rounded-lg bg-elevated border border-edge text-fg-2 text-xs hover:text-fg hover:border-edge-active transition-colors disabled:opacity-50";
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+/** A labelled control. The id association is explicit because the value editor
+ *  is often a custom listbox, which a wrapping <label> would not reach. */
+function Field({
+	label,
+	htmlFor,
+	hint,
+	children,
+}: { label: string; htmlFor: string; hint?: string; children: React.ReactNode }) {
 	return (
-		<label className="block min-w-0">
-			<span className="block text-fg-2 text-xs font-semibold mb-1">{label}</span>
+		<div className="min-w-0">
+			<label htmlFor={htmlFor} className="block text-fg-2 text-xs font-semibold mb-1">
+				{label}
+			</label>
 			{children}
 			{hint ? <span className="block text-fg-3 text-xs mt-1">{hint}</span> : null}
-		</label>
+		</div>
 	);
 }
 
@@ -275,8 +284,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 					{draft.providers.map((provider) => (
 						<div key={provider.id} className="rounded-xl border border-edge bg-raised p-3 space-y-3">
 							<div className="grid gap-3 sm:grid-cols-2">
-								<Field label={t("catalog.providerKind")}>
+								<Field label={t("catalog.providerKind")} htmlFor={`provider-kind-${provider.id}`}>
 									<Select
+										id={`provider-kind-${provider.id}`}
 										value={provider.kind}
 										options={kindOptions}
 										onChange={(value) =>
@@ -289,8 +299,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 										}
 									/>
 								</Field>
-								<Field label={t("catalog.providerLabel")} hint={t("catalog.providerLabelHint")}>
+								<Field label={t("catalog.providerLabel")} htmlFor={`provider-label-${provider.id}`} hint={t("catalog.providerLabelHint")}>
 									<input
+										id={`provider-label-${provider.id}`}
 										type="text"
 										value={provider.label}
 										onChange={(event) =>
@@ -305,8 +316,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 									/>
 								</Field>
 								{provider.kind === "custom" ? (
-									<Field label={t("catalog.providerBaseUrl")} hint={t("catalog.providerBaseUrlHint")}>
+									<Field label={t("catalog.providerBaseUrl")} htmlFor={`provider-url-${provider.id}`} hint={t("catalog.providerBaseUrlHint")}>
 										<input
+											id={`provider-url-${provider.id}`}
 											type="url"
 											value={provider.baseUrl ?? ""}
 											placeholder="https://llm.example.com/v1"
@@ -324,9 +336,11 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 								) : null}
 								<Field
 									label={t("catalog.providerKey")}
+									htmlFor={`provider-key-${provider.id}`}
 									hint={provider.hasKey ? t("catalog.providerKeyStored") : t("catalog.providerKeyMissing")}
 								>
 									<input
+										id={`provider-key-${provider.id}`}
 										type="password"
 										value={keyDrafts[provider.id] ?? ""}
 										placeholder={provider.hasKey ? "••••••••" : "sk-…"}
@@ -365,8 +379,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						return (
 							<div key={model.id} className="rounded-xl border border-edge bg-raised p-3 space-y-3">
 								<div className="grid gap-3 sm:grid-cols-3">
-									<Field label={t("catalog.modelName")} hint={nameBad ? t("catalog.modelNameInvalid") : undefined}>
+									<Field label={t("catalog.modelName")} htmlFor={`model-name-${model.id}`} hint={nameBad ? t("catalog.modelNameInvalid") : undefined}>
 										<input
+											id={`model-name-${model.id}`}
 											type="text"
 											value={model.name}
 											placeholder="fast-gremlin"
@@ -381,8 +396,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											className={`${INPUT_CLASS} font-mono ${nameBad ? "border-danger/50" : ""}`}
 										/>
 									</Field>
-									<Field label={t("catalog.modelProvider")}>
+									<Field label={t("catalog.modelProvider")} htmlFor={`model-provider-${model.id}`}>
 										<Select
+											id={`model-provider-${model.id}`}
 											value={model.providerId}
 											options={providerOptions}
 											onChange={(value) =>
@@ -393,8 +409,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											}
 										/>
 									</Field>
-									<Field label={t("catalog.modelId")} hint={available ? undefined : t("catalog.modelIdManual")}>
+									<Field label={t("catalog.modelId")} htmlFor={`model-id-${model.id}`} hint={available ? undefined : t("catalog.modelIdManual")}>
 										<Select
+											id={`model-id-${model.id}`}
 											value={model.modelId}
 											options={idOptions(model.providerId)}
 											allowCustom

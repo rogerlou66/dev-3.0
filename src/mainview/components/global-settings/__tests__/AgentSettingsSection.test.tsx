@@ -20,6 +20,9 @@ vi.mock("../../../rpc", () => ({
 			setActiveAgentAccount: vi.fn(),
 			toggleFavoriteAgent: vi.fn(() => Promise.resolve({})),
 			checkCodexBedrockConfig: vi.fn(() => Promise.resolve({ configured: true })),
+			// The preset editor asks for the model catalog; an empty one keeps the
+			// roles block hidden, which is this suite's subject.
+			modelCatalogGet: vi.fn(() => Promise.resolve({ providers: [], models: [] })),
 		},
 	},
 }));

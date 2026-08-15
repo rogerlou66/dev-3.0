@@ -78,17 +78,18 @@ export default function PresetModelRoles({
 
 			<div className="grid gap-3 sm:grid-cols-2">
 				{roles.map((role) => (
-					<label key={role.id} className="block min-w-0">
-						<span className="block text-fg-2 text-xs font-semibold mb-1">
+					<div key={role.id} className="min-w-0">
+						<label htmlFor={`role-${role.id}`} className="block text-fg-2 text-xs font-semibold mb-1">
 							{t(role.labelKey as Parameters<TFunction>[0])}
-						</span>
+						</label>
 						<Select
+							id={`role-${role.id}`}
 							value={bindings?.[role.id] ?? ""}
 							options={options}
 							onChange={(value) => setRole(role.id, value)}
 						/>
 						<span className="block text-fg-3 text-xs mt-1">{t(role.hintKey as Parameters<TFunction>[0])}</span>
-					</label>
+					</div>
 				))}
 			</div>
 
