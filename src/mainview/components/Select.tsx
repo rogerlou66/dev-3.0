@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useId, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { AgentCheckResult } from "../../shared/types";
 import { useOverlayLayer } from "../utils/useOverlayLayer";
@@ -13,6 +13,11 @@ export interface SelectOption {
 	/** Set by `allowCustom` on rows the caller never declared: the typed value and
 	 *  an off-list current value. Presentation only — it still commits as itself. */
 	custom?: boolean;
+	/** Heading this option sits under. A heading renders once, above the first
+	 *  option that names it, and is not itself a row: keyboard navigation and the
+	 *  listbox's option indices stay untouched. Options carrying the same section
+	 *  must be adjacent — the caller owns the order. */
+	section?: string;
 }
 
 /** Substring match that ignores case and separators, so "xhigh" finds "X-High". */
@@ -170,9 +175,23 @@ function SelectListbox({
 			{options.map((opt, index) => {
 				const isSelected = opt.value === value;
 				const isActive = index === activeIndex;
+				// Rendered above its first option rather than as a row of its own:
+				// an unselectable row in a listbox breaks arrow-key counting and
+				// reads as an option to a screen reader.
+				const heading =
+					opt.section && opt.section !== options[index - 1]?.section ? (
+						<div
+							key={`section-${opt.section}`}
+							role="presentation"
+							className="px-3 pt-2.5 pb-1 text-micro uppercase tracking-wide text-fg-muted"
+						>
+							{opt.section}
+						</div>
+					) : null;
 				return (
+					<Fragment key={opt.value}>
+					{heading}
 					<button
-						key={opt.value}
 						type="button"
 						role="option"
 						id={optionIdFor(index)}
@@ -216,6 +235,7 @@ function SelectListbox({
 						</span>
 						{isSelected && <CheckIcon />}
 					</button>
+					</Fragment>
 				);
 			})}
 			{options.length === 0 && search && (

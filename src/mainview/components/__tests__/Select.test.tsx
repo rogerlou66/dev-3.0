@@ -221,3 +221,41 @@ describe("Select — searchable + creatable", () => {
 		expect(screen.queryAllByRole("option")).toHaveLength(0);
 	});
 });
+
+describe("section headings", () => {
+	const sectioned: SelectOption[] = [
+		{ value: "a", label: "Alpha", section: "Yours" },
+		{ value: "b", label: "Beta", section: "Yours" },
+		{ value: "c", label: "Gamma", section: "Locked", disabled: true },
+	];
+
+	function SectionHarness() {
+		const [value, setValue] = useState("a");
+		return <Select id="sectioned" value={value} options={sectioned} onChange={setValue} />;
+	}
+
+	it("renders each heading once, above its first option", async () => {
+		const user = userEvent.setup();
+		render(<SectionHarness />);
+		await user.click(trigger());
+		expect(screen.getAllByText("Yours")).toHaveLength(1);
+		expect(screen.getAllByText("Locked")).toHaveLength(1);
+	});
+
+	it("keeps headings out of the listbox's options, so arrow keys still count right", async () => {
+		const user = userEvent.setup();
+		render(<SectionHarness />);
+		await user.click(trigger());
+		// Three options, not five: a heading that became a row would break both
+		// keyboard navigation and what a screen reader announces.
+		expect(screen.getAllByRole("option")).toHaveLength(3);
+	});
+
+	it("moves the active option straight from the last of one section to the first of the next", async () => {
+		const user = userEvent.setup();
+		render(<SectionHarness />);
+		await user.click(trigger());
+		await user.keyboard("{ArrowDown}{ArrowDown}");
+		expect(activeOptionLabel()).toMatch(/Gamma/);
+	});
+});

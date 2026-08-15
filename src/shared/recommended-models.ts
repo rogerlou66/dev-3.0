@@ -102,12 +102,24 @@ export function recommendedCodexRoleModelIds(): Record<string, string> {
 	return byRole;
 }
 
-/** Recommendations the user has not put in their catalog yet — the ones the
- *  launcher shows locked. Matched on the provider-native id, because that is
- *  what identifies a model; the user is free to have named it anything. */
+/**
+ * The recommendations the launcher shows as locked rows.
+ *
+ * Empty as soon as the user has ANY provider of their own — OpenRouter, Ollama,
+ * Fireworks, a custom endpoint, anything. The rows exist to teach someone that
+ * a third-party model is possible at all; a user who already configured a
+ * provider knows, and advertising to them is nagging. The catalog's own
+ * "add a provider" action stays available regardless — that is a separate
+ * control and never depends on this list.
+ *
+ * Otherwise: everything they have not connected, matched on the provider-native
+ * id, because that identifies a model. The user is free to have named it
+ * anything.
+ */
 export function unconnectedRecommendations(
 	catalog: { providers: { id: string; kind: CatalogProviderKind }[]; models: { providerId: string; modelId: string }[] },
 ): RecommendedModel[] {
+	if (catalog.providers.length > 0) return [];
 	const connected = new Set(
 		catalog.models
 			.filter((model) => catalog.providers.some((p) => p.id === model.providerId))

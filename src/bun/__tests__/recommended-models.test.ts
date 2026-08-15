@@ -72,16 +72,19 @@ describe("unconnectedRecommendations", () => {
 		expect(unconnectedRecommendations({ providers: [], models: [] })).toHaveLength(RECOMMENDED_MODELS.length);
 	});
 
-	it("drops one the user already has, whatever they named it", () => {
-		const left = unconnectedRecommendations({
-			providers: [provider],
-			models: [{ providerId: "p1", modelId: "deepseek/deepseek-v4-pro-0813" }],
-		});
-		expect(left.map((m) => m.modelId)).not.toContain("deepseek/deepseek-v4-pro-0813");
-		expect(left).toHaveLength(RECOMMENDED_MODELS.length - 1);
+	it("goes silent the moment the user has a provider of their own", () => {
+		// They already know third-party models exist — that is the only thing
+		// these rows are for. Keeping them up would be nagging.
+		expect(unconnectedRecommendations({ providers: [provider], models: [] })).toEqual([]);
 	});
 
-	it("ignores a model whose provider is gone, so a half-deleted catalog still offers it", () => {
+	it("goes silent for a local provider too, not just the one dev3 recommends", () => {
+		expect(
+			unconnectedRecommendations({ providers: [{ id: "p2", kind: "custom" }], models: [] }),
+		).toEqual([]);
+	});
+
+	it("still offers everything when a model lingers but its provider is gone", () => {
 		const left = unconnectedRecommendations({
 			providers: [],
 			models: [{ providerId: "p-deleted", modelId: "deepseek/deepseek-v4-pro-0813" }],
