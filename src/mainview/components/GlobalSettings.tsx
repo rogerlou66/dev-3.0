@@ -709,6 +709,8 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 				);
 			case "accounts":
 				return <AgentAccountsSection t={t} />;
+			case "models":
+				return <ModelCatalogSection t={t} />;
 			case "workspace":
 				return (
 					<WorkspaceSettingsSection
@@ -732,7 +734,6 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}
 						/>
-						<ModelCatalogSection t={t} />
 						<PxpipeProxySettingsSection
 							t={t}
 							globalSettings={globalSettings}

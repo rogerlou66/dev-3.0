@@ -23,22 +23,46 @@ const INPUT_CLASS =
 const BUTTON_CLASS =
 	"px-2.5 py-1 rounded-lg bg-elevated border border-edge text-fg-2 text-xs hover:text-fg hover:border-edge-active transition-colors disabled:opacity-50";
 
-/** A labelled control. The id association is explicit because the value editor
- *  is often a custom listbox, which a wrapping <label> would not reach. */
-function Field({
-	label,
-	htmlFor,
-	hint,
+const REMOVE_CLASS =
+	"px-2.5 py-1 rounded-lg text-danger text-xs hover:bg-danger/10 border border-transparent hover:border-danger/30 transition-colors";
+const CELL_CLASS = "align-top px-2 py-2 min-w-0";
+
+/** One editable table. Rows carry the controls; the header names the columns,
+ *  and each control repeats that name for screen readers. */
+function EditTable({
+	columns,
+	actionsLabel,
 	children,
-}: { label: string; htmlFor: string; hint?: string; children: React.ReactNode }) {
+}: { columns: string[]; actionsLabel: string; children: React.ReactNode }) {
 	return (
-		<div className="min-w-0">
-			<label htmlFor={htmlFor} className="block text-fg-2 text-xs font-semibold mb-1">
-				{label}
-			</label>
-			{children}
-			{hint ? <span className="block text-fg-3 text-xs mt-1">{hint}</span> : null}
+		<div className="overflow-x-auto rounded-xl border border-edge bg-raised">
+			<table className="w-full text-sm border-collapse">
+				<thead>
+					<tr className="border-b border-edge">
+						{columns.map((column) => (
+							<th key={column} scope="col" className="text-left px-2 py-2 text-fg-2 text-xs font-semibold">
+								{column}
+							</th>
+						))}
+						<th scope="col" className="w-0 px-2 py-2">
+							<span className="sr-only">{actionsLabel}</span>
+						</th>
+					</tr>
+				</thead>
+				<tbody>{children}</tbody>
+			</table>
 		</div>
+	);
+}
+
+/** A control that is off on purpose, with the reason spelled out next to it —
+ *  a greyed button that explains nothing reads as a broken app. */
+function Gated({ reason, children }: { reason: string | null; children: React.ReactNode }) {
+	return (
+		<span className="inline-flex items-center gap-2">
+			{children}
+			{reason ? <span className="text-fg-3 text-xs">{reason}</span> : null}
+		</span>
 	);
 }
 
@@ -117,11 +141,6 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 				sum + agent.configurations.filter((c) => Object.values(c.modelRoles ?? {}).some((id) => modelIds.includes(id))).length,
 			0,
 		);
-
-	const providerLabel = useCallback(
-		(id: string) => draft.providers.find((p) => p.id === id)?.label ?? t("catalog.providerGone"),
-		[draft.providers, t],
-	);
 
 	const kindOptions: SelectOption[] = CATALOG_PROVIDER_KINDS.map((kind) => ({
 		value: kind,
@@ -261,9 +280,30 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 			.map((id) => ({ value: id.slice(prefix.length), label: id.slice(prefix.length) }));
 	};
 
+	// Saved models are what the proxy actually serves — a draft row cannot be listed.
+	const savedModelCount = saved.models.length;
+	const startReason = !status?.binaryAvailable
+		? null // the panel already says the build ships no proxy
+		: savedModelCount === 0
+			? t("catalog.startNeedsModel")
+			: null;
+	const listReason = !status?.binaryAvailable ? null : !status?.running ? t("catalog.listNeedsProxy") : null;
+
 	return (
 		<SettingsEntry anchor="model-catalog">
-			<SettingsSection title={t("catalog.section")} description={t("catalog.sectionDesc")}>
+			<SettingsSection title={t("catalog.section")}>
+				{/* First run: say what to do, in order, instead of showing dead controls. */}
+				{draft.providers.length === 0 && draft.models.length === 0 ? (
+					<div className="rounded-xl border border-accent/30 bg-accent/10 p-4 space-y-1">
+						<p className="text-fg text-sm font-semibold">{t("catalog.firstRunTitle")}</p>
+						<ol className="text-fg-2 text-sm list-decimal list-inside space-y-0.5">
+							<li>{t("catalog.firstRunStep1")}</li>
+							<li>{t("catalog.firstRunStep2")}</li>
+							<li>{t("catalog.firstRunStep3")}</li>
+						</ol>
+					</div>
+				) : null}
+
 				{/* Proxy state — one place that answers "is it me or the proxy". */}
 				<div className="space-y-3 rounded-xl border border-edge bg-raised p-4">
 					{!status?.binaryAvailable ? (
@@ -284,30 +324,42 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						</pre>
 					) : null}
 
-					<div className="flex flex-wrap items-center gap-2">
+					<div className="flex flex-wrap items-center gap-3">
 						{status?.running ? (
 							<button type="button" onClick={stopProxy} disabled={busy} className={BUTTON_CLASS}>
 								{t("catalog.stopProxy")}
 							</button>
 						) : (
+							<Gated reason={startReason}>
+								<button
+									type="button"
+									onClick={startProxy}
+									disabled={busy || !status?.binaryAvailable || savedModelCount === 0}
+									className={BUTTON_CLASS}
+								>
+									{t("catalog.startProxy")}
+								</button>
+							</Gated>
+						)}
+						{/* Listing needs a running proxy. Starting one is the button above's
+						    job — two buttons that both start it is how the first got called dead. */}
+						<Gated reason={listReason}>
 							<button
 								type="button"
-								onClick={startProxy}
-								disabled={busy || !status?.binaryAvailable || draft.models.length === 0}
+								onClick={loadAvailable}
+								disabled={busy || !status?.binaryAvailable || !status?.running}
 								className={BUTTON_CLASS}
 							>
-								{t("catalog.startProxy")}
+								{t("catalog.refreshModels")}
 							</button>
+						</Gated>
+						{listError ? (
+							<span className="text-xs text-warning">{t("catalog.listUnavailable")}</span>
+						) : available === null ? null : available.length > 0 ? (
+							<span className="text-xs text-fg-3">{t("catalog.listLoaded", { count: String(available.length) })}</span>
+						) : (
+							<span className="text-xs text-warning">{t("catalog.listEmpty")}</span>
 						)}
-						<button
-							type="button"
-							onClick={loadAvailable}
-							disabled={busy || !status?.binaryAvailable}
-							className={BUTTON_CLASS}
-						>
-							{t("catalog.refreshModels")}
-						</button>
-						{listError ? <span className="text-xs text-warning">{t("catalog.listUnavailable")}</span> : null}
 					</div>
 				</div>
 
@@ -316,70 +368,71 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 					<p className="text-fg text-sm font-semibold">{t("catalog.providers")}</p>
 					{draft.providers.length === 0 ? (
 						<p className="text-fg-3 text-sm">{t("catalog.noProviders")}</p>
-					) : null}
-					{draft.providers.map((provider) => (
-						<div key={provider.id} className="rounded-xl border border-edge bg-raised p-3 space-y-3">
-							<div className="grid gap-3 sm:grid-cols-2">
-								<Field label={t("catalog.providerKind")} htmlFor={`provider-kind-${provider.id}`}>
-									<Select
-										id={`provider-kind-${provider.id}`}
-										value={provider.kind}
-										options={kindOptions}
-										onChange={(value) => changeProviderKind(provider.id, value as CatalogProviderKind)}
-									/>
-								</Field>
-								<Field label={t("catalog.providerLabel")} htmlFor={`provider-label-${provider.id}`} hint={t("catalog.providerLabelHint")}>
-									<input
-										id={`provider-label-${provider.id}`}
-										type="text"
-										value={provider.label}
-										onChange={(event) => patchProvider(provider.id, { label: event.target.value })}
-										className={INPUT_CLASS}
-									/>
-								</Field>
-								{provider.kind === "custom" ? (
-									<Field label={t("catalog.providerBaseUrl")} htmlFor={`provider-url-${provider.id}`} hint={t("catalog.providerBaseUrlHint")}>
+					) : (
+						<EditTable
+							columns={[t("catalog.providerKind"), t("catalog.providerLabel"), t("catalog.providerKey")]}
+							actionsLabel={t("catalog.colActions")}
+						>
+							{draft.providers.map((provider) => (
+								<tr key={provider.id} className="border-b border-edge/50 last:border-b-0">
+									<td className={`${CELL_CLASS} w-48`}>
+										<Select
+											id={`provider-kind-${provider.id}`}
+											ariaLabel={t("catalog.providerKind")}
+											value={provider.kind}
+											options={kindOptions}
+											onChange={(value) => changeProviderKind(provider.id, value as CatalogProviderKind)}
+										/>
+									</td>
+									<td className={CELL_CLASS}>
 										<input
-											id={`provider-url-${provider.id}`}
-											type="url"
-											value={provider.baseUrl ?? ""}
-											placeholder="https://llm.example.com/v1"
-											onChange={(event) => patchProvider(provider.id, { baseUrl: event.target.value })}
+											id={`provider-label-${provider.id}`}
+											type="text"
+											aria-label={t("catalog.providerLabel")}
+											value={provider.label}
+											onChange={(event) => patchProvider(provider.id, { label: event.target.value })}
+											className={INPUT_CLASS}
+										/>
+										{provider.kind === "custom" ? (
+											<input
+												id={`provider-url-${provider.id}`}
+												type="url"
+												aria-label={t("catalog.providerBaseUrl")}
+												value={provider.baseUrl ?? ""}
+												placeholder="https://llm.example.com/v1"
+												onChange={(event) => patchProvider(provider.id, { baseUrl: event.target.value })}
+												className={`${INPUT_CLASS} font-mono mt-1.5`}
+											/>
+										) : null}
+										<span className="block text-fg-muted text-xs font-mono mt-1 truncate">
+											{sidecarProviderKey(provider)}/…
+										</span>
+									</td>
+									<td className={`${CELL_CLASS} w-64`}>
+										<input
+											id={`provider-key-${provider.id}`}
+											type="password"
+											aria-label={t("catalog.providerKey")}
+											value={keyDrafts[provider.id] ?? ""}
+											placeholder={provider.hasKey ? "••••••••" : "sk-…"}
+											autoComplete="off"
+											spellCheck={false}
+											onChange={(event) => setKeyDrafts({ ...keyDrafts, [provider.id]: event.target.value })}
 											className={`${INPUT_CLASS} font-mono`}
 										/>
-									</Field>
-								) : null}
-								<Field
-									label={t("catalog.providerKey")}
-									htmlFor={`provider-key-${provider.id}`}
-									hint={provider.hasKey ? t("catalog.providerKeyStored") : t("catalog.providerKeyMissing")}
-								>
-									<input
-										id={`provider-key-${provider.id}`}
-										type="password"
-										value={keyDrafts[provider.id] ?? ""}
-										placeholder={provider.hasKey ? "••••••••" : "sk-…"}
-										autoComplete="off"
-										spellCheck={false}
-										onChange={(event) => setKeyDrafts({ ...keyDrafts, [provider.id]: event.target.value })}
-										className={`${INPUT_CLASS} font-mono`}
-									/>
-								</Field>
-							</div>
-							<div className="flex items-center justify-between gap-2">
-								<span className="text-fg-muted text-xs font-mono truncate">
-									{sidecarProviderKey(provider)}/…
-								</span>
-								<button
-									type="button"
-									onClick={() => void removeProvider(provider.id)}
-									className="px-2.5 py-1 rounded-lg text-danger text-xs hover:bg-danger/10 border border-transparent hover:border-danger/30 transition-colors"
-								>
-									{t("catalog.removeProvider")}
-								</button>
-							</div>
-						</div>
-					))}
+										<span className="block text-fg-3 text-xs mt-1">
+											{provider.hasKey ? t("catalog.providerKeyStored") : t("catalog.providerKeyMissing")}
+										</span>
+									</td>
+									<td className={`${CELL_CLASS} text-right`}>
+										<button type="button" onClick={() => void removeProvider(provider.id)} className={REMOVE_CLASS}>
+											{t("catalog.removeProvider")}
+										</button>
+									</td>
+								</tr>
+							))}
+						</EditTable>
+					)}
 					<button type="button" onClick={addProvider} className={BUTTON_CLASS}>
 						{t("catalog.addProvider")}
 					</button>
@@ -388,71 +441,73 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 				{/* Named models */}
 				<div className="space-y-3">
 					<p className="text-fg text-sm font-semibold">{t("catalog.models")}</p>
-					{draft.models.length === 0 ? <p className="text-fg-3 text-sm">{t("catalog.noModels")}</p> : null}
-					{draft.models.map((model) => {
-						const nameBad = model.name.length > 0 && !isValidCatalogModelName(model.name);
-						return (
-							<div key={model.id} className="rounded-xl border border-edge bg-raised p-3 space-y-3">
-								<div className="grid gap-3 sm:grid-cols-3">
-									<Field label={t("catalog.modelName")} htmlFor={`model-name-${model.id}`} hint={nameBad ? t("catalog.modelNameInvalid") : undefined}>
-										<input
-											id={`model-name-${model.id}`}
-											type="text"
-											value={model.name}
-											placeholder="fast-gremlin"
-											onChange={(event) => patchModel(model.id, { name: event.target.value })}
-											className={`${INPUT_CLASS} font-mono ${nameBad ? "border-danger/50" : ""}`}
-										/>
-									</Field>
-									<Field label={t("catalog.modelProvider")} htmlFor={`model-provider-${model.id}`}>
-										<Select
-											id={`model-provider-${model.id}`}
-											value={model.providerId}
-											options={providerOptions}
-											onChange={(value) => patchModel(model.id, { providerId: value })}
-										/>
-									</Field>
-									<Field label={t("catalog.modelId")} htmlFor={`model-id-${model.id}`} hint={available ? undefined : t("catalog.modelIdManual")}>
-										<Select
-											id={`model-id-${model.id}`}
-											value={model.modelId}
-											options={idOptions(model.providerId)}
-											allowCustom
-											searchPlaceholder={t("catalog.modelIdPlaceholder")}
-											searchLabel={t("catalog.modelId")}
-											customOptionLabel={(query) => query}
-											emptyLabel={t("catalog.modelIdEmpty")}
-											onChange={(value) => patchModel(model.id, { modelId: value })}
-										/>
-									</Field>
-								</div>
-								<div className="flex items-center justify-between gap-2">
-									<span className="text-fg-muted text-xs font-mono truncate">{providerLabel(model.providerId)}</span>
-									<div className="flex items-center gap-1.5">
-										<button type="button" onClick={() => duplicateModel(model.id)} className={BUTTON_CLASS}>
-											{t("catalog.duplicateModel")}
-										</button>
-										<button
-											type="button"
-											onClick={() => void removeModel(model.id)}
-											className="px-2.5 py-1 rounded-lg text-danger text-xs hover:bg-danger/10 border border-transparent hover:border-danger/30 transition-colors"
-										>
-											{t("catalog.removeModel")}
-										</button>
-									</div>
-								</div>
-							</div>
-						);
-					})}
-					<button
-						type="button"
-						onClick={addModel}
-						disabled={draft.providers.length === 0}
-						className={BUTTON_CLASS}
-						title={draft.providers.length === 0 ? t("catalog.addModelNeedsProvider") : undefined}
-					>
-						{t("catalog.addModel")}
-					</button>
+					{draft.models.length === 0 ? (
+						<p className="text-fg-3 text-sm">{t("catalog.noModels")}</p>
+					) : (
+						<EditTable
+							columns={[t("catalog.modelName"), t("catalog.modelProvider"), t("catalog.modelId")]}
+							actionsLabel={t("catalog.colActions")}
+						>
+							{draft.models.map((model) => {
+								const nameBad = model.name.length > 0 && !isValidCatalogModelName(model.name);
+								return (
+									<tr key={model.id} className="border-b border-edge/50 last:border-b-0">
+										<td className={CELL_CLASS}>
+											<input
+												id={`model-name-${model.id}`}
+												type="text"
+												aria-label={t("catalog.modelName")}
+												value={model.name}
+												placeholder="fast-gremlin"
+												onChange={(event) => patchModel(model.id, { name: event.target.value })}
+												className={`${INPUT_CLASS} font-mono ${nameBad ? "border-danger/50" : ""}`}
+											/>
+											{nameBad ? <span className="block text-danger text-xs mt-1">{t("catalog.modelNameInvalid")}</span> : null}
+										</td>
+										<td className={`${CELL_CLASS} w-48`}>
+											<Select
+												id={`model-provider-${model.id}`}
+												ariaLabel={t("catalog.modelProvider")}
+												value={model.providerId}
+												options={providerOptions}
+												onChange={(value) => patchModel(model.id, { providerId: value })}
+											/>
+										</td>
+										<td className={CELL_CLASS}>
+											<Select
+												id={`model-id-${model.id}`}
+												ariaLabel={t("catalog.modelId")}
+												value={model.modelId}
+												options={idOptions(model.providerId)}
+												allowCustom
+												searchPlaceholder={t("catalog.modelIdPlaceholder")}
+												searchLabel={t("catalog.modelId")}
+												customOptionLabel={(query) => t("catalog.modelIdCreate", { id: query })}
+												emptyLabel={t("catalog.modelIdEmpty")}
+												onChange={(value) => patchModel(model.id, { modelId: value })}
+											/>
+											</td>
+										<td className={`${CELL_CLASS} text-right whitespace-nowrap`}>
+											<button type="button" onClick={() => duplicateModel(model.id)} className={BUTTON_CLASS}>
+												{t("catalog.duplicateModel")}
+											</button>
+											<button type="button" onClick={() => void removeModel(model.id)} className={`${REMOVE_CLASS} ml-1.5`}>
+												{t("catalog.removeModel")}
+											</button>
+										</td>
+									</tr>
+								);
+							})}
+						</EditTable>
+					)}
+					{draft.models.length > 0 ? (
+						<p className="text-fg-3 text-xs">{available ? t("catalog.modelIdTypeAnyway") : t("catalog.modelIdManual")}</p>
+					) : null}
+					<Gated reason={draft.providers.length === 0 ? t("catalog.addModelNeedsProvider") : null}>
+						<button type="button" onClick={addModel} disabled={draft.providers.length === 0} className={BUTTON_CLASS}>
+							{t("catalog.addModel")}
+						</button>
+					</Gated>
 				</div>
 
 				{/* Save — an edit costs a proxy restart, so it is explicit and announced. */}

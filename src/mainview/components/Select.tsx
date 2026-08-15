@@ -271,6 +271,7 @@ function Select({
 	placeholder,
 	searchPlaceholder,
 	searchLabel,
+	ariaLabel,
 	customOptionLabel,
 	emptyLabel = "Nothing matches",
 	inputMode,
@@ -293,6 +294,9 @@ function Select({
 	/** Accessible name for the filter field. Give it whenever the placeholder
 	 *  is a list of example values rather than a name. */
 	searchLabel?: string;
+	/** Accessible name for the trigger, for a select with no visible <label>
+	 *  (a table cell, where the column header names it only visually). */
+	ariaLabel?: string;
 	/** Label of the row that commits the typed text; defaults to the text itself. */
 	customOptionLabel?: (query: string) => string;
 	emptyLabel?: string;
@@ -440,6 +444,7 @@ function Select({
 				// With a filter field the panel's input is the combobox; the trigger
 				// is then only the thing that opens it.
 				role={withSearch ? undefined : "combobox"}
+				aria-label={ariaLabel}
 				aria-haspopup="listbox"
 				aria-expanded={open}
 				aria-controls={listboxId}

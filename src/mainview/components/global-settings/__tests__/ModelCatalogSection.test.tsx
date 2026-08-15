@@ -194,12 +194,81 @@ describe("editing the catalog", () => {
 	});
 });
 
+describe("telling the user what to do", () => {
+	it("names the first step instead of showing a screen of dead controls", async () => {
+		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
+		renderSection();
+		expect(await screen.findByText("catalog.firstRunTitle")).toBeTruthy();
+		expect(screen.getByText("catalog.firstRunStep1")).toBeTruthy();
+	});
+
+	it("drops the first-run guidance once the catalog has content", async () => {
+		renderSection();
+		await screen.findByDisplayValue("OpenRouter");
+		expect(screen.queryByText("catalog.firstRunTitle")).toBeNull();
+	});
+
+	// A greyed button that explains nothing is what made the user read the whole
+	// screen as broken; the precondition has to be on screen, not implied.
+	it("says why the proxy cannot start yet", async () => {
+		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
+		renderSection();
+		expect(await screen.findByText("catalog.startNeedsModel")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "catalog.startProxy" })).toHaveProperty("disabled", true);
+	});
+
+	it("keeps quiet about the precondition once a saved model exists", async () => {
+		renderSection();
+		await screen.findByDisplayValue("fast-gremlin");
+		expect(screen.queryByText("catalog.startNeedsModel")).toBeNull();
+		expect(screen.getByRole("button", { name: "catalog.startProxy" })).toHaveProperty("disabled", false);
+	});
+
+	it("says why a model cannot be added yet", async () => {
+		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
+		renderSection();
+		expect(await screen.findByText("catalog.addModelNeedsProvider")).toBeTruthy();
+	});
+
+	it("lays the providers and models out as tables with named columns", async () => {
+		renderSection();
+		await screen.findByDisplayValue("OpenRouter");
+		expect(screen.getAllByRole("table")).toHaveLength(2);
+		expect(screen.getByRole("columnheader", { name: "catalog.providerKind" })).toBeTruthy();
+		expect(screen.getByRole("columnheader", { name: "catalog.modelId" })).toBeTruthy();
+	});
+});
+
 describe("the live model list", () => {
 	it("does not offer to load models when the build ships no proxy", async () => {
 		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ binaryAvailable: false }));
 		renderSection();
 		await screen.findByText("catalog.binaryMissing");
 		expect(screen.getByRole("button", { name: "catalog.refreshModels" })).toHaveProperty("disabled", true);
+	});
+
+	// Two buttons that both started the proxy is what made the disabled one look
+	// broken; starting it now has exactly one owner.
+	it("does not offer to load models while the proxy is down, and says why", async () => {
+		renderSection();
+		expect(await screen.findByText("catalog.listNeedsProxy")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "catalog.refreshModels" })).toHaveProperty("disabled", true);
+	});
+
+	it("says how many ids it loaded, instead of rendering nothing on success", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ running: true, port: 1 }));
+		vi.mocked(api.request.modelCatalogListModels).mockResolvedValue({ models: ["openrouter/a", "openrouter/b"] });
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.refreshModels" }));
+		expect(await screen.findByText("catalog.listLoaded")).toBeTruthy();
+	});
+
+	it("says an empty listing is empty, rather than looking like a no-op", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ running: true, port: 1 }));
+		vi.mocked(api.request.modelCatalogListModels).mockResolvedValue({ models: [] });
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.refreshModels" }));
+		expect(await screen.findByText("catalog.listEmpty")).toBeTruthy();
 	});
 
 	it("never lets a failed listing look like an empty provider", async () => {

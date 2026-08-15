@@ -226,7 +226,7 @@ const tips = {
 	"tip.cliDoctorWorktrees.title": "Верните гигабайты с диска",
 	"tip.cliDoctorWorktrees.body": "`dev3 doctor --worktrees` покажет, что лежит в ~/.dev3.0 и какие папки задач уже не принадлежат ни одной задаче.",
 	"tip.modelCatalogRoles.title": "Смешивай модели в одном агенте",
-	"tip.modelCatalogRoles.body": "Собери каталог моделей в настройках, а потом в редакторе пресета раздай каждой роли агента свою модель.",
+	"tip.modelCatalogRoles.body": "Соберите каталог в «Настройки → Модели», затем дайте каждой роли агента свою модель в редакторе пресета.",
 };
 
 export default tips;
