@@ -535,6 +535,8 @@ const settings = {
 	"catalog.removeProviderTitle": "Удалить провайдера?",
 	"catalog.removeProviderBody": "Сохранённый ключ тоже удалится.",
 	"catalog.removeProviderOrphans": "К нему привязано моделей: {count}. Они удалятся вместе с ним, и пресеты с ними перестанут работать.",
+	"catalog.removeProviderInUse": "К нему привязано моделей: {models}, их используют пресетов: {presets}. После удаления эти пресеты сломаются, пока не поправишь.",
+	"catalog.removeModelInUse": "Эта модель стоит в роли у пресетов: {presets}. Они перестанут работать, пока не поправишь.",
 	"catalog.kind.openai": "OpenAI",
 	"catalog.kind.anthropic": "Anthropic",
 	"catalog.kind.openrouter": "OpenRouter",

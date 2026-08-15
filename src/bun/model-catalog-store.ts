@@ -1,13 +1,7 @@
 /**
- * On-disk home of the model catalog.
- *
- * Two additive files under ~/.dev3.0 — an older app version never reads either,
- * so the on-disk layout invariants (AGENTS.md) hold: nothing is renamed, moved
- * or rewritten in place.
- *
- *   model-catalog.json       providers + named models (no secrets)
- *   model-catalog-keys.json  upstream API keys, 0600, never leaves this process
- *                            except as the sidecar's child environment
+ * On-disk home of the model catalog: `model-catalog.json` (providers + named
+ * models) and `model-catalog-keys.json` (upstream keys, 0600). Both are additive
+ * files under ~/.dev3.0, so the on-disk layout invariants (AGENTS.md) hold.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

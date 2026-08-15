@@ -532,6 +532,8 @@ const settings = {
 	"catalog.removeProviderTitle": "¿Eliminar este proveedor?",
 	"catalog.removeProviderBody": "Su clave guardada también se borra.",
 	"catalog.removeProviderOrphans": "Tiene {count} modelo(s) del catálogo, que se eliminarán con él. Los preajustes que los usan dejarán de funcionar.",
+	"catalog.removeProviderInUse": "Tiene {models} modelo(s) del catálogo, usados por {presets} preajuste(s). Al eliminarlo esos preajustes dejan de funcionar hasta que los corrijas.",
+	"catalog.removeModelInUse": "{presets} preajuste(s) asignan este modelo a un rol. Dejarán de funcionar hasta que los corrijas.",
 	"catalog.kind.openai": "OpenAI",
 	"catalog.kind.anthropic": "Anthropic",
 	"catalog.kind.openrouter": "OpenRouter",

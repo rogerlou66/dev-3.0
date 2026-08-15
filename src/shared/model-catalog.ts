@@ -16,7 +16,7 @@
  * as `env.<NAME>` and the values reach the sidecar only through its child env.
  */
 
-import { ENV_UNSET } from "./agent-accounts";
+import { ENV_UNSET, claudeModelFamily } from "./agent-accounts";
 
 // ---------------------------------------------------------------- catalog ---
 
@@ -158,14 +158,8 @@ const NETWORK_CONFIG = {
 	retry_backoff_max: 5000,
 };
 
-/**
- * Build the sidecar's whole configuration document from catalog state.
- *
- * Providers with no catalog models are omitted — an empty provider block buys
- * nothing and a misconfigured one refuses to start. Every configured provider is
- * reachable through a single local session key, and every credential is a
- * symbolic `env.*` reference.
- */
+/** The sidecar's whole configuration, from catalog state. A provider with no
+ *  models is omitted; every credential stays a symbolic `env.*` reference. */
 export function buildSidecarConfig(catalog: ModelCatalog): SidecarConfig {
 	const providers: Record<string, SidecarProvider> = {};
 	const providerConfigs: SidecarConfig["governance"]["virtual_keys"][0]["provider_configs"] = [];
@@ -305,17 +299,17 @@ export interface RoleLaunchPlan {
 export const CODEX_PROVIDER_KEY = "dev3";
 
 /**
- * Turn a preset's role bindings into everything a launch needs.
- *
- * Returns undefined — meaning "launch exactly as dev3 does today" — when the
- * agent has no roles, nothing is bound, a bound model no longer exists, or the
- * agent's load-bearing role is unassigned.
+ * Turn a preset's role bindings into everything a launch needs. Returns
+ * undefined — "launch exactly as dev3 does today" — when the agent has no roles
+ * or nothing is bound. `presetModel` is the preset's own model, used to decide
+ * which bound role the rewritten `--model` should name.
  */
 export function resolveModelRoleLaunch(
 	baseCommand: string,
 	bindings: ModelRoleBindings | undefined,
 	catalog: ModelCatalog,
 	runtime: { baseUrl: string; sessionKey: string },
+	presetModel?: string,
 ): RoleLaunchPlan | undefined {
 	const roles = modelRolesForAgent(baseCommand);
 	if (roles.length === 0 || !bindings) return undefined;
@@ -334,10 +328,24 @@ export function resolveModelRoleLaunch(
 
 	return agentKey(baseCommand) === "codex"
 		? codexPlan(wire, runtime)
-		: claudePlan(wire, runtime);
+		: claudePlan(wire, runtime, presetModel);
 }
 
-function claudePlan(wire: Record<string, string>, runtime: { baseUrl: string; sessionKey: string }): RoleLaunchPlan {
+/** Which bound slot the launch's own `--model` should name: the slot the preset
+ *  already meant, else the most capable one bound. Never a Claude id — that is
+ *  the silent wrong-model case. */
+function claudeLaunchSlot(wire: Record<string, string>, presetModel: string | undefined): string | undefined {
+	const meant = presetModel ? claudeModelFamily(presetModel) : null;
+	if (meant && wire[meant]) return wire[meant];
+	const first = CLAUDE_ROLES.find((role) => wire[role.id]);
+	return first ? wire[first.id] : undefined;
+}
+
+function claudePlan(
+	wire: Record<string, string>,
+	runtime: { baseUrl: string; sessionKey: string },
+	presetModel: string | undefined,
+): RoleLaunchPlan {
 	const env: Record<string, string> = {
 		ANTHROPIC_BASE_URL: `${runtime.baseUrl}/anthropic`,
 		ANTHROPIC_AUTH_TOKEN: runtime.sessionKey,
@@ -345,9 +353,14 @@ function claudePlan(wire: Record<string, string>, runtime: { baseUrl: string; se
 	for (const [role, name] of Object.entries(wire)) {
 		env[`ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`] = name;
 	}
-	// The `--model` flag outranks these vars, so the flag is rewritten separately
-	// by the existing slot-override path, which reads exactly these env vars.
-	return { env, args: [], unsetEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"] };
+	// The flag outranks every one of these vars, so it must name a catalog model
+	// too — otherwise the session asks the sidecar for a Claude id it cannot serve.
+	return {
+		env,
+		args: [],
+		modelFlag: claudeLaunchSlot(wire, presetModel),
+		unsetEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"],
+	};
 }
 
 function codexPlan(wire: Record<string, string>, runtime: { baseUrl: string; sessionKey: string }): RoleLaunchPlan | undefined {

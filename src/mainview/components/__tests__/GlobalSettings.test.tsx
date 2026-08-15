@@ -47,6 +47,7 @@ vi.mock("../../rpc", () => ({
 				running: false,
 				starting: false,
 				binaryAvailable: false,
+				version: "v1.6.10",
 				providerCount: 0,
 				modelCount: 0,
 			}),

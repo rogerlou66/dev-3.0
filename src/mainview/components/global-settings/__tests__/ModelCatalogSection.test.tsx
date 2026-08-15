@@ -14,6 +14,7 @@ vi.mock("../../../rpc", () => ({
 			modelSidecarStart: vi.fn(),
 			modelSidecarStop: vi.fn(),
 			modelCatalogListModels: vi.fn(),
+			getAgents: vi.fn(),
 		},
 	},
 }));
@@ -32,7 +33,7 @@ const CATALOG: ModelCatalogView = {
 };
 
 function status(over: Partial<ModelSidecarStatus> = {}): ModelSidecarStatus {
-	return { running: false, starting: false, binaryAvailable: true, providerCount: 1, modelCount: 1, ...over };
+	return { running: false, starting: false, binaryAvailable: true, version: "v1.6.10", providerCount: 1, modelCount: 1, ...over };
 }
 
 function renderSection() {
@@ -49,6 +50,7 @@ beforeEach(() => {
 	vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status());
 	vi.mocked(api.request.modelCatalogSave).mockResolvedValue(CATALOG);
 	vi.mocked(confirm).mockResolvedValue(true);
+	vi.mocked(api.request.getAgents).mockResolvedValue([]);
 });
 
 describe("the proxy's state", () => {
@@ -129,6 +131,21 @@ describe("editing the catalog", () => {
 		await userEvent.click(await screen.findByRole("button", { name: "catalog.removeProvider" }));
 		await waitFor(() => expect(confirm).toHaveBeenCalled());
 		expect(vi.mocked(confirm).mock.calls[0][0].message).toBe("catalog.removeProviderOrphans");
+	});
+
+	it("says how many presets a deletion would break", async () => {
+		vi.mocked(api.request.getAgents).mockResolvedValue([
+			{
+				id: "a1",
+				name: "Claude",
+				baseCommand: "claude",
+				configurations: [{ id: "c1", name: "Mix", modelRoles: { opus: "m-fast" } }],
+			},
+		] as never);
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.removeModel" }));
+		await waitFor(() => expect(confirm).toHaveBeenCalled());
+		expect(vi.mocked(confirm).mock.calls[0][0].message).toBe("catalog.removeModelInUse");
 	});
 
 	it("drops nothing when the user cancels the removal", async () => {

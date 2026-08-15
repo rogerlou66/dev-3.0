@@ -17,7 +17,8 @@ import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
-import { ENV_UNSET } from "../shared/agent-accounts";
+import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
+export { claudeModelFamily } from "../shared/agent-accounts";
 import { modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
 import { loadModelCatalog } from "./model-catalog-store";
 import { ensureModelSidecar, preflightModelRoles } from "./model-sidecar";
@@ -497,14 +498,10 @@ function launchExtraArgs(options: CommandOptions | undefined): string[] | undefi
 }
 
 /**
- * Route this launch through the model catalog when its preset binds model roles.
- *
- * Starts the proxy sidecar on demand, injects the agent's own role delivery
- * (env for Claude Code, `-c` overrides for Codex) and pins the launch model.
- * An explicit `envVars` entry on the preset still wins, as everywhere else.
- *
- * Throws when the sidecar cannot be brought up: launching anyway would silently
- * send the request to the agent's native API under a model the user did not pick.
+ * Route this launch through the model catalog when its preset binds roles: start
+ * the sidecar, inject the agent's own role delivery, pin the launch model. An
+ * explicit `envVars` entry still wins. Throws rather than launching unrouted,
+ * which would silently hit the agent's native API under the wrong model.
  */
 export async function applyModelRoleLaunch(
 	baseCmd: string,
@@ -536,8 +533,13 @@ export async function applyModelRoleLaunch(
 		throw new Error(`The model proxy cannot serve this preset's roles — ${detail}`);
 	}
 
-	const plan = resolveModelRoleLaunch(baseCmd, bindings, catalog, runtime);
-	if (!plan) return { config, options };
+	const plan = resolveModelRoleLaunch(baseCmd, bindings, catalog, runtime, config?.model);
+	if (!plan) {
+		// Roles are bound but nothing could be built from them — Codex without its
+		// main model is the only way here. Launching would quietly use the agent's
+		// own model instead of the one the preset promises.
+		throw new Error("This preset binds model roles but not the model the agent actually launches with. Fix the preset in Settings.");
+	}
 
 	for (const [key, value] of Object.entries({ ...plan.env, ...roleUnsetEnv(plan) })) {
 		if (config?.envVars && key in config.envVars) continue;
@@ -639,19 +641,6 @@ async function applyCodexAccountEnv(
 	} catch (err) {
 		log.warn("Failed to resolve active Codex account env", { error: String(err) });
 	}
-}
-
-/** Classify a concrete Claude model id into its alias family. dev3 presets pass
- *  concrete ids (`claude-opus-4-8[1m]`, `claude-sonnet-5`, `claude-fable-5`), not
- *  the `opus`/`sonnet`/… aliases, so alias-default env vars alone never bind —
- *  we map the id to a family and rewrite the `--model` flag (applyModelOverride). */
-export function claudeModelFamily(modelId: string): "opus" | "sonnet" | "haiku" | "fable" | null {
-	const m = modelId.toLowerCase();
-	if (m.includes("opus")) return "opus";
-	if (m.includes("sonnet")) return "sonnet";
-	if (m.includes("haiku")) return "haiku";
-	if (m.includes("fable")) return "fable";
-	return null;
 }
 
 /** Rewrite a Claude preset's `--model` flag to the active API profile's override.

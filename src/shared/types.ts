@@ -1054,6 +1054,8 @@ export interface ModelSidecarStatus {
 	baseUrl?: string;
 	/** The pinned binary shipped with this build was found on disk. */
 	binaryAvailable: boolean;
+	/** Pinned proxy version this build targets. */
+	version: string;
 	providerCount: number;
 	modelCount: number;
 	/** Why the last start failed, including the process's own last output. */

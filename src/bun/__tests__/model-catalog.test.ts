@@ -170,6 +170,21 @@ describe("resolveModelRoleLaunch — Claude Code", () => {
 		expect(plan).toBeUndefined();
 	});
 
+	it("rewrites the launch model to the slot the preset already meant", () => {
+		const plan = resolveModelRoleLaunch("claude", bindings, catalog(), RUNTIME, "claude-sonnet-5");
+		expect(plan?.modelFlag).toBe("openrouter/fast-gremlin");
+	});
+
+	it("falls back to the most capable bound slot when the preset's model matches none", () => {
+		const plan = resolveModelRoleLaunch("claude", { sonnet: "m-fast" }, catalog(), RUNTIME, "claude-opus-5");
+		expect(plan?.modelFlag).toBe("openrouter/fast-gremlin");
+	});
+
+	it("never leaves the launch naming a model the proxy cannot serve", () => {
+		const plan = resolveModelRoleLaunch("claude", bindings, catalog(), RUNTIME, "claude-haiku-4-5");
+		expect(plan?.modelFlag).not.toContain("claude-");
+	});
+
 	it("passes no CLI arguments — Claude is configured entirely by environment", () => {
 		expect(resolveModelRoleLaunch("claude", bindings, catalog(), RUNTIME)?.args).toEqual([]);
 	});

@@ -9,11 +9,8 @@ import Select, { type SelectOption } from "../Select";
 import { api } from "../../rpc";
 import type { TFunction } from "../../i18n";
 
-/**
- * Model roles: bind this preset to catalog models, using the roles its own agent
- * CLI genuinely exposes. Hidden entirely when the agent has no roles or the
- * catalog is empty — an unusable control is worse than no control.
- */
+/** Bind this preset to catalog models through the roles its own agent CLI
+ *  exposes. Hidden when the agent has no roles or the catalog is empty. */
 export default function PresetModelRoles({
 	t,
 	baseCommand,

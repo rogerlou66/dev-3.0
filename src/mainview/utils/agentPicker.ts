@@ -95,6 +95,9 @@ export function prettifyModel(model: string): string {
  *  module is a pure util with no React context. */
 export function getModelGroupLabel(config: AgentConfiguration): string {
 	if (config.groupLabel) return config.groupLabel;
+	// A preset bound to model roles has no single model to name the group after —
+	// its "model" is a set, so the preset's own name is the honest label.
+	if (config.modelRoles && Object.keys(config.modelRoles).length > 0) return config.name;
 	if (config.model) return MODEL_GROUP_LABELS[config.model] ?? prettifyModel(config.model);
 	return translate("launch.modelAgentDefault");
 }

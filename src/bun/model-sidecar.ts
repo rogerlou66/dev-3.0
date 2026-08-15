@@ -1,15 +1,8 @@
 /**
- * The proxy sidecar that realizes the model catalog (AGENTS.md § Model routing
- * glossary): one Bifrost process per app, bound to loopback on a dev3-chosen
- * random port, started on demand, dying with the app.
- *
- * dev3 owns the process and the generated config; the user owns the catalog it
- * is generated from. Upstream keys reach the sidecar only through its child
- * environment — never the config file, never the command line, never a log.
- *
- * Packaging follows the bundled-tmux precedent (decisions/2026/07/16): a pinned
- * binary inside the app, because DMG and in-app-updater installs cannot run brew
- * and must never download anything at runtime.
+ * The proxy sidecar behind the model catalog: one Bifrost process per app, on a
+ * loopback port dev3 picks, started on demand and dying with the app. Upstream
+ * keys reach it only through its child environment. The binary is pinned and
+ * bundled (bundled-tmux precedent, decisions/2026/07/16) — never downloaded.
  */
 
 import { createServer } from "node:net";
@@ -27,6 +20,7 @@ import {
 	type ModelCatalog,
 	type ModelRoleBindings,
 } from "../shared/model-catalog";
+import { BIFROST_VERSION } from "../shared/bifrost-release";
 import type { ModelSidecarStatus, ModelCatalogPreflight } from "../shared/types";
 import { createLogger } from "./logger";
 import { loadModelCatalog, loadProviderKeys } from "./model-catalog-store";
@@ -62,11 +56,8 @@ let running: RunningSidecar | null = null;
 let starting: Promise<RunningSidecar> | null = null;
 let lastError: string | undefined;
 
-/**
- * Candidate locations of the bundled sidecar binary. Mirrors the bundled-tmux
- * layout: an app bundle keeps it under Contents/Resources/app, a tarball keeps
- * it beside the executable. Pure so the layout math is testable.
- */
+/** Where the bundled binary may sit, mirroring the bundled-tmux layout: inside
+ *  the app bundle's Resources, or beside the executable in a tarball. */
 export function bundledSidecarCandidates(realExecDir: string | undefined, binaryName = BINARY_NAME): string[] {
 	if (!realExecDir) return [];
 	return [
@@ -85,11 +76,8 @@ function realExecDir(): string | undefined {
 	}
 }
 
-/**
- * The sidecar binary to run: an explicit override for development, else the
- * bundled copy. Nothing on PATH — a stray, unpinned Bifrost would silently
- * change behaviour between machines.
- */
+/** The binary to run: a development override, else the bundled copy. Never
+ *  PATH — a stray unpinned build would change behaviour between machines. */
 export function resolveSidecarBinary(): string | undefined {
 	const override = process.env.DEV3_BIFROST_BINARY?.trim();
 	if (override) return existsSync(override) ? override : undefined;
@@ -235,11 +223,8 @@ async function pumpStream(stream: unknown, push: (chunk: string) => void): Promi
 	}
 }
 
-/**
- * Start the sidecar if it is not up yet and return its runtime. Concurrent
- * callers share one start — two agents launching at once must not race two
- * processes onto two ports.
- */
+/** Start the sidecar if it is not up and return its runtime. Concurrent callers
+ *  share one start, so two launches cannot race two processes onto two ports. */
 export async function ensureModelSidecar(): Promise<{ baseUrl: string; sessionKey: string }> {
 	if (running) return { baseUrl: running.baseUrl, sessionKey: running.sessionKey };
 	if (!starting) starting = startSidecar().finally(() => (starting = null));
@@ -319,6 +304,7 @@ export function getModelSidecarStatus(): ModelSidecarStatus {
 		port: running?.port,
 		baseUrl: running?.baseUrl,
 		binaryAvailable: resolveSidecarBinary() != null,
+		version: BIFROST_VERSION,
 		providerCount: catalog.providers.length,
 		modelCount: catalog.models.length,
 		lastError,
@@ -339,10 +325,8 @@ export async function listSidecarModels(providerKey?: string): Promise<string[]>
 	return (body.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === "string");
 }
 
-/**
- * Check a preset's role bindings before spawning an agent, so a broken setup
- * fails in a dialog naming the role instead of as a dead terminal.
- */
+/** Check a preset's roles before spawning, so a broken setup fails with the
+ *  offending role named instead of as a dead terminal. */
 export async function preflightModelRoles(
 	baseCommand: string,
 	bindings: ModelRoleBindings | undefined,

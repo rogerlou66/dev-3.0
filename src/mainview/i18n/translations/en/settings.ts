@@ -532,6 +532,8 @@ const settings = {
 	"catalog.removeProviderTitle": "Remove this provider?",
 	"catalog.removeProviderBody": "Its stored key is deleted too.",
 	"catalog.removeProviderOrphans": "{count} catalog model(s) belong to it and will be removed as well. Presets pointing at them stop working.",
+	"catalog.removeProviderInUse": "It owns {models} catalog model(s), used by {presets} preset(s). Removing it breaks those presets until you fix them.",
+	"catalog.removeModelInUse": "{presets} preset(s) bind this model to a role. They stop working until you fix them.",
 	"catalog.kind.openai": "OpenAI",
 	"catalog.kind.anthropic": "Anthropic",
 	"catalog.kind.openrouter": "OpenRouter",

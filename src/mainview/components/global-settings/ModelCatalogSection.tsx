@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ModelCatalogView, ModelSidecarStatus } from "../../../shared/types";
+import type { CodingAgent, ModelCatalogView, ModelSidecarStatus } from "../../../shared/types";
 import {
 	CATALOG_PROVIDER_KINDS,
 	isValidCatalogModelName,
@@ -53,12 +53,9 @@ function StatusRow({ tone, children }: { tone: "success" | "warning" | "danger" 
 }
 
 /**
- * The model catalog: which providers dev3 may reach, and the named models built
- * on top of them. Credentials go in and never come back — the renderer only ever
- * learns whether a provider has a key stored.
- *
- * Edits are local until saved, because saving restarts the proxy sidecar and
- * that interrupts running sessions. The restart is announced, never silent.
+ * The model catalog: providers dev3 may reach and the named models on top of
+ * them. Credentials go in and never come back. Edits stay local until saved,
+ * because saving restarts the proxy and that interrupts running sessions.
  */
 export default function ModelCatalogSection({ t }: { t: TFunction }) {
 	const [saved, setSaved] = useState<ModelCatalogView>(EMPTY);
@@ -68,6 +65,8 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 	const [available, setAvailable] = useState<string[] | null>(null);
 	const [listError, setListError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	/** Only to count which presets a deletion would break — never edited here. */
+	const [agents, setAgents] = useState<CodingAgent[]>([]);
 
 	const load = useCallback(async () => {
 		try {
@@ -90,6 +89,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 	useEffect(() => {
 		void load();
 		void refreshStatus();
+		void api.request.getAgents().then(setAgents).catch(() => setAgents([]));
 		const timer = setInterval(() => void refreshStatus(), 4000);
 		return () => clearInterval(timer);
 	}, [load, refreshStatus]);
@@ -103,6 +103,20 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 		() => validateCatalog({ providers: draft.providers, models: draft.models }),
 		[draft],
 	);
+
+	const patchProvider = (id: string, patch: Partial<ModelCatalogView["providers"][number]>) =>
+		setDraft((d) => ({ ...d, providers: d.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
+
+	const patchModel = (id: string, patch: Partial<ModelCatalogView["models"][number]>) =>
+		setDraft((d) => ({ ...d, models: d.models.map((m) => (m.id === id ? { ...m, ...patch } : m)) }));
+
+	/** Presets that would stop working if these catalog models disappeared. */
+	const presetsUsing = (modelIds: string[]): number =>
+		agents.reduce(
+			(sum, agent) =>
+				sum + agent.configurations.filter((c) => Object.values(c.modelRoles ?? {}).some((id) => modelIds.includes(id))).length,
+			0,
+		);
 
 	const providerLabel = useCallback(
 		(id: string) => draft.providers.find((p) => p.id === id)?.label ?? t("catalog.providerGone"),
@@ -128,11 +142,14 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 
 	const removeProvider = async (id: string) => {
 		const orphans = draft.models.filter((m) => m.providerId === id);
+		const presets = presetsUsing(orphans.map((m) => m.id));
 		const ok = await confirm({
 			title: t("catalog.removeProviderTitle"),
-			message: orphans.length > 0
-				? t("catalog.removeProviderOrphans", { count: String(orphans.length) })
-				: t("catalog.removeProviderBody"),
+			message: presets > 0
+				? t("catalog.removeProviderInUse", { models: String(orphans.length), presets: String(presets) })
+				: orphans.length > 0
+					? t("catalog.removeProviderOrphans", { count: String(orphans.length) })
+					: t("catalog.removeProviderBody"),
 			confirmLabel: t("catalog.removeProvider"),
 			danger: true,
 		});
@@ -155,9 +172,10 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 	};
 
 	const removeModel = async (id: string) => {
+		const presets = presetsUsing([id]);
 		const ok = await confirm({
 			title: t("catalog.removeModelTitle"),
-			message: t("catalog.removeModelBody"),
+			message: presets > 0 ? t("catalog.removeModelInUse", { presets: String(presets) }) : t("catalog.removeModelBody"),
 			confirmLabel: t("catalog.removeModel"),
 			danger: true,
 		});
@@ -240,7 +258,9 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 					{!status?.binaryAvailable ? (
 						<StatusRow tone="danger">{t("catalog.binaryMissing")}</StatusRow>
 					) : status?.running ? (
-						<StatusRow tone="success">{t("catalog.proxyRunning", { port: String(status.port ?? "?") })}</StatusRow>
+						<StatusRow tone="success">
+							{t("catalog.proxyRunning", { port: String(status.port ?? "?") })} · {status.version}
+						</StatusRow>
 					) : status?.starting ? (
 						<StatusRow tone="warning">{t("catalog.proxyStarting")}</StatusRow>
 					) : (
@@ -294,14 +314,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 										id={`provider-kind-${provider.id}`}
 										value={provider.kind}
 										options={kindOptions}
-										onChange={(value) =>
-											setDraft({
-												...draft,
-												providers: draft.providers.map((p) =>
-													p.id === provider.id ? { ...p, kind: value as CatalogProviderKind } : p,
-												),
-											})
-										}
+										onChange={(value) => patchProvider(provider.id, { kind: value as CatalogProviderKind })}
 									/>
 								</Field>
 								<Field label={t("catalog.providerLabel")} htmlFor={`provider-label-${provider.id}`} hint={t("catalog.providerLabelHint")}>
@@ -309,14 +322,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 										id={`provider-label-${provider.id}`}
 										type="text"
 										value={provider.label}
-										onChange={(event) =>
-											setDraft({
-												...draft,
-												providers: draft.providers.map((p) =>
-													p.id === provider.id ? { ...p, label: event.target.value } : p,
-												),
-											})
-										}
+										onChange={(event) => patchProvider(provider.id, { label: event.target.value })}
 										className={INPUT_CLASS}
 									/>
 								</Field>
@@ -327,14 +333,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											type="url"
 											value={provider.baseUrl ?? ""}
 											placeholder="https://llm.example.com/v1"
-											onChange={(event) =>
-												setDraft({
-													...draft,
-													providers: draft.providers.map((p) =>
-														p.id === provider.id ? { ...p, baseUrl: event.target.value } : p,
-													),
-												})
-											}
+											onChange={(event) => patchProvider(provider.id, { baseUrl: event.target.value })}
 											className={`${INPUT_CLASS} font-mono`}
 										/>
 									</Field>
@@ -390,14 +389,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											type="text"
 											value={model.name}
 											placeholder="fast-gremlin"
-											onChange={(event) =>
-												setDraft({
-													...draft,
-													models: draft.models.map((m) =>
-														m.id === model.id ? { ...m, name: event.target.value } : m,
-													),
-												})
-											}
+											onChange={(event) => patchModel(model.id, { name: event.target.value })}
 											className={`${INPUT_CLASS} font-mono ${nameBad ? "border-danger/50" : ""}`}
 										/>
 									</Field>
@@ -406,12 +398,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											id={`model-provider-${model.id}`}
 											value={model.providerId}
 											options={providerOptions}
-											onChange={(value) =>
-												setDraft({
-													...draft,
-													models: draft.models.map((m) => (m.id === model.id ? { ...m, providerId: value } : m)),
-												})
-											}
+											onChange={(value) => patchModel(model.id, { providerId: value })}
 										/>
 									</Field>
 									<Field label={t("catalog.modelId")} htmlFor={`model-id-${model.id}`} hint={available ? undefined : t("catalog.modelIdManual")}>
@@ -423,12 +410,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											searchPlaceholder={t("catalog.modelIdPlaceholder")}
 											customOptionLabel={(query) => query}
 											emptyLabel={t("catalog.modelIdEmpty")}
-											onChange={(value) =>
-												setDraft({
-													...draft,
-													models: draft.models.map((m) => (m.id === model.id ? { ...m, modelId: value } : m)),
-												})
-											}
+											onChange={(value) => patchModel(model.id, { modelId: value })}
 										/>
 									</Field>
 								</div>

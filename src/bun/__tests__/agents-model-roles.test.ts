@@ -48,6 +48,11 @@ describe("a preset without roles", () => {
 describe("a Claude preset with roles", () => {
 	const config = preset({ modelRoles: { opus: "m-main", sonnet: "m-fast" } });
 
+	it("pins the launch model at a catalog model, never at a Claude id the proxy cannot serve", async () => {
+		const result = await applyModelRoleLaunch("claude", preset({ modelRoles: { sonnet: "m-fast" } }), {}, {});
+		expect(result.config?.model).toBe("openrouter/fast");
+	});
+
 	it("routes the session at the proxy with a per-run key", async () => {
 		const env: Record<string, string> = {};
 		await applyModelRoleLaunch("claude", config, env, {});
@@ -98,6 +103,12 @@ describe("a Codex preset with roles", () => {
 		const args = result.options.modelRoleArgs?.join(" ") ?? "";
 		expect(args).toContain('wire_api="responses"');
 		expect(args).toContain('agents.default_subagent_model="openrouter/fast"');
+	});
+
+	it("refuses to launch when the main role is missing, instead of using Codex's own model", async () => {
+		await expect(
+			applyModelRoleLaunch("codex", preset({ modelRoles: { review: "m-fast" } }), {}, {}),
+		).rejects.toThrow(/not the model the agent actually launches with/);
 	});
 
 	it("hands Codex the session key instead of any upstream key", async () => {
