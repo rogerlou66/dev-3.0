@@ -273,7 +273,9 @@ describe("LaunchVariantsModal", () => {
 			const user = userEvent.setup();
 			renderModal(makeProject(), { globalSettings: makeGlobalSettings() });
 			const options = await getDropdownOptions(user, getModelButtons()[0]);
-			expect(options).toEqual(["Sonnet 5", "Opus 4.8", "Fable 5"]);
+			// The last row is not a model: connecting a provider of your own is one
+			// click from every launch surface, whether or not anything is offered.
+			expect(options).toEqual(["Sonnet 5", "Opus 4.8", "Fable 5", "+ Connect a provider…"]);
 		});
 
 		it("mode dropdown shows a single-preset group (Sonnet 5)", async () => {
