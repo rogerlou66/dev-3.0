@@ -237,13 +237,58 @@ describe("launchArgs — Claude", () => {
 describe("launchArgs — Codex", () => {
 	it("theme + developer_instructions + resume subcommand", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { resume: true, sessionId: "sid", codex: CODEX_RT }))
-			.toBe("codex resume sid --model gpt-5.6-sol -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR>");
+			.toBe("codex resume sid --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR>");
 	});
 	it("rewrites a dev3 profile to the themed profile", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol", additionalArgs: ["-p", "dev3"] }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'default_permissions=\"dev3\"' -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+	});
+
+	// A preset built by hand carries no flags at all. Codex's own default
+	// permissions do not include ~/.dev3.0, so without this the agent runs but
+	// `dev3 current` dies with EPERM and the task's status never moves.
+	describe("a preset that decides nothing still reaches dev3", () => {
+		it("adds the dev3 permissions preset", () => {
+			expect(launch("codex", cfg({}), { codex: CODEX_RT })).toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		it("adds the dev3 profile, which is where the hook trust lives", () => {
+			expect(launch("codex", cfg({}), { codex: CODEX_RT })).toContain("--profile dev3-dark");
+		});
+
+		it("adds it with the flag the installed codex actually accepts", () => {
+			expect(launch("codex", cfg({}), { codex: { ...CODEX_RT, profileLaunchFlag: "--profile-v2" } }))
+				.toContain("--profile-v2 dev3-dark");
+		});
+
+		it("adds them to a model-roles preset too, which has flags for the model and nothing else", () => {
+			const command = launch("codex", cfg({ model: "openrouter/ds-flash-0731" }), { codex: CODEX_RT });
+			expect(command).toContain(`-c 'default_permissions="dev3"'`);
+			expect(command).toContain("--profile dev3-dark");
+		});
+	});
+
+	// Deciding permissions is the user's call; only the absence of a decision is
+	// dev3's to fill. Each of these means "I chose", so nothing gets added.
+	describe("a preset that decided for itself is left alone", () => {
+		it.each([
+			["a full-access sandbox", ["--sandbox", "danger-full-access"]],
+			["a short-flag sandbox", ["-s", "read-only"]],
+			["the bypass flag", ["--dangerously-bypass-approvals-and-sandbox"]],
+			["its own permissions preset", ["-c", 'default_permissions="myown"']],
+			["a raw sandbox_mode override", ["-c", 'sandbox_mode="read-only"']],
+		])("%s", (_name, additionalArgs) => {
+			expect(launch("codex", cfg({ additionalArgs }), { codex: CODEX_RT }))
+				.not.toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		it("keeps the user's own profile instead of forcing ours", () => {
+			const command = launch("codex", cfg({ additionalArgs: ["-p", "myprofile"] }), { codex: CODEX_RT });
+			expect(command).toContain("-p myprofile");
+			expect(command).not.toContain("dev3-dark");
+		});
 	});
 	it("profile-v2 codex rewrites -p to --profile-v2", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol", additionalArgs: ["-p", "dev3"] }), { codex: { ...CODEX_RT, profileLaunchFlag: "--profile-v2" } }))
