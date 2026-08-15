@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	CATALOG_MODEL_CONTEXT_WINDOW,
 	CODEX_PROVIDER_KEY,
+	buildCodexModelCatalog,
 	buildSidecarConfig,
 	catalogModelWireName,
 	isValidCatalogModelName,
@@ -228,14 +230,70 @@ describe("resolveModelRoleLaunch — Codex CLI", () => {
 		expect(resolveModelRoleLaunch("codex", bindings, catalog(), RUNTIME)?.modelFlag).toBe("openai/my-main");
 	});
 
-	it("omits roles left unassigned rather than emitting an empty override", () => {
+	it("falls an unassigned role back to main, never to Codex's own default slug", () => {
 		const args = resolveModelRoleLaunch("codex", { main: "m-main" }, catalog(), RUNTIME)?.args.join(" ") ?? "";
-		expect(args).not.toContain("review_model");
-		expect(args).not.toContain("default_subagent_model");
+		expect(args).toContain('agents.default_subagent_model="openai/my-main"');
+		expect(args).toContain('review_model="openai/my-main"');
 	});
 
 	it("routes nothing when the preset has no main model, so Codex keeps its own default", () => {
 		expect(resolveModelRoleLaunch("codex", { review: "m-fast" }, catalog(), RUNTIME)).toBeUndefined();
+	});
+});
+
+describe("buildCodexModelCatalog", () => {
+	/** Shaped like a real `codex debug models` dump, trimmed to what the builder reads. */
+	function builtin() {
+		return {
+			models: [
+				{ slug: "gpt-5.6-sol", visibility: "list", priority: 1, tool_mode: "code_mode_only", multi_agent_version: "v2", base_instructions: "sol" },
+				{ slug: "gpt-5.5", visibility: "list", priority: 7, base_instructions: "plain", supports_search_tool: true, service_tiers: [{ id: "priority" }] },
+				{ slug: "gpt-5.4", visibility: "list", priority: 16, base_instructions: "older" },
+				{ slug: "codex-auto-review", visibility: "hide", priority: 43, base_instructions: "review" },
+			],
+		};
+	}
+	const models = () => buildCodexModelCatalog(builtin(), catalog())?.models ?? [];
+	const routed = () => models().filter((m) => String(m.slug).includes("/"));
+
+	it("clones the plainest listed model, not the flagship with its multi-agent machinery", () => {
+		expect(routed()[0]?.base_instructions).toBe("plain");
+		expect(routed()[0]?.tool_mode).toBeUndefined();
+	});
+
+	it("names each catalog model by its wire name and its own label", () => {
+		expect(routed().map((m) => m.slug)).toEqual(["openrouter/fast-gremlin", "openai/my-main", "custom-my-box/local"]);
+		expect(routed()[0]?.display_name).toBe("fast-gremlin");
+		expect(String(routed()[0]?.description)).toContain("OpenRouter");
+	});
+
+	it("gives every routed model the same declared window", () => {
+		for (const model of routed()) {
+			expect(model.context_window).toBe(CATALOG_MODEL_CONTEXT_WINDOW);
+			expect(model.max_context_window).toBe(CATALOG_MODEL_CONTEXT_WINDOW);
+		}
+	});
+
+	it("drops the tiers and hosted tools that only OpenAI can serve", () => {
+		expect(routed()[0]?.service_tiers).toEqual([]);
+		expect(routed()[0]?.supports_search_tool).toBe(false);
+	});
+
+	it("carries every built-in forward, because the generated catalog replaces Codex's own", () => {
+		expect(models().map((m) => m.slug)).toEqual([
+			"openrouter/fast-gremlin",
+			"openai/my-main",
+			"custom-my-box/local",
+			"gpt-5.6-sol",
+			"gpt-5.5",
+			"gpt-5.4",
+			"codex-auto-review",
+		]);
+	});
+
+	it("generates nothing when there is nothing to route or nothing to clone", () => {
+		expect(buildCodexModelCatalog(builtin(), { providers: [], models: [] })).toBeUndefined();
+		expect(buildCodexModelCatalog({ models: [] }, catalog())).toBeUndefined();
 	});
 });
 

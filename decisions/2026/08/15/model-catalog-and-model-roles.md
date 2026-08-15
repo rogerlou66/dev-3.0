@@ -215,6 +215,31 @@ dragging in the list — what the user actually wants — is not a straight repl
 *derived* from grouping, so a drop between two groups has no meaning until order becomes stored
 state. That design is open.
 
+### Follow-up: Codex metadata is cloned from Codex, not authored by dev3
+
+Codex greeted every routed session with `Model metadata for <slug> not found` and fell back to
+placeholder numbers that cap the window at 272k and switch off `apply_patch` and parallel tool
+calls. The fix is `model_catalog_json`, verified on `codex-cli 0.147.0` — but it **replaces** the
+built-in catalog rather than extending it, which second-hand write-ups do not mention.
+
+dev3 therefore asks Codex for its own catalog (`codex debug models`, ~40 ms), clones one built-in
+entry per catalog model, and carries every built-in forward
+(`buildCodexModelCatalog` in `src/shared/model-catalog.ts`, written by
+`src/bun/codex-model-catalog.ts`). Cloning rather than authoring is the whole point: the entry
+carries an authentic system prompt and tool contract for a model dev3 knows nothing about. The
+template is the most capable *listed* entry with no `tool_mode`/`multi_agent_version`, so a
+third-party model does not inherit code-mode or multi-agent machinery it cannot serve; OpenAI's
+speed tiers and hosted search tool are blanked for the same reason. Every catalog model declares
+a 1 000 000-token window — dev3 cannot know the real one, the number only drives compaction, and
+that is what the current generation advertises. Generation is best-effort: any failure launches
+the session on Codex's fallback metadata rather than not at all.
+
+Verified directly, without credentials: `codex exec` against an unreachable base URL prints the
+warning without the generated catalog and does not print it with one.
+
+Related: an unbound `subagent`/`review` role now falls back to `main`. The session is already
+pinned to our provider, so Codex's own default slug would reach a proxy that cannot serve it.
+
 ## Alternatives considered
 
 - **Extend the provider registry with a "bifrost" provider.** Rejected: the registry is shaped

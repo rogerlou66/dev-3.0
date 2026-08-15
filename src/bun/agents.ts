@@ -19,7 +19,8 @@ import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
 import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
 export { claudeModelFamily } from "../shared/agent-accounts";
-import { modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
+import { codexModelCatalogArgs, modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
+import { writeCodexModelCatalog } from "./codex-model-catalog";
 import { loadModelCatalog } from "./model-catalog-store";
 import { ensureModelSidecar, preflightModelRoles } from "./model-sidecar";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "./agent-skills";
@@ -546,9 +547,17 @@ export async function applyModelRoleLaunch(
 		extraEnv[key] = value;
 	}
 
+	// Metadata for a model Codex has never heard of. Best-effort by design:
+	// without it the session still runs, on Codex's placeholder numbers.
+	const args = [...plan.args];
+	if (agentKey(baseCmd) === "codex") {
+		const catalogPath = await writeCodexModelCatalog(baseCmd, catalog);
+		if (catalogPath) args.push(...codexModelCatalogArgs(catalogPath));
+	}
+
 	return {
 		config: plan.modelFlag && config ? { ...config, model: plan.modelFlag } : config,
-		options: plan.args.length > 0 ? { ...options, modelRoleArgs: plan.args } : options,
+		options: args.length > 0 ? { ...options, modelRoleArgs: args } : options,
 	};
 }
 

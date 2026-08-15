@@ -384,8 +384,11 @@ function codexPlan(wire: Record<string, string>, runtime: { baseUrl: string; ses
 		"-c", `${p}.env_key="OPENAI_API_KEY"`,
 		"-c", `model="${wire.main}"`,
 	];
-	if (wire.subagent) args.push("-c", `agents.default_subagent_model="${wire.subagent}"`);
-	if (wire.review) args.push("-c", `review_model="${wire.review}"`);
+	// An unbound slot would keep Codex's own default slug, and the whole session
+	// is already pinned to our provider — that slug reaches a proxy that cannot
+	// serve it. Main is the honest stand-in.
+	args.push("-c", `agents.default_subagent_model="${wire.subagent ?? wire.main}"`);
+	args.push("-c", `review_model="${wire.review ?? wire.main}"`);
 
 	return {
 		env: { OPENAI_API_KEY: runtime.sessionKey },
@@ -393,6 +396,72 @@ function codexPlan(wire: Record<string, string>, runtime: { baseUrl: string; ses
 		modelFlag: wire.main,
 		unsetEnv: [],
 	};
+}
+
+// ----------------------------------------------------- codex model catalog ---
+
+/**
+ * Codex knows nothing about a routed model, so it falls back to placeholder
+ * metadata: a 272k ceiling, no apply_patch, no parallel tool calls, and a
+ * warning on every launch. `model_catalog_json` fixes that — but it REPLACES
+ * Codex's built-in catalog rather than extending it, so the generated document
+ * has to carry the built-ins forward as well.
+ */
+export interface CodexModelCatalog {
+	models: Record<string, unknown>[];
+}
+
+/** What every catalog model claims. dev3 cannot know a third-party model's real
+ *  window, and a million is what the current generation advertises; the number
+ *  only drives Codex's compaction, never billing. */
+export const CATALOG_MODEL_CONTEXT_WINDOW = 1_000_000;
+
+/** The built-in entry a routed model is cloned from — the most capable listed
+ *  model that carries no multi-agent or code-mode machinery, which a
+ *  third-party model would not be able to serve. */
+function codexTemplateEntry(builtin: CodexModelCatalog): Record<string, unknown> | undefined {
+	const listed = builtin.models.filter((m) => m.visibility === "list");
+	const plain = listed.filter((m) => m.tool_mode === undefined && m.multi_agent_version === undefined);
+	const pool = plain.length > 0 ? plain : listed.length > 0 ? listed : builtin.models;
+	return [...pool].sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))[0];
+}
+
+/** Clone that template once per catalog model, then keep every built-in. */
+export function buildCodexModelCatalog(builtin: CodexModelCatalog, catalog: ModelCatalog): CodexModelCatalog | undefined {
+	const template = codexTemplateEntry(builtin);
+	if (!template) return undefined;
+
+	const routed = catalog.models.flatMap((model) => {
+		const slug = catalogModelWireName(catalog, model.id);
+		const provider = catalog.providers.find((p) => p.id === model.providerId);
+		if (!slug || !provider) return [];
+		return [
+			{
+				...template,
+				slug,
+				display_name: model.name,
+				description: `Served by ${provider.label} through the dev3 model catalog.`,
+				// Ours first: in a routed session every built-in is unreachable.
+				priority: 0,
+				visibility: "list",
+				context_window: CATALOG_MODEL_CONTEXT_WINDOW,
+				max_context_window: CATALOG_MODEL_CONTEXT_WINDOW,
+				// OpenAI's own billing tiers and hosted search tool mean nothing to
+				// another provider, and asking for either is a rejected request.
+				additional_speed_tiers: [],
+				service_tiers: [],
+				supports_search_tool: false,
+			},
+		];
+	});
+	if (routed.length === 0) return undefined;
+
+	return { models: [...routed, ...builtin.models] };
+}
+
+/** The launch arg that hands Codex a generated catalog. */
+export function codexModelCatalogArgs(path: string): string[] {
+	return ["-c", `model_catalog_json="${path}"`];
 }
 
 /** Env record form of `unsetEnv`, for the launch env pipeline that speaks in

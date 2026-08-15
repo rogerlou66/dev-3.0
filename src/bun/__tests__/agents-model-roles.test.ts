@@ -6,10 +6,16 @@ const h = vi.hoisted(() => ({
 	catalog: vi.fn<() => ModelCatalog>(),
 	ensure: vi.fn<() => Promise<{ baseUrl: string; sessionKey: string }>>(),
 	preflight: vi.fn(),
+	writeCodexCatalog: vi.fn<() => Promise<string | undefined>>(),
 }));
 
 vi.mock("../model-catalog-store", () => ({ loadModelCatalog: h.catalog }));
-vi.mock("../model-sidecar", () => ({ ensureModelSidecar: h.ensure, preflightModelRoles: h.preflight }));
+vi.mock("../model-sidecar", () => ({
+	ensureModelSidecar: h.ensure,
+	preflightModelRoles: h.preflight,
+	RUNTIME_DIR: "/tmp/dev3-probe-runtime",
+}));
+vi.mock("../codex-model-catalog", () => ({ writeCodexModelCatalog: h.writeCodexCatalog }));
 
 import { applyModelRoleLaunch } from "../agents";
 
@@ -33,6 +39,7 @@ beforeEach(() => {
 	h.catalog.mockReturnValue(CATALOG);
 	h.ensure.mockResolvedValue({ baseUrl: "http://127.0.0.1:41234", sessionKey: "sk-bf-x" });
 	h.preflight.mockResolvedValue({ ok: true, problems: [] });
+	h.writeCodexCatalog.mockResolvedValue("/tmp/dev3-probe-runtime/codex-models.json");
 });
 
 describe("a preset without roles", () => {
@@ -115,5 +122,23 @@ describe("a Codex preset with roles", () => {
 		const env: Record<string, string> = {};
 		await applyModelRoleLaunch("codex", config, env, {});
 		expect(env.OPENAI_API_KEY).toBe("sk-bf-x");
+	});
+
+	it("hands Codex generated metadata for the routed model", async () => {
+		const result = await applyModelRoleLaunch("codex", config, {}, {});
+		expect(result.options.modelRoleArgs?.join(" ")).toContain('model_catalog_json="/tmp/dev3-probe-runtime/codex-models.json"');
+	});
+
+	it("still launches when the metadata could not be generated", async () => {
+		h.writeCodexCatalog.mockResolvedValue(undefined);
+		const result = await applyModelRoleLaunch("codex", config, {}, {});
+		const args = result.options.modelRoleArgs?.join(" ") ?? "";
+		expect(args).not.toContain("model_catalog_json");
+		expect(args).toContain('model="openai/my-main"');
+	});
+
+	it("asks for no metadata for an agent that reads no catalog", async () => {
+		await applyModelRoleLaunch("claude", preset({ modelRoles: { opus: "m-main" } }), {}, {});
+		expect(h.writeCodexCatalog).not.toHaveBeenCalled();
 	});
 });

@@ -31,7 +31,7 @@ import { spawn } from "./spawn";
 const log = createLogger("model-sidecar");
 
 /** Runtime dir: 0700, holds the generated config and nothing the user edits. */
-const RUNTIME_DIR = `${DEV3_HOME}/model-catalog-runtime`;
+export const RUNTIME_DIR = `${DEV3_HOME}/model-catalog-runtime`;
 const CONFIG_PATH = `${RUNTIME_DIR}/config.json`;
 /** Where the port and session key of the last start are remembered, so a
  *  restarted proxy keeps the address the running agents were launched with. */
