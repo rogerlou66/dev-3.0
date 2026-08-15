@@ -225,6 +225,8 @@ const tips = {
 	"tip.terminalPathLinks.body": "⌘-clic (Ctrl en Linux) en una ruta de archivo en el terminal: vista previa en dev3, abrir o mostrar en Finder.",
 	"tip.cliDoctorWorktrees.title": "Recupera gigas de worktrees",
 	"tip.cliDoctorWorktrees.body": "Ejecuta `dev3 doctor --worktrees`: muestra qué guarda ~/.dev3.0 en disco y qué carpetas de tarea ya no pertenecen a ninguna tarea.",
+	"tip.modelCatalogRoles.title": "Mezcla modelos en un agente",
+	"tip.modelCatalogRoles.body": "Crea un catálogo de modelos en Ajustes y luego da a cada rol del agente su propio modelo en el editor de preajustes.",
 };
 
 export default tips;

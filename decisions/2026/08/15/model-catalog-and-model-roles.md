@@ -1,7 +1,19 @@
 # Model catalog and model roles: a dev3-managed proxy sidecar for any provider
 
-Status: design agreed in a grilling session, not yet implemented. The code change that
-implements it ships with this record's follow-ups, not with the record itself.
+Status: implemented. The pure core is `src/shared/model-catalog.ts` (catalog types, sidecar
+config generation, role resolution per agent, validation, warnings); the process lives in
+`src/bun/model-sidecar.ts` with its state in `src/bun/model-catalog-store.ts`; launches route
+through `applyModelRoleLaunch` in `src/bun/agents.ts`; the surfaces are
+`ModelCatalogSection.tsx` and `PresetModelRoles.tsx`. The binary is fetched by
+`scripts/fetch-bifrost.ts` against a recorded SHA-256 pin and staged by
+`scripts/stage-bifrost.ts`.
+
+Two deviations from the plan, both deliberate. The stored API key has no reveal toggle: keys
+never travel back to the renderer at all, so the UI says a key is stored and offers to replace
+it rather than pretending it can show it. And release CI gates on the pin only when
+`vendor/bifrost/pinned.json` exists — a pinned target that 404s or drifts fails the build,
+while an unpinned one ships with the catalog disabled and says so, instead of blocking every
+release until someone records the first hash.
 
 ## Context
 

@@ -225,6 +225,8 @@ const tips = {
 	"tip.terminalPathLinks.body": "⌘-click (Ctrl on Linux) any file path in terminal output to preview it in dev3, open it, or reveal it in Finder.",
 	"tip.cliDoctorWorktrees.title": "Reclaim gigabytes of worktrees",
 	"tip.cliDoctorWorktrees.body": "Run `dev3 doctor --worktrees` — it shows what ~/.dev3.0 keeps on disk and which task folders no longer belong to any task.",
+	"tip.modelCatalogRoles.title": "Mix models in one agent",
+	"tip.modelCatalogRoles.body": "Build a Model catalog in Settings, then give each of an agent's roles its own model in the preset editor.",
 } as const;
 
 export default tips;

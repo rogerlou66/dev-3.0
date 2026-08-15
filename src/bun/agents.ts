@@ -18,9 +18,9 @@ import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
 import { ENV_UNSET } from "../shared/agent-accounts";
-import { modelRolesForAgent, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
+import { modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
 import { loadModelCatalog } from "./model-catalog-store";
-import { ensureModelSidecar } from "./model-sidecar";
+import { ensureModelSidecar, preflightModelRoles } from "./model-sidecar";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "./agent-skills";
 import { getAgentAdapter, agentKey } from "../shared/agent-adapters/registry";
 import type { AdapterLaunchOptions, CodexLaunchRuntime } from "../shared/agent-adapters/types";
@@ -516,8 +516,27 @@ export async function applyModelRoleLaunch(
 	if (!bindings || Object.keys(bindings).length === 0) return { config, options };
 	if (modelRolesForAgent(baseCmd).length === 0) return { config, options };
 
+	const catalog = loadModelCatalog();
+	// A role pointing at a deleted model would otherwise launch unrouted, on the
+	// agent's native API — the exact silent wrong-model case this feature exists
+	// to prevent. Name the roles instead.
+	const orphans = orphanedRoleBindings(bindings, catalog);
+	if (orphans.length > 0) {
+		throw new Error(
+			`These model roles point at catalog models that no longer exist: ${orphans.join(", ")}. Fix the preset in Settings.`,
+		);
+	}
+
 	const runtime = await ensureModelSidecar();
-	const plan = resolveModelRoleLaunch(baseCmd, bindings, loadModelCatalog(), runtime);
+	const verdict = await preflightModelRoles(baseCmd, bindings, catalog);
+	if (!verdict.ok) {
+		const detail = verdict.problems
+			.map((p) => (p.roleId ? `${p.roleId}: ${p.code}${p.detail ? ` (${p.detail})` : ""}` : p.detail ?? p.code))
+			.join("; ");
+		throw new Error(`The model proxy cannot serve this preset's roles — ${detail}`);
+	}
+
+	const plan = resolveModelRoleLaunch(baseCmd, bindings, catalog, runtime);
 	if (!plan) return { config, options };
 
 	for (const [key, value] of Object.entries({ ...plan.env, ...roleUnsetEnv(plan) })) {

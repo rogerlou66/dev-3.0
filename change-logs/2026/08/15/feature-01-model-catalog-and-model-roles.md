@@ -1,0 +1,3 @@
+Short: Run any agent on any provider
+
+Register the providers you pay for in the new Model catalog (Global Settings), give their models your own names, then bind those names to an agent's own roles in its preset — Claude Code's Opus/Sonnet/Haiku slots, Codex's main/subagent/review models. A pinned proxy sidecar bundled with the app resolves the names, so one Claude Code session can run its main model on OpenAI and its subagents on DeepSeek through OpenRouter. Upstream keys never leave your machine: the agent only ever sees a per-run local key, and a launch is blocked with the offending role named rather than silently falling back to the wrong model.
