@@ -130,14 +130,25 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 
 	const providerOptions: SelectOption[] = draft.providers.map((p) => ({ value: p.id, label: p.label }));
 
+	const kindLabel = (kind: CatalogProviderKind) => t(`catalog.kind.${kind}` as Parameters<TFunction>[0]);
+
 	const addProvider = () => {
 		const kind: CatalogProviderKind = CATALOG_PROVIDER_KINDS.find(
 			(k) => k !== "custom" && !draft.providers.some((p) => p.kind === k),
 		) ?? "custom";
 		setDraft({
 			...draft,
-			providers: [...draft.providers, { id: randomUUID(), kind, label: t(`catalog.kind.${kind}` as Parameters<TFunction>[0]), hasKey: false }],
+			providers: [...draft.providers, { id: randomUUID(), kind, label: kindLabel(kind), hasKey: false }],
 		});
+	};
+
+	/** Switching the kind renames the provider too, unless the user typed a name
+	 *  of their own — a row reading "Anthropic" while it talks to OpenRouter is
+	 *  the name every model picker then shows. */
+	const changeProviderKind = (id: string, kind: CatalogProviderKind) => {
+		const current = draft.providers.find((p) => p.id === id);
+		const untouched = !current || CATALOG_PROVIDER_KINDS.some((k) => current.label === kindLabel(k));
+		patchProvider(id, untouched ? { kind, label: kindLabel(kind) } : { kind });
 	};
 
 	const removeProvider = async (id: string) => {
@@ -314,7 +325,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 										id={`provider-kind-${provider.id}`}
 										value={provider.kind}
 										options={kindOptions}
-										onChange={(value) => patchProvider(provider.id, { kind: value as CatalogProviderKind })}
+										onChange={(value) => changeProviderKind(provider.id, value as CatalogProviderKind)}
 									/>
 								</Field>
 								<Field label={t("catalog.providerLabel")} htmlFor={`provider-label-${provider.id}`} hint={t("catalog.providerLabelHint")}>
@@ -408,6 +419,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 											options={idOptions(model.providerId)}
 											allowCustom
 											searchPlaceholder={t("catalog.modelIdPlaceholder")}
+											searchLabel={t("catalog.modelId")}
 											customOptionLabel={(query) => query}
 											emptyLabel={t("catalog.modelIdEmpty")}
 											onChange={(value) => patchModel(model.id, { modelId: value })}

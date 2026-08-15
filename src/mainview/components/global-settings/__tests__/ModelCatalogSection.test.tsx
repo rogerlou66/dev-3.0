@@ -126,6 +126,36 @@ describe("editing the catalog", () => {
 		expect(screen.getByRole("button", { name: "catalog.save" })).toHaveProperty("disabled", true);
 	});
 
+	it("names the model-id filter after its field, not after its examples", async () => {
+		renderSection();
+		await screen.findByDisplayValue("fast-gremlin");
+		await userEvent.click(document.getElementById("model-id-m-fast") as HTMLElement);
+		expect(screen.getByRole("combobox", { name: "catalog.modelId" })).toBeTruthy();
+	});
+
+	it("renames a provider along with its kind, so no row lies about who it talks to", async () => {
+		renderSection();
+		await screen.findByDisplayValue("OpenRouter");
+		// A fresh row is named after its kind; switching the kind must rename it.
+		await userEvent.click(screen.getByRole("button", { name: "catalog.addProvider" }));
+		expect(screen.getByDisplayValue("catalog.kind.openai")).toBeTruthy();
+		const kinds = document.querySelectorAll<HTMLElement>("[id^=provider-kind-]");
+		await userEvent.click(kinds[kinds.length - 1]);
+		await userEvent.click(screen.getByRole("option", { name: "catalog.kind.anthropic" }));
+		expect(screen.getByDisplayValue("catalog.kind.anthropic")).toBeTruthy();
+		expect(screen.queryByDisplayValue("catalog.kind.openai")).toBeNull();
+	});
+
+	it("keeps a name the user typed when the kind changes", async () => {
+		renderSection();
+		const name = await screen.findByDisplayValue("OpenRouter");
+		await userEvent.clear(name);
+		await userEvent.type(name, "work account");
+		await userEvent.click(document.getElementById("provider-kind-p-or") as HTMLElement);
+		await userEvent.click(screen.getByRole("option", { name: "catalog.kind.openai" }));
+		expect(screen.getByDisplayValue("work account")).toBeTruthy();
+	});
+
 	it("says how many models a provider takes down with it", async () => {
 		renderSection();
 		await userEvent.click(await screen.findByRole("button", { name: "catalog.removeProvider" }));

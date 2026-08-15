@@ -277,4 +277,75 @@ describe("global-settings utils", () => {
 		};
 		expect(buildCommandPreview("claude", config, "anthropic").envLine).toBeNull();
 	});
+
+	describe("model roles in the preview", () => {
+		const catalog = {
+			providers: [{ id: "p1", kind: "openrouter" as const, label: "OpenRouter" }],
+			models: [
+				{ id: "m1", providerId: "p1", name: "fast-gremlin", modelId: "deepseek/deepseek-chat" },
+				{ id: "m2", providerId: "p1", name: "big-brain", modelId: "gpt-5.6-sol" },
+			],
+		};
+
+		it("Claude: --model names the bound catalog model, never the preset's Claude id", () => {
+			const config: AgentConfiguration = {
+				id: "c",
+				name: "Default",
+				model: "claude-fable-5",
+				modelRoles: { opus: "m2", sonnet: "m1" },
+			};
+			const { command, envLine } = buildCommandPreview("claude", config, undefined, undefined, catalog);
+			expect(command).not.toContain("claude-fable-5");
+			expect(command).toContain("--model openrouter/big-brain");
+			expect(envLine).toContain("ANTHROPIC_DEFAULT_OPUS_MODEL=openrouter/big-brain");
+			expect(envLine).toContain("ANTHROPIC_DEFAULT_SONNET_MODEL=openrouter/fast-gremlin");
+			// The sentinel that clears a var at launch is not a shell assignment.
+			expect(envLine).not.toContain("dev3:unset");
+		});
+
+		it("Codex: shows the routing args the launch actually passes", () => {
+			const config: AgentConfiguration = {
+				id: "c",
+				name: "Codex",
+				model: "gpt-5.6-sol",
+				modelRoles: { main: "m2" },
+			};
+			const { command } = buildCommandPreview("codex", config, undefined, undefined, catalog);
+			expect(command).toContain(`-c 'model_provider="dev3"'`);
+			expect(command).toContain(`-c 'model="openrouter/big-brain"'`);
+		});
+
+		it("leaves the preview alone when no role is bound", () => {
+			const config: AgentConfiguration = { id: "c", name: "Default", model: "claude-fable-5" };
+			expect(buildCommandPreview("claude", config, undefined, undefined, catalog).command).toContain(
+				"--model claude-fable-5",
+			);
+		});
+
+		it("leaves the preview alone when a binding points at a deleted model", () => {
+			const config: AgentConfiguration = {
+				id: "c",
+				name: "Default",
+				model: "claude-fable-5",
+				modelRoles: { opus: "gone" },
+			};
+			// The launch refuses this preset outright; the preview must not
+			// invent a route that will never happen.
+			expect(buildCommandPreview("claude", config, undefined, undefined, catalog).command).toContain(
+				"--model claude-fable-5",
+			);
+		});
+
+		it("config envVars still win over the routing env", () => {
+			const config: AgentConfiguration = {
+				id: "c",
+				name: "Default",
+				model: "claude-fable-5",
+				modelRoles: { opus: "m2" },
+				envVars: { ANTHROPIC_BASE_URL: "http://my-own-proxy" },
+			};
+			const { envLine } = buildCommandPreview("claude", config, undefined, undefined, catalog);
+			expect(envLine).toContain("ANTHROPIC_BASE_URL=http://my-own-proxy");
+		});
+	});
 });

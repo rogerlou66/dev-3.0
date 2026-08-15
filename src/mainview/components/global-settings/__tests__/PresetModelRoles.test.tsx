@@ -1,14 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentConfiguration, ModelCatalogView } from "../../../../shared/types";
 import { I18nProvider, type TFunction } from "../../../i18n";
 import PresetModelRoles from "../PresetModelRoles";
-
-vi.mock("../../../rpc", () => ({
-	api: { request: { modelCatalogGet: vi.fn() } },
-}));
-
-import { api } from "../../../rpc";
 
 const t = ((key: string) => key) as unknown as TFunction;
 
@@ -23,75 +17,68 @@ const CATALOG: ModelCatalogView = {
 	],
 };
 
-function renderRoles(baseCommand: string, config: Partial<AgentConfiguration> = {}) {
+function renderRoles(
+	baseCommand: string,
+	config: Partial<AgentConfiguration> = {},
+	catalog: ModelCatalogView | null = CATALOG,
+) {
 	const onChange = vi.fn();
-	render(
+	const view = render(
 		<I18nProvider>
 			<PresetModelRoles
 				t={t}
 				baseCommand={baseCommand}
 				config={{ id: "c1", name: "Preset", ...config } as AgentConfiguration}
+				catalog={catalog}
 				onChange={onChange}
 			/>
 		</I18nProvider>,
 	);
-	return { onChange };
+	return { onChange, ...view };
 }
 
-beforeEach(() => {
-	vi.clearAllMocks();
-	vi.mocked(api.request.modelCatalogGet).mockResolvedValue(CATALOG);
-});
-
 describe("when the block appears at all", () => {
-	it("offers Claude Code its own alias slots", async () => {
+	it("offers Claude Code its own alias slots", () => {
 		renderRoles("claude");
-		expect(await screen.findByText("catalog.roleOpus")).toBeTruthy();
+		expect(screen.getByText("catalog.roleOpus")).toBeTruthy();
 		expect(screen.getByText("catalog.roleHaiku")).toBeTruthy();
 	});
 
-	it("offers Codex the roles Codex has, and none it does not", async () => {
+	it("offers Codex the roles Codex has, and none it does not", () => {
 		renderRoles("codex");
-		expect(await screen.findByText("catalog.roleMain")).toBeTruthy();
+		expect(screen.getByText("catalog.roleMain")).toBeTruthy();
 		expect(screen.queryByText("catalog.roleOpus")).toBeNull();
 	});
 
-	it("stays out of the way for an agent dev3 cannot route", async () => {
-		const { container } = render(
-			<I18nProvider>
-				<PresetModelRoles t={t} baseCommand="gemini" config={{ id: "c", name: "n" } as AgentConfiguration} onChange={vi.fn()} />
-			</I18nProvider>,
-		);
-		await waitFor(() => expect(api.request.modelCatalogGet).toHaveBeenCalled());
+	it("stays out of the way for an agent dev3 cannot route", () => {
+		const { container } = renderRoles("gemini");
 		expect(container.textContent).toBe("");
 	});
 
-	it("stays hidden while the catalog is empty, instead of showing a dead control", async () => {
-		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
-		const { container } = render(
-			<I18nProvider>
-				<PresetModelRoles t={t} baseCommand="claude" config={{ id: "c", name: "n" } as AgentConfiguration} onChange={vi.fn()} />
-			</I18nProvider>,
-		);
-		await waitFor(() => expect(api.request.modelCatalogGet).toHaveBeenCalled());
+	it("stays hidden while the catalog is empty, instead of showing a dead control", () => {
+		const { container } = renderRoles("claude", {}, { providers: [], models: [] });
+		expect(container.textContent).toBe("");
+	});
+
+	it("stays hidden until the catalog has loaded", () => {
+		const { container } = renderRoles("claude", {}, null);
 		expect(container.textContent).toBe("");
 	});
 });
 
 describe("warnings the user must see before launching", () => {
-	it("warns when an OpenRouter model serves a Claude Code role", async () => {
+	it("warns when an OpenRouter model serves a Claude Code role", () => {
 		renderRoles("claude", { modelRoles: { sonnet: "m-fast" } });
-		expect(await screen.findByText("catalog.warnOpenRouterTitle")).toBeTruthy();
+		expect(screen.getByText("catalog.warnOpenRouterTitle")).toBeTruthy();
 	});
 
-	it("keeps quiet for a direct provider", async () => {
+	it("keeps quiet for a direct provider", () => {
 		renderRoles("claude", { modelRoles: { opus: "m-main" } });
-		await screen.findByText("catalog.roleOpus");
 		expect(screen.queryByText("catalog.warnOpenRouterTitle")).toBeNull();
 	});
 
-	it("names a role left pointing at a deleted model", async () => {
+	it("names a role left pointing at a deleted model", () => {
 		renderRoles("claude", { modelRoles: { opus: "m-gone" } });
-		expect(await screen.findByText("catalog.roleOrphan")).toBeTruthy();
+		expect(screen.getByText("catalog.roleOrphan")).toBeTruthy();
 	});
 });

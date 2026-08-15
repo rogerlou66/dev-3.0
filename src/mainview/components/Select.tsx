@@ -75,6 +75,10 @@ interface ListboxProps {
 	search?: {
 		query: string;
 		placeholder: string;
+		/** The field's own name, for the filter input. Falls back to the
+		 *  placeholder, which on an examples-style placeholder reads as a list
+		 *  of values rather than a name. */
+		label?: string;
 		inputMode?: "text" | "decimal";
 		emptyLabel: string;
 		onQueryChange: (query: string) => void;
@@ -235,7 +239,7 @@ function SelectListbox({
 					aria-expanded
 					aria-controls={listboxId}
 					aria-autocomplete="list"
-					aria-label={search.placeholder}
+					aria-label={search.label ?? search.placeholder}
 					aria-activedescendant={activeIndex >= 0 ? optionIdFor(activeIndex) : undefined}
 					value={search.query}
 					placeholder={search.placeholder}
@@ -266,6 +270,7 @@ function Select({
 	allowCustom,
 	placeholder,
 	searchPlaceholder,
+	searchLabel,
 	customOptionLabel,
 	emptyLabel = "Nothing matches",
 	inputMode,
@@ -285,6 +290,9 @@ function Select({
 	/** Trigger text when nothing is selected. */
 	placeholder?: string;
 	searchPlaceholder?: string;
+	/** Accessible name for the filter field. Give it whenever the placeholder
+	 *  is a list of example values rather than a name. */
+	searchLabel?: string;
 	/** Label of the row that commits the typed text; defaults to the text itself. */
 	customOptionLabel?: (query: string) => string;
 	emptyLabel?: string;
@@ -477,6 +485,7 @@ function Select({
 					search={withSearch ? {
 						query,
 						placeholder: searchPlaceholder ?? "Filter…",
+						label: searchLabel,
 						inputMode,
 						emptyLabel,
 						// A creatable field highlights nothing while typing: pre-highlighting

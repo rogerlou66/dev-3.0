@@ -25,6 +25,7 @@ import type { TFunction } from "../../i18n";
 import { buildPickerGroups, getModeLeafLabel, getModelGroupLabel, type PickerGroup } from "../../utils/agentPicker";
 import { useToggleFavorite } from "../../hooks/useToggleFavorite";
 import PresetModelRoles from "./PresetModelRoles";
+import { useModelCatalog } from "./use-model-catalog";
 import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
 import {
@@ -838,7 +839,14 @@ function PresetEditor({
 	onMoveUp: () => void;
 	onMoveDown: () => void;
 }) {
-	const preview = buildCommandPreview(agent.baseCommand, config, agent.llmProvider, agent.providerConfig);
+	const catalog = useModelCatalog();
+	const preview = buildCommandPreview(
+		agent.baseCommand,
+		config,
+		agent.llmProvider,
+		agent.providerConfig,
+		catalog ?? undefined,
+	);
 	const baseCommandName = agent.baseCommand.split("/").pop() ?? agent.baseCommand;
 	const modelOptions: SelectOption[] = modelsForAgent(agent).map((model) => ({ value: model, label: model }));
 	const filterHint = t("settings.selectFilterHint");
@@ -1003,7 +1011,13 @@ function PresetEditor({
 
 			{/* Model roles sit with the model, not under "Advanced": they decide which
 			    model actually runs, which is the preset's headline meaning. */}
-			<PresetModelRoles t={t} baseCommand={baseCommandName} config={config} onChange={onChange} />
+			<PresetModelRoles
+				t={t}
+				baseCommand={baseCommandName}
+				config={config}
+				catalog={catalog}
+				onChange={onChange}
+			/>
 
 			<div>
 				<p className="block text-fg-2 text-xs font-semibold mb-1.5">{t("settings.commandPreview")}</p>

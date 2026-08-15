@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { AgentConfiguration, ModelCatalogView } from "../../../shared/types";
 import {
 	modelRolesForAgent,
@@ -6,7 +6,6 @@ import {
 	roleBindingWarnings,
 } from "../../../shared/model-catalog";
 import Select, { type SelectOption } from "../Select";
-import { api } from "../../rpc";
 import type { TFunction } from "../../i18n";
 
 /** Bind this preset to catalog models through the roles its own agent CLI
@@ -15,30 +14,15 @@ export default function PresetModelRoles({
 	t,
 	baseCommand,
 	config,
+	catalog,
 	onChange,
 }: {
 	t: TFunction;
 	baseCommand: string;
 	config: AgentConfiguration;
+	catalog: ModelCatalogView | null;
 	onChange: (patch: Partial<AgentConfiguration>) => void;
 }) {
-	const [catalog, setCatalog] = useState<ModelCatalogView | null>(null);
-
-	useEffect(() => {
-		let cancelled = false;
-		void api.request
-			.modelCatalogGet()
-			.then((view) => {
-				if (!cancelled) setCatalog(view);
-			})
-			.catch(() => {
-				/* the section stays hidden; the catalog settings surface owns the error */
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, []);
-
 	const roles = modelRolesForAgent(baseCommand);
 	const bindings = config.modelRoles;
 

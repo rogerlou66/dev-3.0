@@ -55,7 +55,7 @@ layer and an agent-role layer.
 Two separate concepts, defined in AGENTS.md § Model routing glossary:
 
 - **Model catalog** (app-wide, not switchable): the user registers providers with credentials
-  and then builds named **catalog models** ("fast gremlin" → OpenRouter `deepseek-flash").
+  and then builds named **catalog models** (`fast-gremlin` → OpenRouter `deepseek-flash`).
   Each entry belongs to exactly one provider, so it maps one-to-one onto a static alias on that
   provider's key in the sidecar's config. dev3 generates the config skeleton (loopback bind,
   isolated app dir, file-only config store, per-run local session key, secrets only as `env.*`
