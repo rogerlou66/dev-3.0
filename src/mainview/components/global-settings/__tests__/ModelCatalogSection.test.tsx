@@ -1,0 +1,157 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ModelCatalogView, ModelSidecarStatus } from "../../../../shared/types";
+import { I18nProvider, type TFunction } from "../../../i18n";
+import ModelCatalogSection from "../ModelCatalogSection";
+
+vi.mock("../../../rpc", () => ({
+	api: {
+		request: {
+			modelCatalogGet: vi.fn(),
+			modelCatalogSave: vi.fn(),
+			modelSidecarStatus: vi.fn(),
+			modelSidecarStart: vi.fn(),
+			modelSidecarStop: vi.fn(),
+			modelCatalogListModels: vi.fn(),
+		},
+	},
+}));
+
+vi.mock("../../../confirm", () => ({ confirm: vi.fn(async () => true) }));
+
+import { api } from "../../../rpc";
+import { confirm } from "../../../confirm";
+
+/** Stub translator: keys make assertions stable and locale-agnostic. */
+const t = ((key: string) => key) as unknown as TFunction;
+
+const CATALOG: ModelCatalogView = {
+	providers: [{ id: "p-or", kind: "openrouter", label: "OpenRouter", hasKey: true }],
+	models: [{ id: "m-fast", providerId: "p-or", name: "fast-gremlin", modelId: "deepseek/flash" }],
+};
+
+function status(over: Partial<ModelSidecarStatus> = {}): ModelSidecarStatus {
+	return { running: false, starting: false, binaryAvailable: true, providerCount: 1, modelCount: 1, ...over };
+}
+
+function renderSection() {
+	render(
+		<I18nProvider>
+			<ModelCatalogSection t={t} />
+		</I18nProvider>,
+	);
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	vi.mocked(api.request.modelCatalogGet).mockResolvedValue(CATALOG);
+	vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status());
+	vi.mocked(api.request.modelCatalogSave).mockResolvedValue(CATALOG);
+	vi.mocked(confirm).mockResolvedValue(true);
+});
+
+describe("the proxy's state", () => {
+	it("says the proxy is stopped and offers to start it", async () => {
+		renderSection();
+		expect(await screen.findByText("catalog.proxyStopped")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "catalog.startProxy" })).toBeTruthy();
+	});
+
+	it("says plainly when the build ships no proxy binary", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ binaryAvailable: false }));
+		renderSection();
+		expect(await screen.findByText("catalog.binaryMissing")).toBeTruthy();
+	});
+
+	it("shows the failing process's own output rather than hiding it", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(
+			status({ lastError: "config error: provider openrouter has no key" }),
+		);
+		renderSection();
+		expect(await screen.findByText(/provider openrouter has no key/)).toBeTruthy();
+	});
+
+	it("offers to stop it once it is running", async () => {
+		vi.mocked(api.request.modelSidecarStatus).mockResolvedValue(status({ running: true, port: 41234 }));
+		renderSection();
+		expect(await screen.findByRole("button", { name: "catalog.stopProxy" })).toBeTruthy();
+	});
+});
+
+describe("editing the catalog", () => {
+	it("shows the providers and models already stored", async () => {
+		renderSection();
+		expect(await screen.findByDisplayValue("OpenRouter")).toBeTruthy();
+		expect(screen.getByDisplayValue("fast-gremlin")).toBeTruthy();
+	});
+
+	it("says a key is stored without ever showing it", async () => {
+		renderSection();
+		expect(await screen.findByText("catalog.providerKeyStored")).toBeTruthy();
+		const key = screen.getByPlaceholderText("••••••••") as HTMLInputElement;
+		expect(key.value).toBe("");
+	});
+
+	it("keeps quiet until something actually changed", async () => {
+		renderSection();
+		await screen.findByDisplayValue("OpenRouter");
+		expect(screen.queryByRole("button", { name: "catalog.save" })).toBeNull();
+	});
+
+	it("warns that saving restarts the proxy, before the user saves", async () => {
+		renderSection();
+		const name = await screen.findByDisplayValue("fast-gremlin");
+		await userEvent.type(name, "-2");
+		expect(screen.getByText("catalog.restartWarning")).toBeTruthy();
+	});
+
+	it("sends the edit and the typed key together", async () => {
+		renderSection();
+		const key = await screen.findByPlaceholderText("••••••••");
+		await userEvent.type(key, "sk-new");
+		await userEvent.click(screen.getByRole("button", { name: "catalog.save" }));
+		await waitFor(() => expect(api.request.modelCatalogSave).toHaveBeenCalled());
+		expect(vi.mocked(api.request.modelCatalogSave).mock.calls[0][0].providerKeys).toEqual({ "p-or": "sk-new" });
+	});
+
+	it("refuses to save a name that cannot travel on the wire", async () => {
+		renderSection();
+		const name = await screen.findByDisplayValue("fast-gremlin");
+		await userEvent.clear(name);
+		await userEvent.type(name, "fast gremlin");
+		expect(screen.getByText("catalog.issue.invalid-name")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "catalog.save" })).toHaveProperty("disabled", true);
+	});
+
+	it("says how many models a provider takes down with it", async () => {
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.removeProvider" }));
+		await waitFor(() => expect(confirm).toHaveBeenCalled());
+		expect(vi.mocked(confirm).mock.calls[0][0].message).toBe("catalog.removeProviderOrphans");
+	});
+
+	it("drops nothing when the user cancels the removal", async () => {
+		vi.mocked(confirm).mockResolvedValue(false);
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.removeProvider" }));
+		await waitFor(() => expect(confirm).toHaveBeenCalled());
+		expect(screen.getByDisplayValue("OpenRouter")).toBeTruthy();
+	});
+
+	it("cannot add a model before there is a provider to hang it on", async () => {
+		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
+		renderSection();
+		expect(await screen.findByText("catalog.noProviders")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "catalog.addModel" })).toHaveProperty("disabled", true);
+	});
+});
+
+describe("the live model list", () => {
+	it("never lets a failed listing look like an empty provider", async () => {
+		vi.mocked(api.request.modelCatalogListModels).mockRejectedValue(new Error("proxy down"));
+		renderSection();
+		await userEvent.click(await screen.findByRole("button", { name: "catalog.refreshModels" }));
+		expect(await screen.findByText("catalog.listUnavailable")).toBeTruthy();
+	});
+});

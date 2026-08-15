@@ -365,6 +365,14 @@ export const SETTINGS_ENTRIES = [
 		storage: "browser",
 	},
 	{
+		id: "model-catalog",
+		category: "system",
+		titleKey: "catalog.section",
+		descriptionKey: "catalog.sectionDesc",
+		anchor: "model-catalog",
+		storage: "surface",
+	},
+	{
 		id: "token-saving-proxy",
 		category: "system",
 		titleKey: "settings.pxpipeSection",

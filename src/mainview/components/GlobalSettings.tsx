@@ -40,6 +40,7 @@ import AppearanceSettingsSection from "./global-settings/AppearanceSettingsSecti
 import BehaviorSettingsSection from "./global-settings/BehaviorSettingsSection";
 import DeveloperToolsSection from "./global-settings/DeveloperToolsSection";
 import KeyboardSettingsSection from "./global-settings/KeyboardSettingsSection";
+import ModelCatalogSection from "./global-settings/ModelCatalogSection";
 import PxpipeProxySettingsSection from "./global-settings/PxpipeProxySettingsSection";
 import SystemSettingsSection from "./global-settings/SystemSettingsSection";
 import TerminalSettingsSection from "./global-settings/TerminalSettingsSection";
@@ -731,6 +732,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}
 						/>
+						<ModelCatalogSection t={t} />
 						<PxpipeProxySettingsSection
 							t={t}
 							globalSettings={globalSettings}

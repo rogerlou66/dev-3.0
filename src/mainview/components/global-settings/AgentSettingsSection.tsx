@@ -24,6 +24,7 @@ import { api } from "../../rpc";
 import type { TFunction } from "../../i18n";
 import { buildPickerGroups, getModeLeafLabel, getModelGroupLabel, type PickerGroup } from "../../utils/agentPicker";
 import { useToggleFavorite } from "../../hooks/useToggleFavorite";
+import PresetModelRoles from "./PresetModelRoles";
 import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
 import {
@@ -999,6 +1000,10 @@ function PresetEditor({
 					/>
 				</Field>
 			</div>
+
+			{/* Model roles sit with the model, not under "Advanced": they decide which
+			    model actually runs, which is the preset's headline meaning. */}
+			<PresetModelRoles t={t} baseCommand={baseCommandName} config={config} onChange={onChange} />
 
 			<div>
 				<p className="block text-fg-2 text-xs font-semibold mb-1.5">{t("settings.commandPreview")}</p>

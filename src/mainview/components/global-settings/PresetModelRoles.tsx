@@ -1,0 +1,107 @@
+import { useEffect, useMemo, useState } from "react";
+import type { AgentConfiguration, ModelCatalogView } from "../../../shared/types";
+import {
+	modelRolesForAgent,
+	orphanedRoleBindings,
+	roleBindingWarnings,
+} from "../../../shared/model-catalog";
+import Select, { type SelectOption } from "../Select";
+import { api } from "../../rpc";
+import type { TFunction } from "../../i18n";
+
+/**
+ * Model roles: bind this preset to catalog models, using the roles its own agent
+ * CLI genuinely exposes. Hidden entirely when the agent has no roles or the
+ * catalog is empty — an unusable control is worse than no control.
+ */
+export default function PresetModelRoles({
+	t,
+	baseCommand,
+	config,
+	onChange,
+}: {
+	t: TFunction;
+	baseCommand: string;
+	config: AgentConfiguration;
+	onChange: (patch: Partial<AgentConfiguration>) => void;
+}) {
+	const [catalog, setCatalog] = useState<ModelCatalogView | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		void api.request
+			.modelCatalogGet()
+			.then((view) => {
+				if (!cancelled) setCatalog(view);
+			})
+			.catch(() => {
+				/* the section stays hidden; the catalog settings surface owns the error */
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	const roles = modelRolesForAgent(baseCommand);
+	const bindings = config.modelRoles;
+
+	const asCatalog = useMemo(
+		() => ({ providers: catalog?.providers ?? [], models: catalog?.models ?? [] }),
+		[catalog],
+	);
+	const warnings = roleBindingWarnings(baseCommand, bindings, asCatalog);
+	const orphans = orphanedRoleBindings(bindings, asCatalog);
+
+	if (roles.length === 0 || !catalog || catalog.models.length === 0) return null;
+
+	const options: SelectOption[] = [
+		{ value: "", label: t("catalog.roleUnassigned") },
+		...catalog.models.map((model) => ({
+			value: model.id,
+			label: `${model.name} · ${catalog.providers.find((p) => p.id === model.providerId)?.label ?? "?"}`,
+		})),
+	];
+
+	const setRole = (roleId: string, modelId: string) => {
+		const next = { ...(bindings ?? {}) };
+		if (modelId) next[roleId] = modelId;
+		else delete next[roleId];
+		onChange({ modelRoles: Object.keys(next).length > 0 ? next : undefined });
+	};
+
+	return (
+		<div className="rounded-xl border border-edge bg-raised p-3 space-y-3">
+			<div>
+				<p className="text-fg text-sm font-semibold">{t("catalog.rolesTitle")}</p>
+				<p className="text-fg-3 text-xs mt-0.5">{t("catalog.rolesHint")}</p>
+			</div>
+
+			<div className="grid gap-3 sm:grid-cols-2">
+				{roles.map((role) => (
+					<label key={role.id} className="block min-w-0">
+						<span className="block text-fg-2 text-xs font-semibold mb-1">
+							{t(role.labelKey as Parameters<TFunction>[0])}
+						</span>
+						<Select
+							value={bindings?.[role.id] ?? ""}
+							options={options}
+							onChange={(value) => setRole(role.id, value)}
+						/>
+						<span className="block text-fg-3 text-xs mt-1">{t(role.hintKey as Parameters<TFunction>[0])}</span>
+					</label>
+				))}
+			</div>
+
+			{orphans.length > 0 ? (
+				<p className="text-danger text-xs">{t("catalog.roleOrphan", { roles: orphans.join(", ") })}</p>
+			) : null}
+
+			{warnings.length > 0 ? (
+				<div className="rounded-lg border border-warning/30 bg-warning/10 p-2.5">
+					<p className="text-warning text-xs font-semibold">{t("catalog.warnOpenRouterTitle")}</p>
+					<p className="text-fg-2 text-xs leading-relaxed mt-0.5">{t("catalog.warnOpenRouterBody")}</p>
+				</div>
+			) : null}
+		</div>
+	);
+}
