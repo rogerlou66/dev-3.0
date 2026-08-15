@@ -1,6 +1,8 @@
 import type { AgentConfiguration, CodingAgent, FavoriteAgentConfig } from "../../shared/types";
 import { DEPRECATED_DEFAULT_CONFIG_REMAP } from "../../shared/types";
 import { orderFavorites } from "../../shared/favorites";
+import { modelRolesForAgent, type CatalogProviderKind } from "../../shared/model-catalog";
+import { unconnectedRecommendations, type RecommendedModel } from "../../shared/recommended-models";
 import { translate } from "../i18n";
 
 /**
@@ -165,6 +167,37 @@ export interface PickerGroup {
 	label: string;
 	/** Presets in this model group, in their declared order. */
 	configs: AgentConfiguration[];
+	/** Set when the group is an *offer* rather than a preset: a model dev3
+	 *  recommends but the user has not connected, so there is nothing to launch
+	 *  yet and `configs` is empty. Rendered disabled; clicking it starts the
+	 *  connect flow. */
+	locked?: RecommendedModel;
+}
+
+/** Value of the Model field's always-present "connect a provider" row. Not a
+ *  model — picking it opens the connect flow and leaves the selection alone. */
+export const CONNECT_PROVIDER_VALUE = "__dev3-connect-provider__";
+
+/**
+ * The models dev3 offers this agent but the user has not connected.
+ *
+ * Empty for an agent dev3 cannot route (no roles = no way to put another
+ * model behind it), and empty once the user has any provider of their own —
+ * `unconnectedRecommendations` owns that rule.
+ *
+ * Also empty while the catalog is still loading (`null`): showing offers and
+ * then yanking them a frame later is worse than showing them a frame late.
+ */
+export function lockedModelGroups(
+	agent: CodingAgent | undefined | null,
+	catalog: { providers: { id: string; kind: CatalogProviderKind }[]; models: { providerId: string; modelId: string }[] } | null,
+): PickerGroup[] {
+	if (!agent || !catalog) return [];
+	if (modelRolesForAgent(agent.baseCommand).length === 0) return [];
+	const taken = new Set(buildPickerGroups(agent).map((group) => group.label));
+	return unconnectedRecommendations(catalog)
+		.filter((model) => !taken.has(model.label))
+		.map((model) => ({ label: model.label, configs: [], locked: model }));
 }
 
 /** Group an agent's configurations by model into ordered picker groups.

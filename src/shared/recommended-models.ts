@@ -15,7 +15,8 @@
  * get corrected.
  */
 
-import type { CatalogProviderKind } from "./model-catalog";
+import { modelRolesForAgent, type CatalogProviderKind } from "./model-catalog";
+import type { AgentConfiguration, CodingAgent, ModelCatalogView } from "./types";
 
 export interface RecommendedModel {
 	/** Provider that serves it. Only providers dev3 can configure unattended. */
@@ -126,4 +127,90 @@ export function unconnectedRecommendations(
 			.map((model) => model.modelId),
 	);
 	return RECOMMENDED_MODELS.filter((model) => !connected.has(model.modelId));
+}
+
+// ------------------------------------------------------------------ seed ---
+
+/** Group label the seeded presets carry, and the marker that says an agent has
+ *  already been seeded. One constant so the picker, the seeder and the
+ *  idempotency check cannot drift apart. */
+export const SEEDED_GROUP_LABEL = "Open Source";
+
+/**
+ * Add the recommendations to the catalog under an existing provider.
+ *
+ * Matched on the provider-native id, so re-running it after the user renamed a
+ * model adds nothing: connecting twice must not leave two rows that serve the
+ * same thing and differ only by name.
+ */
+export function seedCatalogModels(
+	catalog: ModelCatalogView,
+	providerId: string,
+	newId: () => string,
+): ModelCatalogView {
+	const existing = new Set(catalog.models.filter((m) => m.providerId === providerId).map((m) => m.modelId));
+	const taken = new Set(catalog.models.map((m) => m.name));
+	const added = RECOMMENDED_MODELS.filter((model) => !existing.has(model.modelId)).map((model) => ({
+		id: newId(),
+		providerId,
+		// A name collision would be rejected on save, so a name already in use by
+		// some other provider's model gets the provider id appended rather than
+		// failing a flow the user only clicked one button for.
+		name: taken.has(model.name) ? `${model.name}-${providerId.slice(0, 4)}` : model.name,
+		modelId: model.modelId,
+	}));
+	return { providers: catalog.providers, models: [...catalog.models, ...added] };
+}
+
+/** Role id → catalog model **id** for one agent, resolved through the catalog.
+ *  Roles bind by id, so this is where the curated names stop travelling. */
+function bindingsForAgent(agent: CodingAgent, catalog: ModelCatalogView): Record<string, string> | null {
+	const roles = modelRolesForAgent(agent.baseCommand);
+	if (roles.length === 0) return null;
+	const byName = new Map(catalog.models.map((m) => [m.name, m.id]));
+	// Claude's role ids and Codex's are disjoint, so one merged map answers for
+	// both and nothing here has to know which CLI it is looking at.
+	const wanted = { ...recommendedClaudeRoleModelIds(), ...recommendedCodexRoleModelIds() };
+	const bindings: Record<string, string> = {};
+	for (const role of roles) {
+		const catalogId = byName.get(wanted[role.id] ?? "");
+		if (catalogId) bindings[role.id] = catalogId;
+	}
+	// A partial binding sends the unbound roles to a proxy that cannot serve
+	// them, which fails mid-session rather than at launch. All or nothing.
+	return Object.keys(bindings).length === roles.length ? bindings : null;
+}
+
+/**
+ * The ready-to-run preset a freshly connected provider gives an agent.
+ *
+ * Cloned from the agent's own default preset rather than written from scratch:
+ * whatever args and permissions that CLI needs are already right there, and a
+ * hand-built preset is how a launch ends up missing one of them. Only the model
+ * is replaced — that is the entire point.
+ *
+ * Null when the agent cannot be routed, is already seeded, or the catalog does
+ * not carry every model its roles need.
+ */
+export function seedPresetForAgent(
+	agent: CodingAgent,
+	catalog: ModelCatalogView,
+	newId: () => string,
+): AgentConfiguration | null {
+	if (agent.configurations.some((c) => c.groupLabel === SEEDED_GROUP_LABEL)) return null;
+	const modelRoles = bindingsForAgent(agent, catalog);
+	if (!modelRoles) return null;
+	const base = agent.configurations.find((c) => c.id === agent.defaultConfigId) ?? agent.configurations[0];
+	if (!base) return null;
+	const { model: _model, requiresPxpipeProxy: _gated, ...rest } = base;
+	return { ...rest, id: newId(), name: `${SEEDED_GROUP_LABEL} (${base.name})`, groupLabel: SEEDED_GROUP_LABEL, modelRoles };
+}
+
+/** Every agent with its seeded preset appended, agents that cannot be routed
+ *  returned untouched. The caller saves the whole list back. */
+export function seedAgentPresets(agents: CodingAgent[], catalog: ModelCatalogView, newId: () => string): CodingAgent[] {
+	return agents.map((agent) => {
+		const preset = seedPresetForAgent(agent, catalog, newId);
+		return preset ? { ...agent, configurations: [...agent.configurations, preset] } : agent;
+	});
 }

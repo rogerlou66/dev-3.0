@@ -9,14 +9,20 @@ import FavoritesMenu, { StarGlyph } from "./FavoritesMenu";
 import Select, { useAgentRenderOption } from "./Select";
 import {
 	buildPickerGroups,
+	CONNECT_PROVIDER_VALUE,
 	getModeLeafLabel,
 	groupLabelForConfig,
 	groupRequiresPxpipeProxy,
+	lockedModelGroups,
 	pickConfigForModelChange,
 	providerCaptionForConfig,
 	resolveFavoriteChips,
+	prettifyModel,
 } from "../utils/agentPicker";
 import { useModelCatalog } from "../hooks/useModelCatalog";
+import { CLAUDE_ROLE_BUILTIN_MODEL, type RecommendedModel } from "../../shared/recommended-models";
+import { resolveModelRate } from "../../shared/agent-pricing";
+import ConnectProviderModal from "./ConnectProviderModal";
 
 export interface AgentConfigSelection {
 	agentId: string | null;
@@ -46,6 +52,24 @@ export function pickerLabelsHeaderClass(withFavorites: boolean): string {
 /** Wrap that header so its container query matches the picker's: the header cell
  *  and the picker are the same width. */
 export const PICKER_HEADER_CONTAINER_CLASS = "[container-type:inline-size]";
+
+/** Round money the way a price list does: a rate under a dollar loses all its
+ *  meaning at zero decimals, and one above it gains nothing from two. */
+function formatRate(usdPerMillion: number): string {
+	return `$${usdPerMillion < 1 ? usdPerMillion.toFixed(2) : usdPerMillion.toFixed(0)}`;
+}
+
+/** Caption under an offered model: what it costs and what it stands in for.
+ *  Output tokens only — that is the rate that dominates an agent session, and
+ *  two numbers in a dropdown row is one too many. */
+function lockedCaption(model: RecommendedModel, t: ReturnType<typeof useT>): string | null {
+	const rate = resolveModelRate(model.modelId);
+	if (!rate) return null;
+	return t("launch.lockedCaption", {
+		price: formatRate(rate.output),
+		builtin: prettifyModel(CLAUDE_ROLE_BUILTIN_MODEL[model.claudeRole]),
+	});
+}
 
 interface AgentConfigPickerProps {
 	agents: CodingAgent[];
@@ -122,9 +146,12 @@ function AgentConfigPicker({
 }: AgentConfigPickerProps) {
 	const t = useT();
 	const renderAgentOption = useAgentRenderOption(agentAvailability, t("settings.agentNotInstalled"));
-	// Only to caption Model options with who serves them; null until it loads, and
-	// a caption that is not there yet costs nothing.
-	const catalog = useModelCatalog();
+	// Captions the Model options with who serves them, and decides whether the
+	// open-source offers still have anything to teach. Null until it loads, and a
+	// caption that is not there yet costs nothing.
+	const [catalogVersion, setCatalogVersion] = useState(0);
+	const catalog = useModelCatalog(catalogVersion);
+	const [connectOpen, setConnectOpen] = useState(false);
 	// Favorites popover (anchored to the leading star trigger). Per-picker so the
 	// global list is never duplicated across variant rows (decision 125).
 	// Escape closes the favorites menu before the surrounding modal: the menu is
@@ -133,9 +160,14 @@ function AgentConfigPicker({
 	const [favMenuOpen, setFavMenuOpen] = useState(false);
 	const favCaretRef = useRef<HTMLButtonElement>(null);
 
-	function handleGatedConfigClick() {
-		// The preset is visible but off. Tell the user and offer a one-click jump
-		// into the Settings section that enables it (the whole toast is the link).
+	function handleGatedConfigClick(value: string) {
+		// Two kinds of locked row land here. An offered model is one click from
+		// working, so it opens the flow that makes it work; a pxpipe-gated preset
+		// needs a Settings toggle, and the whole toast is the link to it.
+		if (lockedByLabel.has(value)) {
+			setConnectOpen(true);
+			return;
+		}
 		toast.info(t("pxpipe.disabledPresetToast"), {
 			source: "settings",
 			onClick: () =>
@@ -155,6 +187,15 @@ function AgentConfigPicker({
 			.map((group) => [group.label, providerCaptionForConfig(group.configs[0], catalog)] as const)
 			.filter(([, caption]) => caption !== null),
 	);
+	// Models dev3 offers but the user has not connected. They are the only reason
+	// a first-time user learns this is possible at all — nobody goes looking for a
+	// capability they have never heard of.
+	const lockedGroups = lockedModelGroups(selectedAgent, catalog);
+	const lockedByLabel = new Map(lockedGroups.map((group) => [group.label, group.locked as RecommendedModel]));
+	// Headings only earn their space when there are two kinds of row to tell
+	// apart; one heading over an undivided list is decoration.
+	const builtinSection = lockedGroups.length > 0 ? t("launch.modelSectionBuiltin") : undefined;
+	const openSourceSection = lockedGroups.length > 0 ? t("launch.modelSectionOpenSource") : undefined;
 	const currentGroupLabel = groupLabelForConfig(selectedAgent, configId) ?? groups[0]?.label ?? "";
 	const currentGroup = groups.find((g) => g.label === currentGroupLabel) ?? groups[0];
 	const modeConfigs = currentGroup?.configs ?? [];
@@ -168,6 +209,12 @@ function AgentConfigPicker({
 	}
 
 	function handleModelChange(groupLabel: string) {
+		// Not a model: the row that exists so connecting is never more than one
+		// click away, whether or not anything is being advertised above it.
+		if (groupLabel === CONNECT_PROVIDER_VALUE) {
+			setConnectOpen(true);
+			return;
+		}
 		// Switching Model keeps the current Mode *kind* when the new group has it
 		// (bible §1.0 lazy-human), else falls back to its default.
 		const group = buildPickerGroups(selectedAgent).find((g) => g.label === groupLabel);
@@ -262,15 +309,28 @@ function AgentConfigPicker({
 					<Select
 						id={`${idPrefix}-model`}
 						value={currentGroupLabel}
-						options={groups.map((g) => ({
-							value: g.label,
-							label: g.label,
-							disabled: groupRequiresPxpipeProxy(g) && !pxpipeProxyEnabled,
-						}))}
+						options={[
+							...groups.map((g) => ({
+								value: g.label,
+								label: g.label,
+								disabled: groupRequiresPxpipeProxy(g) && !pxpipeProxyEnabled,
+								section: builtinSection,
+							})),
+							...lockedGroups.map((g) => ({
+								value: g.label,
+								label: g.label,
+								disabled: true,
+								section: openSourceSection,
+							})),
+							// `custom` so it renders as its own plain row: it is an action,
+							// and captioning it with a provider or a price would be a lie.
+							{ value: CONNECT_PROVIDER_VALUE, label: t("launch.connectProvider"), custom: true, section: openSourceSection },
+						]}
 						onChange={handleModelChange}
 						onOptionDisabledClick={handleGatedConfigClick}
 						renderOption={(option) => {
-							const caption = providerCaptions.get(option.value);
+							const offered = lockedByLabel.get(option.value);
+							const caption = offered ? lockedCaption(offered, t) : providerCaptions.get(option.value);
 							return (
 								<span className="flex items-baseline gap-1.5 min-w-0">
 									<span className="truncate">{option.label}</span>
@@ -324,6 +384,16 @@ function AgentConfigPicker({
 					}}
 					onRemove={(a, c) => onToggleFavorite?.(a, c)}
 					onClose={() => setFavMenuOpen(false)}
+				/>
+			)}
+
+			{/* Connecting seeds the catalog and the presets, and the agent list
+			    refreshes itself off the `agentsUpdated` push; only the catalog has no
+			    push of its own, so the picker re-reads it here. */}
+			{connectOpen && (
+				<ConnectProviderModal
+					onClose={() => setConnectOpen(false)}
+					onConnected={() => setCatalogVersion((v) => v + 1)}
 				/>
 			)}
 		</div>

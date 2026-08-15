@@ -7,7 +7,7 @@ import { api } from "../rpc";
  *  all read it, and none of them owns the error: the catalog settings surface
  *  does. Best-effort by contract — every caller must render without it, so the
  *  call itself is guarded rather than only its promise. */
-export function useModelCatalog(): ModelCatalogView | null {
+export function useModelCatalog(reloadKey?: unknown): ModelCatalogView | null {
 	const [catalog, setCatalog] = useState<ModelCatalogView | null>(null);
 
 	useEffect(() => {
@@ -23,7 +23,9 @@ export function useModelCatalog(): ModelCatalogView | null {
 		return () => {
 			cancelled = true;
 		};
-	}, []);
+		// `reloadKey` is the caller's own "it changed" signal (connecting a
+		// provider): the catalog has no push message of its own.
+	}, [reloadKey]);
 
 	return catalog;
 }
