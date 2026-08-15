@@ -502,7 +502,7 @@ describe("GlobalSettings", () => {
 			await screen.findByText("Model:");
 
 			// Provider picker starts on Claude (agent-1); switch to Codex (agent-2).
-			await pickFromSelect(user, "default-agent-provider", "Codex");
+			await pickFromSelect(user, "default-agent-harness", "Codex");
 
 			expect(mockedApi.request.saveGlobalSettings).toHaveBeenCalledWith(
 				expect.objectContaining({
@@ -518,7 +518,7 @@ describe("GlobalSettings", () => {
 			await waitForLoad();
 			await screen.findByText("Model:");
 
-			expect(document.getElementById("default-agent-provider")).toBeInTheDocument();
+			expect(document.getElementById("default-agent-harness")).toBeInTheDocument();
 			expect(document.getElementById("default-agent-model")).toBeInTheDocument();
 			expect(document.getElementById("default-agent-mode")).toBeInTheDocument();
 		});
