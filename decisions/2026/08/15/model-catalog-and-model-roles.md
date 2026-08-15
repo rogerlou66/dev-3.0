@@ -79,6 +79,27 @@ the preset's roles reference is actually reachable, failing with a dialog instea
 terminal. Metadata-only request logging is enabled (token counts and cost) with content logging
 off, so a task's spend is answerable when subscription quotas do not apply.
 
+## What the live binary changed
+
+Running the pinned binary against a dev3-generated config (`scripts/smoke-bifrost.ts`)
+contradicted the vendor cheat sheet on four points, each of which would have shipped as a
+dead launch:
+
+- **`logs_store.enabled: true` needs `type` and a payload.** Without them the process exits
+  during bootstrap.
+- **A relative store path resolves against the process's CWD**, not `-app-dir` — the first
+  smoke run dropped a 25 MB `config.db` into the repo root. Both paths are absolute now.
+- **`governance.virtual_keys` requires the config store**, so the recommended file-only mode
+  (`config_store.enabled: false`) and the local session key are mutually exclusive. The store
+  is on; the generated file stays authoritative because the sidecar updates the store from it
+  on every boot.
+- **The store encrypts what it persists**, so a fresh encryption key per start makes the
+  *second* start die on decrypt. The key is generated once and kept beside the provider keys
+  (`loadOrCreateEncryptionKey`).
+
+Also learned: an `env.` reference is honoured for key values only. A custom endpoint's base URL
+is written literally — it is a URL, not a credential.
+
 ## Risks
 
 - **Reversal of the vendor guidance on log storage.** The vendor cheat sheet recommends
@@ -105,7 +126,13 @@ off, so a task's spend is answerable when subscription quotas do not apply.
 - **Live tool-loop verification is manual.** Automated coverage stops at pure functions
   (config generation, port selection, preflight, command assembly); real agent runs against real
   keys are the user's own pass. A green suite here genuinely does not mean the integration works.
-- **A pinned bundled binary makes upgrading it a dev3 release**, and grows every platform build.
+- **A pinned bundled binary makes upgrading it a dev3 release**, and grows every platform build
+  by **113 MB** — the measured size of `bifrost-http` v1.6.10 for darwin/arm64. That is the
+  largest single thing dev3 ships; if it proves unacceptable, the alternatives are a separate
+  optional download (which the update-channel rules make risky) or a smaller gateway.
+- **Both SQLite stores live under `~/.dev3.0/model-catalog-runtime/`** and grow with use. Only
+  the log store is wanted; the config store exists because governance demands it. Nothing
+  prunes either yet.
 
 ## Alternatives considered
 

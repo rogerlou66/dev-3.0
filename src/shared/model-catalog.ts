@@ -144,8 +144,16 @@ export interface SidecarConfig {
 			provider_configs: { provider: string; allowed_models: string[]; key_ids: string[]; weight: number }[];
 		}[];
 	};
-	config_store: { enabled: boolean };
-	logs_store: { enabled: boolean };
+	config_store: SidecarStore;
+	logs_store: SidecarStore;
+}
+
+/** The sidecar refuses to boot on `enabled: true` without a type and payload,
+ *  and resolves a relative path against its own CWD — always absolute. */
+interface SidecarStore {
+	enabled: boolean;
+	type?: "sqlite";
+	config?: { path: string };
 }
 
 /** Conservative timeouts: coding agents stream for minutes and retry on their
@@ -160,7 +168,7 @@ const NETWORK_CONFIG = {
 
 /** The sidecar's whole configuration, from catalog state. A provider with no
  *  models is omitted; every credential stays a symbolic `env.*` reference. */
-export function buildSidecarConfig(catalog: ModelCatalog): SidecarConfig {
+export function buildSidecarConfig(catalog: ModelCatalog, dataDir = "."): SidecarConfig {
 	const providers: Record<string, SidecarProvider> = {};
 	const providerConfigs: SidecarConfig["governance"]["virtual_keys"][0]["provider_configs"] = [];
 
@@ -188,10 +196,9 @@ export function buildSidecarConfig(catalog: ModelCatalog): SidecarConfig {
 		};
 
 		if (provider.kind === "custom") {
-			entry.network_config = {
-				base_url: `env.${providerBaseUrlEnvName(providerKey)}`,
-				...NETWORK_CONFIG,
-			};
+			// The base URL is written literally: an `env.` reference is honoured for
+			// key VALUES only, and the sidecar then dials the placeholder itself.
+			entry.network_config = { base_url: provider.baseUrl ?? "", ...NETWORK_CONFIG };
 			entry.custom_provider_config = {
 				base_provider_type: "openai",
 				// Partial `allowed_requests` means "everything not listed is denied",
@@ -234,10 +241,11 @@ export function buildSidecarConfig(catalog: ModelCatalog): SidecarConfig {
 				},
 			],
 		},
-		config_store: { enabled: false },
-		// On, deliberately against the vendor's desktop advice: nothing else in the
-		// chain sees both the token counts and the price (see the design record).
-		logs_store: { enabled: true },
+		// Both stores are on because governance refuses to boot without a config
+		// store, and the log store is what makes a task's spend answerable. Content
+		// logging stays off, so no prompt or code is ever written to them.
+		config_store: { enabled: true, type: "sqlite", config: { path: `${dataDir}/config.db` } },
+		logs_store: { enabled: true, type: "sqlite", config: { path: `${dataDir}/logs.db` } },
 	};
 }
 

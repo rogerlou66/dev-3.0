@@ -88,11 +88,11 @@ describe("buildSidecarConfig", () => {
 		expect(buildSidecarConfig({ providers: [], models: [] }).providers).toEqual({});
 	});
 
-	it("describes a custom endpoint as an OpenAI-compatible provider with its base URL from env", () => {
+	it("describes a custom endpoint as an OpenAI-compatible provider with its own base URL", () => {
 		const config = buildSidecarConfig(catalog());
 		const custom = config.providers["custom-my-box"];
 		expect(custom.custom_provider_config?.base_provider_type).toBe("openai");
-		expect(custom.network_config?.base_url).toBe("env.DEV3_LLM_BASE_URL_CUSTOM_MY_BOX");
+		expect(custom.network_config?.base_url).toBe("https://llm.example.com/v1");
 	});
 
 	it("allows the Responses protocol on a custom endpoint, because Codex speaks nothing else", () => {
@@ -110,8 +110,15 @@ describe("buildSidecarConfig", () => {
 		expect(vk.provider_configs.map((p) => p.provider).sort()).toEqual(["custom-my-box", "openai", "openrouter"]);
 	});
 
-	it("keeps the config store off so the file stays the only source of truth", () => {
-		expect(buildSidecarConfig(catalog()).config_store.enabled).toBe(false);
+	it("gives both stores an absolute home, since the sidecar resolves paths against its own CWD", () => {
+		const config = buildSidecarConfig(catalog(), "/data/dev3");
+		expect(config.config_store.config?.path).toBe("/data/dev3/config.db");
+		expect(config.logs_store.config?.path).toBe("/data/dev3/logs.db");
+	});
+
+	it("declares a store type, without which the sidecar refuses to boot", () => {
+		const config = buildSidecarConfig(catalog());
+		expect(config.config_store).toMatchObject({ enabled: true, type: "sqlite" });
 	});
 
 	it("records token counts but never request bodies", () => {

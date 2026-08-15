@@ -23,7 +23,7 @@ import {
 import { BIFROST_VERSION } from "../shared/bifrost-release";
 import type { ModelSidecarStatus, ModelCatalogPreflight } from "../shared/types";
 import { createLogger } from "./logger";
-import { loadModelCatalog, loadProviderKeys } from "./model-catalog-store";
+import { loadModelCatalog, loadOrCreateEncryptionKey, loadProviderKeys } from "./model-catalog-store";
 import { DEV3_HOME } from "./paths";
 import { getDescendantPids } from "./port-scanner";
 import { spawn } from "./spawn";
@@ -134,7 +134,7 @@ export function buildSidecarEnv(
 
 function writeConfig(catalog: ModelCatalog): void {
 	mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
-	writeFileSync(CONFIG_PATH, `${JSON.stringify(buildSidecarConfig(catalog), null, 2)}\n`, { mode: 0o600 });
+	writeFileSync(CONFIG_PATH, `${JSON.stringify(buildSidecarConfig(catalog, RUNTIME_DIR), null, 2)}\n`, { mode: 0o600 });
 	try {
 		chmodSync(RUNTIME_DIR, 0o700);
 	} catch {
@@ -243,7 +243,10 @@ async function startSidecar(): Promise<RunningSidecar> {
 	writeConfig(catalog);
 
 	const sessionKey = `sk-bf-${randomSecret(24)}`;
-	const env = buildSidecarEnv(catalog, loadProviderKeys(), { sessionKey, encryptionKey: randomSecret(32) });
+	const env = buildSidecarEnv(catalog, loadProviderKeys(), {
+		sessionKey,
+		encryptionKey: loadOrCreateEncryptionKey(),
+	});
 
 	let failure: unknown;
 	for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
@@ -343,11 +346,16 @@ export async function preflightModelRoles(
 	}
 	if (problems.length > 0) return { ok: false, problems };
 
-	let available: string[];
+	let available: string[] = [];
 	try {
 		available = await listSidecarModels();
 	} catch (err) {
-		return { ok: false, problems: [{ roleId: "", code: "proxy-unreachable", detail: String(err instanceof Error ? err.message : err) }] };
+		// The proxy answered its health check, so it is up; one provider refusing to
+		// enumerate is not a reason to block a launch that may not even use it.
+		log.warn("Model listing failed during preflight", { error: String(err) });
+		if (!running) {
+			return { ok: false, problems: [{ roleId: "", code: "proxy-unreachable", detail: String(err instanceof Error ? err.message : err) }] };
+		}
 	}
 
 	// An empty listing means the sidecar could not enumerate anything; treating it

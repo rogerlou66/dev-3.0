@@ -27,7 +27,6 @@ export function stageBifrost(): boolean {
 	rmSync(DIST_DIR, { recursive: true, force: true });
 	// The whole directory travels: the binary plus its licence notices.
 	cpSync(VENDOR_DIR, DIST_DIR, { recursive: true });
-	rmSync(`${DIST_DIR}/pinned.json`, { force: true });
 	console.log(`[stage-bifrost] staged dist/bifrost/${target.binaryName}`);
 	return true;
 }

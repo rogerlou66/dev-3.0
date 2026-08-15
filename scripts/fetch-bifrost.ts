@@ -1,6 +1,7 @@
 /**
  * Download the pinned proxy-sidecar binary for this machine's target into
- * `vendor/bifrost/`, verifying its SHA-256 against `vendor/bifrost/pinned.json`.
+ * `vendor/bifrost/` (git-ignored), verifying its SHA-256 against the tracked
+ * `scripts/bifrost-pinned.json`.
  *
  *   bun scripts/fetch-bifrost.ts            verify against the pin (release CI)
  *   bun scripts/fetch-bifrost.ts --record   record the hash for a new version
@@ -12,11 +13,12 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { BIFROST_VERSION, bifrostPinKey, bifrostTarget } from "../src/shared/bifrost-release";
+import { BIFROST_LICENSE_URL, BIFROST_VERSION, bifrostPinKey, bifrostTarget } from "../src/shared/bifrost-release";
 
 const ROOT = resolve(import.meta.dir, "..");
 const VENDOR_DIR = `${ROOT}/vendor/bifrost`;
-const PIN_FILE = `${VENDOR_DIR}/pinned.json`;
+// Tracked, unlike vendor/ — the whole point of a pin is that it lives in git.
+const PIN_FILE = `${ROOT}/scripts/bifrost-pinned.json`;
 
 interface PinFile {
 	version: string;
@@ -54,7 +56,6 @@ async function main(): Promise<void> {
 			version: BIFROST_VERSION,
 			sha256: { ...(pins.version === BIFROST_VERSION ? pins.sha256 : {}), [key]: digest },
 		};
-		mkdirSync(VENDOR_DIR, { recursive: true });
 		writeFileSync(PIN_FILE, `${JSON.stringify(next, null, 2)}\n`);
 		console.log(`[fetch-bifrost] recorded ${key} ${digest}`);
 	} else if (!pinned) {
@@ -65,7 +66,15 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
+	// The licence travels with the binary: dev3 redistributes it inside the app.
+	const license = await fetch(BIFROST_LICENSE_URL);
+	if (!license.ok) {
+		console.error(`[fetch-bifrost] ${BIFROST_LICENSE_URL} answered ${license.status}`);
+		process.exit(1);
+	}
+
 	mkdirSync(VENDOR_DIR, { recursive: true });
+	writeFileSync(`${VENDOR_DIR}/LICENSE-bifrost.txt`, await license.text());
 	const binaryPath = `${VENDOR_DIR}/${target.binaryName}`;
 	writeFileSync(binaryPath, bytes);
 	if (process.platform !== "win32") chmodSync(binaryPath, 0o755);

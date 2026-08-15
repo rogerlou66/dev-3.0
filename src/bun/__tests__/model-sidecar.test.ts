@@ -22,6 +22,7 @@ vi.mock("../paths", () => ({ DEV3_HOME: "/tmp/dev3-model-catalog-test" }));
 vi.mock("../model-catalog-store", () => ({
 	loadModelCatalog: h.catalog,
 	loadProviderKeys: h.keys,
+	loadOrCreateEncryptionKey: () => "0".repeat(64),
 }));
 
 const CATALOG: ModelCatalog = {
@@ -263,6 +264,15 @@ describe("preflight", () => {
 		const { preflightModelRoles } = await freshModule();
 		const result = await preflightModelRoles("claude", bindings, CATALOG);
 		expect(result.problems[0].code).toBe("proxy-unreachable");
+	});
+
+	it("keeps the encryption key stable, so a restart does not die on decrypt", async () => {
+		const { ensureModelSidecar, stopModelSidecar } = await freshModule();
+		await ensureModelSidecar();
+		const first = h.spawnMock.mock.calls[0][1].env.DEV3_BIFROST_ENCRYPTION_KEY;
+		await stopModelSidecar();
+		await ensureModelSidecar();
+		expect(h.spawnMock.mock.calls[1][1].env.DEV3_BIFROST_ENCRYPTION_KEY).toBe(first);
 	});
 
 	it("does not fail a launch just because the proxy lists nothing", async () => {

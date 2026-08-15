@@ -53,6 +53,23 @@ export function saveProviderKeys(keys: Record<string, string>): void {
 	writeJson(KEYS_FILE, keys, SECRET_MODE);
 }
 
+/** Reserved slot in the keys file for the sidecar's at-rest encryption key. A
+ *  provider id is a UUID, so it can never collide with this name. */
+const ENCRYPTION_KEY_SLOT = "dev3:sidecar-encryption-key";
+
+/** The sidecar's encryption key, generated once and kept: it encrypts what the
+ *  config store persists, and a fresh key makes the next start die on decrypt. */
+export function loadOrCreateEncryptionKey(): string {
+	const keys = loadProviderKeys();
+	const existing = keys[ENCRYPTION_KEY_SLOT];
+	if (existing) return existing;
+	const bytes = new Uint8Array(32);
+	crypto.getRandomValues(bytes);
+	const generated = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+	saveProviderKeys({ ...keys, [ENCRYPTION_KEY_SLOT]: generated });
+	return generated;
+}
+
 /** Store, replace, or (with an empty value) drop one provider's key. */
 export function setProviderKey(providerId: string, key: string | null): void {
 	const keys = loadProviderKeys();
@@ -64,7 +81,7 @@ export function setProviderKey(providerId: string, key: string | null): void {
 /** Drop the key of a provider the user removed, so a deleted provider leaves no
  *  credential behind. */
 export function forgetProviderKeys(providers: CatalogProvider[]): void {
-	const live = new Set(providers.map((p) => p.id));
+	const live = new Set([...providers.map((p) => p.id), ENCRYPTION_KEY_SLOT]);
 	const keys = loadProviderKeys();
 	let changed = false;
 	for (const id of Object.keys(keys)) {

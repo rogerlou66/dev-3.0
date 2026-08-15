@@ -11,6 +11,9 @@ export const BIFROST_VERSION = "v1.6.10";
 
 const DOWNLOAD_ROOT = "https://downloads.getmaxim.ai/bifrost";
 
+/** Apache-2.0 text of the exact transport release, shipped beside the binary. */
+export const BIFROST_LICENSE_URL = `https://raw.githubusercontent.com/maximhq/bifrost/transports/${BIFROST_VERSION}/LICENSE`;
+
 /** Platform/arch names the vendor's download host uses. */
 const URL_PLATFORM: Record<string, string> = { darwin: "darwin", linux: "linux", win32: "windows" };
 const URL_ARCH: Record<string, string> = { arm64: "arm64", x64: "amd64", ia32: "386" };

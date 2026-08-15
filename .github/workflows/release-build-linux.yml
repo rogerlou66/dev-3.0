@@ -88,10 +88,11 @@ jobs:
       # catalog, which the app reports plainly instead of crashing.
       - name: Fetch pinned model proxy
         run: |
-          if [ -f vendor/bifrost/pinned.json ]; then
+          if [ -f scripts/bifrost-pinned.json ]; then
             bun scripts/fetch-bifrost.ts
+            bun scripts/smoke-bifrost.ts
           else
-            echo "::warning title=Model catalog disabled::vendor/bifrost/pinned.json is absent — this build ships no model proxy. Record a pin with 'bun scripts/fetch-bifrost.ts --record'."
+            echo "::warning title=Model catalog disabled::scripts/bifrost-pinned.json is absent — this build ships no model proxy. Record a pin with 'bun scripts/fetch-bifrost.ts --record'."
           fi
 
       - name: Clean build directory
