@@ -390,6 +390,13 @@ export interface AgentConfiguration {
 	 *  but renders it disabled until the user opts in (clicking it deep-links to
 	 *  the Settings section). See PxpipeProxyStatus + decisions/112. */
 	requiresPxpipeProxy?: boolean;
+	/**
+	 * Model roles: this preset's binding of catalog models to the roles its own
+	 * agent CLI exposes (role id → catalog model id, see `src/shared/model-catalog.ts`).
+	 * Bound by id so renaming a catalog model does not break the preset. When set,
+	 * the launch goes through the proxy sidecar; when absent, nothing changes.
+	 */
+	modelRoles?: Record<string, string>;
 }
 
 export interface CodingAgent {
@@ -1031,6 +1038,50 @@ export interface PxpipeProxyStatus {
 	holderName?: string;
 	/** The proxy dashboard URL (served by the proxy on the same port). */
 	dashboardUrl: string;
+}
+
+/**
+ * Live state of the model-catalog proxy sidecar (AGENTS.md § Model routing
+ * glossary). One process per app, on a dev3-chosen loopback port, started on
+ * demand. Everything here is computed on demand — nothing is cached.
+ */
+export interface ModelSidecarStatus {
+	/** The sidecar is up and answering its health endpoint. */
+	running: boolean;
+	/** A start is in flight (another launch is already waiting on it). */
+	starting: boolean;
+	port?: number;
+	baseUrl?: string;
+	/** The pinned binary shipped with this build was found on disk. */
+	binaryAvailable: boolean;
+	providerCount: number;
+	modelCount: number;
+	/** Why the last start failed, including the process's own last output. */
+	lastError?: string;
+}
+
+/** Why a preset's role bindings cannot be launched right now. */
+export interface ModelCatalogPreflight {
+	ok: boolean;
+	problems: {
+		/** The role that cannot be served; empty when the proxy itself is the problem. */
+		roleId: string;
+		code: "missing-model" | "model-unreachable" | "proxy-unreachable";
+		detail?: string;
+	}[];
+}
+
+/** The catalog as the renderer sees it: never any credential, only whether one
+ *  is stored for each provider. */
+export interface ModelCatalogView {
+	providers: {
+		id: string;
+		kind: "openai" | "anthropic" | "openrouter" | "custom";
+		label: string;
+		baseUrl?: string;
+		hasKey: boolean;
+	}[];
+	models: { id: string; providerId: string; name: string; modelId: string }[];
 }
 
 /**
@@ -3237,6 +3288,40 @@ export type AppRPCSchema = {
 			pxpipeProxyStop: {
 				params: void;
 				response: PxpipeProxyStatus;
+			};
+			/** The model catalog as the renderer may see it (no credential values). */
+			modelCatalogGet: {
+				params: void;
+				response: ModelCatalogView;
+			};
+			/** Replace the catalog's providers and models. A key travels only in
+			 *  `providerKeys` (provider id → new key; omitted = keep, empty = drop).
+			 *  Restarts the sidecar, because its config is read once at startup. */
+			modelCatalogSave: {
+				params: { catalog: ModelCatalogView; providerKeys?: Record<string, string> };
+				response: ModelCatalogView;
+			};
+			/** Live state of the model-catalog proxy sidecar. */
+			modelSidecarStatus: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Start the sidecar on demand (no-op when it is already up). */
+			modelSidecarStart: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Stop the sidecar; running agent sessions lose their route. */
+			modelSidecarStop: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Model ids the sidecar can actually serve, for the model-id combobox.
+			 *  Throws when the sidecar cannot be reached — an empty list must never
+			 *  be mistaken for "this provider has no models". */
+			modelCatalogListModels: {
+				params: { providerKey?: string };
+				response: { models: string[] };
 			};
 			/** Symlink the bundled dev3 CLI to ~/.dev3.0/bin/dev3 (for dev/debug). */
 			installDev3Cli: {

@@ -18,6 +18,9 @@ import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
 import { ENV_UNSET } from "../shared/agent-accounts";
+import { modelRolesForAgent, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
+import { loadModelCatalog } from "./model-catalog-store";
+import { ensureModelSidecar } from "./model-sidecar";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "./agent-skills";
 import { getAgentAdapter, agentKey } from "../shared/agent-adapters/registry";
 import type { AdapterLaunchOptions, CodexLaunchRuntime } from "../shared/agent-adapters/types";
@@ -421,6 +424,10 @@ export interface CommandOptions {
 	 *  Threaded into the account env resolution so each spawned session locks to
 	 *  its chosen account instead of a single global active one. */
 	accountId?: string | null;
+	/** Raw CLI args contributed by the preset's model roles (Codex's `-c` config
+	 *  overrides). Appended after the provider's own routing args; the adapter
+	 *  shell-escapes them. */
+	modelRoleArgs?: string[];
 }
 
 /**
@@ -467,14 +474,61 @@ export function resolveAgentCommand(
 		// Under an env-delivering backend (e.g. Bedrock for Claude) the model comes
 		// from injected env (ANTHROPIC_MODEL), so the adapter omits --model.
 		skipModelForProvider: providerOmitsModelFlag(options?.llmProvider),
-		// Backend routing args (e.g. Codex on Bedrock), shell-escaped by the adapter.
-		providerArgs: getProviderDefinition(options?.llmProvider)?.enableArgs,
+		// Backend routing args (e.g. Codex on Bedrock) plus the preset's model-role
+		// overrides, shell-escaped by the adapter.
+		providerArgs: launchExtraArgs(options),
 		// Codex-only: resolve the theme/profile runtime (impure) here so the pure
 		// adapter stays pure. Non-Codex agents skip it (avoids the codex --help probe).
 		codex: adapter.command === "codex" ? codexLaunchRuntime() : undefined,
 	};
 
 	return adapter.launchArgs(baseCmd, config, ctx, adapterOptions).join(" ");
+}
+
+/** Every raw arg a launch adds beyond the preset's own: the selected backend's
+ *  routing args, then the preset's model-role overrides. Undefined when neither
+ *  applies, so nothing changes for an ordinary launch. */
+function launchExtraArgs(options: CommandOptions | undefined): string[] | undefined {
+	const args = [
+		...(getProviderDefinition(options?.llmProvider)?.enableArgs ?? []),
+		...(options?.modelRoleArgs ?? []),
+	];
+	return args.length > 0 ? args : undefined;
+}
+
+/**
+ * Route this launch through the model catalog when its preset binds model roles.
+ *
+ * Starts the proxy sidecar on demand, injects the agent's own role delivery
+ * (env for Claude Code, `-c` overrides for Codex) and pins the launch model.
+ * An explicit `envVars` entry on the preset still wins, as everywhere else.
+ *
+ * Throws when the sidecar cannot be brought up: launching anyway would silently
+ * send the request to the agent's native API under a model the user did not pick.
+ */
+export async function applyModelRoleLaunch(
+	baseCmd: string,
+	config: AgentConfiguration | undefined,
+	extraEnv: Record<string, string>,
+	options: CommandOptions,
+): Promise<{ config: AgentConfiguration | undefined; options: CommandOptions }> {
+	const bindings = config?.modelRoles;
+	if (!bindings || Object.keys(bindings).length === 0) return { config, options };
+	if (modelRolesForAgent(baseCmd).length === 0) return { config, options };
+
+	const runtime = await ensureModelSidecar();
+	const plan = resolveModelRoleLaunch(baseCmd, bindings, loadModelCatalog(), runtime);
+	if (!plan) return { config, options };
+
+	for (const [key, value] of Object.entries({ ...plan.env, ...roleUnsetEnv(plan) })) {
+		if (config?.envVars && key in config.envVars) continue;
+		extraEnv[key] = value;
+	}
+
+	return {
+		config: plan.modelFlag && config ? { ...config, model: plan.modelFlag } : config,
+		options: plan.args.length > 0 ? { ...options, modelRoleArgs: plan.args } : options,
+	};
 }
 
 export function findConfig(
@@ -647,11 +701,12 @@ export async function resolveCommandForAgent(
 	}
 	await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId);
 	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId);
+	const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts);
 	const command = resolveAgentCommand(
 		agentWithPath,
-		resolveLaunchConfig(config, agentWithPath, baseCmd, extraEnv),
+		resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv),
 		ctx,
-		providerOpts,
+		routed.options,
 	);
 	return { command, agent, config, extraEnv };
 }
@@ -751,11 +806,12 @@ export async function resolveCommandForProject(
 		};
 		await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId);
 		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId);
+		const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts);
 		const command = resolveAgentCommand(
 			agentWithPath,
-			resolveLaunchConfig(config, agentWithPath, baseCmd, extraEnv),
+			resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv),
 			ctx,
-			providerOpts,
+			routed.options,
 		);
 		return { command, agent, config, extraEnv };
 	}

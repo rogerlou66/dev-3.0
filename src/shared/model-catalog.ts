@@ -1,0 +1,467 @@
+/**
+ * Model catalog and model roles — the pure core of dev3's multi-provider agent
+ * routing (AGENTS.md § Model routing glossary).
+ *
+ * Two layers that never learn about each other:
+ *   - the CATALOG knows providers, credentials and named models, and nothing
+ *     about agents;
+ *   - ROLES bind catalog models to the roles an agent CLI actually exposes, and
+ *     know nothing about credentials.
+ *
+ * Everything here is pure: no fs, no network, no process. The sidecar's config
+ * document, the launch env/args for each agent, validation and warnings are all
+ * derived from plain state, so the whole feature is decidable in unit tests.
+ *
+ * Credentials NEVER appear in a generated document — the config references them
+ * as `env.<NAME>` and the values reach the sidecar only through its child env.
+ */
+
+import { ENV_UNSET } from "./agent-accounts";
+
+// ---------------------------------------------------------------- catalog ---
+
+/** The provider families dev3 ships a definition for. `custom` is any other
+ *  OpenAI-compatible endpoint the user points at by base URL. */
+export type CatalogProviderKind = "openai" | "anthropic" | "openrouter" | "custom";
+
+export const CATALOG_PROVIDER_KINDS: CatalogProviderKind[] = ["openai", "anthropic", "openrouter", "custom"];
+
+export interface CatalogProvider {
+	id: string;
+	kind: CatalogProviderKind;
+	/** User-facing name. For a custom endpoint it also seeds the wire prefix. */
+	label: string;
+	/** Required for `custom`; ignored for the known kinds. */
+	baseUrl?: string;
+}
+
+/** One named model: the user's own name bound to exactly one provider and one
+ *  provider-native model id. The name is what travels on the wire. */
+export interface CatalogModel {
+	id: string;
+	providerId: string;
+	name: string;
+	modelId: string;
+}
+
+export interface ModelCatalog {
+	providers: CatalogProvider[];
+	models: CatalogModel[];
+}
+
+export const EMPTY_MODEL_CATALOG: ModelCatalog = { providers: [], models: [] };
+
+/** Names travel inside `provider/name`, so anything that would split or escape
+ *  is rejected at entry rather than producing an unroutable request later. */
+export function isValidCatalogModelName(name: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim());
+}
+
+function slugify(label: string): string {
+	return label
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "") || "endpoint";
+}
+
+/**
+ * The provider's key inside the sidecar's config, and the prefix of every wire
+ * name it serves. A known kind uses its canonical provider name (so at most one
+ * provider per kind — enforced by `validateCatalog`); a custom endpoint gets a
+ * `custom-<slug>` name declared as an OpenAI-compatible custom provider.
+ */
+export function sidecarProviderKey(provider: CatalogProvider): string {
+	return provider.kind === "custom" ? `custom-${slugify(provider.label)}` : provider.kind;
+}
+
+function envSuffix(providerKey: string): string {
+	return providerKey.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+/** Env var carrying this provider's upstream key into the sidecar's process. */
+export function providerKeyEnvName(providerKey: string): string {
+	return `DEV3_LLM_KEY_${envSuffix(providerKey)}`;
+}
+
+/** Env var carrying a custom endpoint's base URL into the sidecar's process. */
+export function providerBaseUrlEnvName(providerKey: string): string {
+	return `DEV3_LLM_BASE_URL_${envSuffix(providerKey)}`;
+}
+
+/** Env var the sidecar reads its local session key from. */
+export const SESSION_KEY_ENV = "DEV3_BIFROST_VIRTUAL_KEY";
+/** Env var the sidecar reads its at-rest encryption key from. */
+export const ENCRYPTION_KEY_ENV = "DEV3_BIFROST_ENCRYPTION_KEY";
+
+/** How a catalog model is addressed on the wire: `<provider>/<name>`. */
+export function catalogModelWireName(catalog: ModelCatalog, catalogModelId: string): string | undefined {
+	const model = catalog.models.find((m) => m.id === catalogModelId);
+	if (!model) return undefined;
+	const provider = catalog.providers.find((p) => p.id === model.providerId);
+	if (!provider) return undefined;
+	return `${sidecarProviderKey(provider)}/${model.name}`;
+}
+
+// -------------------------------------------------------- sidecar config ---
+
+interface SidecarProviderKey {
+	id: string;
+	name: string;
+	value: string;
+	models: string[];
+	weight: number;
+	aliases: Record<string, string>;
+}
+
+interface SidecarProvider {
+	keys: SidecarProviderKey[];
+	network_config?: Record<string, unknown> & { base_url?: string };
+	custom_provider_config?: {
+		base_provider_type: string;
+		allowed_requests: Record<string, boolean>;
+	};
+}
+
+export interface SidecarConfig {
+	$schema: string;
+	encryption_key: string;
+	client: {
+		drop_excess_requests: boolean;
+		enable_logging: boolean;
+		disable_content_logging: boolean;
+		enforce_auth_on_inference: boolean;
+		allowed_headers: string[];
+		allow_direct_keys: boolean;
+	};
+	providers: Record<string, SidecarProvider>;
+	governance: {
+		virtual_keys: {
+			id: string;
+			name: string;
+			value: string;
+			is_active: boolean;
+			provider_configs: { provider: string; allowed_models: string[]; key_ids: string[]; weight: number }[];
+		}[];
+	};
+	config_store: { enabled: boolean };
+	logs_store: { enabled: boolean };
+}
+
+/** Conservative timeouts: coding agents stream for minutes and retry on their
+ *  own, so the sidecar retries at most once. */
+const NETWORK_CONFIG = {
+	default_request_timeout_in_seconds: 300,
+	stream_idle_timeout_in_seconds: 120,
+	max_retries: 1,
+	retry_backoff_initial: 500,
+	retry_backoff_max: 5000,
+};
+
+/**
+ * Build the sidecar's whole configuration document from catalog state.
+ *
+ * Providers with no catalog models are omitted — an empty provider block buys
+ * nothing and a misconfigured one refuses to start. Every configured provider is
+ * reachable through a single local session key, and every credential is a
+ * symbolic `env.*` reference.
+ */
+export function buildSidecarConfig(catalog: ModelCatalog): SidecarConfig {
+	const providers: Record<string, SidecarProvider> = {};
+	const providerConfigs: SidecarConfig["governance"]["virtual_keys"][0]["provider_configs"] = [];
+
+	for (const provider of catalog.providers) {
+		const models = catalog.models.filter((m) => m.providerId === provider.id);
+		if (models.length === 0) continue;
+
+		const providerKey = sidecarProviderKey(provider);
+		const keyId = `key-dev3-${providerKey}`;
+		const aliases: Record<string, string> = {};
+		for (const model of models) aliases[model.name] = model.modelId;
+
+		const entry: SidecarProvider = {
+			keys: [
+				{
+					id: keyId,
+					name: keyId,
+					value: `env.${providerKeyEnvName(providerKey)}`,
+					models: ["*"],
+					weight: 1.0,
+					aliases,
+				},
+			],
+			network_config: { ...NETWORK_CONFIG },
+		};
+
+		if (provider.kind === "custom") {
+			entry.network_config = {
+				base_url: `env.${providerBaseUrlEnvName(providerKey)}`,
+				...NETWORK_CONFIG,
+			};
+			entry.custom_provider_config = {
+				base_provider_type: "openai",
+				// Partial `allowed_requests` means "everything not listed is denied",
+				// so the Responses pair must be spelled out — Codex speaks nothing else.
+				allowed_requests: {
+					list_models: true,
+					chat_completion: true,
+					chat_completion_stream: true,
+					responses: true,
+					responses_stream: true,
+				},
+			};
+		}
+
+		providers[providerKey] = entry;
+		providerConfigs.push({ provider: providerKey, allowed_models: ["*"], key_ids: [keyId], weight: 1.0 });
+	}
+
+	return {
+		$schema: "https://www.getbifrost.ai/schema",
+		encryption_key: `env.${ENCRYPTION_KEY_ENV}`,
+		client: {
+			drop_excess_requests: false,
+			// Metadata-only: token counts feed per-task cost, bodies are never stored.
+			enable_logging: true,
+			disable_content_logging: true,
+			enforce_auth_on_inference: true,
+			allowed_headers: ["*"],
+			allow_direct_keys: false,
+		},
+		providers,
+		governance: {
+			virtual_keys: [
+				{
+					id: "vk-dev3-session",
+					name: "dev3 local session",
+					value: `env.${SESSION_KEY_ENV}`,
+					is_active: true,
+					provider_configs: providerConfigs,
+				},
+			],
+		},
+		config_store: { enabled: false },
+		// On, deliberately against the vendor's desktop advice: nothing else in the
+		// chain sees both the token counts and the price (see the design record).
+		logs_store: { enabled: true },
+	};
+}
+
+// ------------------------------------------------------------------ roles ---
+
+export interface AgentModelRole {
+	id: string;
+	labelKey: string;
+	hintKey: string;
+}
+
+/** Claude Code's own alias slots, most capable first. */
+const CLAUDE_ROLES: AgentModelRole[] = [
+	{ id: "fable", labelKey: "catalog.roleFable", hintKey: "catalog.roleFableHint" },
+	{ id: "opus", labelKey: "catalog.roleOpus", hintKey: "catalog.roleOpusHint" },
+	{ id: "sonnet", labelKey: "catalog.roleSonnet", hintKey: "catalog.roleSonnetHint" },
+	{ id: "haiku", labelKey: "catalog.roleHaiku", hintKey: "catalog.roleHaikuHint" },
+];
+
+/** Codex CLI's own roles. `main` is load-bearing: without it there is nothing
+ *  to route, so dev3 leaves the launch untouched. */
+const CODEX_ROLES: AgentModelRole[] = [
+	{ id: "main", labelKey: "catalog.roleMain", hintKey: "catalog.roleMainHint" },
+	{ id: "subagent", labelKey: "catalog.roleSubagent", hintKey: "catalog.roleSubagentHint" },
+	{ id: "review", labelKey: "catalog.roleReview", hintKey: "catalog.roleReviewHint" },
+];
+
+const AGENT_ROLES: Record<string, AgentModelRole[]> = {
+	claude: CLAUDE_ROLES,
+	codex: CODEX_ROLES,
+};
+
+function agentKey(baseCommand: string): string {
+	return baseCommand.split("/").pop() ?? baseCommand;
+}
+
+/** The roles the given agent CLI genuinely exposes; empty when dev3 cannot
+ *  route that agent through the catalog. */
+export function modelRolesForAgent(baseCommand: string): AgentModelRole[] {
+	return AGENT_ROLES[agentKey(baseCommand)] ?? [];
+}
+
+/** Role id → catalog model id. Bound by id, so renaming a model keeps presets working. */
+export type ModelRoleBindings = Record<string, string>;
+
+export interface RoleLaunchPlan {
+	/** Env vars to inject into the launch. */
+	env: Record<string, string>;
+	/** Raw (unescaped) CLI args to append; the agent adapter escapes them. */
+	args: string[];
+	/** Wire name that must replace the preset's `--model`, when the CLI gives the
+	 *  flag precedence over everything else. */
+	modelFlag?: string;
+	/** Env vars to actively clear, so a leaked credential cannot win. */
+	unsetEnv: string[];
+}
+
+/** The `model_providers` entry dev3 declares for Codex. */
+export const CODEX_PROVIDER_KEY = "dev3";
+
+/**
+ * Turn a preset's role bindings into everything a launch needs.
+ *
+ * Returns undefined — meaning "launch exactly as dev3 does today" — when the
+ * agent has no roles, nothing is bound, a bound model no longer exists, or the
+ * agent's load-bearing role is unassigned.
+ */
+export function resolveModelRoleLaunch(
+	baseCommand: string,
+	bindings: ModelRoleBindings | undefined,
+	catalog: ModelCatalog,
+	runtime: { baseUrl: string; sessionKey: string },
+): RoleLaunchPlan | undefined {
+	const roles = modelRolesForAgent(baseCommand);
+	if (roles.length === 0 || !bindings) return undefined;
+
+	const wire: Record<string, string> = {};
+	for (const role of roles) {
+		const bound = bindings[role.id];
+		if (!bound) continue;
+		const name = catalogModelWireName(catalog, bound);
+		// A dangling binding is a broken setup, not a partial one: routing half a
+		// preset would silently bill the wrong provider.
+		if (!name) return undefined;
+		wire[role.id] = name;
+	}
+	if (Object.keys(wire).length === 0) return undefined;
+
+	return agentKey(baseCommand) === "codex"
+		? codexPlan(wire, runtime)
+		: claudePlan(wire, runtime);
+}
+
+function claudePlan(wire: Record<string, string>, runtime: { baseUrl: string; sessionKey: string }): RoleLaunchPlan {
+	const env: Record<string, string> = {
+		ANTHROPIC_BASE_URL: `${runtime.baseUrl}/anthropic`,
+		ANTHROPIC_AUTH_TOKEN: runtime.sessionKey,
+	};
+	for (const [role, name] of Object.entries(wire)) {
+		env[`ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`] = name;
+	}
+	// The `--model` flag outranks these vars, so the flag is rewritten separately
+	// by the existing slot-override path, which reads exactly these env vars.
+	return { env, args: [], unsetEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"] };
+}
+
+function codexPlan(wire: Record<string, string>, runtime: { baseUrl: string; sessionKey: string }): RoleLaunchPlan | undefined {
+	if (!wire.main) return undefined;
+	const p = `model_providers.${CODEX_PROVIDER_KEY}`;
+	const args = [
+		"-c", `model_provider="${CODEX_PROVIDER_KEY}"`,
+		"-c", `${p}.name="dev3 model catalog"`,
+		// Codex talks to a custom provider over the Responses protocol only, and
+		// its WebSocket mode is not what the sidecar exposes.
+		"-c", `${p}.wire_api="responses"`,
+		"-c", `${p}.supports_websockets=false`,
+		"-c", `${p}.base_url="${runtime.baseUrl}/openai/v1"`,
+		"-c", `${p}.env_key="OPENAI_API_KEY"`,
+		"-c", `model="${wire.main}"`,
+	];
+	if (wire.subagent) args.push("-c", `agents.default_subagent_model="${wire.subagent}"`);
+	if (wire.review) args.push("-c", `review_model="${wire.review}"`);
+
+	return {
+		env: { OPENAI_API_KEY: runtime.sessionKey },
+		args,
+		modelFlag: wire.main,
+		unsetEnv: [],
+	};
+}
+
+/** Env record form of `unsetEnv`, for the launch env pipeline that speaks in
+ *  `ENV_UNSET` sentinels rather than a separate list. */
+export function roleUnsetEnv(plan: RoleLaunchPlan): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key of plan.unsetEnv) env[key] = ENV_UNSET;
+	return env;
+}
+
+// ------------------------------------------------------------ validation ---
+
+export type CatalogIssueCode =
+	| "duplicate-name"
+	| "invalid-name"
+	| "unknown-provider"
+	| "missing-model-id"
+	| "missing-base-url"
+	| "duplicate-provider";
+
+export interface CatalogIssue {
+	code: CatalogIssueCode;
+	/** The catalog model the issue is about, when it is about one. */
+	modelId?: string;
+	/** The provider the issue is about, when it is about one. */
+	providerId?: string;
+}
+
+/** Every reason this catalog cannot be turned into a working sidecar config. */
+export function validateCatalog(catalog: ModelCatalog): CatalogIssue[] {
+	const issues: CatalogIssue[] = [];
+
+	const seenKinds = new Set<string>();
+	for (const provider of catalog.providers) {
+		if (provider.kind === "custom") {
+			if (!provider.baseUrl?.trim()) issues.push({ code: "missing-base-url", providerId: provider.id });
+		}
+		const key = sidecarProviderKey(provider);
+		if (seenKinds.has(key)) issues.push({ code: "duplicate-provider", providerId: provider.id });
+		seenKinds.add(key);
+	}
+
+	const seenNames = new Set<string>();
+	for (const model of catalog.models) {
+		const name = model.name.trim().toLowerCase();
+		if (!isValidCatalogModelName(model.name)) issues.push({ code: "invalid-name", modelId: model.id });
+		else if (seenNames.has(name)) issues.push({ code: "duplicate-name", modelId: model.id });
+		seenNames.add(name);
+		if (!model.modelId.trim()) issues.push({ code: "missing-model-id", modelId: model.id });
+		if (!catalog.providers.some((p) => p.id === model.providerId)) {
+			issues.push({ code: "unknown-provider", modelId: model.id });
+		}
+	}
+
+	return issues;
+}
+
+/** Role ids whose catalog model no longer exists. */
+export function orphanedRoleBindings(bindings: ModelRoleBindings | undefined, catalog: ModelCatalog): string[] {
+	if (!bindings) return [];
+	return Object.entries(bindings)
+		.filter(([, modelId]) => modelId && !catalog.models.some((m) => m.id === modelId))
+		.map(([role]) => role);
+}
+
+export type RoleWarningCode = "openrouter-claude-tools";
+
+export interface RoleWarning {
+	code: RoleWarningCode;
+	roleId: string;
+}
+
+/**
+ * Combinations that are allowed but known to disappoint. Currently one: the
+ * sidecar's own documentation reports OpenRouter streaming empty tool-call
+ * arguments to Claude Code, which breaks every file edit. Unverified on our
+ * side — hence a warning in the form, never a block.
+ */
+export function roleBindingWarnings(
+	baseCommand: string,
+	bindings: ModelRoleBindings | undefined,
+	catalog: ModelCatalog,
+): RoleWarning[] {
+	if (agentKey(baseCommand) !== "claude" || !bindings) return [];
+	const warnings: RoleWarning[] = [];
+	for (const [roleId, modelId] of Object.entries(bindings)) {
+		const model = catalog.models.find((m) => m.id === modelId);
+		const provider = catalog.providers.find((p) => p.id === model?.providerId);
+		if (provider?.kind === "openrouter") warnings.push({ code: "openrouter-claude-tools", roleId });
+	}
+	return warnings;
+}

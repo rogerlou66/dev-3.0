@@ -695,6 +695,9 @@ function runGlobalQuitCleanup(): void {
 	// would orphan tunnels (and trycloudflare quotas) on app exit.
 	import("./port-tunnels").then(({ cleanupAllTunnels }) => cleanupAllTunnels()).catch(() => { /* shutdown — best-effort */ });
 	try { stopTunnel(); } catch (err) { log.warn("stopTunnel failed", { error: String(err) }); }
+	// The model-catalog proxy dies with the app — an orphan would keep holding a
+	// loopback port and the user's provider keys in memory.
+	import("./model-sidecar").then(({ stopModelSidecar }) => stopModelSidecar()).catch(() => { /* shutdown — best-effort */ });
 }
 
 // Terminal/OS signals (Ctrl+C in `bun run dev`, kill, shutdown) bypass the
