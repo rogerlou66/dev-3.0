@@ -14,7 +14,6 @@ import { toast } from "../../toast";
 import { api } from "../../rpc";
 import type { TFunction } from "../../i18n";
 import SettingsEntry from "./SettingsEntry";
-import SettingsSection from "./SettingsSection";
 
 const EMPTY: ModelCatalogView = { providers: [], models: [] };
 
@@ -280,32 +279,18 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 			.map((id) => ({ value: id.slice(prefix.length), label: id.slice(prefix.length) }));
 	};
 
-	// Saved models are what the proxy actually serves — a draft row cannot be listed.
-	const savedModelCount = saved.models.length;
+	// A saved provider is what the proxy can serve — a draft row is not in its
+	// config yet, and naming models comes after asking the provider what it has.
+	const savedProviderCount = saved.providers.length;
 	const startReason = !status?.binaryAvailable
 		? null // the panel already says the build ships no proxy
-		: savedModelCount === 0
-			? t("catalog.startNeedsModel")
+		: savedProviderCount === 0
+			? t("catalog.startNeedsProvider")
 			: null;
 	const listReason = !status?.binaryAvailable ? null : !status?.running ? t("catalog.listNeedsProxy") : null;
 
-	return (
-		<SettingsEntry anchor="model-catalog">
-			<SettingsSection title={t("catalog.section")}>
-				{/* First run: say what to do, in order, instead of showing dead controls. */}
-				{draft.providers.length === 0 && draft.models.length === 0 ? (
-					<div className="rounded-xl border border-accent/30 bg-accent/10 p-4 space-y-1">
-						<p className="text-fg text-sm font-semibold">{t("catalog.firstRunTitle")}</p>
-						<ol className="text-fg-2 text-sm list-decimal list-inside space-y-0.5">
-							<li>{t("catalog.firstRunStep1")}</li>
-							<li>{t("catalog.firstRunStep2")}</li>
-							<li>{t("catalog.firstRunStep3")}</li>
-						</ol>
-					</div>
-				) : null}
-
-				{/* Proxy state — one place that answers "is it me or the proxy". */}
-				<div className="space-y-3 rounded-xl border border-edge bg-raised p-4">
+	const proxyPanel = (
+		<div className="space-y-3 rounded-xl border border-edge bg-raised p-4">
 					{!status?.binaryAvailable ? (
 						<StatusRow tone="danger">{t("catalog.binaryMissing")}</StatusRow>
 					) : status?.running ? (
@@ -334,7 +319,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 								<button
 									type="button"
 									onClick={startProxy}
-									disabled={busy || !status?.binaryAvailable || savedModelCount === 0}
+									disabled={busy || !status?.binaryAvailable || savedProviderCount === 0}
 									className={BUTTON_CLASS}
 								>
 									{t("catalog.startProxy")}
@@ -360,10 +345,26 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						) : (
 							<span className="text-xs text-warning">{t("catalog.listEmpty")}</span>
 						)}
-					</div>
-				</div>
+			</div>
+		</div>
+	);
 
-				{/* Providers */}
+	return (
+		<SettingsEntry anchor="model-catalog">
+			<div className="space-y-6">
+				{/* First run: say what to do, in order, instead of showing dead controls. */}
+				{draft.providers.length === 0 && draft.models.length === 0 ? (
+					<div className="rounded-xl border border-accent/30 bg-accent/10 p-4 space-y-1">
+						<p className="text-fg text-sm font-semibold">{t("catalog.firstRunTitle")}</p>
+						<ol className="text-fg-2 text-sm list-decimal list-inside space-y-0.5">
+							<li>{t("catalog.firstRunStep1")}</li>
+							<li>{t("catalog.firstRunStep2")}</li>
+							<li>{t("catalog.firstRunStep3")}</li>
+						</ol>
+					</div>
+				) : null}
+
+				{/* Providers come first: nothing below exists without one. */}
 				<div className="space-y-3">
 					<p className="text-fg text-sm font-semibold">{t("catalog.providers")}</p>
 					{draft.providers.length === 0 ? (
@@ -437,6 +438,11 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						{t("catalog.addProvider")}
 					</button>
 				</div>
+
+				{/* The proxy sits between the two tables because that is where it is used:
+				    it answers what a saved provider offers, and those ids fill the models
+				    below. It also answers "is it me or the proxy" when a launch fails. */}
+				{proxyPanel}
 
 				{/* Named models */}
 				<div className="space-y-3">
@@ -540,7 +546,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						</div>
 					</div>
 				) : null}
-			</SettingsSection>
+			</div>
 		</SettingsEntry>
 	);
 }

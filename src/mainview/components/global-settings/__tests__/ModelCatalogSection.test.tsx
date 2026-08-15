@@ -213,15 +213,32 @@ describe("telling the user what to do", () => {
 	it("says why the proxy cannot start yet", async () => {
 		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({ providers: [], models: [] });
 		renderSection();
-		expect(await screen.findByText("catalog.startNeedsModel")).toBeTruthy();
+		expect(await screen.findByText("catalog.startNeedsProvider")).toBeTruthy();
 		expect(screen.getByRole("button", { name: "catalog.startProxy" })).toHaveProperty("disabled", true);
 	});
 
-	it("keeps quiet about the precondition once a saved model exists", async () => {
+	// A saved provider is the whole precondition: asking it what models it offers
+	// is the step BEFORE naming any of them, so models cannot be required here.
+	it("lets the proxy start on a saved provider alone, before any model is named", async () => {
+		vi.mocked(api.request.modelCatalogGet).mockResolvedValue({
+			providers: [{ id: "p-or", kind: "openrouter", label: "OpenRouter", hasKey: true }],
+			models: [],
+		});
 		renderSection();
-		await screen.findByDisplayValue("fast-gremlin");
-		expect(screen.queryByText("catalog.startNeedsModel")).toBeNull();
+		await screen.findByDisplayValue("OpenRouter");
+		expect(screen.queryByText("catalog.startNeedsProvider")).toBeNull();
 		expect(screen.getByRole("button", { name: "catalog.startProxy" })).toHaveProperty("disabled", false);
+	});
+
+	// The order on screen is the order of the work: providers, then ask them what
+	// they offer, then name the ones you want.
+	it("puts the proxy panel between the providers and the models", async () => {
+		renderSection();
+		await screen.findByDisplayValue("OpenRouter");
+		const order = Array.from(document.querySelectorAll("table, button")).filter(
+			(el) => el.tagName === "TABLE" || el.textContent === "catalog.refreshModels",
+		);
+		expect(order.map((el) => (el.tagName === "TABLE" ? "table" : "load"))).toEqual(["table", "load", "table"]);
 	});
 
 	it("says why a model cannot be added yet", async () => {

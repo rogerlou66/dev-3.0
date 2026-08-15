@@ -1,6 +1,6 @@
 /**
  * The proxy sidecar behind the model catalog: one Bifrost process per app, on a
- * loopback port dev3 picks, started on demand and dying with the app. Upstream
+ * loopback port dev3 picks, brought up with the app and dying with it. Upstream
  * keys reach it only through its child environment. The binary is pinned and
  * bundled (bundled-tmux precedent, decisions/2026/07/16) — never downloaded.
  */
@@ -38,6 +38,11 @@ const CONFIG_PATH = `${RUNTIME_DIR}/config.json`;
 const ENDPOINT_PATH = `${RUNTIME_DIR}/endpoint.json`;
 
 const BINARY_NAME = process.platform === "win32" ? "bifrost-http.exe" : "bifrost-http";
+
+/** The address dev3 wants every time. Below 32768, so no OS on any platform
+ *  hands it out as an ephemeral port behind our back, and far from the ports a
+ *  dev machine actually runs things on. Taken? Fall back rather than refuse. */
+export const DEFAULT_SIDECAR_PORT = 32123;
 
 /** How long a start may take before dev3 gives up and shows the process output. */
 const READY_TIMEOUT_MS = 20_000;
@@ -275,6 +280,21 @@ export async function ensureModelSidecar(): Promise<{ baseUrl: string; sessionKe
 	return { baseUrl: instance.baseUrl, sessionKey: instance.sessionKey };
 }
 
+/** Which port this attempt tries. The fixed one first, so the proxy normally
+ *  lives at one predictable address; then the port the last run actually used,
+ *  because agents already running were launched against it; then anything free. */
+export async function choosePort(
+	attempt: number,
+	remembered: SidecarEndpoint | null,
+	free: (port: number) => Promise<boolean> = isPortFree,
+): Promise<number> {
+	if (attempt === 1 && (await free(DEFAULT_SIDECAR_PORT))) return DEFAULT_SIDECAR_PORT;
+	if (attempt <= 2 && remembered && remembered.port !== DEFAULT_SIDECAR_PORT && (await free(remembered.port))) {
+		return remembered.port;
+	}
+	return await chooseCandidatePort();
+}
+
 async function startSidecar(): Promise<RunningSidecar> {
 	const binary = resolveSidecarBinary();
 	if (!binary) {
@@ -297,10 +317,7 @@ async function startSidecar(): Promise<RunningSidecar> {
 	let failure: unknown;
 	for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
 		try {
-			// Only the first attempt insists on the remembered port; if something
-			// else holds it, a fresh one beats refusing to start at all.
-			const reuse = attempt === 1 && remembered && (await isPortFree(remembered.port));
-			const port = reuse ? remembered.port : await chooseCandidatePort();
+			const port = await choosePort(attempt, remembered);
 			const instance = await launchOnce(binary, env, sessionKey, port);
 			running = instance;
 			saveSidecarEndpoint({ port: instance.port, sessionKey });
@@ -314,6 +331,24 @@ async function startSidecar(): Promise<RunningSidecar> {
 	}
 	lastError = String(failure instanceof Error ? failure.message : failure);
 	throw new Error(lastError);
+}
+
+/** Bring the proxy up at app start, so the catalog is a place you configure
+ *  rather than a machine you operate. Skipped when there is no provider to
+ *  serve — an empty catalog has nothing to answer with. A failure here is not
+ *  fatal: it lands in the status panel, and a launch retries on its own. */
+export async function autostartModelSidecar(): Promise<void> {
+	if (!resolveSidecarBinary()) return;
+	if (loadModelCatalog().providers.length === 0) {
+		log.info("Model proxy autostart skipped — the catalog has no providers");
+		return;
+	}
+	try {
+		const { baseUrl } = await ensureModelSidecar();
+		log.info("Model proxy autostarted", { baseUrl });
+	} catch (err) {
+		log.warn("Model proxy autostart failed", { error: String(err) });
+	}
 }
 
 /** Stop the sidecar and its children. Safe to call when nothing is running. */

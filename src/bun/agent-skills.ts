@@ -744,7 +744,7 @@ Under the hood the agent uses \`dev3 pane run\` / \`dev3 pane logs\` (either bac
 
 ## Bring your own models
 
-- **Model catalog → any provider, any mix.** In **Settings → Models** you register the providers you pay for (OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint), then build **catalog models**: your own name for one provider's model — \`fast-gremlin\` is DeepSeek Flash at OpenRouter. Keys stay on your machine; a local proxy that ships inside the app does the routing, and the agent only ever sees a local proxy key.
+- **Model catalog → any provider, any mix.** In **Settings → API models** you register the providers you pay for (OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint), then build **catalog models**: your own name for one provider's model — \`fast-gremlin\` is DeepSeek Flash at OpenRouter. Keys stay on your machine; a local proxy that ships inside the app does the routing, and the agent only ever sees a local proxy key.
 - **Model roles → different models inside one agent.** In a preset's editor, each of that agent's own roles gets a catalog model: Claude Code's Opus/Sonnet/Haiku slots, Codex's main / subagent / review models. So one session can think on OpenAI and let its subagents run cheap through OpenRouter. Leave a role empty and it behaves exactly as before. A preset with roles appears in the launch picker as its own Model group.
 
 ## More than one agent

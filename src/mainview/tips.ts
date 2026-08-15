@@ -944,7 +944,7 @@ const ALL_TIPS: Tip[] = [
 		icon: "\u{F0BC5}", // nf-md-swap_horizontal_variant
 		score: 4,
 		contexts: ["settings", "board"],
-		settingsSection: "system",
+		settingsSection: "models",
 	},
 ];
 

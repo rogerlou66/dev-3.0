@@ -226,7 +226,7 @@ const tips = {
 	"tip.cliDoctorWorktrees.title": "Reclaim gigabytes of worktrees",
 	"tip.cliDoctorWorktrees.body": "Run `dev3 doctor --worktrees` — it shows what ~/.dev3.0 keeps on disk and which task folders no longer belong to any task.",
 	"tip.modelCatalogRoles.title": "Mix models in one agent",
-	"tip.modelCatalogRoles.body": "Build a catalog in Settings → Models, then give each of an agent's roles its own model in the preset editor.",
+	"tip.modelCatalogRoles.body": "Register your own providers, then give each of an agent's roles its own model in the preset editor.",
 } as const;
 
 export default tips;

@@ -237,15 +237,14 @@ describe("surviving a restart", () => {
 
 	// A running agent has the base URL and token baked into its launch env, so a
 	// proxy that comes back elsewhere strands every session it was serving.
-	it("comes back on the same address, so running agents keep working", async () => {
+	it("comes back with the same session key, so running agents keep working", async () => {
 		remember({ port: 47311, sessionKey: "sk-bf-rememberedkey" });
 		const { ensureModelSidecar } = await freshModule();
 		const runtime = await ensureModelSidecar();
-		expect(runtime.baseUrl).toBe("http://127.0.0.1:47311");
 		expect(runtime.sessionKey).toBe("sk-bf-rememberedkey");
 	});
 
-	it("takes a fresh port when something else holds the remembered one", async () => {
+	it("takes a real port when something else holds the fixed one", async () => {
 		const squatter = createServer();
 		const taken = await new Promise<number>((done) => {
 			squatter.listen({ host: "127.0.0.1", port: 0 }, () => done((squatter.address() as AddressInfo).port));
@@ -275,7 +274,94 @@ describe("surviving a restart", () => {
 		const { ensureModelSidecar } = await freshModule();
 		const runtime = await ensureModelSidecar();
 		expect(runtime.sessionKey).toMatch(/^sk-bf-/);
-		expect(runtime.baseUrl).not.toBe("http://127.0.0.1:47311");
+	});
+});
+
+describe("choosing the port", () => {
+	const REMEMBERED = { port: 47311, sessionKey: "sk-bf-rememberedkey" };
+	/** Ports the probe should call free; everything else is treated as taken. */
+	const freeOnly = (...ports: number[]) => async (port: number) => ports.includes(port);
+
+	it("uses one fixed address, so the proxy is at the same place every run", async () => {
+		const { choosePort, DEFAULT_SIDECAR_PORT } = await freshModule();
+		expect(await choosePort(1, REMEMBERED, freeOnly(DEFAULT_SIDECAR_PORT, REMEMBERED.port))).toBe(DEFAULT_SIDECAR_PORT);
+	});
+
+	it("keeps the fixed address even with nothing remembered", async () => {
+		const { choosePort, DEFAULT_SIDECAR_PORT } = await freshModule();
+		expect(await choosePort(1, null, freeOnly(DEFAULT_SIDECAR_PORT))).toBe(DEFAULT_SIDECAR_PORT);
+	});
+
+	// Second best: the address the agents already running were launched against.
+	it("falls back to the last run's port when the fixed one is taken", async () => {
+		const { choosePort } = await freshModule();
+		expect(await choosePort(1, REMEMBERED, freeOnly(REMEMBERED.port))).toBe(REMEMBERED.port);
+	});
+
+	it("takes any free port when both are taken, rather than refusing to start", async () => {
+		const { choosePort, DEFAULT_SIDECAR_PORT } = await freshModule();
+		const port = await choosePort(1, REMEMBERED, freeOnly());
+		expect(port).not.toBe(DEFAULT_SIDECAR_PORT);
+		expect(port).not.toBe(REMEMBERED.port);
+		expect(port).toBeGreaterThan(0);
+	});
+
+	// A port that answered the health check but died right after is not a port to
+	// keep retrying — later attempts stop insisting and just take a free one.
+	it("stops insisting on a specific port after the early attempts", async () => {
+		const { choosePort, DEFAULT_SIDECAR_PORT } = await freshModule();
+		const port = await choosePort(3, REMEMBERED, freeOnly(DEFAULT_SIDECAR_PORT, REMEMBERED.port));
+		expect(port).not.toBe(DEFAULT_SIDECAR_PORT);
+		expect(port).not.toBe(REMEMBERED.port);
+	});
+
+	it("sits below the ephemeral range, so no OS hands it out behind our back", async () => {
+		const { DEFAULT_SIDECAR_PORT } = await freshModule();
+		expect(DEFAULT_SIDECAR_PORT).toBeGreaterThan(1024);
+		expect(DEFAULT_SIDECAR_PORT).toBeLessThan(32768);
+	});
+});
+
+describe("autostart", () => {
+	it("brings the proxy up with the app, so the catalog needs no operating", async () => {
+		const { autostartModelSidecar, getModelSidecarStatus } = await freshModule();
+		await autostartModelSidecar();
+		expect(getModelSidecarStatus().running).toBe(true);
+		expect(h.spawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("stays out of the way when there is no provider to serve", async () => {
+		h.catalog.mockReturnValue({ providers: [], models: [] });
+		const { autostartModelSidecar, getModelSidecarStatus } = await freshModule();
+		await autostartModelSidecar();
+		expect(h.spawnMock).not.toHaveBeenCalled();
+		expect(getModelSidecarStatus().running).toBe(false);
+	});
+
+	// A provider without a key is still worth starting for: the user is mid-setup,
+	// and the proxy is what they need up to load the provider's model ids.
+	it("starts for a provider that has no key yet", async () => {
+		h.keys.mockReturnValue({});
+		const { autostartModelSidecar, getModelSidecarStatus } = await freshModule();
+		await autostartModelSidecar();
+		expect(getModelSidecarStatus().running).toBe(true);
+	});
+
+	it("never throws when the proxy refuses to come up — the app still boots", async () => {
+		h.spawnMock.mockImplementation(() => deadProcess("bind: address already in use"));
+		stubHttp([], () => false);
+		const { autostartModelSidecar, getModelSidecarStatus } = await freshModule();
+		await expect(autostartModelSidecar()).resolves.toBeUndefined();
+		expect(getModelSidecarStatus().running).toBe(false);
+		expect(getModelSidecarStatus().lastError).toContain("address already in use");
+	});
+
+	it("does nothing when the build ships no proxy binary", async () => {
+		h.fs.existsSync.mockReturnValue(false);
+		delete process.env.DEV3_BIFROST_BINARY;
+		const { autostartModelSidecar } = await freshModule();
+		await autostartModelSidecar();
+		expect(h.spawnMock).not.toHaveBeenCalled();
 	});
 });
 

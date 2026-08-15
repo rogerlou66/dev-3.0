@@ -146,6 +146,25 @@ the port only when it is still bindable, so a squatter costs a new address inste
 start. The key gains no new exposure — it already lives in every agent's process environment and
 in the sidecar's own config store.
 
+## Follow-up: the proxy is infrastructure, not a machine the user operates
+
+Hands-on use turned up a second framing error. The proxy started lazily, on a port chosen fresh
+each time, and the catalog screen offered a `Start proxy` button — so the user was operating a
+process to configure a setting. It is now brought up ~1.5s after boot whenever the catalog has a
+provider (`autostartModelSidecar`, called from `index.ts`), on one fixed port
+(`DEFAULT_SIDECAR_PORT = 32123`, below every platform's ephemeral floor so the OS never hands it
+out behind our back), falling back to the last run's port and then to any free one. The button
+stays, for the one case it is honest about: restarting after a failure.
+
+The same pass fixed the order of the work. `buildSidecarConfig` used to omit a provider that had
+no models, which made "add a provider, then ask it what it offers" impossible — the only way to
+learn a provider's model ids was through the proxy, and the proxy did not know the provider
+existed until a model was already named. A provider is now declared as soon as it exists;
+verified against the live `bifrost-http` 1.6.10 that a provider with no aliases starts fine and
+still answers `/v1/models`, and that a provider with no key logs a warning instead of killing the
+process. On screen the proxy panel moved between the two tables, matching the real order:
+providers → ask them what they offer → name what you want.
+
 ## Alternatives considered
 
 - **Extend the provider registry with a "bifrost" provider.** Rejected: the registry is shaped

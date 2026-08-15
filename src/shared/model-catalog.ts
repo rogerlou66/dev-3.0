@@ -166,16 +166,15 @@ const NETWORK_CONFIG = {
 	retry_backoff_max: 5000,
 };
 
-/** The sidecar's whole configuration, from catalog state. A provider with no
- *  models is omitted; every credential stays a symbolic `env.*` reference. */
+/** The sidecar's whole configuration, from catalog state. A provider is declared
+ *  as soon as it exists — naming models is what comes after asking it what it
+ *  offers. Every credential stays a symbolic `env.*` reference. */
 export function buildSidecarConfig(catalog: ModelCatalog, dataDir = "."): SidecarConfig {
 	const providers: Record<string, SidecarProvider> = {};
 	const providerConfigs: SidecarConfig["governance"]["virtual_keys"][0]["provider_configs"] = [];
 
 	for (const provider of catalog.providers) {
 		const models = catalog.models.filter((m) => m.providerId === provider.id);
-		if (models.length === 0) continue;
-
 		const providerKey = sidecarProviderKey(provider);
 		const keyId = `key-dev3-${providerKey}`;
 		const aliases: Record<string, string> = {};

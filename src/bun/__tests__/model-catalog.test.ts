@@ -78,10 +78,14 @@ describe("buildSidecarConfig", () => {
 		expect(config.providers.openai.keys[0].aliases).toEqual({ "my-main": "gpt-5.6-sol" });
 	});
 
-	it("omits a provider that has no models, so an empty entry cannot break startup", () => {
+	// Verified against the live bifrost-http 1.6.10: a provider with no aliases
+	// starts fine and still answers /v1/models. Declaring it is what makes
+	// "add a provider, then ask it what it offers" possible at all.
+	it("declares a provider that has no models yet, so its ids can be listed", () => {
 		const only = catalog();
 		only.models = only.models.filter((m) => m.providerId === "p-oai");
-		expect(Object.keys(buildSidecarConfig(only).providers)).toEqual(["openai"]);
+		expect(Object.keys(buildSidecarConfig(only).providers).sort()).toEqual(["custom-my-box", "openai", "openrouter"]);
+		expect(buildSidecarConfig(only).providers.openrouter.keys[0].aliases).toEqual({});
 	});
 
 	it("produces no providers at all for an empty catalog", () => {
