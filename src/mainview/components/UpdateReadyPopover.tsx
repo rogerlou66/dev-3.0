@@ -4,9 +4,6 @@ import { useT } from "../i18n";
 import CanaryBadge from "./CanaryBadge";
 import { UpdateReadyIcon } from "./HeaderIcons";
 
-/** Static placeholder countdown shown in the simulator (no real timer runs). */
-const PREVIEW_COUNTDOWN_SECONDS = 205;
-
 interface UpdateWhatsNewProps {
 	version: string;
 	changelog?: UpdateChangelog | null;
@@ -18,7 +15,7 @@ interface UpdateWhatsNewProps {
 /**
  * The "what's new" section — version-scoped feature list + a "+N more · M fixes"
  * rollup + a link to the full Changelog screen. Shared by the header dropdown
- * popover and the auto-shown update toast so both surface the same preview.
+ * and the one-time manual-update toast so both surface the same preview.
  * Renders nothing when the incoming update carries no feature titles.
  */
 export function UpdateWhatsNew({ version, changelog, onSeeAllChanges, className }: UpdateWhatsNewProps) {
@@ -107,33 +104,13 @@ export default function UpdateReadyPopover({
 				</div>
 			</div>
 			<UpdateWhatsNew version={version} changelog={changelog} onSeeAllChanges={onSeeAllChanges} />
-			{preview ? (
-				// Preview mimics the auto-shown toast layout (restart-with-countdown +
-				// Postpone) so the simulator looks like the real update prompt. The
-				// countdown is a static placeholder — no real timer, both disabled.
-				<div className="flex gap-2">
-					<button
-						disabled
-						className="flex-1 px-3 py-2 text-sm font-medium rounded-lg bg-accent-fill text-white transition-colors disabled:opacity-50"
-					>
-						{t("update.restartCountdown", { seconds: String(PREVIEW_COUNTDOWN_SECONDS) })}
-					</button>
-					<button
-						disabled
-						className="px-3 py-2 text-sm font-medium rounded-lg bg-raised text-fg border border-edge transition-colors disabled:opacity-50"
-					>
-						{t("update.postponeBtn")}
-					</button>
-				</div>
-			) : (
-				<button
-					onClick={onRestart}
-					disabled={restarting}
-					className="w-full px-3 py-2 text-sm font-medium rounded-lg bg-accent-fill text-white hover:bg-accent-fill-hover transition-colors disabled:opacity-50"
-				>
-					{restarting ? t("update.restarting") : t("update.restartBtn")}
-				</button>
-			)}
+			<button
+				onClick={onRestart}
+				disabled={preview || restarting}
+				className="w-full px-3 py-2 text-sm font-medium rounded-lg bg-accent-fill text-white hover:bg-accent-fill-hover transition-colors disabled:opacity-50"
+			>
+				{restarting ? t("update.restarting") : t("update.restartBtn")}
+			</button>
 		</div>
 	);
 }

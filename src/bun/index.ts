@@ -8,7 +8,6 @@ import Electrobun, {
 import { startDisplayWatch } from "./display-watch";
 import { handlers, setPushMessage, getPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell } from "./rpc-handlers";
 import {
-	startAutoCheck,
 	checkForUpdateWithChannel,
 	getLocalVersion,
 	downloadUpdateForChannel,
@@ -897,7 +896,7 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 	} else if (e.data.action === MENU_ACTIONS.viewportLab) {
 		sendToFocusedWindow("navigateToViewportLab");
 	} else if (e.data.action === MENU_ACTIONS.checkForUpdates) {
-		// Mirror the silent auto-update flow: check, then download in the background.
+		// A manual check downloads the selected update in the background.
 		// A ready update surfaces as the existing header "Update ready" plaque
 		// (`updateAvailable`); "up to date" / errors surface as in-app toasts
 		// (`updateCheckOutcome`). No native message boxes — works in remote mode too.
@@ -920,7 +919,6 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 					broadcastToAllWindows("updateAvailable", {
 						version: result.version,
 						changelog: result.changelog,
-						reminder: true,
 					});
 					return;
 				}
@@ -979,29 +977,5 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 		sendToFocusedWindow("menuAction", { action: e.data.action });
 	}
 });
-
-// --- Auto-Update Check ---
-
-startAutoCheck(
-	() => loadSettings().then((s) => s.updateChannel),
-	async (version, changelog) => {
-		log.info("Auto-check found update, downloading silently...", { version });
-		const settings = await loadSettings();
-		sendUpdateProgress("downloading", 0);
-		const dlResult = await downloadUpdateForChannel(settings.updateChannel, sendUpdateProgress);
-		if (dlResult.ok) {
-			log.info("Auto-download complete, notifying renderer", { version });
-			broadcastToAllWindows("updateAvailable", { version, changelog });
-		} else {
-			log.error("Auto-download failed", { error: dlResult.error });
-			sendUpdateProgress("error");
-		}
-	},
-	sendUpdateProgress,
-	(version, changelog) => {
-		log.info("Re-prompting for the downloaded update", { version });
-		broadcastToAllWindows("updateAvailable", { version, changelog, reminder: true });
-	},
-);
 
 log.info("=== dev-3.0 ready ===");

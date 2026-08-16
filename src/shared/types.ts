@@ -4289,13 +4289,8 @@ export type AppRPCSchema = {
 			projectPtyDied: { projectId: string };
 			terminalBell: { taskId: string };
 			gitOpCompleted: { taskId: string; projectId: string; operation: string; ok: boolean };
-			/**
-			 * A downloaded update waits for a restart. `reminder` marks a repeat
-			 * announcement of an already-announced version (the user postponed it),
-			 * telling the renderer to re-show the prompt even though the version
-			 * itself did not change.
-			 */
-			updateAvailable: { version: string; changelog?: UpdateChangelog; reminder?: boolean };
+			/** A manually downloaded update is ready and waits for an explicit restart. */
+			updateAvailable: { version: string; changelog?: UpdateChangelog };
 			branchMerged: { taskId: string; projectId: string; taskTitle: string; branchName: string; fingerprint: string | null; subject: TaskDialogSubject; shouldPrompt?: boolean; shouldNotify?: boolean };
 			manualCompletionChanged: { taskId: string; projectId: string; manualCompletion: boolean; taskSeq?: number; taskTitle?: string; projectName?: string };
 			/**

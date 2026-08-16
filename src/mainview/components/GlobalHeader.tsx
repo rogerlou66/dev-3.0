@@ -56,8 +56,7 @@ interface GlobalHeaderProps {
 	canGoBack: boolean;
 	canGoForward: boolean;
 	updateVersion?: string | null;
-	/** Counter bumped on every update announcement, including repeats of the same version. */
-	updateAnnouncement?: number;
+	updateReadySignal?: number;
 	updateChangelog?: UpdateChangelog | null;
 	updateDownloadStatus?: string | null;
 	remoteAccessActive: boolean;
@@ -74,7 +73,7 @@ interface BreadcrumbSegment {
 /** Cache TTL for project task counts (30 seconds) */
 const COUNTS_CACHE_TTL = 30_000;
 
-function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateAnnouncement, updateChangelog, updateDownloadStatus, remoteAccessActive }: GlobalHeaderProps) {
+function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessActive }: GlobalHeaderProps) {
 	const t = useT();
 	const privacy = useProjectPrivacy();
 	const compact = useCompact();
@@ -87,8 +86,6 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	const [showUpdateDropdown, setShowUpdateDropdown] = useState(false);
 	const [restarting, setRestarting] = useState(false);
 	const [showToast, setShowToast] = useState(false);
-	const [countdown, setCountdown] = useState(0);
-	const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const [showProjectDropdown, setShowProjectDropdown] = useState(false);
 	const [projectTaskCounts, setProjectTaskCounts] = useState<Record<string, number>>({});
 	const dropdownRef = useRef<HTMLDivElement>(null);
@@ -115,31 +112,11 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	// the version the same way the popover does or the two disagree.
 	const offeredBuild = parseDisplayVersion(updateVersion ?? "");
 
-	// Show toast with 5min countdown on every update announcement — the first one
-	// and each periodic reminder for a postponed, already-downloaded version.
+	// A manual check announces the downloaded update once. Applying it always
+	// requires an explicit click; this prompt never starts a restart timer.
 	useEffect(() => {
-		if (updateVersion) {
-			setShowToast(true);
-			setCountdown(300);
-			countdownRef.current = setInterval(() => {
-				setCountdown((prev) => {
-					if (prev <= 1) return 0;
-					return prev - 1;
-				});
-			}, 1000);
-			return () => {
-				if (countdownRef.current) clearInterval(countdownRef.current);
-			};
-		}
-	}, [updateVersion, updateAnnouncement]);
-
-	// Auto-restart when countdown reaches 0
-	useEffect(() => {
-		if (countdown === 0 && showToast) {
-			if (countdownRef.current) clearInterval(countdownRef.current);
-			handleRestart();
-		}
-	}, [countdown, showToast]);
+		setShowToast(!!updateVersion);
+	}, [updateVersion, updateReadySignal]);
 
 	// Close whichever header dropdown is open on Escape.
 	useEscapeKey(
@@ -222,19 +199,10 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 
 	function dismissToast() {
 		setShowToast(false);
-		setCountdown(0);
-		if (countdownRef.current) {
-			clearInterval(countdownRef.current);
-			countdownRef.current = null;
-		}
 	}
 
 	async function handleRestart() {
 		setRestarting(true);
-		if (countdownRef.current) {
-			clearInterval(countdownRef.current);
-			countdownRef.current = null;
-		}
 		try {
 			// Belt-and-suspenders: the route is already persisted (debounced) on
 			// every navigation, but flush the exact current route synchronously
@@ -844,7 +812,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 				</div>
 			</BottomSheet>
 		)}
-		{/* Toast notification for update ready */}
+		{/* One-time response to a manual update check. */}
 		{showToast && updateVersion && (
 			<div className="fixed top-14 right-4 z-50 animate-slide-in-right">
 				<div className="bg-overlay border border-accent/30 rounded-xl shadow-2xl p-4 w-80 flex items-start gap-3">
@@ -876,13 +844,13 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 								onClick={() => { dismissToast(); handleRestart(); }}
 								className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent-fill text-white hover:bg-accent-fill-hover transition-colors"
 							>
-								{countdown > 0 ? t("update.restartCountdown", { seconds: String(countdown) }) : t("update.restartBtn")}
+								{t("update.restartBtn")}
 							</button>
 							<button
 								onClick={dismissToast}
 								className="px-3 py-1.5 text-xs font-medium rounded-lg text-fg-3 hover:text-fg hover:bg-elevated transition-colors"
 							>
-								{t("update.postponeBtn")}
+								{t("update.laterBtn")}
 							</button>
 						</div>
 					</div>

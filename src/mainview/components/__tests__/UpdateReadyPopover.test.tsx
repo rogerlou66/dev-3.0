@@ -21,11 +21,10 @@ function renderPopover(preview: boolean, version = "1.2.3") {
 }
 
 describe("UpdateReadyPopover", () => {
-	it("real popover (non-preview) shows only a functional Restart, no Postpone", () => {
+	it("real popover shows a functional Restart", () => {
 		renderPopover(false);
 		const restart = screen.getByRole("button", { name: "Restart to Update" });
 		expect((restart as HTMLButtonElement).disabled).toBe(false);
-		expect(screen.queryByRole("button", { name: "Postpone" })).toBeNull();
 	});
 
 	// THE BUG A USER ACTUALLY HIT: switch to canary, get offered a build off main, and the
@@ -57,11 +56,9 @@ describe("UpdateReadyPopover", () => {
 		).toBeNull();
 	});
 
-	it("preview mimics the toast: static-countdown Restart + disabled Postpone", () => {
+	it("preview shows the manual Restart action disabled", () => {
 		renderPopover(true);
-		const restart = screen.getByRole("button", { name: /Restart to Update \(205s\)/ });
+		const restart = screen.getByRole("button", { name: "Restart to Update" });
 		expect((restart as HTMLButtonElement).disabled).toBe(true);
-		const postpone = screen.getByRole("button", { name: "Postpone" });
-		expect((postpone as HTMLButtonElement).disabled).toBe(true);
 	});
 });

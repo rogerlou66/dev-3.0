@@ -151,7 +151,7 @@ function renderHeader(
 	tasks: Task[] = [],
 	extra?: {
 		updateVersion?: string | null;
-		updateAnnouncement?: number;
+		updateReadySignal?: number;
 		updateChangelog?: UpdateChangelog | null;
 		updateDownloadStatus?: string | null;
 		remoteAccessActive?: boolean;
@@ -183,7 +183,7 @@ function headerElement(
 				canGoBack={extra?.canGoBack ?? false}
 				canGoForward={extra?.canGoForward ?? false}
 				updateVersion={extra?.updateVersion}
-				updateAnnouncement={extra?.updateAnnouncement}
+				updateReadySignal={extra?.updateReadySignal}
 				updateChangelog={extra?.updateChangelog}
 				updateDownloadStatus={extra?.updateDownloadStatus}
 				remoteAccessActive={extra?.remoteAccessActive ?? false}
@@ -439,9 +439,9 @@ describe("GlobalHeader — project switcher dropdown", () => {
 			updateChangelog: changelog,
 		});
 
-		// The auto-shown toast renders the same list; dismiss it so the queries
+		// The manual-check result toast renders the same list; dismiss it so the queries
 		// below target the dropdown only.
-		await user.click(screen.getByText("Postpone"));
+		await user.click(screen.getByText("Later"));
 		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
 
 		expect(screen.getByText("What's new in v1.38.0")).toBeInTheDocument();
@@ -451,7 +451,7 @@ describe("GlobalHeader — project switcher dropdown", () => {
 		expect(screen.getByText("+3 more features · 4 fixes")).toBeInTheDocument();
 	});
 
-	it("renders the what's-new changelog section in the auto-shown update toast", () => {
+	it("renders the what's-new changelog section in the manual-check result toast", () => {
 		const changelog: UpdateChangelog = {
 			features: ["Terminal scrollback search", "PR review threads in diff"],
 			featureCount: 5,
@@ -462,7 +462,7 @@ describe("GlobalHeader — project switcher dropdown", () => {
 			updateChangelog: changelog,
 		});
 
-		// Toast auto-shows on update-ready (no dropdown click); it must surface the
+		// The result toast shows when the manual download becomes ready; it must surface the
 		// same preview as the dropdown — regression: the toast previously omitted it.
 		expect(screen.getByText("What's new in v1.38.0")).toBeInTheDocument();
 		expect(screen.getByText("Terminal scrollback search")).toBeInTheDocument();
@@ -477,8 +477,8 @@ describe("GlobalHeader — project switcher dropdown", () => {
 			updateChangelog: { features: ["A feature"], featureCount: 1, fixCount: 0 },
 		});
 
-		// Dismiss the auto-shown toast first so "See all changes" is unambiguous.
-		await user.click(screen.getByText("Postpone"));
+		// Dismiss the result toast first so "See all changes" is unambiguous.
+		await user.click(screen.getByText("Later"));
 		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
 		await user.click(screen.getByText(/See all changes/));
 		expect(navigate).toHaveBeenCalledWith({ screen: "changelog" });
@@ -491,8 +491,8 @@ describe("GlobalHeader — project switcher dropdown", () => {
 		});
 		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
 		expect(screen.queryByText("What's new in v1.38.0")).not.toBeInTheDocument();
-		// The dropdown still opened — its restart button (exact, no countdown suffix) is present.
-		expect(screen.getByText("Restart to Update")).toBeInTheDocument();
+		// The dropdown still opened, so both manual restart entry points are present.
+		expect(screen.getAllByText("Restart to Update")).toHaveLength(2);
 	});
 
 	it("toggles dropdown open/close on repeated chevron clicks", async () => {
@@ -604,7 +604,7 @@ describe("GlobalHeader — breadcrumb inline rename", () => {
 	});
 });
 
-describe("GlobalHeader — update countdown", () => {
+describe("GlobalHeader — manual update prompt", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.useFakeTimers();
@@ -617,7 +617,7 @@ describe("GlobalHeader — update countdown", () => {
 		vi.useRealTimers();
 	});
 
-	it("shows countdown on restart button when update is available", () => {
+	it("requires an explicit restart and offers a dismiss action", () => {
 		renderHeader(
 			{ screen: "dashboard" },
 			[project1],
@@ -625,36 +625,12 @@ describe("GlobalHeader — update countdown", () => {
 			[],
 			{ updateVersion: "1.2.3" },
 		);
-		expect(screen.getByText(/Restart to Update \(300s\)/)).toBeInTheDocument();
+		expect(screen.getByText("Restart to Update")).toBeInTheDocument();
+		expect(screen.getByText("Later")).toBeInTheDocument();
+		expect(screen.queryByText(/\(\d+s\)/)).not.toBeInTheDocument();
 	});
 
-	it("decrements countdown every second", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-		expect(screen.getByText(/\(300s\)/)).toBeInTheDocument();
-
-		act(() => { vi.advanceTimersByTime(3000); });
-		expect(screen.getByText(/\(297s\)/)).toBeInTheDocument();
-	});
-
-	it("shows Postpone button instead of Later", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-		expect(screen.getByText("Postpone")).toBeInTheDocument();
-		expect(screen.queryByText("Later")).not.toBeInTheDocument();
-	});
-
-	it("dismisses toast and stops countdown on Postpone click", () => {
+	it("dismisses the one-time prompt on Later click", () => {
 		renderHeader(
 			{ screen: "dashboard" },
 			[project1],
@@ -664,33 +640,33 @@ describe("GlobalHeader — update countdown", () => {
 		);
 		expect(screen.getByText(/Restart to Update/)).toBeInTheDocument();
 
-		act(() => { fireEvent.click(screen.getByText("Postpone")); });
+		act(() => { fireEvent.click(screen.getByText("Later")); });
 
-		// Toast should be dismissed
-		expect(screen.queryByText(/Restart to Update \(\d+s\)/)).not.toBeInTheDocument();
+		expect(screen.queryByText("Restart to Update")).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Version 1\.2\.3 is ready/i })).toBeInTheDocument();
 	});
 
-	it("re-opens the postponed toast when the same version is announced again (issue #1072)", () => {
+	it("shows the prompt again after another explicit check of the same version", () => {
 		const view = render(
 			headerElement({ screen: "dashboard" }, [project1], vi.fn(), [], {
 				updateVersion: "1.2.3",
-				updateAnnouncement: 1,
+				updateReadySignal: 1,
 			}),
 		);
-		act(() => { fireEvent.click(screen.getByText("Postpone")); });
-		expect(screen.queryByText(/Restart to Update \(\d+s\)/)).not.toBeInTheDocument();
+		act(() => { fireEvent.click(screen.getByText("Later")); });
+		expect(screen.queryByText("Restart to Update")).not.toBeInTheDocument();
 
 		view.rerender(
 			headerElement({ screen: "dashboard" }, [project1], vi.fn(), [], {
 				updateVersion: "1.2.3",
-				updateAnnouncement: 2,
+				updateReadySignal: 2,
 			}),
 		);
 
-		expect(screen.getByText(/Restart to Update \(300s\)/)).toBeInTheDocument();
+		expect(screen.getByText("Restart to Update")).toBeInTheDocument();
 	});
 
-	it("auto-restarts when countdown reaches 0", async () => {
+	it("does not restart without an explicit click", async () => {
 		renderHeader(
 			{ screen: "dashboard" },
 			[project1],
@@ -700,10 +676,9 @@ describe("GlobalHeader — update countdown", () => {
 		);
 
 		act(() => { vi.advanceTimersByTime(300_000); });
-		// Flush the async handleRestart (saveLastRoute → applyUpdate)
 		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
-		expect(mockedApi.request.applyUpdate).toHaveBeenCalled();
+		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
 	});
 
 	it("shows an error toast and re-enables restart when applyUpdate fails (issue #813)", async () => {
@@ -716,7 +691,7 @@ describe("GlobalHeader — update countdown", () => {
 			{ updateVersion: "1.2.3" },
 		);
 
-		act(() => { fireEvent.click(screen.getByText(/Restart to Update \(\d+s\)/)); });
+		act(() => { fireEvent.click(screen.getByText("Restart to Update")); });
 		// Flush the async handleRestart (saveLastRoute → applyUpdate rejection)
 		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
@@ -729,7 +704,7 @@ describe("GlobalHeader — update countdown", () => {
 		expect(screen.queryByText("Restarting...")).not.toBeInTheDocument();
 	});
 
-	it("saves current route via RPC before applying update", () => {
+	it("saves current route via RPC before applying update", async () => {
 		renderHeader(
 			{ screen: "project", projectId: "p1" },
 			[project1],
@@ -738,7 +713,8 @@ describe("GlobalHeader — update countdown", () => {
 			{ updateVersion: "1.2.3" },
 		);
 
-		act(() => { vi.advanceTimersByTime(300_000); });
+		act(() => { fireEvent.click(screen.getByText("Restart to Update")); });
+		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
 		expect(mockedApi.request.saveLastRoute).toHaveBeenCalledWith({
 			route: JSON.stringify({ screen: "project", projectId: "p1" }),

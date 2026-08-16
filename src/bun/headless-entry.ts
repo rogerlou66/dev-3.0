@@ -2,7 +2,7 @@
  * Headless entry point for `dev3 remote`.
  *
  * This is a mirror of `src/bun/index.ts` that skips everything GUI-specific
- * (BrowserWindow, ApplicationMenu, Screen, Electrobun.events, auto-update UI).
+ * (BrowserWindow, ApplicationMenu, Screen, Electrobun.events, update UI).
  * The RPC handler surface, PTY server, CLI socket, git pollers, port scanner,
  * and resource monitor are identical — only the shell is replaced by the
  * remote-access HTTP/WS server which any browser can connect to.
