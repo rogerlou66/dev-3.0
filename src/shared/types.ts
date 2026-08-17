@@ -896,10 +896,8 @@ export interface GlobalSettings {
 	theme?: "dark" | "light" | "system";
 	resolvedTheme?: "dark" | "light";
 	/**
-	 * The id PostHog buckets this install by, owned by bun so every renderer —
-	 * desktop window and remote browser alike — reports the same one. Seeded once
-	 * from the desktop renderer's own posthog-js id so existing installs keep
-	 * their person instead of splitting into a second one.
+	 * Retained only so older app versions sharing settings.json keep their stored
+	 * value. Current versions neither create nor read this field.
 	 */
 	analyticsDistinctId?: string;
 	cloneBaseDirectory?: string;
@@ -4076,31 +4074,6 @@ export type AppRPCSchema = {
 				response: void;
 			};
 			/**
-			 * PostHog feature-flag values, pushed by the Electrobun renderer every
-			 * FEATURE_FLAG_REFRESH_MS. The bun process never queries PostHog itself
-			 * and holds the last pushed value — see src/bun/feature-flags.ts.
-			 */
-			setFeatureFlags: {
-				params: { flags: Record<string, boolean> };
-				response: void;
-			};
-			/** Every declared flag with the value bun currently gates code on. */
-			getFeatureFlags: {
-				params: void;
-				response: Record<string, boolean>;
-			};
-			/**
-			 * The install-wide PostHog distinct id. `seed` is the calling renderer's
-			 * own posthog-js id. Adopted when bun has none stored yet, or when the
-			 * caller is `authoritative` — the desktop renderer, whose posthog-js
-			 * identity outlives every attached browser and is the one flags are
-			 * really evaluated against.
-			 */
-			resolveAnalyticsDistinctId: {
-				params: { seed?: string; authoritative?: boolean };
-				response: { distinctId: string };
-			};
-			/**
 			 * Pushed by the renderer whenever the current route changes; the bun
 			 * side uses it to rebuild the native menu so context-aware items
 			 * (task / project / terminal) render disabled when irrelevant.
@@ -4542,8 +4515,6 @@ export type AppRPCSchema = {
 			showQuitDialog: {};
 			/** Open the in-app About modal (replaces the native About message box). */
 			showAbout: { version: string; buildChannel?: string };
-			/** Open the Debug → Feature Flags inspector. */
-			showFeatureFlags: {};
 			/**
 			 * Result of a manual "Check for Updates" menu action, surfaced as a toast.
 			 * `available` updates flow through `updateAvailable` instead (header plaque).

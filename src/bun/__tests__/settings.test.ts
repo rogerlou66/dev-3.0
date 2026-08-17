@@ -215,9 +215,8 @@ describe("saveSettings", () => {
 			expect(loaded[key], `field "${key}" was dropped by loadSettings`).toEqual(full[key]);
 		}
 
-		// Both readers or neither: the sync one used to be a hand-kept twin missing
-		// `analyticsDistinctId`, so the value sat on disk and every synchronous
-		// caller (webview preload, served HTML) got undefined.
+		// The retired analytics id remains readable for older versions sharing this
+		// settings file, and both readers must preserve the same shape.
 		const loadedSync = loadSettingsSync();
 		for (const key of Object.keys(full) as (keyof GlobalSettings)[]) {
 			expect(loadedSync[key], `field "${key}" was dropped by loadSettingsSync`).toEqual(full[key]);

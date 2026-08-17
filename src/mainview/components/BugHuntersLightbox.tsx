@@ -5,7 +5,6 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
 import { useToggleFavorite } from "../hooks/useToggleFavorite";
 import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
-import { trackAgentLaunched, trackEvent } from "../analytics";
 import AgentConfigPicker from "./AgentConfigPicker";
 
 interface BugHuntersLightboxProps {
@@ -79,7 +78,7 @@ function BugHuntersLightbox({ task, project, onClose }: BugHuntersLightboxProps)
 		setLaunching(true);
 		setError(null);
 		try {
-			const result = await api.request.spawnBugHuntersInTask({
+			await api.request.spawnBugHuntersInTask({
 				taskId: task.id,
 				projectId: project.id,
 				agentId,
@@ -87,15 +86,6 @@ function BugHuntersLightbox({ task, project, onClose }: BugHuntersLightboxProps)
 				count,
 				accountId,
 			});
-			trackEvent("bug_hunters_spawned", {
-				project_id: project.id,
-				agent_id: agentId ?? "default",
-				count: result.spawned,
-			});
-			// One launch event per hunter actually spawned (all share the same agent/config).
-			for (let i = 0; i < result.spawned; i++) {
-				trackAgentLaunched(agents, agentId, configId);
-			}
 			onClose();
 		} catch (err) {
 			setError(String(err));

@@ -1,14 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { init } from "ghostty-web";
-import "./posthog";
 import "./index.css";
 import "./rpc";
 import App from "./App";
 import { I18nProvider } from "./i18n";
 import { MobileProvider, detectMobile } from "./hooks/useMobile";
-import { initAnalytics } from "./analytics";
-import { initFeatureFlags } from "./feature-flags";
 import { api, isElectrobun } from "./rpc";
 import { initAutoFullscreen } from "./fullscreen";
 import { initKeyboardLock } from "./keyboard-lock";
@@ -96,9 +93,6 @@ initAutoFullscreen({ mobile: !isElectrobun && detectMobile() });
 // a pure upgrade — everything still works without it. See keyboard-lock.ts.
 initKeyboardLock();
 
-// Start the PostHog feature-flag refresh loop (desktop renderer only)
-initFeatureFlags();
-
 // Load saved terminal scroll speed into cache before terminals mount
 bootstrapScrollSpeed();
 
@@ -124,22 +118,19 @@ async function bootstrap() {
 		});
 	}
 
-	// Initialize Google Analytics with app version.
-	// Await with a 5s timeout so desktop IPC stays sequential (avoids
-	// Electrobun message loss under burst) while mobile/browser doesn't
-	// block forever if WS isn't connected.
+	// Resolve the build identity before rendering so the window title is correct.
+	// Await with a 5s timeout so desktop IPC stays sequential while remote/browser
+	// mode does not block forever if its WebSocket is unavailable.
 	try {
 		const { version, buildChannel } = await Promise.race([
 			api.request.getAppVersion(),
 			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
 		]);
-		initAnalytics(version);
 		// Non-stable channels get a visible prefix so the window is unmistakable next to
 		// an installed stable one — shared with the native window title.
 		document.title = `${buildChannelTitlePrefix(buildChannel)}dev-3.0 v${version}`;
 	} catch (err) {
-		console.warn("[main] Failed to init analytics:", err);
-		initAnalytics("unknown");
+		console.warn("[main] Failed to read app version:", err);
 		document.title = "dev-3.0";
 	}
 

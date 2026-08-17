@@ -36,10 +36,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-}));
-
 vi.mock("../../toast", () => ({
 	toast: {
 		error: vi.fn(),

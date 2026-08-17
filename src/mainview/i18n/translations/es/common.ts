@@ -57,27 +57,6 @@ const common = {
 	"about.website": "Sitio web",
 	"about.close": "Cerrar",
 
-	// Debug -> Feature Flags (developer inspector)
-	"featureFlags.title": "Feature flags",
-	"featureFlags.effectiveHint": "Valores por los que la app decide el código ahora mismo.",
-	"featureFlags.loading": "Leyendo…",
-	"featureFlags.empty": "No hay flags declarados.",
-	"featureFlags.emptyHint": "Añade uno a FEATURE_FLAGS en src/shared/feature-flags.ts y créalo en PostHog con la misma clave.",
-	"featureFlags.on": "Activo",
-	"featureFlags.off": "Inactivo",
-	"featureFlags.distinctIdLabel": "PostHog distinct ID — apunta un despliegue a esta instalación",
-	"featureFlags.distinctIdMissing": "PostHog no está configurado",
-	"featureFlags.copy": "Copiar",
-	"featureFlags.copied": "Copiado",
-	"featureFlags.cadence": "Se actualiza cada {minutes} min aprox. PostHog no tiene canal push, así que ese es también el peor caso para que llegue un cambio.",
-	"featureFlags.refreshNow": "Actualizar ahora",
-	"featureFlags.refreshing": "Consultando a PostHog…",
-	"featureFlags.refreshed": "Valores actualizados",
-	"featureFlags.refreshFailed": "PostHog no respondió",
-	"featureFlags.idMismatch": "El host guardó otro id ({stored}). Apunta al de arriba: es el que se usa para evaluar los flags.",
-	"featureFlags.noClient": "Esta compilación no tiene clave de PostHog, así que ningún flag se evaluará nunca: arriba están los valores por defecto. El id de abajo es el que guardó el host.",
-	"featureFlags.close": "Cerrar",
-
 	// Generic
 	"toast.source.menu": "Menú",
 	"toast.source.settings": "Ajustes",

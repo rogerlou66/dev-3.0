@@ -17,8 +17,6 @@ import { DEV3_HOME } from "../paths";
 import { isFreshStartMode } from "../fresh-start";
 import { spawn } from "../spawn";
 import { setCurrentUiTheme } from "../theme-state";
-import { getAllFeatureFlags, setFeatureFlags as cacheFeatureFlags } from "../feature-flags";
-import { resolveAnalyticsDistinctId as resolveDistinctId } from "../analytics-identity";
 import { extractConfigFromParams, getPushMessage, getSystemRequirements, log, resolveBinaryPath, setFocusMode } from "./shared";
 import { binaryCandidatesOnPath, hasModelProviderSection, tmuxSearchPaths } from "./shared-pure";
 import { agentBinaryPathOverride, isExecutableFile } from "../executable";
@@ -160,10 +158,8 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	if (Object.prototype.hasOwnProperty.call(params, "focusMode")) {
 		setFocusMode(params.focusMode === true);
 	}
-	// The renderer sends its whole snapshot, taken when it loaded. Anything the host
-	// owns and the renderer never edits must survive that: the analytics identity was
-	// minted after the snapshot was taken, so trusting the payload erased it on every
-	// settings change and the install got a new id on every launch.
+	// Preserve the retired analytics id solely for N-2 on-disk compatibility with
+	// older installed versions that still read the shared settings file.
 	const stored = await loadSettings();
 	const next: GlobalSettings = { ...params, analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId };
 	await saveSettings(next);
@@ -458,30 +454,8 @@ async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dar
 	await pty.applyTmuxTheme(params.theme);
 }
 
-/**
- * Cache PostHog flag values evaluated by the renderer. Fire-and-forget: the hot
- * paths that read them (e.g. enqueuePtyData) do a synchronous cached lookup.
- */
-async function setFeatureFlags(params: { flags: Record<string, boolean> }): Promise<void> {
-	log.debug("→ setFeatureFlags", params.flags);
-	cacheFeatureFlags(params.flags);
-}
-
-/** Read side for Debug -> Feature Flags: what bun actually gates code on. */
-async function getFeatureFlags(): Promise<Record<string, boolean>> {
-	return getAllFeatureFlags();
-}
-
-/** One distinct id per install; the desktop renderer's identity wins (see analytics-identity). */
-async function resolveAnalyticsDistinctId(params: { seed?: string; authoritative?: boolean }): Promise<{ distinctId: string }> {
-	return { distinctId: await resolveDistinctId(params?.seed, { authoritative: params?.authoritative }) };
-}
-
 export const settingsConfigHandlers = {
 	getResolvedProject,
-	setFeatureFlags,
-	getFeatureFlags,
-	resolveAnalyticsDistinctId,
 	getProjectConfigs,
 	getProjectConfigFiles,
 	updateProjectSettings,

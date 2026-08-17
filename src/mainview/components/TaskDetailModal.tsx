@@ -19,7 +19,6 @@ import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
 import { getStatusLabel } from "../utils/statusLabel";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
-import { trackEvent, agentNameFromId } from "../analytics";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import { useClipboardPaste } from "../hooks/useClipboardPaste";
 import { useFileDrop } from "../hooks/useFileDrop";
@@ -140,7 +139,6 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 				description: trimmed,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_edited", { project_id: project.id });
 			setIsEditing(false);
 		} catch (err) {
 			toast.error(t("task.failedEdit", { error: String(err) }), { taskId: task.id });
@@ -168,7 +166,6 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 				customTitle: trimmed,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_renamed", { project_id: project.id });
 			setIsRenaming(false);
 		} catch (err) {
 			toast.error(t("task.failedRename", { error: String(err) }), { taskId: task.id });
@@ -222,7 +219,6 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 				customColumnId,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_moved", { from_status: task.status, to_status: `custom:${customColumnId}`, agent_name: agentNameFromId(task.agentId) });
 			onClose();
 		} catch (err) {
 			toast.error(t("task.failedMove", { error: String(err) }), { taskId: task.id });
@@ -263,7 +259,6 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 		try {
 			await api.request.deleteTask({ taskId: task.id, projectId: project.id });
 			dispatch({ type: "removeTask", taskId: task.id });
-			trackEvent("task_deleted", { project_id: project.id });
 			onClose();
 		} catch (err) {
 			toast.error(t("task.failedDelete", { error: String(err) }), { taskId: task.id });
@@ -281,7 +276,6 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 				toProjectId: target.id,
 			});
 			dispatch({ type: "removeTask", taskId: task.id });
-			trackEvent("task_moved_to_project", { from_project_id: project.id, to_project_id: target.id });
 			toast.success(t("task.movedToProject", { project: target.name }));
 			onClose();
 		} catch (err) {

@@ -3,7 +3,6 @@ import type { Task, Project, TaskSessionState } from "../../shared/types";
 import { getTaskOpenMode, taskClosedHomeRoute, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
-import { trackEvent } from "../analytics";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import TerminalView from "../TerminalView";
 import type { TerminalHandle } from "../TerminalView";
@@ -371,7 +370,6 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		try {
 			const url = await api.request.resumeTask({ taskId });
 			setPtyUrl(url);
-			trackEvent("session_recovered", { action: "resume" });
 		} catch (err) {
 			console.error("[TaskTerminal] Resume session failed:", err);
 			await classifyAndSetError();
@@ -387,7 +385,6 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		try {
 			const url = await api.request.restartTask({ taskId });
 			setPtyUrl(url);
-			trackEvent("session_recovered", { action: "fresh" });
 		} catch (err) {
 			console.error("[TaskTerminal] Start fresh failed:", err);
 			await classifyAndSetError();

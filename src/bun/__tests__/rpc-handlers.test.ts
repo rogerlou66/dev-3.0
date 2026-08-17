@@ -1791,19 +1791,19 @@ describe("handlers.saveGlobalSettings", () => {
 		expect(push).toHaveBeenCalledWith("globalSettingsUpdated", settings);
 	});
 
-	// The renderer sends a whole snapshot taken when it loaded, and the analytics id
+	// The renderer sends a whole snapshot taken when it loaded, and the legacy id
 	// is minted by the host afterwards — trusting the payload erased it, so the
 	// install got a fresh id (and lost its flag targeting) on every launch.
-	it("keeps the stored analytics id when the renderer's snapshot predates it", async () => {
+	it("keeps the stored legacy id when the renderer's snapshot predates it", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({
 			updateChannel: "stable",
-			analyticsDistinctId: "id-minted-after-the-snapshot",
+			analyticsDistinctId: "legacy-analytics-id",
 		} as GlobalSettings);
 
 		await handlers.saveGlobalSettings({ updateChannel: "beta" } as unknown as GlobalSettings);
 
 		expect(saveSettings).toHaveBeenCalledWith(
-			expect.objectContaining({ updateChannel: "beta", analyticsDistinctId: "id-minted-after-the-snapshot" }),
+			expect.objectContaining({ updateChannel: "beta", analyticsDistinctId: "legacy-analytics-id" }),
 		);
 	});
 

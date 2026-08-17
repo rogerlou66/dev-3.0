@@ -23,11 +23,6 @@ vi.mock("../../rpc", () => ({
 	isElectrobun: false,
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
-
 vi.mock("../../TerminalView", () => ({
 	default: ({ ptyUrl, onReady }: { ptyUrl: string; onReady?: (h: unknown) => void }) => {
 		if (onReady) {
@@ -52,10 +47,8 @@ function setTouchDevice(isTouch: boolean) {
 }
 
 import { api } from "../../rpc";
-import { trackEvent } from "../../analytics";
 
 const mockedApi = vi.mocked(api, true);
-const mockedTrackEvent = vi.mocked(trackEvent);
 
 // ---- Fixtures ----
 
@@ -180,11 +173,6 @@ describe("TaskTerminal", () => {
 			expect(movedAtMs).toBeGreaterThan(Date.now() - 5000);
 
 			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1", taskView: true });
-			expect(mockedTrackEvent).toHaveBeenCalledWith("task_moved", {
-				from_status: "in-progress",
-				to_status: "completed",
-				agent_name: "unknown",
-			});
 		});
 
 		it("sets movedAt when cancelling task from error screen", async () => {

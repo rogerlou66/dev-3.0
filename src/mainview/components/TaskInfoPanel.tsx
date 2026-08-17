@@ -14,7 +14,6 @@ import { api } from "../rpc";
 import { useT } from "../i18n";
 import { formatBytes } from "../utils/formatBytes";
 import { getStatusLabel } from "../utils/statusLabel";
-import { trackEvent, agentNameFromId } from "../analytics";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { ImageAttachmentsStrip } from "./ImageAttachmentsStrip";
 import PipelineRing, { CompleteCheckIcon } from "./PipelineRing";
@@ -411,7 +410,6 @@ function TaskInfoPanel({
 				customColumnId,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_moved", { from_status: task.status, to_status: `custom:${customColumnId}`, agent_name: agentNameFromId(task.agentId) });
 		} catch (err) {
 			toast.error(t("task.failedMove", { error: String(err) }), { taskId: task.id });
 		}

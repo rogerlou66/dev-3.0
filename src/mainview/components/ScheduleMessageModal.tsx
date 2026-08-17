@@ -11,7 +11,6 @@ import type { AppAction } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
-import { trackEvent } from "../analytics";
 import SchedulePicker from "./SchedulePicker";
 
 interface ScheduleMessageModalProps {
@@ -109,11 +108,6 @@ function ScheduleMessageModal({ task, project, dispatch, onClose, initialText }:
 				target,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("scheduled_message_created", {
-				project_id: project.id,
-				delay_ms: scheduleTarget.getTime() - Date.now(),
-				target_kind: target.kind,
-			});
 			onClose();
 		} catch (err) {
 			setError(String(err));

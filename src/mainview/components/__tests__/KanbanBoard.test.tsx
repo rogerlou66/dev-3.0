@@ -28,8 +28,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({ trackEvent: vi.fn(), agentNameFromId: vi.fn(() => "unknown") }));
-
 vi.mock("../../toast", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 
 const project: Project = {

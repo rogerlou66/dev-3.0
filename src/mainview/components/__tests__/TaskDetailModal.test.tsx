@@ -28,11 +28,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
-
 vi.mock("../../confirm", () => ({
 	confirm: vi.fn(() => Promise.resolve(true)),
 }));

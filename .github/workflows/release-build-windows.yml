@@ -113,9 +113,6 @@ jobs:
       # hardcoded `canary`. electrobun's own postBuild/postPackage hooks assemble and re-verify
       # the native terminal host image out of the final archive from here.
       - name: Build release
-        env:
-          VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
-          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
         run: |
           bun scripts/generate-build-info.ts
           bun scripts/generate-changelog.ts

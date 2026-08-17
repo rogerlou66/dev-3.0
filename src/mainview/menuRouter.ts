@@ -108,9 +108,6 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 			return;
 
 		// ── Debug screens (browser equivalents of the bun navigate-to-* pushes) ──
-		case "feature-flags":
-			window.dispatchEvent(new CustomEvent("rpc:showFeatureFlags"));
-			return;
 		case "gauge-demo":
 			navigate(ctx, { screen: "gauge-demo" });
 			return;
@@ -446,7 +443,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"about", "hard-refresh",
 	// View / navigation
 	"view-dashboard", "view-kanban", "view-changelog", "view-stats", "open-settings",
-	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview", "feature-flags",
+	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview",
 	"debug-play-sound-completed", "debug-play-sound-cancelled", "debug-push-sound-completed",
 	"open-new-task", "open-add-project", "open-project-switch", "open-command-palette",
 	// Project

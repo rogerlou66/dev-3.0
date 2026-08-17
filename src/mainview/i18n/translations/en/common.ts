@@ -57,27 +57,6 @@ const common = {
 	"about.website": "Website",
 	"about.close": "Close",
 
-	// Debug -> Feature Flags (developer inspector)
-	"featureFlags.title": "Feature flags",
-	"featureFlags.effectiveHint": "Values the app is gating code on right now.",
-	"featureFlags.loading": "Reading…",
-	"featureFlags.empty": "No flags are declared.",
-	"featureFlags.emptyHint": "Add one to FEATURE_FLAGS in src/shared/feature-flags.ts, then create it in PostHog under the same key.",
-	"featureFlags.on": "On",
-	"featureFlags.off": "Off",
-	"featureFlags.distinctIdLabel": "PostHog distinct ID — target a rollout at this install",
-	"featureFlags.distinctIdMissing": "PostHog is not configured",
-	"featureFlags.copy": "Copy",
-	"featureFlags.copied": "Copied",
-	"featureFlags.cadence": "Refreshed about every {minutes} min. PostHog has no push channel, so that is also the worst case for a change to arrive.",
-	"featureFlags.refreshNow": "Refresh now",
-	"featureFlags.refreshing": "Asking PostHog…",
-	"featureFlags.refreshed": "Values updated",
-	"featureFlags.refreshFailed": "No answer from PostHog",
-	"featureFlags.idMismatch": "The host stored a different id ({stored}). Target the one above — it is the one flags are evaluated against.",
-	"featureFlags.noClient": "This build has no PostHog key, so no flag will ever evaluate — the values above are the shipped defaults. The id below is the one the host stored.",
-	"featureFlags.close": "Close",
-
 	// Generic
 	"toast.source.menu": "Menu",
 	"toast.source.settings": "Settings",
@@ -327,4 +306,3 @@ const common = {
 } as const;
 
 export default common;
-

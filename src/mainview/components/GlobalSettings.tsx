@@ -29,7 +29,6 @@ import { getInitialThemeState, getWindowInjectedThemeState } from "../theme-boot
 import { getZoom, ZOOM_CHANGED_EVENT } from "../zoom";
 import { getScrollSpeed, SCROLL_SPEED_CHANGED_EVENT } from "../scroll-speed";
 import { setShortcutOverrides } from "../keymap-store";
-import { trackEvent } from "../analytics";
 import { confirm } from "../confirm";
 import type { UpdateChannel } from "../../shared/update-channel";
 import AdvancedExperienceSection from "./global-settings/AdvancedExperienceSection";
@@ -70,13 +69,6 @@ type GlobalSettingsUpdater = (
 
 interface PersistOptions {
 	onLocalUpdate?: (next: GlobalSettingsType) => void;
-}
-
-interface SettingChangeOptions extends PersistOptions {
-	tracking?: {
-		setting: string;
-		value: string;
-	};
 }
 
 function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
@@ -170,11 +162,8 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	);
 
 	const persistSettingChange = useCallback(
-		(patch: Partial<GlobalSettingsType>, options: SettingChangeOptions = {}) => {
+		(patch: Partial<GlobalSettingsType>, options: PersistOptions = {}) => {
 			persistGlobalSettingsPatch(patch, options);
-			if (options.tracking) {
-				trackEvent("settings_changed", options.tracking);
-			}
 		},
 		[persistGlobalSettingsPatch],
 	);
@@ -255,15 +244,11 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		document.documentElement.dataset.theme = resolvedTheme;
 		localStorage.setItem("dev3-theme", nextTheme);
 		api.request.setTmuxTheme({ theme: resolvedTheme, preference: nextTheme }).catch(() => {});
-		trackEvent("theme_changed", { theme: nextTheme });
 	}, []);
 
 	const handleTaskSortOrderChange = useCallback(
 		(order: GlobalSettingsType["taskSortOrder"]) => {
-			persistSettingChange(
-				{ taskSortOrder: order },
-				{ tracking: { setting: "task_sort_order", value: order } },
-			);
+			persistSettingChange({ taskSortOrder: order });
 		},
 		[persistSettingChange],
 	);
@@ -283,15 +268,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 				),
 			});
 			if (!ok) return;
-			persistSettingChange(
-				{ updateChannel: channel },
-				{
-					tracking: {
-						setting: "update_channel",
-						value: channel,
-					},
-				},
-			);
+			persistSettingChange({ updateChannel: channel });
 		},
 		[persistSettingChange, t],
 	);
@@ -311,7 +288,6 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		(backend: TerminalBackendIdentity) => {
 			setNewTaskTerminalBackend(backend);
 			api.request.setNewTaskTerminalBackend({ backend }).catch(() => {});
-			trackEvent("settings_changed", { setting: "new_task_terminal_backend", value: backend });
 		},
 		[],
 	);
@@ -325,15 +301,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 
 	const handleWatchByDefaultToggle = useCallback(
 		(enabled: boolean) => {
-			persistSettingChange(
-				{ watchByDefault: enabled },
-				{
-					tracking: {
-						setting: "watch_by_default",
-						value: String(enabled),
-					},
-				},
-			);
+			persistSettingChange({ watchByDefault: enabled });
 		},
 		[persistSettingChange],
 	);
@@ -389,10 +357,6 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							localStorage.removeItem("dev3-task-open-mode");
 						}
 					},
-					tracking: {
-						setting: "task_open_mode",
-						value: mode,
-					},
 				},
 			);
 		},
@@ -401,30 +365,14 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 
 	const handleDefaultDiffViewModeChange = useCallback(
 		(mode: "split" | "unified" | "auto") => {
-			persistSettingChange(
-				{ defaultDiffViewMode: toStoredDiffViewMode(mode) },
-				{
-					tracking: {
-						setting: "default_diff_view_mode",
-						value: mode,
-					},
-				},
-			);
+			persistSettingChange({ defaultDiffViewMode: toStoredDiffViewMode(mode) });
 		},
 		[persistSettingChange],
 	);
 
 	const handleTerminalPathOpenModeChange = useCallback(
 		(mode: TerminalPathOpenMode) => {
-			persistSettingChange(
-				{ terminalPathOpenMode: mode },
-				{
-					tracking: {
-						setting: "terminal_path_open_mode",
-						value: mode,
-					},
-				},
-			);
+			persistSettingChange({ terminalPathOpenMode: mode });
 		},
 		[persistSettingChange],
 	);
@@ -459,25 +407,14 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 
 	const handleTerminalBidiToggle = useCallback(
 		(enabled: boolean) => {
-			persistSettingChange(
-				{ experimentalTerminalBidi: enabled ? true : undefined },
-				{
-					tracking: {
-						setting: "experimental_terminal_bidi",
-						value: String(enabled),
-					},
-				},
-			);
+			persistSettingChange({ experimentalTerminalBidi: enabled ? true : undefined });
 		},
 		[persistSettingChange],
 	);
 
 	const handlePxpipeProxyToggle = useCallback(
 		(enabled: boolean) => {
-			persistSettingChange(
-				{ pxpipeProxyEnabled: enabled ? true : undefined },
-				{ tracking: { setting: "pxpipe_proxy_enabled", value: String(enabled) } },
-			);
+			persistSettingChange({ pxpipeProxyEnabled: enabled ? true : undefined });
 		},
 		[persistSettingChange],
 	);
@@ -622,7 +559,6 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 
 	const handleLocaleChange = useCallback((nextLocale: "en" | "ru" | "es") => {
 		setLocale(nextLocale);
-		trackEvent("locale_changed", { locale: nextLocale });
 	}, [setLocale]);
 
 	const handleInstallDev3Cli = useCallback(async () => {

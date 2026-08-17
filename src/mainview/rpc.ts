@@ -104,7 +104,6 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	menuAction: (payload) => window.dispatchEvent(new CustomEvent("rpc:menuAction", { detail: payload })),
 	showQuitDialog: () => window.dispatchEvent(new CustomEvent("rpc:showQuitDialog")),
 	showAbout: (payload) => window.dispatchEvent(new CustomEvent("rpc:showAbout", { detail: payload })),
-	showFeatureFlags: () => window.dispatchEvent(new CustomEvent("rpc:showFeatureFlags")),
 	updateCheckOutcome: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateCheckOutcome", { detail: payload })),
 };
 
@@ -138,7 +137,7 @@ const RPC_TIMEOUT_MS = 120_000;
 // Wrap api.request to enrich timeout errors with the method name.
 // Electrobun rejects with a generic "RPC request timed out." — no indication
 // of which method failed.  This proxy catches that and re-throws with context
-// so the unhandled-rejection tracker (analytics.ts) and console show something
+// so the diagnostics boundary and console show something
 // actionable like: 'RPC "getBranchStatus" timed out (120 000 ms)'.
 function enrichRequest(rawRequest: RequestProxy): RequestProxy {
 	return new Proxy(rawRequest, {

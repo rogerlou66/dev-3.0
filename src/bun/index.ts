@@ -14,7 +14,6 @@ import {
 	isUpdateAlreadyReady,
 } from "./updater";
 import { loadSettings, loadSettingsSync } from "./settings";
-import { distinctIdBootstrapScript } from "./analytics-identity";
 import { shouldAutoOpenDevTools } from "./devtools-auto-open";
 import { installSignalQuitConfirmation, isQuitConfirmed, markQuitConfirmed, markQuitDialogPending } from "./quit-manager";
 import { initNativeNotifications } from "./native-notifications";
@@ -325,7 +324,7 @@ log.info("CLI socket server ready", { path: cliSocketPath });
 }
 
 // Side-effect: starts the PTY WebSocket server (dynamic import so PATH is patched first)
-const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds, getPtyPort, registerBackpressureProbe } = await import("./pty-server");
+const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds, getPtyPort } = await import("./pty-server");
 const { startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
 const { startResourceMonitor, stopResourceMonitor } = await import("./resource-monitor");
 const { startRateLimitMonitor, stopRateLimitMonitor } = await import("./rate-limit-monitor");
@@ -426,9 +425,6 @@ async function openMainWindow() {
 		title: makeTitle(APP_VERSION, lastBuildTime, buildChannel),
 		url,
 		handlers: handlers as unknown as Record<string, (...args: unknown[]) => unknown>,
-		// One analytics identity per install: hand it over before posthog-js boots,
-		// or the renderer mints its own and flag targeting aims at the wrong id.
-		preload: distinctIdBootstrapScript(),
 		onDomReady: async (win) => {
 			// dom-ready is the readiness contract: it only fires once a webview
 			// actually rendered, so it is the one signal that proves a renderer.
@@ -491,7 +487,6 @@ await startRemoteAccessServer({
 		return await handler(params);
 	},
 	getPtyPort,
-	registerBackpressureProbe,
 	onQrTokenConsumed: () => {
 		getPushMessage()?.("qrTokenConsumed", {});
 	},
@@ -877,8 +872,6 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 	if (e.data.action === MENU_ACTIONS.hardRefresh) {
 		log.info("Hard refresh — navigating to home page");
 		focused?.webview.loadURL(url);
-	} else if (e.data.action === MENU_ACTIONS.featureFlags) {
-		sendToFocusedWindow("showFeatureFlags", {});
 	} else if (e.data.action === MENU_ACTIONS.about) {
 		// The channel BAKED INTO THE BUNDLE, not the one selected in Settings: About answers
 		// "which build am I running", and those two disagree for as long as a switch is

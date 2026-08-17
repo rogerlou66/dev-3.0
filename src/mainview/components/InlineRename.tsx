@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { toast } from "../toast";
 import { api } from "../rpc";
-import { trackEvent } from "../analytics";
 import { useT } from "../i18n";
 import type { Dispatch } from "react";
 import type { AppAction } from "../state";
@@ -56,7 +55,6 @@ export default function InlineRename({
 		try {
 			const updated = await api.request.renameTask({ taskId, projectId, customTitle: trimmed });
 			if (dispatch) dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_renamed", { project_id: projectId });
 			setEditing(false);
 		} catch (err) {
 			toast.error(t("task.failedRename", { error: String(err) }), { taskId });

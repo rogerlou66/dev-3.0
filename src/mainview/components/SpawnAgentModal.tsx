@@ -7,7 +7,6 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
 import { useToggleFavorite } from "../hooks/useToggleFavorite";
 import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
-import { trackAgentLaunched, trackEvent } from "../analytics";
 import AgentConfigPicker from "./AgentConfigPicker";
 import AgentPickerSkeleton from "./AgentPickerSkeleton";
 import MemoryPressureBanner from "./MemoryPressureBanner";
@@ -110,8 +109,6 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 				configId,
 				accountId,
 			});
-			trackEvent("spawn_extra_agent", { project_id: project.id, agent_id: agentId ?? "default" });
-			trackAgentLaunched(agents, agentId, configId);
 			spawnedRef.current = true;
 			// The terminal holds this until the new pane is attachable, then types
 			// straight into it — the user's next keystroke is the agent's prompt.

@@ -6,7 +6,6 @@ import type { AppAction, Route } from "../state";
 import { api } from "../rpc";
 import { confirm } from "../confirm";
 import { useT } from "../i18n";
-import { trackEvent } from "../analytics";
 import ActivityOverview from "./ActivityOverview";
 
 interface DashboardProps {
@@ -31,7 +30,6 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject 
 		try {
 			await api.request.removeProject({ projectId });
 			dispatch({ type: "removeProject", projectId });
-			trackEvent("project_removed", { project_id: projectId });
 		} catch (err) {
 			toast.error(t("dashboard.failedRemove", { error: String(err) }), { projectId });
 		}
@@ -46,7 +44,6 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject 
 			// boards (Operations) so they are not wiped from state on confirmation.
 			const virtuals = previousProjects.filter((p) => p.kind === "virtual");
 			dispatch({ type: "setProjects", projects: orderProjectsForDisplay([...reordered, ...virtuals]) });
-			trackEvent("projects_reordered", { project_count: projectIds.length });
 		} catch (err) {
 			dispatch({ type: "setProjects", projects: previousProjects });
 			toast.error(t("dashboard.failedReorder", { error: String(err) }), { source: "dashboard" });

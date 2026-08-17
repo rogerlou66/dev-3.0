@@ -395,7 +395,7 @@ export const SETTINGS_ENTRIES = [
 /** GlobalSettings fields intentionally kept outside the visible settings registry. */
 export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"resolvedTheme",
-	// Machine identity for analytics, not a preference — read-only in Debug -> Feature Flags.
+	// Retired field preserved for older versions sharing settings.json.
 	"analyticsDistinctId",
 	"customBinaryPaths",
 	"agentBinaryPaths",

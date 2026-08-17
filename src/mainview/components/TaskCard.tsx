@@ -10,7 +10,6 @@ import { useT } from "../i18n";
 import type { TranslationKey } from "../i18n";
 import { formatBytes } from "../utils/formatBytes";
 import { formatCountdown } from "../../shared/duration";
-import { trackEvent, agentNameFromId } from "../analytics";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { useTerminalPreview } from "../hooks/useTerminalPreview";
 import { useIsTruncated } from "../hooks/useIsTruncated";
@@ -264,7 +263,6 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				customColumnId,
 			});
 			dispatch({ type: "updateTask", task: updated });
-			trackEvent("task_moved", { from_status: task.status, to_status: `custom:${customColumnId}`, agent_name: agentNameFromId(task.agentId) });
 		} catch (err) {
 			toast.error(t("task.failedMove", { error: String(err) }), { taskId: task.id });
 		}
@@ -286,7 +284,6 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				projectId: project.id,
 			});
 			dispatch({ type: "removeTask", taskId: task.id });
-			trackEvent("task_deleted", { project_id: project.id });
 		} catch (err) {
 			toast.error(t("task.failedDelete", { error: String(err) }), { taskId: task.id });
 		}

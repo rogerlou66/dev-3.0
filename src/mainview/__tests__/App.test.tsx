@@ -67,13 +67,6 @@ vi.mock("../rpc", () => ({
 	},
 }));
 
-vi.mock("../analytics", () => ({
-	trackPageView: vi.fn(),
-	trackEvent: vi.fn(),
-	registerAgents: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
-
 vi.mock("../zoom", () => ({
 	adjustZoom: vi.fn(),
 	applyZoom: vi.fn(),

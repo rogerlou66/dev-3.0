@@ -89,8 +89,7 @@ function resolveDefaultConfigId(stored: unknown): string {
  * Shape the raw file into `GlobalSettings`.
  *
  * One function for both loaders on purpose: they used to be hand-kept twins, and
- * the sync one silently lacked `analyticsDistinctId` — so the value existed on
- * disk, the async reader saw it, and every synchronous reader got `undefined`.
+ * the sync one once differed from the async shape.
  */
 function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -102,7 +101,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		updateChannel: coerceUpdateChannel(d.updateChannel, hostPublishesCanary()),
 		theme: d.theme === "light" || d.theme === "system" || d.theme === "dark" ? d.theme : undefined,
 		resolvedTheme: d.resolvedTheme === "light" || d.resolvedTheme === "dark" ? d.resolvedTheme : undefined,
-		// Machine identity for analytics — opaque string, never regenerated on load.
+		// Preserve the retired analytics id for older versions sharing settings.json.
 		analyticsDistinctId: typeof d.analyticsDistinctId === "string" && d.analyticsDistinctId
 			? d.analyticsDistinctId
 			: undefined,

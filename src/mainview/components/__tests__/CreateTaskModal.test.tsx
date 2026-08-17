@@ -30,10 +30,6 @@ vi.mock("../../rpc", () => ({
 	isElectrobun: false,
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-}));
-
 import { api } from "../../rpc";
 
 const mockedApi = vi.mocked(api, true);

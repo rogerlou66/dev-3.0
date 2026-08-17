@@ -10,10 +10,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-}));
-
 import { parseForkRef, parsePrUrl, normalizeBranchQuery, matchesBranchQuery, splitBranchWords, sortBranchesForDisplay } from "../BranchSelector";
 
 // ─── parsePrUrl ──────────────────────────────────────────────────────────────

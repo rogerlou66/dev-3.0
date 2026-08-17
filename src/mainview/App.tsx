@@ -8,9 +8,8 @@ import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import { trackPageView, trackEvent, registerAgents } from "./analytics";
 import type { AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
-import { orderProjectsForDisplay, taskSeqLabel, getTaskTitle } from "../shared/types";
+import { orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { isRemote } from "./utils/platform";
@@ -49,7 +48,6 @@ import RemoteAccessExposedPorts from "./components/RemoteAccessExposedPorts";
 import { ConfirmHost, confirm } from "./confirm";
 import AgentLaunchRequestModal from "./components/AgentLaunchRequestModal";
 import AboutModal from "./components/AboutModal";
-import FeatureFlagsModal from "./components/FeatureFlagsModal";
 import FilePreviewModal from "./components/FilePreviewModal";
 import { OPEN_FILE_PREVIEW_EVENT, type OpenFilePreviewDetail } from "./terminal-path-open";
 import RosettaWarningModal from "./components/RosettaWarningModal";
@@ -286,7 +284,6 @@ function App() {
 	const [aboutVersion, setAboutVersion] = useState<string | null>(null);
 	/** The channel baked into the running bundle — what tells a canary install from the release. */
 	const [aboutBuildChannel, setAboutBuildChannel] = useState<string | null>(null);
-	const [showFeatureFlags, setShowFeatureFlags] = useState(false);
 
 	// Silent update indicator
 	const [updateVersion, setUpdateVersion] = useState<string | null>(null);
@@ -1618,7 +1615,6 @@ function App() {
 						} as any,
 					});
 					dispatch({ type: "clearBell", taskId });
-					trackEvent("task_moved", { from_status: "review-by-user", to_status: "completed" });
 					api.request.moveTask({
 						taskId,
 						projectId,
@@ -1707,7 +1703,6 @@ function App() {
 				const dest = routeAfterTaskClosed(routeRef.current, taskId, openMode);
 				if (dest) navigate(dest);
 				dispatch({ type: "clearBell", taskId });
-				trackEvent("task_moved", { to_status: "completed", agent_requested: true });
 			}
 			api.request.respondToAgentCompletionRequest({ requestId, approved }).catch((err) =>
 				console.error("respondToAgentCompletionRequest failed:", err),
@@ -1747,7 +1742,6 @@ function App() {
 		launch?: { agentId: string | null; configId: string | null; accountId?: string | null },
 	) => {
 		setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
-		if (approved) trackEvent("task_moved", { to_status: "in-progress", agent_requested: true });
 		api.request.respondToAgentLaunchRequest({
 			requestId,
 			approved,
@@ -1777,15 +1771,6 @@ function App() {
 		}
 		window.addEventListener("rpc:showAbout", onShowAbout);
 		return () => window.removeEventListener("rpc:showAbout", onShowAbout);
-	}, []);
-
-	// Debug -> Feature Flags: a read-only look at what the app is gating code on.
-	useEffect(() => {
-		function onShowFeatureFlags() {
-			setShowFeatureFlags(true);
-		}
-		window.addEventListener("rpc:showFeatureFlags", onShowFeatureFlags);
-		return () => window.removeEventListener("rpc:showFeatureFlags", onShowFeatureFlags);
 	}, []);
 
 	// Surface the result of a manual "Check for Updates" menu action as a toast.
@@ -2053,12 +2038,6 @@ function App() {
 			});
 	}, [agentSettingsLoaded, createTaskProjectId]);
 
-	// Register agents with analytics on mount so events like `task_moved` can
-	// carry a human-readable agent name (the modal load above is lazy).
-	useEffect(() => {
-		api.request.getAgents().then(registerAgents).catch(() => {});
-	}, []);
-
 	useEffect(() => {
 		function onOpenAddProjectModal() {
 			openAddProject();
@@ -2189,16 +2168,6 @@ function App() {
 		}, 1000);
 		return () => clearInterval(tick);
 	}, [applyRemoteQR, qrModalOpen]);
-
-	// Track page views on route changes. Resolve the task's human-readable seq id
-	// (e.g. "981-1") from the loaded task list so analytics paths carry the task
-	// number, not the opaque hash; falls back to the raw id if not yet loaded.
-	useEffect(() => {
-		const taskId = routeTaskId(state.route);
-		const task = taskId ? state.currentProjectTasks.find((t) => t.id === taskId) : undefined;
-		trackPageView(state.route, task ? taskSeqLabel(task) : undefined);
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per navigation; task list read at that moment
-	}, [state.route]);
 
 	// Escape: close quit dialog or navigate back from settings screens
 	// (skipped when a terminal has focus — Escape must reach the shell)
@@ -2819,7 +2788,6 @@ function App() {
 					onClose={() => setAboutVersion(null)}
 				/>
 			)}
-			{showFeatureFlags && <FeatureFlagsModal onClose={() => setShowFeatureFlags(false)} />}
 			{rosettaWarning && (
 				<RosettaWarningModal
 					command={rosettaWarning.command}

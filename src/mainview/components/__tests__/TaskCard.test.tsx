@@ -39,11 +39,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
-
 vi.mock("../../utils/confirmTaskCompletion", () => ({
 	confirmTaskCompletion: vi.fn().mockResolvedValue(true),
 }));
@@ -73,7 +68,6 @@ vi.mock("../LabelPicker", () => ({
 import { api } from "../../rpc";
 import { confirm } from "../../confirm";
 import { toast } from "../../toast";
-import { trackEvent } from "../../analytics";
 import { confirmTaskCompletion } from "../../utils/confirmTaskCompletion";
 
 vi.mock("../../confirm", () => ({
@@ -87,7 +81,6 @@ vi.mock("../../toast", () => ({
 }));
 
 const mockedApi = vi.mocked(api, true);
-const mockedTrackEvent = vi.mocked(trackEvent);
 const mockedConfirmTaskCompletion = vi.mocked(confirmTaskCompletion);
 
 // ---- Fixtures ----
@@ -1153,11 +1146,6 @@ describe("TaskCard", () => {
 
 			await waitFor(() => {
 				expect(dispatch).toHaveBeenCalledWith({ type: "updateTask", task: updated });
-				expect(mockedTrackEvent).toHaveBeenCalledWith("task_moved", {
-					from_status: "in-progress",
-					to_status: "completed",
-					agent_name: "unknown",
-				});
 			});
 		});
 
@@ -1233,7 +1221,7 @@ describe("TaskCard", () => {
 			});
 		});
 
-		it("tracks task_moved event after successful move", async () => {
+		it("moves the task after cancellation is confirmed", async () => {
 			const user = userEvent.setup();
 			const task = makeTask({ status: "todo" });
 			const updated = { ...task, status: "cancelled" as TaskStatus };
@@ -1244,18 +1232,12 @@ describe("TaskCard", () => {
 
 			await user.click(screen.getByLabelText("Cancel"));
 
-			await waitFor(() => {
-				expect(mockedTrackEvent).toHaveBeenCalledWith("task_moved", {
-					from_status: "todo",
-					to_status: "cancelled",
-					agent_name: "unknown",
-				});
-			});
+			await waitFor(() => expect(mockedApi.request.moveTask).toHaveBeenCalled());
 		});
 	});
 
 	describe("handleDelete — dispatch", () => {
-		it("dispatches removeTask and tracks event after successful delete", async () => {
+		it("dispatches removeTask after successful delete", async () => {
 			const user = userEvent.setup();
 			const dispatch = vi.fn();
 			const task = makeTask({ status: "cancelled" });
@@ -1268,7 +1250,6 @@ describe("TaskCard", () => {
 
 			await waitFor(() => {
 				expect(dispatch).toHaveBeenCalledWith({ type: "removeTask", taskId: "t1" });
-				expect(mockedTrackEvent).toHaveBeenCalledWith("task_deleted", { project_id: "p1" });
 			});
 		});
 

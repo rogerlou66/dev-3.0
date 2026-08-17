@@ -1,8 +1,6 @@
 import type { Dispatch } from "react";
 import { api } from "../rpc";
 import { toast } from "../toast";
-import { trackEvent, agentNameFromId } from "../analytics";
-import posthog from "../posthog";
 import { confirmTaskCompletion } from "./confirmTaskCompletion";
 import { playTaskCompletionSound } from "../task-sounds";
 import type { Task, Project, TaskStatus } from "../../shared/types";
@@ -93,8 +91,6 @@ export async function moveTaskToStatus({
 		if (!proceed) return false;
 	}
 
-	const fromStatus = task.status;
-
 	// Optimistic update mirroring the server's end-state so the card doesn't
 	// flicker when the real task comes back. `statusEnteredAt` is stamped on every
 	// move, not just terminal ones: it is what both the board and the sidebar sort
@@ -132,8 +128,6 @@ export async function moveTaskToStatus({
 			updated = await api.request.moveTask({ taskId: task.id, projectId: project.id, newStatus, force: true, clientPlayedSound });
 		}
 		dispatch({ type: "updateTask", task: updated });
-		trackEvent("task_moved", { from_status: fromStatus, to_status: newStatus, agent_name: agentNameFromId(task.agentId) });
-		posthog.capture("task_moved", { from_status: fromStatus, to_status: newStatus });
 		onSuccess?.();
 	} catch (err) {
 		onFailure?.(err);

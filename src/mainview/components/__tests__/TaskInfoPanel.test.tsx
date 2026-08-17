@@ -53,11 +53,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
-
 vi.mock("../../utils/confirmTaskCompletion", () => ({
 	confirmTaskCompletion: vi.fn().mockResolvedValue(true),
 }));
@@ -65,7 +60,6 @@ vi.mock("../../utils/confirmTaskCompletion", () => ({
 import { api } from "../../rpc";
 import { confirm } from "../../confirm";
 import { toast } from "../../toast";
-import { trackEvent } from "../../analytics";
 import { confirmTaskCompletion } from "../../utils/confirmTaskCompletion";
 
 vi.mock("../../confirm", () => ({
@@ -79,7 +73,6 @@ vi.mock("../../toast", () => ({
 }));
 
 const mockedApi = vi.mocked(api, true);
-const mockedTrackEvent = vi.mocked(trackEvent);
 const mockedConfirmTaskCompletion = vi.mocked(confirmTaskCompletion);
 
 /**
@@ -688,11 +681,6 @@ describe("TaskInfoPanel", () => {
 			expect(dispatch).toHaveBeenCalledWith({
 				type: "updateTask",
 				task: updatedTask,
-			});
-			expect(mockedTrackEvent).toHaveBeenCalledWith("task_moved", {
-				from_status: "in-progress",
-				to_status: "user-questions",
-				agent_name: "unknown",
 			});
 		});
 
@@ -2992,7 +2980,6 @@ describe("TaskInfoPanel", () => {
 				});
 			});
 			expect(dispatch).toHaveBeenCalledWith({ type: "updateTask", task: updatedTask });
-			expect(mockedTrackEvent).toHaveBeenCalledWith("task_renamed", { project_id: "p1" });
 		});
 
 		it("cancels rename on cancel button click", async () => {

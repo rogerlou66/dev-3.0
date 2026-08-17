@@ -7,10 +7,6 @@ vi.mock("../../rpc", () => ({
 vi.mock("../../toast", () => ({
 	toast: { error: vi.fn() },
 }));
-vi.mock("../../analytics", () => ({
-	trackEvent: vi.fn(),
-	agentNameFromId: vi.fn(() => "unknown"),
-}));
 vi.mock("../confirmTaskCompletion", () => ({
 	confirmTaskCompletion: vi.fn().mockResolvedValue(true),
 }));

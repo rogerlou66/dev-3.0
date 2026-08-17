@@ -87,7 +87,6 @@ export const MENU_ACTIONS = {
 	openLogsDirectory: "open-logs-directory",
 	gaugeDemo: "gauge-demo",
 	viewportLab: "viewport-lab",
-	featureFlags: "feature-flags",
 	nativePaneLayoutLab: "native-pane-layout-lab",
 	updatePopoverPreview: "update-popover-preview",
 	debugPlaySoundCompleted: "debug-play-sound-completed",
@@ -667,7 +666,6 @@ function viewMenu(): ApplicationMenuItemConfig {
 				submenu: [
 					item({ label: "Gauge Demo", action: MENU_ACTIONS.gaugeDemo }),
 					item({ label: "Viewport Lab", action: MENU_ACTIONS.viewportLab }),
-			item({ label: "Feature Flags", action: MENU_ACTIONS.featureFlags }),
 					item({ label: "Native Pane Layout Lab", action: MENU_ACTIONS.nativePaneLayoutLab }),
 					item({ label: "Update Popover Preview", action: MENU_ACTIONS.updatePopoverPreview }),
 					SEP,

@@ -1532,8 +1532,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 						if (str) { pendingFromSocket = true; enqueueTermWrite(str); }
 					}
 				} catch {
-					// Swallow ghostty-web rendering errors to avoid flooding
-					// analytics with thousands of app_exception events per session.
+					// A malformed renderer chunk must not tear down the socket loop.
 				}
 			};
 

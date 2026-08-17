@@ -16,11 +16,6 @@ vi.mock("../../rpc", () => ({
 	},
 }));
 
-vi.mock("../../analytics", () => ({
-	trackAgentLaunched: vi.fn(),
-	trackEvent: vi.fn(),
-}));
-
 vi.mock("../AgentConfigPicker", () => ({
 	default: () => <div data-testid="agent-picker" />,
 }));
