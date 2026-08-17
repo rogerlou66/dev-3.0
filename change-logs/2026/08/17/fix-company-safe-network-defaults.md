@@ -1,1 +1,1 @@
-The desktop app now keeps its terminal bridge on loopback and no longer starts or advertises Remote Access automatically. Explicit `dev3 remote` sessions remain available when remote access is intentionally requested.
+The desktop app now keeps its terminal bridge on loopback and no longer starts or advertises Remote Access automatically. Explicit `dev3 remote` sessions remain available when remote access is intentionally requested, and vulnerable production and development dependency versions have been replaced with audited safe releases.
