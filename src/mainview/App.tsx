@@ -2324,6 +2324,7 @@ function App() {
 						updateReadySignal={updateReadySignal}
 						updateChangelog={updateChangelog}
 						updateDownloadStatus={updateDownloadStatus}
+						remoteAccessAvailable={!isElectrobun}
 						remoteAccessActive={remoteAccessActive}
 					/>
 					{ghWarning && (

@@ -184,7 +184,6 @@ export const MENU_ACTIONS = {
 	helpExplainScreen: "help-explain-screen",
 	helpReportBug: "help-report-bug",
 	helpGithub: "help-github",
-	showRemoteQr: "show-remote-qr",
 	helpDiagnostics: "help-diagnostics",
 } as const;
 
@@ -854,8 +853,6 @@ function helpMenu(): ApplicationMenuItemConfig {
 			SEP,
 			item({ label: "Report a Bug…", action: MENU_ACTIONS.helpReportBug }),
 			item({ label: "View on GitHub", action: MENU_ACTIONS.helpGithub }),
-			SEP,
-			item({ label: "Remote Access QR Code…", action: MENU_ACTIONS.showRemoteQr }),
 			item({ label: "Run Diagnostics", action: MENU_ACTIONS.helpDiagnostics }),
 		],
 	};

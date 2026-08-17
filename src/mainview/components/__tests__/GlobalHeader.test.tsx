@@ -150,6 +150,7 @@ function renderHeader(
 		updateReadySignal?: number;
 		updateChangelog?: UpdateChangelog | null;
 		updateDownloadStatus?: string | null;
+		remoteAccessAvailable?: boolean;
 		remoteAccessActive?: boolean;
 		goBack?: () => void;
 		goForward?: () => void;
@@ -182,6 +183,7 @@ function headerElement(
 				updateReadySignal={extra?.updateReadySignal}
 				updateChangelog={extra?.updateChangelog}
 				updateDownloadStatus={extra?.updateDownloadStatus}
+				remoteAccessAvailable={extra?.remoteAccessAvailable ?? true}
 				remoteAccessActive={extra?.remoteAccessActive ?? false}
 			/>
 		</I18nProvider>
@@ -804,6 +806,20 @@ describe("GlobalHeader — remote access indicator", () => {
 		expect(remoteButton.className).toContain("remote-access-active");
 		expect(remoteButton.className).toContain("text-accent");
 		expect(remoteButton.className).toContain("bg-accent/15");
+	});
+
+	it("removes the Remote Access entry when the desktop server is unavailable", () => {
+		renderHeader(
+			{ screen: "dashboard" },
+			undefined,
+			undefined,
+			[],
+			{ remoteAccessAvailable: false },
+		);
+
+		expect(
+			screen.queryByLabelText("Open on your phone — scan QR code for remote access"),
+		).not.toBeInTheDocument();
 	});
 });
 

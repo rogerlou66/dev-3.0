@@ -65,6 +65,7 @@ import {
 	getSessionTmuxName,
 	getSessionType,
 	getPtyPort,
+	PTY_SERVER_HOSTNAME,
 	setOnPtyDied,
 	setOnBell,
 	setOnOsc52Copy,
@@ -521,6 +522,10 @@ describe("pty-server", () => {
 		it("returns port from Bun.serve stub", () => {
 			// test-setup.ts stubs Bun.serve → { port: 9999 }
 			expect(getPtyPort()).toBe(9999);
+		});
+
+		it("binds the direct PTY bridge to loopback", () => {
+			expect(PTY_SERVER_HOSTNAME).toBe("127.0.0.1");
 		});
 	});
 

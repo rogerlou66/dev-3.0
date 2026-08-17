@@ -1937,7 +1937,10 @@ function findTaskIdByTmuxSession(tmuxSessionName: string): string | null {
 	return null;
 }
 
+export const PTY_SERVER_HOSTNAME = "127.0.0.1";
+
 const ptyServer = Bun.serve({
+	hostname: PTY_SERVER_HOSTNAME,
 	port: 0,
 	fetch(req, server) {
 		try {

@@ -59,6 +59,7 @@ interface GlobalHeaderProps {
 	updateReadySignal?: number;
 	updateChangelog?: UpdateChangelog | null;
 	updateDownloadStatus?: string | null;
+	remoteAccessAvailable: boolean;
 	remoteAccessActive: boolean;
 }
 
@@ -73,7 +74,7 @@ interface BreadcrumbSegment {
 /** Cache TTL for project task counts (30 seconds) */
 const COUNTS_CACHE_TTL = 30_000;
 
-function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessActive }: GlobalHeaderProps) {
+function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable, remoteAccessActive }: GlobalHeaderProps) {
 	const t = useT();
 	const privacy = useProjectPrivacy();
 	const compact = useCompact();
@@ -326,11 +327,11 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 									: navigate({ screen: "project-terminal", projectId: currentProjectId }),
 						}]
 					: []),
-				{
+				...(remoteAccessAvailable ? [{
 					key: "remote",
 					label: t("header.remoteAccessLabel"),
 					run: () => { void openRemoteAccess(); },
-				},
+				}] : []),
 				...(route.screen !== "changelog" ? [{ key: "changelog", label: t("header.changelogLabel"), run: () => navigate({ screen: "changelog" }) }] : []),
 				{ key: "website", label: t("header.githubLabel"), run: () => window.open("https://h0x91b.github.io/dev-3.0/", "_blank") },
 				{ key: "report", label: t("header.reportLabel"), run: () => window.open("https://github.com/h0x91b/dev-3.0/issues", "_blank") },
@@ -619,7 +620,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 				)}
 
 				{/* Remote Access QR Code (folded into the kebab on narrow) */}
-				{!isNarrow && (
+				{remoteAccessAvailable && !isNarrow && (
 					<Tooltip content={t("header.remoteAccessTooltip")} detail={t("ttip.header.remoteAccess")}>
 						<button
 							onClick={() => { void openRemoteAccess(); }}

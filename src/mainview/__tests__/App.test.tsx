@@ -1805,6 +1805,10 @@ describe("App keyboard shortcuts", () => {
 	});
 
 	describe("QR modal consumed state", () => {
+		beforeEach(() => {
+			rpcTransport.isElectrobun = false;
+		});
+
 		it("shows a success state after copying the QR URL", async () => {
 			await renderApp();
 			let resolveWrite!: () => void;

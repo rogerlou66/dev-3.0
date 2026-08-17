@@ -6,7 +6,7 @@ import Electrobun, {
 	Utils,
 } from "electrobun/bun";
 import { startDisplayWatch } from "./display-watch";
-import { handlers, setPushMessage, getPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell } from "./rpc-handlers";
+import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell } from "./rpc-handlers";
 import {
 	checkForUpdateWithChannel,
 	getLocalVersion,
@@ -35,7 +35,6 @@ import { resolveUserHome } from "../shared/user-home";
 import { normalizeEnvPath } from "../shared/env-path";
 import { applyFullShellEnvToProcess, getShellRcFiles, getUserShell, resolveShellEnv } from "./shell-env";
 import { startSocketServer, stopSocketServer } from "./cli-socket-server";
-import { startRemoteAccessServer, pushToBrowserClients } from "./remote-access-server";
 import { writeSystemClipboard } from "./system-clipboard";
 import { stopTunnel } from "./cloudflare-tunnel";
 import { installAgentSkills } from "./agent-skills";
@@ -324,7 +323,7 @@ log.info("CLI socket server ready", { path: cliSocketPath });
 }
 
 // Side-effect: starts the PTY WebSocket server (dynamic import so PATH is patched first)
-const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds, getPtyPort } = await import("./pty-server");
+const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds } = await import("./pty-server");
 const { startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
 const { startResourceMonitor, stopResourceMonitor } = await import("./resource-monitor");
 const { startRateLimitMonitor, stopRateLimitMonitor } = await import("./rate-limit-monitor");
@@ -459,11 +458,11 @@ await openMainWindow();
 log.info("Main window created");
 readiness.arm();
 
-// Wire push messages: every open renderer window + any connected browser clients.
+// Wire push messages to every open desktop renderer window. Browser clients are
+// served only by the explicit `dev3 remote` process in headless-entry.ts.
 setPushMessage((name, payload) => {
 	log.debug("Push to renderer", { name });
 	broadcastToAllWindows(name, payload);
-	pushToBrowserClients(name, payload);
 });
 
 // Initialize the backend gate before background pollers and CLI requests can
@@ -475,22 +474,8 @@ setFocusMode(loadSettingsSync().focusMode === true);
 import("./port-tunnels").then(({ setPortTunnelsPushHook }) => {
 	setPortTunnelsPushHook((name, payload) => {
 		broadcastToAllWindows(name, payload);
-		pushToBrowserClients(name, payload);
 	});
 }).catch((err) => log.warn("port-tunnels push hook setup failed", { error: String(err) }));
-
-// Start remote access server (serves UI + RPC + PTY proxy on LAN)
-await startRemoteAccessServer({
-	rpcHandler: async (method: string, params: any) => {
-		const handler = (handlers as any)[method];
-		if (!handler) throw new Error(`Unknown RPC method: ${method}`);
-		return await handler(params);
-	},
-	getPtyPort,
-	onQrTokenConsumed: () => {
-		getPushMessage()?.("qrTokenConsumed", {});
-	},
-});
 
 // Diagnostic: log whenever the Bun event loop is blocked for >500ms.
 // Silent during normal operation — only fires on stalls (e.g. accidental
@@ -665,11 +650,9 @@ setOnOsc52Copy((payload) => {
 			tool,
 		});
 	}
-	// Still forward to renderer (diagnostics) and remote browser clients
-	// (where the user's clipboard is the browser, not the host).
+	// Still forward to the desktop renderer for diagnostics.
 	try {
 		broadcastToAllWindows("osc52Clipboard", payload);
-		pushToBrowserClients("osc52Clipboard", payload);
 	} catch (err) {
 		log.error("Failed to forward OSC 52 clipboard payload", {
 			taskId: payload.taskId.slice(0, 8),
@@ -946,15 +929,6 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 		sendToFocusedWindow("zoomOut");
 	} else if (e.data.action === "zoom-reset") {
 		sendToFocusedWindow("zoomReset");
-	} else if (e.data.action === "show-remote-qr") {
-		try {
-			// Fetch only the local QR (no blocking tunnel handshake) so the
-			// modal opens instantly; the renderer brings the tunnel up next.
-			const remoteAccess = await handlers.getRemoteAccessQR({ tunnel: false });
-			sendToFocusedWindow("showRemoteAccessQR", { ...remoteAccess, autoStartTunnel: true });
-		} catch (err) {
-			log.error("Failed to generate QR code", { error: String(err) });
-		}
 	} else if (e.data.action === MENU_ACTIONS.helpGithub) {
 		Utils.openExternal("https://github.com/h0x91b/dev-3.0");
 	} else if (e.data.action === MENU_ACTIONS.helpReportBug) {
