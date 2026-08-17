@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, type Dispatch } from "react";
 import type { AgentCheckResult, CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
-import type { ScheduleMode } from "../../shared/schedule";
 import { launchFailureHintKey } from "../../shared/launch-failure";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { useToggleFavorite } from "../hooks/useToggleFavorite";

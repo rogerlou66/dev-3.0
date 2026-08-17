@@ -13,13 +13,16 @@ describe("external telemetry removal", () => {
 	it("does not ship GA4 or PostHog runtime clients", () => {
 		expect(existsSync(join(ROOT, "src/mainview/analytics.ts"))).toBe(false);
 		expect(existsSync(join(ROOT, "src/mainview/posthog.ts"))).toBe(false);
+		expect(existsSync(join(ROOT, "src/mainview/telemetry.ts"))).toBe(false);
 		expect(read("package.json")).not.toContain("posthog-js");
 		expect(read("src/mainview/main.tsx")).not.toMatch(/initAnalytics|posthog|feature-flags/i);
 	});
 
 	it("does not inject telemetry credentials into release builds", () => {
 		for (const platform of ["macos", "linux", "windows"]) {
-			expect(read(`.github/workflows/release-build-${platform}.yml`)).not.toMatch(/VITE_POSTHOG_(KEY|HOST)/);
+			expect(read(`.github/workflows/release-build-${platform}.yml`)).not.toMatch(
+				/VITE_(?:POSTHOG_(?:KEY|HOST)|TELEMETRY)/,
+			);
 		}
 	});
 
