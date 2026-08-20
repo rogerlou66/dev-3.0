@@ -188,6 +188,7 @@ async function createTask(params: { projectId: string; description: string; stat
 		return updated;
 	}
 
+	getPushMessage()?.("taskUpdated", { projectId: project.id, task });
 	log.info("← createTask", { taskId: task.id });
 	return task;
 }

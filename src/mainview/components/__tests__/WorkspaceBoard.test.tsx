@@ -84,4 +84,19 @@ describe("WorkspaceBoard", () => {
 		await userEvent.click(screen.getAllByRole("button", { name: "+ New Task" })[1]);
 		expect(onOpenCreateTask).toHaveBeenCalledWith("p2");
 	});
+
+	it("shows a newly created task from the live update without remounting", async () => {
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "p1", tasks: [] },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+
+		await screen.findByText("Alpha");
+		expect(screen.queryByText("created-live")).not.toBeInTheDocument();
+		window.dispatchEvent(new CustomEvent("rpc:taskUpdated", {
+			detail: { projectId: "p1", task: task("created-live", "p1", "todo") },
+		}));
+		expect(await screen.findByText("created-live")).toBeInTheDocument();
+	});
 });

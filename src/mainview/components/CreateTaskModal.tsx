@@ -398,14 +398,9 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 				...(isVirtual && opsFolder ? { opsWorkDir: opsFolder } : {}),
 				...(priority !== DEFAULT_PRIORITY ? { priority } : {}),
 			});
-			// The task is now persisted on disk. Make it visible on the board
-			// IMMEDIATELY — a task created into "todo" pushes no taskUpdated, so
-			// if a follow-up (renameTask/setTaskLabels) fails, deferring the
-			// dispatch would leave an invisible orphan and tempt a duplicate on
-			// retry. Title/labels are non-fatal follow-ups on the created task.
-			// A task created in another project must not be added to the board the
-			// user is currently viewing; its persisted taskUpdated events will load
-			// it when that project is opened.
+			// Show the persisted task immediately in the originating project view.
+			// The backend push keeps other boards and windows synchronized, while
+			// title and label updates remain non-fatal follow-ups.
 			if (created.projectId === initialProject.id) {
 				dispatch({ type: "addTask", task: created });
 			}

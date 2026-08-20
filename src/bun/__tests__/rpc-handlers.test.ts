@@ -1947,6 +1947,8 @@ describe("handlers.createTask", () => {
 		const task = makeTask({ status: "todo", worktreePath: null, branchName: null });
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.addTask).mockResolvedValue(task);
+		const push = vi.fn();
+		setPushMessage(push);
 
 		const result = await handlers.createTask({
 			projectId: "proj-1",
@@ -1955,6 +1957,7 @@ describe("handlers.createTask", () => {
 		expect(result).toEqual(task);
 		expect(data.addTask).toHaveBeenCalledWith(project, "New task", "todo", undefined);
 		expect(git.createWorktree).not.toHaveBeenCalled();
+		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task });
 	});
 
 	it("creates an in-progress task with worktree + PTY", async () => {
