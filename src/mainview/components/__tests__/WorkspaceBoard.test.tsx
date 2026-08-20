@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import WorkspaceBoard from "../WorkspaceBoard";
 import { I18nProvider } from "../../i18n";
 import type { Project, Task } from "../../../shared/types";
@@ -37,7 +38,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p2", tasks: [] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={projects} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={projects} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		expect(await screen.findByText("Alpha")).toBeInTheDocument();
 		expect(screen.getByText("Beta")).toBeInTheDocument();
@@ -53,7 +54,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p1", tasks: [task("ai", "p1", "review-by-ai"), task("pr", "p1", "review-by-colleague")] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		await waitFor(() => expect(screen.getByText("AI Review")).toBeInTheDocument());
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
@@ -63,10 +64,24 @@ describe("WorkspaceBoard", () => {
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [] }]);
 		const virtualProject = { ...projects[0], kind: "virtual" as const };
 
-		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		await screen.findByText("Alpha");
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
 		expect(screen.getByText("N/A")).toBeInTheDocument();
+	});
+
+	it("opens task creation for the project owning the To Do cell", async () => {
+		const onOpenCreateTask = vi.fn();
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "p1", tasks: [] },
+			{ projectId: "p2", tasks: [] },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={projects} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={onOpenCreateTask} /></I18nProvider>);
+
+		await screen.findByText("Alpha");
+		await userEvent.click(screen.getAllByRole("button", { name: "+ New Task" })[1]);
+		expect(onOpenCreateTask).toHaveBeenCalledWith("p2");
 	});
 });

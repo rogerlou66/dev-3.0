@@ -827,13 +827,14 @@ function App() {
 
 	const getProjectIdForRoute = useCallback((route: Route): string | null => projectIdForRoute(route), []);
 
-	const openCreateTaskModal = useCallback(() => {
-		const projectId = getProjectIdForRoute(state.route);
+	const openCreateTaskModal = useCallback((requestedProjectId?: string) => {
+		const projectId = requestedProjectId ?? getProjectIdForRoute(state.route);
 		if (!projectId) return false;
+		if (!state.projects.some((project) => project.id === projectId && !project.deleted)) return false;
 		if (document.querySelector('[data-create-task-modal="true"]')) return false;
 		setCreateTaskProjectId((current) => current ?? projectId);
 		return true;
-	}, [getProjectIdForRoute, state.route]);
+	}, [getProjectIdForRoute, state.projects, state.route]);
 
 	const openAddProject = useCallback(() => {
 		if (state.route.screen === "dashboard") {
@@ -2852,6 +2853,7 @@ function App() {
 						navigate={navigate}
 						bellCounts={state.bellCounts}
 						onOpenAddProject={() => setShowAddProjectModal(true)}
+						onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
 					/>
 				);
 			case "project":

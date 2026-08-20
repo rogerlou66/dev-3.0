@@ -10,7 +10,7 @@ Agent hooks and CLI flows depend on the existing lifecycle statuses, so removing
 
 ## Decision
 
-`KanbanBoard` and `WorkspaceBoard` project `user-questions` into Agent is Working while `TaskCard` supplies an amber, text-labelled attention treatment. AI Review mounts only when occupied; PR Review remains visible for peer-reviewed git projects because an open PR is a durable external waiting stage. The workspace board omits Cancelled from its daily-work matrix while project boards retain it as reachable history. The workspace board uses project swimlanes backed by a separate all-status RPC, and cross-project drag is refused.
+`KanbanBoard` and `WorkspaceBoard` project `user-questions` into Agent is Working while `TaskCard` supplies an amber, text-labelled attention treatment. AI Review mounts only when occupied; PR Review remains visible for peer-reviewed git projects because an open PR is a durable external waiting stage. The workspace board omits Cancelled from its daily-work matrix while project boards retain it as reachable history. The workspace board uses project swimlanes backed by a separate all-status RPC, refuses cross-project drag, and opens the existing create-task modal from a project-scoped action in each To Do cell.
 
 ## Risks
 

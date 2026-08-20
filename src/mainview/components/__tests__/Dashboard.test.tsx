@@ -34,6 +34,7 @@ function renderDashboard(
 	navigate?: (route: Route) => void,
 	onOpenAddProject?: () => void,
 	view: "board" | "projects" = "projects",
+	onOpenCreateTask?: (projectId: string) => void,
 ) {
 	const result = render(
 		<I18nProvider>
@@ -43,6 +44,7 @@ function renderDashboard(
 				navigate={navigate ?? vi.fn()}
 				bellCounts={new Map()}
 				onOpenAddProject={onOpenAddProject ?? vi.fn()}
+				onOpenCreateTask={onOpenCreateTask ?? vi.fn()}
 			/>
 		</I18nProvider>,
 	);

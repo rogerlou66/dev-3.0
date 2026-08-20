@@ -15,9 +15,10 @@ interface DashboardProps {
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
 	onOpenAddProject: () => void;
+	onOpenCreateTask: (projectId: string) => void;
 }
 
-function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject }: DashboardProps) {
+function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask }: DashboardProps) {
 	const t = useT();
 	const [surface, setSurface] = useState<"board" | "projects">("board");
 
@@ -76,6 +77,7 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject 
 						dispatch={dispatch}
 						navigate={navigate}
 						bellCounts={bellCounts}
+						onOpenCreateTask={onOpenCreateTask}
 					/> : <ActivityOverview
 						projects={projects}
 						dispatch={dispatch}

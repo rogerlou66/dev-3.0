@@ -22,11 +22,12 @@ interface WorkspaceBoardProps {
 	dispatch: Dispatch<AppAction>;
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
+	onOpenCreateTask: (projectId: string) => void;
 }
 
 const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
 
-function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceBoardProps) {
+function WorkspaceBoard({ projects, dispatch, navigate, bellCounts, onOpenCreateTask }: WorkspaceBoardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -215,6 +216,19 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 		);
 	}
 
+	function renderAddTaskButton(project: Project, column: WorkspaceColumnId) {
+		if (column !== "todo") return null;
+		return (
+			<button
+				type="button"
+				onClick={() => onOpenCreateTask(project.id)}
+				className="mt-1 w-full rounded-lg border border-dashed border-edge px-2 py-2 text-center text-xs font-medium text-fg-3 transition-[color,background-color,border-color,transform] hover:border-accent/30 hover:bg-accent/10 hover:text-accent motion-safe:active:scale-[0.96]"
+			>
+				{t("kanban.newTask")}
+			</button>
+		);
+	}
+
 	if (loading && tasksByProject.size === 0) {
 		return <div className="flex h-full items-center justify-center text-sm text-fg-3">{t("workspaceBoard.loading")}</div>;
 	}
@@ -239,6 +253,7 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 								{cellTasks.length > 0
 									? cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))
 									: <div className="py-3 text-center text-xs text-fg-muted">{available ? t("kanban.noTasks") : t("workspaceBoard.notApplicable")}</div>}
+								{renderAddTaskButton(project, column)}
 							</div>
 						</section>
 					);
@@ -301,6 +316,7 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 										{cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))}
 										{!available && <div className="py-5 text-center text-dense text-fg-muted">{t("workspaceBoard.notApplicable")}</div>}
 										{cellTasks.length > 15 && <div className="py-1 text-center text-dense text-fg-muted">{t("kanban.showMore", { count: String(cellTasks.length - 15) })}</div>}
+										{renderAddTaskButton(project, column)}
 									</div>
 								</div>
 							);
