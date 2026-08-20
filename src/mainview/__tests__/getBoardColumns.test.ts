@@ -22,6 +22,7 @@ describe("getBoardColumns", () => {
 			"todo",
 			"in-progress",
 			"review-by-user",
+			"review-by-colleague",
 			"completed",
 			"cancelled",
 		]);
@@ -35,6 +36,7 @@ describe("getBoardColumns", () => {
 			"review-by-user",
 			"custom:deploy",
 			"custom:qa",
+			"review-by-colleague",
 			"completed",
 			"cancelled",
 		]);

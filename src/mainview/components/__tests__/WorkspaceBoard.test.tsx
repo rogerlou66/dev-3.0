@@ -44,10 +44,11 @@ describe("WorkspaceBoard", () => {
 		expect(screen.getByText("question")).toHaveAttribute("data-needs-input", "true");
 		expect(screen.queryByText("Has Questions")).not.toBeInTheDocument();
 		expect(screen.queryByText("AI Review")).not.toBeInTheDocument();
-		expect(screen.queryByText("PR Review")).not.toBeInTheDocument();
+		expect(screen.getByText("PR Review")).toBeInTheDocument();
+		expect(screen.queryByText("Cancelled")).not.toBeInTheDocument();
 	});
 
-	it("opens AI and PR review columns only while occupied", async () => {
+	it("opens AI Review only while occupied and keeps PR Review visible", async () => {
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
 			{ projectId: "p1", tasks: [task("ai", "p1", "review-by-ai"), task("pr", "p1", "review-by-colleague")] },
 		]);
@@ -56,5 +57,16 @@ describe("WorkspaceBoard", () => {
 
 		await waitFor(() => expect(screen.getByText("AI Review")).toBeInTheDocument());
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
+	});
+
+	it("marks PR Review unavailable for virtual projects", async () => {
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [] }]);
+		const virtualProject = { ...projects[0], kind: "virtual" as const };
+
+		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} /></I18nProvider>);
+
+		await screen.findByText("Alpha");
+		expect(screen.getByText("PR Review")).toBeInTheDocument();
+		expect(screen.getByText("N/A")).toBeInTheDocument();
 	});
 });

@@ -211,7 +211,7 @@ ux_architecture:
       allowed: ["object_card", "create_in_column", "drag_move", "column_config", "label_filter"]
       forbidden: ["durable_global_configuration"]
       evidence: ["src/mainview/components/KanbanBoard.tsx", "src/mainview/components/KanbanColumn.tsx", "src/mainview/components/LabelFilterBar.tsx"]
-      lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review and PR Review mount only while occupied; Completed and Cancelled never default-collapse."
+      lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review mounts only while occupied; PR Review remains visible for peer-reviewed git projects; Completed remains visible; the workspace board omits Cancelled while project boards retain it as reachable history."
       desktop_layout: "Compact equal-width grid across available space; no default horizontal scrollbar for the standard lifecycle columns."
     workspace_board:
       purpose: "Cross-project daily-work surface on Dashboard > Board: one canonical status header with projects as swimlanes."

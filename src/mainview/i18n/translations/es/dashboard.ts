@@ -29,6 +29,7 @@ const dashboard = {
 	"workspaceBoard.openProject": "Abrir proyecto",
 	"workspaceBoard.dropHere": "Mover tarea a {status} en {project}",
 	"workspaceBoard.dropHereShort": "Soltar para mover",
+	"workspaceBoard.notApplicable": "No aplicable",
 
 	// Activity overview
 	"activity.noActiveTasks": "Sin tareas activas en ningún proyecto",

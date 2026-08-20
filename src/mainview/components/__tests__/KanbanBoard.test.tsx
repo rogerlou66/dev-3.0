@@ -141,12 +141,12 @@ describe("column ordering", () => {
 		localStorage.clear();
 	});
 
-	it("hides Questions, AI Review, and PR Review when they have no work", async () => {
+	it("hides Questions and AI Review while keeping PR Review visible", async () => {
 		await renderBoardWith();
 		const labels = getColumnLabels();
 		expect(labels).not.toContain("Has Questions");
 		expect(labels).not.toContain("AI Review");
-		expect(labels).not.toContain("PR Review");
+		expect(labels).toContain("PR Review");
 		expect(labels).toContain("Completed");
 		expect(labels).toContain("Cancelled");
 	});
@@ -645,14 +645,14 @@ describe("mobile carousel mode", () => {
 
 	it("starts on Agent is Working when a task needs input", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "user-questions" })] });
-		expect(screen.getByText("2 / 5")).toBeTruthy();
+		expect(screen.getByText("2 / 6")).toBeTruthy();
 		expect(screen.getByText("Needs input")).toBeTruthy();
 	});
 
 	it("falls back to Your Review when Has Questions is empty", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "review-by-user" })] });
 		// With no questions waiting, show the next human-action queue instead.
-		expect(screen.getByText("3 / 5")).toBeTruthy();
+		expect(screen.getByText("3 / 6")).toBeTruthy();
 	});
 
 	it("keeps completed and cancelled columns in the mobile carousel", async () => {

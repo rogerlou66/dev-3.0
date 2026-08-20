@@ -24,7 +24,7 @@ interface WorkspaceBoardProps {
 	bellCounts: Map<string, number>;
 }
 
-const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "completed", "cancelled"];
+const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
 
 function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceBoardProps) {
 	const t = useT();
@@ -107,10 +107,6 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 	const columns = useMemo(() => {
 		const next = [...BASE_COLUMNS];
 		if (allTasks.some((task) => task.status === "review-by-ai")) next.splice(2, 0, "review-by-ai");
-		if (allTasks.some((task) => task.status === "review-by-colleague")) {
-			const reviewIndex = next.indexOf("review-by-user");
-			next.splice(reviewIndex + 1, 0, "review-by-colleague");
-		}
 		if (allTasks.some((task) => task.customColumnId)) {
 			const completedIndex = next.indexOf("completed");
 			next.splice(completedIndex, 0, "custom");
@@ -188,6 +184,12 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 		return column === "custom" ? t("workspaceBoard.custom") : t(statusKey(column));
 	}
 
+	function isColumnAvailable(project: Project, column: WorkspaceColumnId): boolean {
+		if (project.kind === "virtual" && (column === "review-by-ai" || column === "review-by-colleague")) return false;
+		if (column === "review-by-colleague" && project.peerReviewEnabled === false) return false;
+		return true;
+	}
+
 	function renderTaskCard(project: Project, task: Task, siblingMap: Map<string, Task[]>) {
 		return (
 			<TaskCard
@@ -229,11 +231,14 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 					const siblingMap = new Map<string, Task[]>();
 					for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
 					const cellTasks = tasksForCell(project, column);
+					const available = isColumnAvailable(project, column) || cellTasks.length > 0;
 					return (
 						<section key={project.id} className="mb-3 rounded-lg border border-edge bg-raised/30 p-2" aria-label={project.name}>
 							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mb-2 block w-full truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
 							<div className="space-y-2">
-								{cellTasks.length > 0 ? cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap)) : <div className="py-3 text-center text-xs text-fg-muted">{t("kanban.noTasks")}</div>}
+								{cellTasks.length > 0
+									? cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))
+									: <div className="py-3 text-center text-xs text-fg-muted">{available ? t("kanban.noTasks") : t("workspaceBoard.notApplicable")}</div>}
 							</div>
 						</section>
 					);
@@ -276,7 +281,8 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 						{columns.map((column) => {
 							const cellTasks = tasksForCell(project, column);
 							const targetStatus = column === "custom" ? null : column;
-							const acceptsDrop = targetStatus && dragged?.projectId === project.id && getAllowedTransitions(dragged.status).includes(targetStatus);
+							const available = isColumnAvailable(project, column) || cellTasks.length > 0;
+							const acceptsDrop = available && targetStatus && dragged?.projectId === project.id && getAllowedTransitions(dragged.status).includes(targetStatus);
 							return (
 								<div
 									key={column}
@@ -293,6 +299,7 @@ function WorkspaceBoard({ projects, dispatch, navigate, bellCounts }: WorkspaceB
 									{acceptsDrop && <div className="mb-1 rounded border border-accent/40 bg-accent/10 px-1.5 py-1 text-center text-dense font-semibold text-accent">{t("workspaceBoard.dropHereShort")}</div>}
 									<div className="space-y-1.5">
 										{cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))}
+										{!available && <div className="py-5 text-center text-dense text-fg-muted">{t("workspaceBoard.notApplicable")}</div>}
 										{cellTasks.length > 15 && <div className="py-1 text-center text-dense text-fg-muted">{t("kanban.showMore", { count: String(cellTasks.length - 15) })}</div>}
 									</div>
 								</div>

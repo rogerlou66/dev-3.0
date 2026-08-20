@@ -1395,8 +1395,9 @@ export type BoardColumnSlot =
  * Returns every column a project's board renders, in effective display order,
  * respecting `columnOrder` and hiding contextual columns while they are idle.
  * `user-questions` is projected into Agent is Working by the board, while AI
- * Review and PR Review appear only while they contain tasks. Single source of
- * truth for the board's column layout — see [[KanbanBoard]].
+ * Review appears only while it contains tasks. PR Review remains visible for
+ * git projects that use peer review. Single source of truth for the board's
+ * column layout — see [[KanbanBoard]].
  *
  * Pure function of the project plus `opts.occupiedStatuses` — the built-in
  * statuses that currently hold at least one card. Occupied review columns stay
@@ -1411,7 +1412,10 @@ export function getBoardColumns(
 	const occupied = opts.occupiedStatuses;
 	const shouldHide = (s: TaskStatus) => {
 		if (s === "user-questions") return true;
-		if (s === "review-by-ai" || s === "review-by-colleague") return !occupied?.has(s);
+		if (s === "review-by-ai") return !occupied?.has(s);
+		if (s === "review-by-colleague") {
+			return !occupied?.has(s) && (project.kind === "virtual" || project.peerReviewEnabled === false);
+		}
 		return false;
 	};
 	const filterBuiltin = (statuses: TaskStatus[]) => statuses.filter((s) => !shouldHide(s));

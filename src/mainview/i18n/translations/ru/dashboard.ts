@@ -31,6 +31,7 @@ const dashboard = {
 	"workspaceBoard.openProject": "Открыть проект",
 	"workspaceBoard.dropHere": "Переместить задачу в {status}, проект {project}",
 	"workspaceBoard.dropHereShort": "Отпустите для перемещения",
+	"workspaceBoard.notApplicable": "Не применяется",
 
 	// Activity overview
 	"activity.noActiveTasks": "Нет активных задач ни в одном проекте",
