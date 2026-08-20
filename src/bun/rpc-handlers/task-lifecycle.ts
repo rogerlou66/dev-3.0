@@ -102,6 +102,24 @@ async function getAllProjectTasks(): Promise<{ projectId: string; tasks: Task[] 
 	return results;
 }
 
+async function getWorkspaceBoardTasks(): Promise<{ projectId: string; tasks: Task[]; error?: string }[]> {
+	log.info("→ getWorkspaceBoardTasks");
+	const projects = [...await data.loadProjects(), ...await data.loadVirtualProjects()];
+	const results = await Promise.all(
+		projects.map(async (project) => {
+			try {
+				return { projectId: project.id, tasks: await data.loadTasks(project) };
+			} catch (err) {
+				log.error("Workspace board project load failed", { projectId: project.id, error: String(err) });
+				return { projectId: project.id, tasks: [], error: String(err) };
+			}
+		}),
+	);
+	const total = results.reduce((sum, result) => sum + result.tasks.length, 0);
+	log.info(`← getWorkspaceBoardTasks: ${total} task(s) across ${projects.length} project(s)`);
+	return results;
+}
+
 async function createTask(params: { projectId: string; description: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority }): Promise<Task> {
 	log.info("→ createTask", {
 		projectId: params.projectId,
@@ -170,6 +188,7 @@ async function createTask(params: { projectId: string; description: string; stat
 		return updated;
 	}
 
+	getPushMessage()?.("taskUpdated", { projectId: project.id, task });
 	log.info("← createTask", { taskId: task.id });
 	return task;
 }
@@ -1057,6 +1076,7 @@ async function setNewTaskTerminalBackend(params: {
 export const taskLifecycleHandlers = {
 	getTasks,
 	getAllProjectTasks,
+	getWorkspaceBoardTasks,
 	openQuickShell,
 	createTask,
 	moveTask,

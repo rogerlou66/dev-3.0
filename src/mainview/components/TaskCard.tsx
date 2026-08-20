@@ -71,9 +71,11 @@ interface TaskCardProps {
 	onOpenUnresolvedComments?: (task: Task) => void;
 	/** Reopens the New Task popup on a draft card instead of the detail modal. */
 	onEditDraft?: (task: Task) => void;
+	/** Jira-like board density: keep identity, title, lifecycle, and the To Do run action. */
+	compact?: boolean;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, compact = false }: TaskCardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -120,6 +122,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// nothing is running either — the card must not pass for live work.
 	const isDisconnected = isTaskDisconnected(task);
 	const isCancelled = task.status === "cancelled";
+	const needsInput = task.status === "user-questions";
 	const isActive = ACTIVE_STATUSES.includes(task.status);
 	const isCompleting = (moving || isMovingProp) && (task.status === "completed" || task.status === "cancelled");
 	const color = statusColors[task.status];
@@ -737,6 +740,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			data-task-id={task.id}
 			data-hint-id={task.id}
 			data-help-id="board.task-card"
+			data-needs-input={needsInput || undefined}
 			draggable={!isDisabled && !detailOpen && !isHibernated}
 			onDragStart={handleDragStart}
 			onContextMenu={handleContextMenu}
@@ -747,6 +751,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					? "cursor-pointer hover:-translate-y-0.5 hover:shadow-card-hover"
 					: "cursor-grab active:cursor-grabbing hover:-translate-y-0.5 hover:shadow-card-hover"
 			} ${isCompleting || isShuttingDown ? "grayscale opacity-40 pointer-events-none" : isPreparing ? "opacity-60" : isDisabled ? "opacity-50 pointer-events-none" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""}`}
+			style={needsInput ? {
+				background: `linear-gradient(${statusColors["user-questions"]}20, ${statusColors["user-questions"]}0d)`,
+				borderColor: `${statusColors["user-questions"]}70`,
+				boxShadow: `0 0 0 1px ${statusColors["user-questions"]}18, 0 8px 24px ${statusColors["user-questions"]}12`,
+			} : undefined}
 			onClick={handleClick}
 		>
 			{/* Moving spinner overlay */}
@@ -907,6 +916,15 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						</span>
 					</Tooltip>
 				)}
+				{needsInput && (
+					<span
+						data-testid="task-card-needs-input"
+						className="flex-shrink-0 rounded border px-1.5 py-0.5 text-dense font-bold uppercase tracking-[0.05em]"
+						style={{ color: statusColors["user-questions"], borderColor: `${statusColors["user-questions"]}80`, background: `${statusColors["user-questions"]}18` }}
+					>
+						{t("task.needsInput")}
+					</span>
+				)}
 				{showDismissButton && (
 					<Tooltip content={isCancelled ? t("task.delete") : t("task.cancel")} detail={isCancelled ? t("ttip.task.delete") : t("ttip.task.cancel")}>
 						<button
@@ -940,11 +958,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					touch={narrow}
 				/>
 
-				<div className="flex min-w-0 flex-1 flex-col px-3 pt-2.5">
+				<div className={`flex min-w-0 flex-1 flex-col ${compact ? "px-2 pt-2" : "px-3 pt-2.5"}`}>
 					{/* CONTENT */}
 					<div>
 						<div
-							className={`break-words text-sm font-medium leading-relaxed text-fg line-clamp-3 ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
+							className={`break-words text-sm font-medium leading-relaxed text-fg ${compact ? "line-clamp-2" : "line-clamp-3"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
 							onClick={handleTitleClick}
 							title={isTodo && hasLongDescription ? task.description : undefined}
 						>
@@ -968,7 +986,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						)}
 
 						{/* Label chips — always rendered so "+" stays discoverable on hover */}
-						{(() => {
+						{!compact && (() => {
 							const projectLabels = project.labels ?? [];
 							const taskLabelIds = task.labelIds ?? [];
 							const assignedLabels = taskLabelIds
@@ -1070,7 +1088,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 					{/* SIGNALS + ACTIONS — one segmented bar welded to the bottom edge.
 					    mt-auto is what keeps it there when the rail is the taller column. */}
-					<div className="-mx-3 mt-auto border-t border-edge bg-black/20">
+					{(!compact || signalGroups.length > 0 || (isTodo && !isDraft)) && <div className={`${compact ? "-mx-2" : "-mx-3"} mt-auto border-t border-edge bg-black/20`}>
 						{signalGroups.length > 0 && (
 							<div
 								data-testid="task-card-signals"
@@ -1081,11 +1099,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						)}
 						{/* Actions get a reserved strip, so signals can never squeeze them
 						    out. min-h-9 is what the 22px buttons plus their hover fill need. */}
-						<div
+						{(!compact || (isTodo && !isDraft)) && <div
 							data-testid="task-card-action-row"
-							className={`flex min-h-9 min-w-0 items-center gap-1 px-2 py-1.5 ${signalGroups.length > 0 ? "border-t border-edge" : ""}`}
+							className={`flex min-h-9 min-w-0 items-center gap-1 px-2 py-1.5 ${!compact && signalGroups.length > 0 ? "border-t border-edge" : ""}`}
 						>
-							{isActive && task.worktreePath && (
+							{!compact && isActive && task.worktreePath && (
 								<Tooltip content={t("openIn.menuTitle")} detail={t("ttip.openIn.menu")}>
 									<button
 										onClick={(e) => {
@@ -1101,9 +1119,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 									</button>
 								</Tooltip>
 							)}
-							{watchButton}
+							{!compact && watchButton}
 							<div className="flex-1" />
-							{isActive && (
+							{!compact && isActive && (
 								<Tooltip content={t("task.addVariant")} detail={t("ttip.task.addVariant")}>
 									<button
 										onClick={(e) => {
@@ -1139,8 +1157,8 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 									</button>
 								</Tooltip>
 							)}
-						</div>
-					</div>
+						</div>}
+					</div>}
 				</div>
 			</div>
 

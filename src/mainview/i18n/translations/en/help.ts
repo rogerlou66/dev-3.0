@@ -55,6 +55,8 @@ const help = {
 
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Projects",
+	"help.dashboard.workspaceBoard.title": "Workspace board",
+	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Create from a project's To Do cell; moves stay inside that project, and questions appear as amber Needs input cards in Agent Working.",
 	"help.dashboard.projects.body":
 		"Each project is a git repository with its own Kanban board, labels and lifecycle scripts. An Operations board is a virtual project: its tasks run agents in managed folders, without git.",
 	"help.dashboard.statsEntry.title": "Productivity Stats",

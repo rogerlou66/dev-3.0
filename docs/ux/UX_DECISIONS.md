@@ -4,6 +4,18 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-20 — Workspace search shares the dashboard tab bar
+
+- **Rule:** Dashboard Board's one search field occupies the trailing edge of the `Board | Projects` tab bar, appears only while Board is active, and flexes narrower before it can displace either tab.
+- **Why:** Search is a temporary filter of the active workspace board; a dedicated second toolbar consumed vertical space without adding a second control or a distinct scope.
+- **Status:** Implemented. Evidence: `Dashboard.tsx`, `WorkspaceBoard.tsx`.
+
+## 2026-08-19 — Treat questions as attention, not location
+
+- **Rule:** Boards project `user-questions` into Agent is Working with an amber `Needs input` card; AI/PR review columns are contextual, terminal columns stay expanded, and Dashboard Board aligns all projects as swimlanes.
+- **Why:** Persistent empty handoff columns made lifecycle scanning and cross-project work unnecessarily wide; deleting backend statuses was rejected because hooks and automation still need their semantics.
+- **Status:** Implemented. Evidence: `WorkspaceBoard.tsx`, `KanbanBoard.tsx`, `TaskCard.tsx`, `types.ts#getBoardColumns`.
+
 ## 2026-08-14 — An agent-to-agent message toast names two tasks and owns its own hue
 
 - **Rule:** The toast for `dev3 message` between two agents renders `#fromSeq title → #toSeq title` as its source line, uses the non-severity `agent` variant (violet `--agent`), and clicks through to the RECEIVER; every other toast keeps one origin and a severity variant.

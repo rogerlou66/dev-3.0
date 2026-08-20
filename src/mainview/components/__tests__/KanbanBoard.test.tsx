@@ -141,13 +141,14 @@ describe("column ordering", () => {
 		localStorage.clear();
 	});
 
-	it("review-by-colleague appears before completed in default order", async () => {
+	it("hides Questions and AI Review while keeping PR Review visible", async () => {
 		await renderBoardWith();
 		const labels = getColumnLabels();
-		const colleagueIdx = labels.findIndex((l) => l === "PR Review");
-		const completedIdx = labels.findIndex((l) => l === "Completed");
-		expect(colleagueIdx).toBeGreaterThan(0);
-		expect(colleagueIdx).toBeLessThan(completedIdx);
+		expect(labels).not.toContain("Has Questions");
+		expect(labels).not.toContain("AI Review");
+		expect(labels).toContain("PR Review");
+		expect(labels).toContain("Completed");
+		expect(labels).toContain("Cancelled");
 	});
 
 	it("review-by-colleague is hidden when peerReviewEnabled is false", async () => {
@@ -245,6 +246,7 @@ describe("column ordering", () => {
 				...project,
 				columnOrder: ["todo", "in-progress", "user-questions", "review-by-user", "completed", "cancelled", "review-by-ai"],
 			},
+			tasks: [makeTask({ status: "review-by-colleague" })],
 		});
 		const labels = getColumnLabels();
 		const colleagueIdx = labels.findIndex((l) => l === "PR Review");
@@ -259,6 +261,7 @@ describe("column ordering", () => {
 				...project,
 				columnOrder: ["review-by-colleague", "todo", "in-progress", "user-questions", "review-by-user", "completed", "cancelled", "review-by-ai"],
 			},
+			tasks: [makeTask({ status: "review-by-colleague" })],
 		});
 		const labels = getColumnLabels();
 		expect(labels[0]).toBe("PR Review");
@@ -500,16 +503,17 @@ describe("tip rotation", () => {
 	});
 });
 
-describe("collapsible columns", () => {
+describe("expanded lifecycle columns", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		localStorage.clear();
 	});
 
-	it("renders completed, cancelled as collapsed by default", async () => {
+	it("renders completed and cancelled expanded by default", async () => {
 		await renderBoardWith();
 		const collapsedCols = document.querySelectorAll("[data-collapsed-column]");
-		expect(collapsedCols.length).toBe(2);
+		expect(collapsedCols.length).toBe(0);
+		expect(getColumnLabels()).toEqual(expect.arrayContaining(["Completed", "Cancelled"]));
 	});
 
 	it("active columns are always expanded", async () => {
@@ -519,14 +523,9 @@ describe("collapsible columns", () => {
 		expect(labels).toContain("Agent is Working");
 	});
 
-	it("collapsed columns are excluded from tip placement", async () => {
-		// Tip should not be placed in collapsed todo column
+	it("does not render any collapsed column rails", async () => {
 		await renderBoardWith();
-		const collapsedCols = document.querySelectorAll("[data-collapsed-column]");
-		for (const col of collapsedCols) {
-			// Collapsed columns should not contain TipCard content
-			expect(col.querySelector("[class*='tip']")).toBeNull();
-		}
+		expect(document.querySelector("[data-collapsed-column]")).toBeNull();
 	});
 });
 
@@ -644,16 +643,16 @@ describe("mobile carousel mode", () => {
 		expect(screen.getByText(/^\d+ \/ \d+$/)).toBeTruthy();
 	});
 
-	it("starts on Has Questions when it contains tasks", async () => {
+	it("starts on Agent is Working when a task needs input", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "user-questions" })] });
-		// Has Questions is the first mobile attention queue when it has work.
-		expect(screen.getByText("3 / 8")).toBeTruthy();
+		expect(screen.getByText("2 / 6")).toBeTruthy();
+		expect(screen.getByText("Needs input")).toBeTruthy();
 	});
 
 	it("falls back to Your Review when Has Questions is empty", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "review-by-user" })] });
 		// With no questions waiting, show the next human-action queue instead.
-		expect(screen.getByText("5 / 8")).toBeTruthy();
+		expect(screen.getByText("3 / 6")).toBeTruthy();
 	});
 
 	it("keeps completed and cancelled columns in the mobile carousel", async () => {

@@ -1,6 +1,9 @@
 const dashboard = {
 	// Dashboard
 	"dashboard.screenTitle": "Dashboard",
+	"dashboard.views": "Dashboard views",
+	"dashboard.tabBoard": "Board",
+	"dashboard.tabProjects": "Projects",
 	"dashboard.noProjects": "No projects yet",
 	"dashboard.noProjectsHint": "Add a git repository to get started",
 	"dashboard.addProject": "Add project",
@@ -16,6 +19,17 @@ const dashboard = {
 	"dashboard.moveProjectDown": "Move project down",
 	"dashboard.projectCount_one": "{count} project",
 	"dashboard.projectCount_other": "{count} projects",
+	"workspaceBoard.projects": "Projects",
+	"workspaceBoard.custom": "Custom",
+	"workspaceBoard.search": "Search tasks and projects…",
+	"workspaceBoard.loading": "Loading workspace board…",
+	"workspaceBoard.retry": "Retry failed projects",
+	"workspaceBoard.failedLoad": "Unable to load the workspace board. ({error})",
+	"workspaceBoard.taskCount": "{count} tasks",
+	"workspaceBoard.openProject": "Open project",
+	"workspaceBoard.dropHere": "Move task to {status} in {project}",
+	"workspaceBoard.dropHereShort": "Drop to move",
+	"workspaceBoard.notApplicable": "N/A",
 
 	// Activity overview
 	"activity.noActiveTasks": "No active tasks across any project",

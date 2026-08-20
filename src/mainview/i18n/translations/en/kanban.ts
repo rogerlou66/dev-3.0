@@ -16,7 +16,6 @@ const kanban = {
 	"kanban.failedReorderColumns": "Failed to reorder columns: {error}",
 	"kanban.showMore": "Show more ({count})",
 	"kanban.showLess": "Show less",
-	"kanban.collapseColumn": "Unpin column",
 	"kanban.renameColumn": "Rename column",
 	"kanban.draftNotDroppable": "This is a draft — finish its description and save it as a task before starting it.",
 
@@ -283,6 +282,7 @@ const kanban = {
 
 	// Watch
 	"task.watch": "Watch",
+	"task.needsInput": "Needs input",
 	"task.watching": "Watching",
 	"task.watchTooltip": "Watch — notify on status changes",
 	"task.manualCompletion": "I’ll complete it myself",

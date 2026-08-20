@@ -407,117 +407,6 @@ describe("KanbanColumn — double-click empty space to add task", () => {
 	});
 });
 
-describe("KanbanColumn — collapsed state", () => {
-	function renderCollapsedColumn(overrides: {
-		onCollapseToggle?: () => void;
-		tasks?: Task[];
-	} = {}) {
-		const tasks = overrides.tasks ?? [];
-		return render(
-			<I18nProvider>
-				<KanbanColumn
-					status="todo"
-					label="To Do"
-					tasks={tasks}
-					project={project}
-					dispatch={vi.fn()}
-					navigate={vi.fn()}
-					onAddTask={vi.fn()}
-					agents={[]}
-					onLaunchVariants={vi.fn()}
-					onAddAttempts={vi.fn()}
-					onTaskDrop={vi.fn()}
-					dragFromStatus={null}
-					dragFromCustomColumnId={null}
-					onDragStart={vi.fn()}
-					bellCounts={new Map()}
-					taskPorts={new Map()}
-					movingTaskIds={new Set()}
-					onSetMoving={vi.fn()}
-					siblingMap={new Map()}
-					collapsed={true}
-					onCollapseToggle={overrides.onCollapseToggle ?? vi.fn()}
-				/>
-			</I18nProvider>,
-		);
-	}
-
-	it("renders narrow collapsed column with vertical label", () => {
-		renderCollapsedColumn();
-		const collapsed = document.querySelector("[data-collapsed-column]");
-		expect(collapsed).not.toBeNull();
-		// Check vertical label text
-		const label = collapsed?.querySelector(".kanban-col-vertical-label");
-		expect(label).not.toBeNull();
-		expect(label?.textContent).toBe("To Do");
-	});
-
-	it("renders task count badge when tasks exist", () => {
-		const task: Task = {
-			id: "t1", projectId: "p1", seq: 1, title: "Test", description: "Test",
-			status: "todo", baseBranch: "main", worktreePath: null, branchName: null,
-			groupId: null, variantIndex: null, agentId: null, configId: null,
-			createdAt: "2025-01-01T00:00:00Z", updatedAt: "2025-01-01T00:00:00Z",
-		};
-		renderCollapsedColumn({ tasks: [task] });
-		const badge = document.querySelector("[data-collapsed-column] .text-xs.font-bold");
-		expect(badge?.textContent).toBe("1");
-	});
-
-	it("collapsed strip does not render a pin button", () => {
-		renderCollapsedColumn({ onCollapseToggle: vi.fn() });
-		const pinBtn = document.querySelector("[data-collapsed-column] button[aria-label='Pin column open']");
-		expect(pinBtn).toBeNull();
-	});
-
-	it("collapsed Todo column renders a new task button", async () => {
-		const onAddTask = vi.fn();
-		render(
-			<I18nProvider>
-				<KanbanColumn
-					status="todo"
-					label="To Do"
-					tasks={[]}
-					project={project}
-					dispatch={vi.fn()}
-					navigate={vi.fn()}
-					onAddTask={onAddTask}
-					agents={[]}
-					onLaunchVariants={vi.fn()}
-					onAddAttempts={vi.fn()}
-					onTaskDrop={vi.fn()}
-					dragFromStatus={null}
-					dragFromCustomColumnId={null}
-					onDragStart={vi.fn()}
-					bellCounts={new Map()}
-					taskPorts={new Map()}
-					movingTaskIds={new Set()}
-					onSetMoving={vi.fn()}
-					siblingMap={new Map()}
-					collapsed={true}
-					onCollapseToggle={vi.fn()}
-				/>
-			</I18nProvider>,
-		);
-		const addBtn = document.querySelector("[data-collapsed-column] button[aria-label='+ New Task']") as HTMLElement;
-		expect(addBtn).not.toBeNull();
-		await userEvent.click(addBtn);
-		expect(onAddTask).toHaveBeenCalledTimes(1);
-	});
-
-	it("collapsed column still has drag-and-drop handlers", () => {
-		renderCollapsedColumn();
-		const collapsed = document.querySelector("[data-collapsed-column]") as HTMLElement;
-		// Verify element exists and can receive drag events (doesn't throw)
-		expect(collapsed).not.toBeNull();
-		const dt = makeDt({ "text/plain": "task-123" });
-		const event = new MouseEvent("dragover", { bubbles: true, cancelable: true });
-		Object.defineProperty(event, "dataTransfer", { value: dt });
-		act(() => { collapsed.dispatchEvent(event); });
-		// No error thrown = drag handlers are active
-	});
-});
-
 describe("built-in column as column-reorder drop target", () => {
 	function getBuiltinColumn() {
 		return screen.getByText("To Do").closest("[class*='glass-column']") as HTMLElement;
@@ -549,68 +438,14 @@ describe("built-in column as column-reorder drop target", () => {
 	});
 });
 
-describe("KanbanColumn — compact empty column on narrow viewport", () => {
-	const originalInnerWidth = window.innerWidth;
-	const originalMatchMedia = window.matchMedia;
-
-	function setViewport(width: number) {
-		Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
-		Object.defineProperty(window, "matchMedia", {
-			configurable: true,
-			value: (query: string) => ({
-				matches: width < 1400,
-				media: query,
-				onchange: null,
-				addEventListener: vi.fn(),
-				removeEventListener: vi.fn(),
-				addListener: vi.fn(),
-				removeListener: vi.fn(),
-				dispatchEvent: vi.fn(),
-			}),
-		});
-	}
-
-	afterEach(() => {
-		Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
-		Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia });
-	});
-
-	it("collapses an empty in-progress column to a slim fixed width when viewport is narrow", () => {
-		setViewport(1200);
+describe("KanbanColumn — fluid board width", () => {
+	it("fills its grid track and keeps a terse empty state", () => {
 		const { container } = renderBuiltinColumn({ status: "in-progress", label: "In Progress" });
 		const column = container.querySelector(".glass-column") as HTMLElement;
-		expect(column.className).toMatch(/w-\[6\.125rem\]/);
-		expect(column.className).not.toMatch(/w-\[19rem\]/);
-		// "No tasks" placeholder is hidden in compact mode
-		expect(screen.queryByText("No tasks")).toBeNull();
-	});
-
-	it("keeps the Todo column at full width even when empty and narrow", () => {
-		setViewport(1200);
-		const { container } = renderBuiltinColumn({ status: "todo", label: "To Do" });
-		const column = container.querySelector(".glass-column") as HTMLElement;
-		expect(column.className).toMatch(/w-\[19rem\]/);
-	});
-
-	it("stays full width when viewport is wide, even if the column is empty", () => {
-		setViewport(1920);
-		const { container } = renderBuiltinColumn({ status: "in-progress", label: "In Progress" });
-		const column = container.querySelector(".glass-column") as HTMLElement;
-		expect(column.className).toMatch(/w-\[19rem\]/);
+		expect(column).toHaveClass("w-full", "min-w-0");
+		expect(column.className).not.toMatch(/w-\[(6\.125|19)rem\]/);
 		expect(screen.getByText("No tasks")).toBeInTheDocument();
-	});
-
-	it("stays full width when the column has tasks, regardless of viewport", () => {
-		setViewport(1200);
-		const task: Task = {
-			id: "t1", projectId: "p1", seq: 1, title: "Test", description: "",
-			status: "in-progress", baseBranch: "main", worktreePath: null, branchName: null,
-			groupId: null, variantIndex: null, agentId: null, configId: null,
-			createdAt: "2025-01-01T00:00:00Z", updatedAt: "2025-01-01T00:00:00Z",
-		};
-		const { container } = renderBuiltinColumn({ status: "in-progress", label: "In Progress", tasks: [task] });
-		const column = container.querySelector(".glass-column") as HTMLElement;
-		expect(column.className).toMatch(/w-\[19rem\]/);
+		expect(screen.queryByText(/Drag a task here/)).toBeNull();
 	});
 });
 

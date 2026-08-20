@@ -1905,6 +1905,34 @@ describe("handlers.getAllProjectTasks", () => {
 		expect(opsEntry).toBeDefined();
 		expect(opsEntry!.tasks.map((t) => t.id)).toEqual(["op1"]);
 	});
+
+	it("keeps active-only semantics while the workspace board returns every status", async () => {
+		const project = makeProject({ id: "g1" });
+		const todo = makeTask({ id: "todo-1", projectId: "g1", status: "todo" });
+		const active = makeTask({ id: "active-1", projectId: "g1", status: "in-progress" });
+		const completed = makeTask({ id: "done-1", projectId: "g1", status: "completed" });
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockResolvedValue([todo, active, completed]);
+
+		expect((await handlers.getAllProjectTasks())[0].tasks.map((task) => task.id)).toEqual(["active-1"]);
+		expect((await handlers.getWorkspaceBoardTasks())[0].tasks.map((task) => task.id)).toEqual(["todo-1", "active-1", "done-1"]);
+	});
+
+	it("keeps healthy project rows when one workspace project fails to load", async () => {
+		const healthy = makeProject({ id: "healthy" });
+		const broken = makeProject({ id: "broken" });
+		vi.mocked(data.loadProjects).mockResolvedValue([healthy, broken]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockImplementation(async (project: Project) => {
+			if (project.id === "broken") throw new Error("bad tasks file");
+			return [makeTask({ id: "visible", projectId: project.id, status: "completed" })];
+		});
+
+		const result = await handlers.getWorkspaceBoardTasks();
+		expect(result.find((entry) => entry.projectId === "healthy")?.tasks[0].id).toBe("visible");
+		expect(result.find((entry) => entry.projectId === "broken")).toMatchObject({ tasks: [], error: "Error: bad tasks file" });
+	});
 });
 
 // ================================================================
@@ -1919,6 +1947,8 @@ describe("handlers.createTask", () => {
 		const task = makeTask({ status: "todo", worktreePath: null, branchName: null });
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.addTask).mockResolvedValue(task);
+		const push = vi.fn();
+		setPushMessage(push);
 
 		const result = await handlers.createTask({
 			projectId: "proj-1",
@@ -1927,6 +1957,7 @@ describe("handlers.createTask", () => {
 		expect(result).toEqual(task);
 		expect(data.addTask).toHaveBeenCalledWith(project, "New task", "todo", undefined);
 		expect(git.createWorktree).not.toHaveBeenCalled();
+		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task });
 	});
 
 	it("creates an in-progress task with worktree + PTY", async () => {
