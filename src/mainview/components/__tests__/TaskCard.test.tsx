@@ -190,6 +190,15 @@ function renderCard(
 }
 
 describe("TaskCard", () => {
+	it("uses a full-card attention treatment when the agent needs input", () => {
+		renderCard(makeTask({ status: "user-questions" }));
+
+		const card = screen.getByTestId("task-card-needs-input").closest("[data-needs-input]");
+		expect(screen.getByText("Needs input")).toBeInTheDocument();
+		expect(card).toHaveAttribute("data-needs-input", "true");
+		expect(card).toHaveStyle({ borderColor: "#ffa35370" });
+	});
+
 	it("keeps the last preparation failure visible after a task returns to To Do", () => {
 		renderCard(makeTask({ preparationError: "tmux failed to spawn" }));
 

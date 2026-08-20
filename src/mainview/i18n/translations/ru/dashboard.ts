@@ -1,6 +1,9 @@
 const dashboard = {
 	// Dashboard
 	"dashboard.screenTitle": "Панель проектов",
+	"dashboard.views": "Режимы панели",
+	"dashboard.tabBoard": "Доска",
+	"dashboard.tabProjects": "Проекты",
 	"dashboard.noProjects": "Пока нет проектов",
 	"dashboard.noProjectsHint": "Добавьте git-репозиторий, чтобы начать",
 	"dashboard.addProject": "Добавить проект",
@@ -18,6 +21,16 @@ const dashboard = {
 	"dashboard.projectCount_few": "{count} проекта",
 	"dashboard.projectCount_many": "{count} проектов",
 	"dashboard.projectCount_other": "{count} проектов",
+	"workspaceBoard.projects": "Проекты",
+	"workspaceBoard.custom": "Свои",
+	"workspaceBoard.search": "Поиск задач и проектов…",
+	"workspaceBoard.loading": "Загрузка общей доски…",
+	"workspaceBoard.retry": "Повторить загрузку проектов",
+	"workspaceBoard.failedLoad": "Не удалось загрузить общую доску. ({error})",
+	"workspaceBoard.taskCount": "{count} задач",
+	"workspaceBoard.openProject": "Открыть проект",
+	"workspaceBoard.dropHere": "Переместить задачу в {status}, проект {project}",
+	"workspaceBoard.dropHereShort": "Отпустите для перемещения",
 
 	// Activity overview
 	"activity.noActiveTasks": "Нет активных задач ни в одном проекте",

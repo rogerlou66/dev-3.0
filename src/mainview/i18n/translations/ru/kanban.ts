@@ -16,7 +16,6 @@ const kanban = {
 	"kanban.failedReorderColumns": "Не удалось изменить порядок колонок: {error}",
 	"kanban.showMore": "Показать ещё ({count})",
 	"kanban.showLess": "Свернуть",
-	"kanban.collapseColumn": "Открепить колонку",
 	"kanban.renameColumn": "Переименовать колонку",
 	"kanban.draftNotDroppable": "Это черновик — допишите описание и сохраните как задачу, прежде чем запускать.",
 
@@ -293,6 +292,7 @@ const kanban = {
 
 	// Watch
 	"task.watch": "Следить",
+	"task.needsInput": "Нужен ответ",
 	"task.watching": "Слежу",
 	"task.watchTooltip": "Следить — уведомлять при смене статуса",
 	"task.manualCompletion": "Завершу самостоятельно",

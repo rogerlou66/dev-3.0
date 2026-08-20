@@ -20,7 +20,6 @@ import { matchesTaskQuery } from "../utils/taskSearch";
 import { buildFilterGroups, taskQueryContext, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
 import { startVisibilityAwarePoll } from "../utils/poll";
 import { useTipRotation } from "../hooks/useTipRotation";
-import { useColumnCollapse } from "../hooks/useColumnCollapse";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useStatusColors } from "../hooks/useStatusColors";
@@ -133,7 +132,6 @@ function KanbanBoard({
 	const [autoEditColumnId, setAutoEditColumnId] = useState<string | null>(null);
 	// Feature-discovery tip rotation (board context). Shared logic lives in the hook.
 	const { tip: currentTip, tipState, applyTipState } = useTipRotation("board", globalSettings.tipsDisabled);
-	const collapseState = useColumnCollapse(project.id);
 
 	// PR badge data for task cards. Seed from persisted task metadata so the board
 	// stays useful while the first live GitHub lookup is still in flight.
@@ -482,6 +480,19 @@ function KanbanBoard({
 		}
 	}
 
+	// Questions are an attention state, not a separate place in the workflow.
+	// Keep the persisted lifecycle status intact while presenting those cards in
+	// Agent is Working, where their amber treatment makes the interruption clear.
+	const workingTasks = [
+		...(tasksByStatus.get("in-progress") ?? []),
+		...(tasksByStatus.get("user-questions") ?? []),
+	];
+	tasksByStatus.set(
+		"in-progress",
+		sortTasksForColumn(workingTasks, globalSettings.taskSortOrder, "in-progress"),
+	);
+	tasksByStatus.set("user-questions", []);
+
 	// Returns all columns in their effective display order (delegates to the
 	// shared getBoardColumns). Occupancy is computed from the FULL task list, not
 	// the filtered one: a search filter must never hide a column out from under
@@ -547,14 +558,11 @@ function KanbanBoard({
 		tasksByCustomColumn.set(colId, sortTasksForColumn(colTasks, globalSettings.taskSortOrder));
 	}
 
-	// Find the first column with <2 tasks for the tip card (only one tip across the board)
-	// Exclude collapsed columns from tip placement
+	// Find the first column with room for the single board tip card.
 	const tipColumnId: string | null = useMemo(() => {
 		if (!currentTip) return null;
 		const orderedCols = getOrderedColumns();
 		for (const slot of orderedCols) {
-			const colId = slot.type === "builtin" ? slot.status : slot.col.id;
-			if (collapseState.isCollapsed(colId)) continue;
 			if (slot.type === "builtin") {
 				const count = tasksByStatus.get(slot.status)?.length ?? 0;
 				if (count < 3) return slot.status;
@@ -564,7 +572,7 @@ function KanbanBoard({
 			}
 		}
 		return null;
-	}, [currentTip, displayTasks, collapseState]);
+	}, [currentTip, displayTasks]);
 
 	// Resolved from the live task list, so the popup closes by itself if the draft
 	// is promoted or deleted from somewhere else.
@@ -620,9 +628,8 @@ function KanbanBoard({
 		onOpenUnresolvedComments,
 	};
 
-	function renderColumnElement(slot: ColumnSlot, full: boolean) {
+	function renderColumnElement(slot: ColumnSlot) {
 		if (slot.type === "builtin") {
-			const colId = slot.status;
 			return (
 				<KanbanColumn
 					key={slot.status}
@@ -634,11 +641,7 @@ function KanbanBoard({
 					tip={tipColumnId === slot.status ? currentTip : undefined}
 					onTipChanged={handleTipChanged}
 					tipState={tipState ?? undefined}
-					collapsed={full ? false : collapseState.isCollapsed(colId)}
-					onCollapseToggle={full ? undefined : () => collapseState.toggle(colId)}
-					collapseDragHandlers={full ? undefined : collapseState.dragExpandHandlers(colId)}
 					onRenameColumn={(name) => handleRenameBuiltinColumn(slot.status, name)}
-					fullWidth={full}
 					{...commonProps}
 				/>
 			);
@@ -664,18 +667,14 @@ function KanbanBoard({
 				tip={tipColumnId === col.id ? currentTip : undefined}
 				onTipChanged={handleTipChanged}
 				tipState={tipState ?? undefined}
-				fullWidth={full}
 				{...commonProps}
 			/>
 		);
 	}
 
-	// Carousel mode: one column per screen. Built-in collapsed defaults remain
-	// reachable on mobile; only columns explicitly collapsed by the user are
-	// excluded from rotation. Empty columns stay for position stability.
+	// Carousel mode: one column per screen. Empty columns stay for position stability.
 	const carouselColumns: CarouselColumn[] = isCarousel
 		? orderedColumns
-				.filter((slot) => !collapseState.isUserCollapsed(slot.type === "builtin" ? slot.status : slot.col.id))
 				.map((slot) =>
 					slot.type === "builtin"
 						? {
@@ -683,18 +682,18 @@ function KanbanBoard({
 								label: customStatusLabels[slot.status] || t(statusKey(slot.status)),
 								color: statusColors[slot.status],
 								count: tasksByStatus.get(slot.status)?.length ?? 0,
-								element: renderColumnElement(slot, true),
+								element: renderColumnElement(slot),
 							}
 						: {
 								id: slot.col.id,
 								label: slot.col.name,
 								color: slot.col.color ?? statusColors.todo,
 								count: tasksByCustomColumn.get(slot.col.id)?.length ?? 0,
-								element: renderColumnElement(slot, true),
+								element: renderColumnElement(slot),
 							},
 				)
 		: [];
-	const initialColumnId = carouselColumns.find((column) => column.id === "user-questions" && column.count > 0)?.id
+	const initialColumnId = carouselColumns.find((column) => column.id === "in-progress" && column.count > 0)?.id
 		?? carouselColumns.find((column) => column.id === "review-by-user" && column.count > 0)?.id;
 
 	return (
@@ -709,7 +708,15 @@ function KanbanBoard({
 			{isCarousel ? (
 				<MobileBoardCarousel columns={carouselColumns} initialColumnId={initialColumnId} />
 			) : (
-				<div className="flex-1 min-h-0 flex gap-5 px-6 pb-6 pt-2 overflow-x-auto overflow-y-hidden kanban-scroll">
+				<div
+					className="flex-1 min-h-0 grid gap-2 px-3 pb-3 pt-2 overflow-hidden"
+					style={{
+						gridTemplateColumns: orderedColumns
+							.flatMap((slot) => slot.type === "builtin" && slot.status === "completed" ? ["2.75rem", "minmax(0, 1fr)"] : ["minmax(0, 1fr)"])
+							.concat(orderedColumns.some((slot) => slot.type === "builtin" && slot.status === "completed") ? [] : ["2.75rem"])
+							.join(" "),
+					}}
+				>
 					{(() => {
 						// Add-column affordance (issue #222): a slim dashed ghost strip that
 						// reuses the board's "+" idiom — no toolbar button. It sits right
@@ -717,7 +724,7 @@ function KanbanBoard({
 						// the very end past Cancelled.
 						const hasCompleted = orderedColumns.some((s) => s.type === "builtin" && s.status === "completed");
 						return orderedColumns.flatMap((slot) => {
-							const el = renderColumnElement(slot, false);
+							const el = renderColumnElement(slot);
 							const beforeCompleted = slot.type === "builtin" && slot.status === "completed";
 							return beforeCompleted ? [addColumnButton, el] : [el];
 							// Defensive fallback handled below when Completed is somehow absent.

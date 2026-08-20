@@ -16,7 +16,6 @@ const kanban = {
 	"kanban.failedReorderColumns": "No se pudo reordenar las columnas: {error}",
 	"kanban.showMore": "Mostrar más ({count})",
 	"kanban.showLess": "Mostrar menos",
-	"kanban.collapseColumn": "Desanclar columna",
 	"kanban.renameColumn": "Renombrar columna",
 	"kanban.draftNotDroppable": "Esto es un borrador: completa su descripción y guárdalo como tarea antes de iniciarlo.",
 
@@ -283,6 +282,7 @@ const kanban = {
 
 	// Watch
 	"task.watch": "Vigilar",
+	"task.needsInput": "Requiere respuesta",
 	"task.watching": "Vigilando",
 	"task.watchTooltip": "Vigilar — notificar al cambiar estado",
 	"task.manualCompletion": "La completaré por mi cuenta",

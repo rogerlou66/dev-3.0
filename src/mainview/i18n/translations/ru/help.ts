@@ -49,6 +49,8 @@ const help = {
 
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Проекты",
+	"help.dashboard.workspaceBoard.title": "Общая доска",
+	"help.dashboard.workspaceBoard.body": "Работайте со всеми проектами на одной выровненной доске. Перемещения остаются внутри проекта, а вопросы показаны янтарными карточками Нужен ответ в колонке Агент работает.",
 	"help.dashboard.projects.body":
 		"Каждый проект — это git-репозиторий со своей Kanban-доской, лейблами и скриптами жизненного цикла. Operations-доска — виртуальный проект: её задачи запускают агентов в управляемых папках, без git.",
 	"help.dashboard.statsEntry.title": "Статистика продуктивности",

@@ -69,6 +69,7 @@ export const HELP_TOPICS: HelpTopic[] = [
 	{ id: "board.task-card", titleKey: "help.board.taskCard.title", bodyKey: "help.board.taskCard.body" },
 
 	// ── Dashboard ──
+	{ id: "dashboard.workspace-board", titleKey: "help.dashboard.workspaceBoard.title", bodyKey: "help.dashboard.workspaceBoard.body" },
 	{ id: "dashboard.projects", titleKey: "help.dashboard.projects.title", bodyKey: "help.dashboard.projects.body" },
 	{ id: "dashboard.stats-entry", titleKey: "help.dashboard.statsEntry.title", bodyKey: "help.dashboard.statsEntry.body" },
 	{ id: "dashboard.project-row", titleKey: "help.dashboard.projectRow.title", bodyKey: "help.dashboard.projectRow.body" },
@@ -180,6 +181,7 @@ export const REQUIRED_HELP_SURFACES: string[] = [
 	"filters.dsl",
 	"board.task-card",
 	// Dashboard
+	"dashboard.workspace-board",
 	"dashboard.projects",
 	"dashboard.stats-entry",
 	"dashboard.project-row",

@@ -1393,36 +1393,27 @@ export type BoardColumnSlot =
 
 /**
  * Returns every column a project's board renders, in effective display order,
- * respecting `columnOrder` and hiding columns that don't apply (virtual boards
- * have no AI/PR review; `peerReviewEnabled === false` hides PR review; AI review
- * hides when disabled). Single source of truth for the board's column layout —
- * see [[KanbanBoard]].
+ * respecting `columnOrder` and hiding contextual columns while they are idle.
+ * `user-questions` is projected into Agent is Working by the board, while AI
+ * Review and PR Review appear only while they contain tasks. Single source of
+ * truth for the board's column layout — see [[KanbanBoard]].
  *
  * Pure function of the project plus `opts.occupiedStatuses` — the built-in
- * statuses that currently hold at least one card. **A column holding tasks is
- * never hidden**, whatever the project config says: hiding it would drop those
- * cards off the board with no way to reach them (and it survives a restart,
- * which reads as data loss). Turning peer review off, or converting a board to
- * Operations, therefore leaves an occupied review column standing until it
- * empties out.
+ * statuses that currently hold at least one card. Occupied review columns stay
+ * visible so their cards remain reachable. Questions is the deliberate
+ * exception because the renderer places those cards in Agent is Working.
  */
 export function getBoardColumns(
 	project: Pick<Project, "customColumns" | "columnOrder" | "peerReviewEnabled" | "builtinColumnAgents" | "kind">,
 	opts: { occupiedStatuses?: ReadonlySet<TaskStatus> } = {},
 ): BoardColumnSlot[] {
 	const cols = project.customColumns ?? [];
-	const peerReviewEnabled = project.peerReviewEnabled !== false;
-	// AI Review shows by default (on when builtinColumnAgents is unset or has a review-by-ai config).
-	const aiReviewEnabled = project.builtinColumnAgents === undefined || !!project.builtinColumnAgents?.["review-by-ai"];
 	const occupied = opts.occupiedStatuses;
-	// Virtual ("Operations") boards have no diff/PR, so AI Review and PR Review are hidden.
-	const isVirtual = project.kind === "virtual";
-	const shouldHide = (s: TaskStatus) =>
-		!occupied?.has(s) && (
-			(isVirtual && (s === "review-by-ai" || s === "review-by-colleague")) ||
-			(s === "review-by-colleague" && !peerReviewEnabled) ||
-			(s === "review-by-ai" && !aiReviewEnabled)
-		);
+	const shouldHide = (s: TaskStatus) => {
+		if (s === "user-questions") return true;
+		if (s === "review-by-ai" || s === "review-by-colleague") return !occupied?.has(s);
+		return false;
+	};
 	const filterBuiltin = (statuses: TaskStatus[]) => statuses.filter((s) => !shouldHide(s));
 
 	if (!project.columnOrder || project.columnOrder.length === 0) {
@@ -3306,6 +3297,11 @@ export type AppRPCSchema = {
 			getAllProjectTasks: {
 				params: void;
 				response: { projectId: string; tasks: Task[] }[];
+			};
+			/** All lifecycle states for the workspace Kanban; active-only callers use getAllProjectTasks. */
+			getWorkspaceBoardTasks: {
+				params: void;
+				response: { projectId: string; tasks: Task[]; error?: string }[];
 			};
 			getProductivityStats: {
 				params: void;

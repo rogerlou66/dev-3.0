@@ -49,6 +49,8 @@ const help = {
 
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Proyectos",
+	"help.dashboard.workspaceBoard.title": "Tablero global",
+	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. Los movimientos permanecen dentro de cada proyecto y las preguntas aparecen como tarjetas ámbar Requiere respuesta en Agente trabajando.",
 	"help.dashboard.projects.body":
 		"Cada proyecto es un repositorio git con su propio tablero Kanban, etiquetas y scripts de ciclo de vida. Un tablero de Operaciones es un proyecto virtual: sus tareas ejecutan agentes en carpetas gestionadas, sin git.",
 	"help.dashboard.statsEntry.title": "Estadísticas de productividad",

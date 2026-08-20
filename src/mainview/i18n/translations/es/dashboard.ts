@@ -1,6 +1,9 @@
 const dashboard = {
 	// Dashboard
 	"dashboard.screenTitle": "Panel de proyectos",
+	"dashboard.views": "Vistas del panel",
+	"dashboard.tabBoard": "Tablero",
+	"dashboard.tabProjects": "Proyectos",
 	"dashboard.noProjects": "Aún no hay proyectos",
 	"dashboard.noProjectsHint": "Agrega un repositorio git para comenzar",
 	"dashboard.addProject": "Agregar proyecto",
@@ -16,6 +19,16 @@ const dashboard = {
 	"dashboard.moveProjectDown": "Bajar proyecto",
 	"dashboard.projectCount_one": "{count} proyecto",
 	"dashboard.projectCount_other": "{count} proyectos",
+	"workspaceBoard.projects": "Proyectos",
+	"workspaceBoard.custom": "Personalizado",
+	"workspaceBoard.search": "Buscar tareas y proyectos…",
+	"workspaceBoard.loading": "Cargando el tablero global…",
+	"workspaceBoard.retry": "Reintentar proyectos fallidos",
+	"workspaceBoard.failedLoad": "No se pudo cargar el tablero global. ({error})",
+	"workspaceBoard.taskCount": "{count} tareas",
+	"workspaceBoard.openProject": "Abrir proyecto",
+	"workspaceBoard.dropHere": "Mover tarea a {status} en {project}",
+	"workspaceBoard.dropHereShort": "Soltar para mover",
 
 	// Activity overview
 	"activity.noActiveTasks": "Sin tareas activas en ningún proyecto",

@@ -1,4 +1,4 @@
-import type { Dispatch } from "react";
+import { useState, type Dispatch } from "react";
 import { toast } from "../toast";
 import type { Project } from "../../shared/types";
 import { orderProjectsForDisplay } from "../../shared/types";
@@ -7,6 +7,7 @@ import { api } from "../rpc";
 import { confirm } from "../confirm";
 import { useT } from "../i18n";
 import ActivityOverview from "./ActivityOverview";
+import WorkspaceBoard from "./WorkspaceBoard";
 
 interface DashboardProps {
 	projects: Project[];
@@ -18,6 +19,7 @@ interface DashboardProps {
 
 function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject }: DashboardProps) {
 	const t = useT();
+	const [surface, setSurface] = useState<"board" | "projects">("board");
 
 	async function handleRemoveProject(projectId: string) {
 		const confirmed = await confirm({
@@ -52,9 +54,29 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject 
 
 	return (
 		<div className="h-full w-full flex flex-col">
+			{projects.length > 0 && (
+				<nav className="flex h-12 flex-shrink-0 items-end gap-2 border-b border-edge px-3" aria-label={t("dashboard.views")}>
+					{(["board", "projects"] as const).map((view) => (
+						<button
+							key={view}
+							type="button"
+							onClick={() => setSurface(view)}
+							aria-current={surface === view ? "page" : undefined}
+							className={`h-full border-b-2 px-4 text-sm font-semibold transition-colors ${surface === view ? "border-accent text-fg" : "border-transparent text-fg-3 hover:text-fg"}`}
+						>
+							{t(view === "board" ? "dashboard.tabBoard" : "dashboard.tabProjects")}
+						</button>
+					))}
+				</nav>
+			)}
 			<div className="flex-1 overflow-hidden">
 				{projects.length > 0 ? (
-					<ActivityOverview
+					surface === "board" ? <WorkspaceBoard
+						projects={projects}
+						dispatch={dispatch}
+						navigate={navigate}
+						bellCounts={bellCounts}
+					/> : <ActivityOverview
 						projects={projects}
 						dispatch={dispatch}
 						navigate={navigate}

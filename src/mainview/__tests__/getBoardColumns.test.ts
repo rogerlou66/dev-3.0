@@ -17,14 +17,11 @@ function project(overrides: Partial<Project> = {}): ProjectInput {
 }
 
 describe("getBoardColumns", () => {
-	it("default git board (no columnOrder, no custom) — all built-ins in lifecycle order", () => {
+	it("default git board keeps only the persistent workflow columns", () => {
 		expect(tokens(getBoardColumns(project()))).toEqual([
 			"todo",
 			"in-progress",
-			"user-questions",
-			"review-by-ai",
 			"review-by-user",
-			"review-by-colleague",
 			"completed",
 			"cancelled",
 		]);
@@ -35,12 +32,9 @@ describe("getBoardColumns", () => {
 		expect(tokens(getBoardColumns(project({ customColumns: cols })))).toEqual([
 			"todo",
 			"in-progress",
-			"user-questions",
-			"review-by-ai",
 			"review-by-user",
 			"custom:deploy",
 			"custom:qa",
-			"review-by-colleague",
 			"completed",
 			"cancelled",
 		]);
@@ -62,6 +56,11 @@ describe("getBoardColumns", () => {
 			getBoardColumns(project({ builtinColumnAgents: {} }), { occupiedStatuses: new Set(["review-by-ai"] as const) }),
 		);
 		expect(result).toContain("review-by-ai");
+	});
+
+	it("Questions stays projected into Agent is Working even when occupied", () => {
+		const result = tokens(getBoardColumns(project(), { occupiedStatuses: new Set(["user-questions"] as const) }));
+		expect(result).not.toContain("user-questions");
 	});
 
 	// An occupied column that hides takes its cards off the board for good: they
@@ -112,7 +111,7 @@ describe("getBoardColumns", () => {
 
 	it("virtual (Operations) board hides both AI Review and PR Review", () => {
 		const result = tokens(getBoardColumns(project({ kind: "virtual" })));
-		expect(result).toEqual(["todo", "in-progress", "user-questions", "review-by-user", "completed", "cancelled"]);
+		expect(result).toEqual(["todo", "in-progress", "review-by-user", "completed", "cancelled"]);
 	});
 
 	it("respects an explicit columnOrder, placing custom columns where listed", () => {
@@ -123,12 +122,12 @@ describe("getBoardColumns", () => {
 		);
 		// Ordered head follows columnOrder; the rest are appended afterwards.
 		expect(result.slice(0, 3)).toEqual(["todo", "custom:deploy", "in-progress"]);
-		expect(result).toContain("user-questions");
+		expect(result).not.toContain("user-questions");
 		expect(result).toContain("completed");
 	});
 
 	it("re-inserts review-by-ai before review-by-user when absent from a stored columnOrder", () => {
-		const result = tokens(getBoardColumns(project({ columnOrder: ["todo", "in-progress", "review-by-user"] })));
+		const result = tokens(getBoardColumns(project({ columnOrder: ["todo", "in-progress", "review-by-user"] }), { occupiedStatuses: new Set(["review-by-ai"] as const) }));
 		const aiIdx = result.indexOf("review-by-ai");
 		const userIdx = result.indexOf("review-by-user");
 		expect(aiIdx).toBeGreaterThanOrEqual(0);
@@ -136,7 +135,7 @@ describe("getBoardColumns", () => {
 	});
 
 	it("re-inserts review-by-colleague before completed when absent from a stored columnOrder", () => {
-		const result = tokens(getBoardColumns(project({ columnOrder: ["todo", "completed"] })));
+		const result = tokens(getBoardColumns(project({ columnOrder: ["todo", "completed"] }), { occupiedStatuses: new Set(["review-by-colleague"] as const) }));
 		const colleagueIdx = result.indexOf("review-by-colleague");
 		const completedIdx = result.indexOf("completed");
 		expect(colleagueIdx).toBeGreaterThanOrEqual(0);

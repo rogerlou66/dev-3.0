@@ -98,7 +98,7 @@ Evidence: `GlobalHeader.tsx`.
 
 ### Tabs — `Observed`
 
-Only in `project-settings` (`global | project | worktree | automations`). Budget ≤ 6 visible tabs.
+Tabs divide sibling views inside an existing destination. Observed in `dashboard` (`Board | Projects`) and `project-settings` (`global | project | worktree | automations`). Budget ≤ 6 visible tabs.
 
 ### Command palette (Cmd/Ctrl+K nav · Cmd/Ctrl+Shift+P actions) — `Observed`
 
@@ -110,7 +110,8 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 |---|---|---|---|---|
 | Global header | Location + switching + app utilities | breadcrumb, destination, project switcher, settings/changelog entry, tmux manager, prevent-sleep (awake) toggle, **≤1 ambient resource readout** (memory headroom) | task-scoped action, dense filters, destructive primary | `GlobalHeader.tsx` |
 | Application menu (native) | Canonical home for the full action taxonomy | every action type | — | `application-menu.ts`, `menu-actions.ts` |
-| Kanban board | Primary work surface | task cards, create-in-column, drag-move, column config, task filter (token-DSL search + funnel; label chips are a view of it) | durable global config | `KanbanBoard.tsx`, `KanbanColumn.tsx`, `LabelFilterBar.tsx`, `FilterFunnel.tsx` |
+| Workspace board | Cross-project daily work on the Dashboard Board tab | project swimlanes, aligned lifecycle columns, task open/move, search | cross-project task moves, project-specific column configuration | `WorkspaceBoard.tsx`, `Dashboard.tsx` |
+| Kanban board | Primary single-project work surface | task cards, create-in-column, drag-move, column config, task filter (token-DSL search + funnel; label chips are a view of it) | durable global config | `KanbanBoard.tsx`, `KanbanColumn.tsx`, `LabelFilterBar.tsx`, `FilterFunnel.tsx` |
 | Task card | Compact task summary | status dot, labels, variant dots (≤3, clickable → sibling popover), open, context menu, git badge, native-backend marker (§5.6) | full settings, global destination, unbounded dot rows | `TaskCard.tsx` (large — watch density) |
 | Task info panel (inspector) | Active-task control: git, dev server, scripts, notes, tmux, open-in | object/git/dev-server actions, metadata, **capped** notes preview (§5.8) | global destination, cross-project action, an uncapped note list | `TaskInfoPanel.tsx` (densest surface) |
 | Task notes log | The whole agent-written note log of one task | read every note, add, edit, delete | task lifecycle action, git mutation, global destination | `TaskNotesOverlay.tsx` (sheet on narrow, dialog on wide — see 5.8) |
@@ -132,6 +133,8 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 | Diagnostics (crash + error surface) | Make renderer faults visible in remote/mobile where there is no devtools | crash fallback (error boundary), bootstrap phase + timeout→retry, captured error list, copy/clear, conditional floating entry | navigation destination, mutation of app data, permanent chrome in the happy path | `RootErrorBoundary.tsx`, `BootstrapScreen.tsx`, `DiagnosticsPanel.tsx`, `DiagnosticsIndicator.tsx`, `diagnostics.ts` (see §5.5) |
 | Inline help (Tooltip / HelpSpot → HelpCard / help mode) | Explain what a section is, why it exists, what to do in it | fast control tooltip, section (i) in header-bearing surfaces, rich read-only HelpCard, screen-wide help-mode overlay | mutation, multi-step tour, permanent (i) in quickbars/cards/toolbars | `Tooltip.tsx`, `HelpSpot.tsx`, `HelpCard.tsx`, `HelpOverlay.tsx`, `help.ts` (see §5.4) |
 | Productivity Stats (Velocity Cockpit) | Read-only showcase of shipping output over time | hero speedometer gauges, SVG bar/area charts, per-project gauge wall, counters, time-range switch + prev/next period navigation, per-project→board jump | mutation, lifecycle/config action, header button, data filter (new dimension beyond time) | `ProductivityStatsView.tsx`, `components/stats/*` |
+
+**Board lifecycle presentation (`Observed`, 2026-08-19):** `user-questions` remains a persisted lifecycle status and hook target, but boards project it into **Agent is Working** with a full-card amber wash and a text `Needs input` badge. AI Review and PR Review are contextual columns that mount only while occupied; Completed and Cancelled stay expanded. Desktop single-project columns share the available width as a compact grid instead of defaulting to horizontal scroll. The workspace board uses one canonical header plus project swimlanes, forbids cross-project drag, and rolls project-specific custom columns into a non-drop `Custom` column.
 
 Note: native menu is the **overflow/expert** surface; frequent actions are mirrored into DOM toolbars (inspector, board).
 
@@ -554,7 +557,8 @@ Every surface from §5 gets an explicit narrow form. "—" = unchanged.
 | Surface | Desktop form | Narrow (<768) form | Status |
 |---|---|---|---|
 | Mobile orientation | natural device orientation | **portrait-only device guard**; best-effort platform lock plus a blocking rotate prompt fallback in landscape | `Observed` (`MobilePortraitGate`, `usePortraitOrientation`) |
-| Kanban board | all columns side-by-side | **column carousel** (one column/screen, swipe; vertical task scroll; collapsed cols excluded, empty kept) | `Observed` |
+| Kanban board | compact equal-width columns; contextual review columns appear only while occupied | **column carousel** (one status/screen, swipe; vertical task scroll; empty persistent columns kept) | `Observed` |
+| Workspace board | project swimlanes under one sticky lifecycle header | **status carousel**; each slide stacks project sections vertically | `Observed` |
 | Task move (drag) | drag card across columns | drag impossible → **"Move to <status>" action sheet** (long-press card) on the existing status path; completion reuses `confirmTaskCompletion` | `Proposed` |
 | Board filters/search | inline `LabelFilterBar` + `FilterFunnel` dropdown (token-DSL) | **bottom sheet** behind the funnel button (same grouped facets) | `Proposed` |
 | Terminal panes | tiled tmux panes | **pane carousel** — one zoomed pane + axis-arbitrated horizontal swipe over the terminal, a slim non-overlapping top dots strip, Arrow keys; keep-zoom via `tmuxPaneNavigate` (`MobilePaneCarousel.tsx`) | `Observed` |
@@ -566,7 +570,7 @@ Every surface from §5 gets an explicit narrow form. "—" = unchanged.
 | Modal (`*Modal`) | fixed 26–35rem centered | **full-bleed sheet**: `max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-2rem)]` (or bottom-sheet for action-style modals) | `Proposed` |
 | Context menu (right-click) | popup at cursor | **bottom action sheet** (long-press trigger) | `Proposed` |
 | Settings (left-nav + detail) | left-nav Settings categories + one category detail pane; localized search groups registered Settings entries | **category list first → one category detail at a time** with a visible back affordance; same route and persistence, no horizontal overflow | `Observed` (`GlobalSettings.tsx`, `settings-registry.ts`) |
-| Dashboard (Activity) | project list + resting-visible action icons + drag-reorder | vertical list, full-width cards (`p-3` not `p-7`); per-project actions **+ reorder** collapse into a **kebab → `BottomSheet` action sheet** (the desktop icon cluster, HTML5 drag, and the `hidden md:flex` up/down steps are all dead on touch); touch targets ≥44px | `Observed` |
+| Dashboard | Board / Projects sibling tabs; Projects retains the activity list and project controls | same tabs; Board becomes the status carousel, Projects remains a vertical list | `Observed` |
 | Command palette (Cmd+K / Cmd+Shift+P) | keyboard-summoned, `34rem` | needs a **touch entry** + `w-full max-w-[calc(100vw-2rem)]` — see §12.4 (it is the action fallback for the absent native menu) | `Proposed` |
 | Global header | single row, ≤9 utility buttons | reflow: logo + truncated breadcrumb + **one overflow (kebab)** for all utilities; never a 9-icon row (`useCompact` at 1600 only hides labels, it does not reflow for 390px) | `Observed` |
 | Hover terminal preview | popover on card hover | **disabled** on touch/narrow (no hover; popover obscures) — already gated in `useTerminalPreview` | `Observed` |

@@ -1,6 +1,6 @@
 ux_architecture:
   version: 1
-  updated_at: "2026-07-13"
+  updated_at: "2026-08-19"
   source: "derived_from_repository"
   confidence: "medium"
 
@@ -30,6 +30,7 @@ ux_architecture:
       - "src/mainview/App.tsx"
       - "src/mainview/components/GlobalHeader.tsx"
       - "src/mainview/components/KanbanBoard.tsx"
+      - "src/mainview/components/WorkspaceBoard.tsx"
       - "src/mainview/components/KanbanColumn.tsx"
       - "src/mainview/components/TaskCard.tsx"
       - "src/mainview/components/TaskInfoPanel.tsx"
@@ -151,7 +152,7 @@ ux_architecture:
       status: "observed"
       evidence: ["src/mainview/components/GlobalHeader.tsx (BreadcrumbSegment, project switcher)"]
     tabs:
-      observed_in: ["project-settings (global | project | worktree | automations)"]
+      observed_in: ["dashboard (Board | Projects)", "project-settings (global | project | worktree | automations)"]
       max_visible_tabs: 6
       status: "observed"
     command_palette:
@@ -210,6 +211,15 @@ ux_architecture:
       allowed: ["object_card", "create_in_column", "drag_move", "column_config", "label_filter"]
       forbidden: ["durable_global_configuration"]
       evidence: ["src/mainview/components/KanbanBoard.tsx", "src/mainview/components/KanbanColumn.tsx", "src/mainview/components/LabelFilterBar.tsx"]
+      lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review and PR Review mount only while occupied; Completed and Cancelled never default-collapse."
+      desktop_layout: "Compact equal-width grid across available space; no default horizontal scrollbar for the standard lifecycle columns."
+    workspace_board:
+      purpose: "Cross-project daily-work surface on Dashboard > Board: one canonical status header with projects as swimlanes."
+      allowed: ["object_card", "same_project_drag_move", "task_open", "project_open", "search"]
+      forbidden: ["cross_project_drag", "project_specific_column_config", "custom_column_drop"]
+      custom_columns: "Project-specific custom columns roll up into one occupied-only Custom display column; lifecycle menu retains the precise project column."
+      status: "observed"
+      evidence: ["src/mainview/components/WorkspaceBoard.tsx", "src/mainview/components/Dashboard.tsx", "src/bun/rpc-handlers/task-lifecycle.ts (getWorkspaceBoardTasks)"]
     task_card:
       purpose: "Compact object summary on the board with the most relevant per-task affordances."
       allowed: ["status_dot", "label_chip", "variant_dots", "open_action", "context_menu", "git_status_badge", "deferred_timer_chip", "native_backend_mark"]
@@ -600,7 +610,7 @@ ux_architecture:
       header: "GlobalHeader breadcrumb + add/create entry"
       filter: "label filter bar (board); task search (sidebar/dashboard)"
       item_actions: "context menu on card; open navigates to task"
-      empty_state: "compact empty Kanban columns (decision 047); empty config fallthrough (decision 020)"
+      empty_state: "terse empty Kanban cells preserve lifecycle alignment; empty config fallthrough (decision 020)"
     detail_screen:
       example: "task (full-screen terminal) / split project+task"
       header: "two-row task info header"
@@ -737,7 +747,8 @@ ux_architecture:
       always: "every swipe has a button + keyboard equivalent (chevrons/dots/Arrow Left-Right); swipe is never the only way. Focus follows the active sibling; aria-live announces it. prefers-reduced-motion snaps instantly — honoured everywhere (index.css blocks cover toast, sheet, marching-ants, icon families; useReducedMotion covers JS-driven animations)."
     surface_adaptation: # every §5 surface gets a narrow form
       mobile_orientation: { narrow: "portrait-only device guard — best-effort Screen Orientation API lock, with a blocking localized rotate prompt and inert app fallback when landscape cannot be locked", status: observed, evidence: "MobilePortraitGate.tsx, usePortraitOrientation.ts" }
-      kanban_board: { narrow: "column carousel (one column/screen, swipe; vertical task scroll; collapsed cols excluded, empty kept)", status: observed, evidence: "MobileBoardCarousel.tsx, KanbanBoard.tsx useNarrowViewport(768), KanbanColumn fullWidth" }
+      kanban_board: { narrow: "status carousel (one column/screen, swipe; vertical task scroll; empty persistent columns kept)", status: observed, evidence: "MobileBoardCarousel.tsx, KanbanBoard.tsx useNarrowViewport(768)" }
+      workspace_board: { narrow: "status carousel; every slide stacks project sections vertically; task moves use the lifecycle sheet, never cross-project drag", status: observed, evidence: "WorkspaceBoard.tsx, MobileBoardCarousel.tsx" }
       task_move_drag: { narrow: "drag impossible -> 'Move to <status>' bottom action sheet (long-press) on existing status path; completion reuses confirmTaskCompletion", status: proposed }
       board_filters: { narrow: "bottom sheet behind a header funnel button (LabelFilterBar + search)", status: proposed }
       terminal_panes: { narrow: "pane carousel — one pane at a time + axis-arbitrated horizontal swipe + a slim non-overlapping top dots strip + Arrow keys; backend-neutral via taskPaneState / taskPaneAction RPCs; native tasks page the same way; MobileWindowCarousel not rendered for native tasks", status: observed, evidence: "MobilePaneCarousel.tsx, TaskTerminal.tsx, task-panes.ts taskPaneState, decision 089" }
