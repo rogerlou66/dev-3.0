@@ -21,6 +21,7 @@ interface DashboardProps {
 function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask }: DashboardProps) {
 	const t = useT();
 	const [surface, setSurface] = useState<"board" | "projects">("board");
+	const [workspaceQuery, setWorkspaceQuery] = useState("");
 
 	async function handleRemoveProject(projectId: string) {
 		const confirmed = await confirm({
@@ -56,7 +57,7 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject,
 	return (
 		<div className="h-full w-full flex flex-col">
 			{projects.length > 0 && (
-				<nav className="flex h-12 flex-shrink-0 items-end gap-2 border-b border-edge px-3" aria-label={t("dashboard.views")}>
+				<nav className="flex h-12 flex-shrink-0 items-center gap-2 border-b border-edge px-3" aria-label={t("dashboard.views")}>
 					{(["board", "projects"] as const).map((view) => (
 						<button
 							key={view}
@@ -68,12 +69,25 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject,
 							{t(view === "board" ? "dashboard.tabBoard" : "dashboard.tabProjects")}
 						</button>
 					))}
+					{surface === "board" && (
+						<div className="relative ml-auto min-w-0 flex-1 max-w-sm">
+							<svg className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+							<input
+								aria-label={t("workspaceBoard.search")}
+								value={workspaceQuery}
+								onChange={(event) => setWorkspaceQuery(event.target.value)}
+								placeholder={t("workspaceBoard.search")}
+								className="h-8 w-full rounded-lg border border-edge bg-base/50 pl-9 pr-3 text-sm text-fg outline-none focus:border-accent"
+							/>
+						</div>
+					)}
 				</nav>
 			)}
 			<div className="flex-1 overflow-hidden">
 				{projects.length > 0 ? (
 					surface === "board" ? <WorkspaceBoard
 						projects={projects}
+						query={workspaceQuery}
 						dispatch={dispatch}
 						navigate={navigate}
 						bellCounts={bellCounts}

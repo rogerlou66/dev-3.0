@@ -98,7 +98,7 @@ Evidence: `GlobalHeader.tsx`.
 
 ### Tabs — `Observed`
 
-Tabs divide sibling views inside an existing destination. Observed in `dashboard` (`Board | Projects`) and `project-settings` (`global | project | worktree | automations`). Budget ≤ 6 visible tabs.
+Tabs divide sibling views inside an existing destination. Observed in `dashboard` (`Board | Projects`) and `project-settings` (`global | project | worktree | automations`). Budget ≤ 6 visible tabs. Dashboard Board may use one trailing search field in this row because it filters only the active workspace board; it disappears on Projects and flexes before displacing either tab.
 
 ### Command palette (Cmd/Ctrl+K nav · Cmd/Ctrl+Shift+P actions) — `Observed`
 

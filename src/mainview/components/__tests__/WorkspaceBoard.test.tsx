@@ -38,7 +38,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p2", tasks: [] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={projects} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		expect(await screen.findByText("Alpha")).toBeInTheDocument();
 		expect(screen.getByText("Beta")).toBeInTheDocument();
@@ -54,7 +54,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p1", tasks: [task("ai", "p1", "review-by-ai"), task("pr", "p1", "review-by-colleague")] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		await waitFor(() => expect(screen.getByText("AI Review")).toBeInTheDocument());
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
@@ -64,7 +64,7 @@ describe("WorkspaceBoard", () => {
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [] }]);
 		const virtualProject = { ...projects[0], kind: "virtual" as const };
 
-		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		await screen.findByText("Alpha");
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
@@ -78,7 +78,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p2", tasks: [] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={projects} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={onOpenCreateTask} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={onOpenCreateTask} /></I18nProvider>);
 
 		await screen.findByText("Alpha");
 		await userEvent.click(screen.getAllByRole("button", { name: "+ New Task" })[1]);
@@ -90,7 +90,7 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p1", tasks: [] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
 		await screen.findByText("Alpha");
 		expect(screen.queryByText("created-live")).not.toBeInTheDocument();

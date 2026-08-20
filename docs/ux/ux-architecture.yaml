@@ -216,6 +216,7 @@ ux_architecture:
     workspace_board:
       purpose: "Cross-project daily-work surface on Dashboard > Board: one canonical status header with projects as swimlanes."
       creation: "Each project swimlane owns a New Task action in its To Do cell; it opens the existing create-task modal preselected to that project."
+      search_placement: "One trailing field in the Board | Projects tab row, visible only while Board is active and flex-shrinking before either tab."
       allowed: ["object_card", "same_project_drag_move", "task_open", "project_open", "search"]
       forbidden: ["cross_project_drag", "project_specific_column_config", "custom_column_drop"]
       custom_columns: "Project-specific custom columns roll up into one occupied-only Custom display column; lifecycle menu retains the precise project column."

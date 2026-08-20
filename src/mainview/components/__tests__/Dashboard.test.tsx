@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Dashboard from "../Dashboard";
 import { I18nProvider } from "../../i18n";
@@ -73,7 +73,21 @@ describe("Dashboard", () => {
 	it("opens the workspace board by default", async () => {
 		renderDashboard([mockProject], vi.fn(), vi.fn(), vi.fn(), "board");
 		expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-current", "page");
-		expect(await screen.findByPlaceholderText("Search tasks and projects…")).toBeInTheDocument();
+		const navigation = screen.getByRole("navigation", { name: "Dashboard views" });
+		expect(await within(navigation).findByPlaceholderText("Search tasks and projects…")).toBeInTheDocument();
+	});
+
+	it("keeps the workspace search in the trailing tab-bar slot", async () => {
+		const user = userEvent.setup();
+		renderDashboard([mockProject], vi.fn(), vi.fn(), vi.fn(), "board");
+		const navigation = screen.getByRole("navigation", { name: "Dashboard views" });
+		const search = within(navigation).getByRole("textbox", { name: "Search tasks and projects…" });
+
+		await user.type(search, "api");
+		expect(search).toHaveValue("api");
+		expect(navigation.lastElementChild).toContainElement(search);
+		await user.click(within(navigation).getByRole("button", { name: "Projects" }));
+		expect(within(navigation).queryByRole("textbox")).not.toBeInTheDocument();
 	});
 
 	describe("empty state", () => {
