@@ -4,6 +4,12 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-20 — Workspace Completed history discloses per project
+
+- **Rule:** Each workspace Completed cell shows its two newest tasks by default; `Show N more` expands all remaining completed tasks for only that project, and `Show less` restores the compact row.
+- **Why:** Completed is durable history, but rendering every archived card makes one project's swimlane dominate the daily-work matrix; deletion and a global collapse were rejected because neither matches the task's local history scope.
+- **Status:** Implemented. Evidence: `WorkspaceBoard.tsx`, `WorkspaceBoard.test.tsx`.
+
 ## 2026-08-20 — Workspace search shares the dashboard tab bar
 
 - **Rule:** Dashboard Board's one search field occupies the trailing edge of the `Board | Projects` tab bar, appears only while Board is active, and flexes narrower before it can displace either tab.

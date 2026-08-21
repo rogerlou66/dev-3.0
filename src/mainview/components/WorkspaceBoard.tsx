@@ -27,6 +27,8 @@ interface WorkspaceBoardProps {
 }
 
 const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
+const WORKSPACE_CELL_TASK_LIMIT = 15;
+const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 
 function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask }: WorkspaceBoardProps) {
 	const t = useT();
@@ -44,6 +46,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	const [loadErrors, setLoadErrors] = useState<string[]>([]);
 	const [dragged, setDragged] = useState<{ projectId: string; taskId: string; status: TaskStatus } | null>(null);
 	const [movingTaskIds, setMovingTaskIds] = useState<Set<string>>(new Set());
+	const [expandedCompletedProjects, setExpandedCompletedProjects] = useState<Set<string>>(new Set());
 	const [launchModal, setLaunchModal] = useState<{ task: Task; project: Project; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
 
 	const load = useCallback(async () => {
@@ -191,6 +194,41 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		return true;
 	}
 
+	function visibleTasksForCell(project: Project, column: WorkspaceColumnId, tasks: Task[]): Task[] {
+		if (column === "completed") {
+			return expandedCompletedProjects.has(project.id)
+				? tasks
+				: tasks.slice(0, COMPLETED_COLLAPSED_TASK_LIMIT);
+		}
+		return tasks.slice(0, WORKSPACE_CELL_TASK_LIMIT);
+	}
+
+	function renderCellOverflow(project: Project, column: WorkspaceColumnId, tasks: Task[]) {
+		if (column !== "completed") {
+			if (tasks.length <= WORKSPACE_CELL_TASK_LIMIT) return null;
+			return <div className="py-1 text-center text-dense text-fg-muted">{t("kanban.showMore", { count: String(tasks.length - WORKSPACE_CELL_TASK_LIMIT) })}</div>;
+		}
+
+		const expanded = expandedCompletedProjects.has(project.id);
+		if (tasks.length <= COMPLETED_COLLAPSED_TASK_LIMIT) return null;
+		return (
+			<button
+				type="button"
+				onClick={() => setExpandedCompletedProjects((previous) => {
+					const next = new Set(previous);
+					if (expanded) next.delete(project.id); else next.add(project.id);
+					return next;
+				})}
+				aria-expanded={expanded}
+				className="w-full rounded-md py-1 text-center text-dense text-fg-3 transition-[color,background-color] hover:bg-fg/5 hover:text-fg"
+			>
+				{expanded
+					? t("kanban.showLess")
+					: t("kanban.showMore", { count: String(tasks.length - COMPLETED_COLLAPSED_TASK_LIMIT) })}
+			</button>
+		);
+	}
+
 	function renderTaskCard(project: Project, task: Task, siblingMap: Map<string, Task[]>) {
 		return (
 			<TaskCard
@@ -251,8 +289,9 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mb-2 block w-full truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
 							<div className="space-y-2">
 								{cellTasks.length > 0
-									? cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))
+									? visibleTasksForCell(project, column, cellTasks).map((task) => renderTaskCard(project, task, siblingMap))
 									: <div className="py-3 text-center text-xs text-fg-muted">{available ? t("kanban.noTasks") : t("workspaceBoard.notApplicable")}</div>}
+								{renderCellOverflow(project, column, cellTasks)}
 								{renderAddTaskButton(project, column)}
 							</div>
 						</section>
@@ -307,9 +346,9 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 								>
 									{acceptsDrop && <div className="mb-1 rounded border border-accent/40 bg-accent/10 px-1.5 py-1 text-center text-dense font-semibold text-accent">{t("workspaceBoard.dropHereShort")}</div>}
 									<div className="space-y-1.5">
-										{cellTasks.slice(0, 15).map((task) => renderTaskCard(project, task, siblingMap))}
+										{visibleTasksForCell(project, column, cellTasks).map((task) => renderTaskCard(project, task, siblingMap))}
 										{!available && <div className="py-5 text-center text-dense text-fg-muted">{t("workspaceBoard.notApplicable")}</div>}
-										{cellTasks.length > 15 && <div className="py-1 text-center text-dense text-fg-muted">{t("kanban.showMore", { count: String(cellTasks.length - 15) })}</div>}
+										{renderCellOverflow(project, column, cellTasks)}
 										{renderAddTaskButton(project, column)}
 									</div>
 								</div>

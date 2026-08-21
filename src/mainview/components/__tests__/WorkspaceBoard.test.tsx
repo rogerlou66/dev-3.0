@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import WorkspaceBoard from "../WorkspaceBoard";
 import { I18nProvider } from "../../i18n";
@@ -98,5 +98,42 @@ describe("WorkspaceBoard", () => {
 			detail: { projectId: "p1", task: task("created-live", "p1", "todo") },
 		}));
 		expect(await screen.findByText("created-live")).toBeInTheDocument();
+	});
+
+	it("shows the two newest completed tasks and expands the rest per project", async () => {
+		const completedTasks = [1, 2, 3, 4].map((index) => ({
+			...task(`done-${index}`, "p1", "completed"),
+			movedAt: `2026-01-0${index}T00:00:00Z`,
+		}));
+		const betaCompletedTasks = [1, 2, 3].map((index) => ({
+			...task(`beta-done-${index}`, "p2", "completed"),
+			movedAt: `2026-01-0${index}T00:00:00Z`,
+		}));
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "p1", tasks: completedTasks },
+			{ projectId: "p2", tasks: betaCompletedTasks },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+
+		const alpha = await screen.findByRole("region", { name: "Alpha" });
+		const beta = screen.getByRole("region", { name: "Beta" });
+		expect(within(alpha).getByText("done-4")).toBeInTheDocument();
+		expect(within(alpha).getByText("done-3")).toBeInTheDocument();
+		expect(within(alpha).queryByText("done-2")).not.toBeInTheDocument();
+		expect(within(alpha).queryByText("done-1")).not.toBeInTheDocument();
+		expect(within(beta).getByText("beta-done-3")).toBeInTheDocument();
+		expect(within(beta).getByText("beta-done-2")).toBeInTheDocument();
+		expect(within(beta).queryByText("beta-done-1")).not.toBeInTheDocument();
+
+		const showMore = within(alpha).getByRole("button", { name: "Show more (2)" });
+		expect(showMore).toHaveAttribute("aria-expanded", "false");
+		await userEvent.click(showMore);
+
+		expect(within(alpha).getByText("done-2")).toBeInTheDocument();
+		expect(within(alpha).getByText("done-1")).toBeInTheDocument();
+		expect(within(alpha).getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+		expect(within(beta).queryByText("beta-done-1")).not.toBeInTheDocument();
+		expect(within(beta).getByRole("button", { name: "Show more (1)" })).toHaveAttribute("aria-expanded", "false");
 	});
 });

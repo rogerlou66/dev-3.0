@@ -220,6 +220,7 @@ ux_architecture:
       allowed: ["object_card", "same_project_drag_move", "task_open", "project_open", "search"]
       forbidden: ["cross_project_drag", "project_specific_column_config", "custom_column_drop"]
       custom_columns: "Project-specific custom columns roll up into one occupied-only Custom display column; lifecycle menu retains the precise project column."
+      completed_disclosure: "Each project cell shows its two newest Completed tasks by default; Show N more expands all remaining Completed history for that project, and Show less restores the compact state."
       status: "observed"
       evidence: ["src/mainview/components/WorkspaceBoard.tsx", "src/mainview/components/Dashboard.tsx", "src/bun/rpc-handlers/task-lifecycle.ts (getWorkspaceBoardTasks)"]
     task_card:
