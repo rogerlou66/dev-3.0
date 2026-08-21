@@ -209,8 +209,7 @@ const terminal = {
 	"projectTerminal.restart": "Reiniciar",
 	"projectTerminal.label": "Terminal del proyecto",
 	"projectTerminal.backToBoard": "Volver al tablero",
-	"projectTerminal.shortcutHint": "⌘`",
-	"projectTerminal.tooltipWithShortcut": "Terminal del proyecto (⌘`)",
+	"projectTerminal.tooltipWithShortcut": "Terminal del proyecto ({shortcut})",
 
 	// Quick Shell (consola Operations integrada en $HOME)
 	"quickShell.open": "Shell rápido",

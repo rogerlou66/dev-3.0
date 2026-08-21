@@ -1,4 +1,4 @@
-import { useState, type Dispatch } from "react";
+import { useEffect, useState, type Dispatch } from "react";
 import { toast } from "../toast";
 import type { Project } from "../../shared/types";
 import { orderProjectsForDisplay } from "../../shared/types";
@@ -16,12 +16,17 @@ interface DashboardProps {
 	bellCounts: Map<string, number>;
 	onOpenAddProject: () => void;
 	onOpenCreateTask: (projectId: string) => void;
+	workspaceBoardRequest: number;
 }
 
-function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask }: DashboardProps) {
+function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask, workspaceBoardRequest }: DashboardProps) {
 	const t = useT();
 	const [surface, setSurface] = useState<"board" | "projects">("board");
 	const [workspaceQuery, setWorkspaceQuery] = useState("");
+
+	useEffect(() => {
+		setSurface("board");
+	}, [workspaceBoardRequest]);
 
 	async function handleRemoveProject(projectId: string) {
 		const confirmed = await confirm({

@@ -45,6 +45,7 @@ function renderDashboard(
 				bellCounts={new Map()}
 				onOpenAddProject={onOpenAddProject ?? vi.fn()}
 				onOpenCreateTask={onOpenCreateTask ?? vi.fn()}
+				workspaceBoardRequest={0}
 			/>
 		</I18nProvider>,
 	);
@@ -88,6 +89,32 @@ describe("Dashboard", () => {
 		expect(navigation.lastElementChild).toContainElement(search);
 		await user.click(within(navigation).getByRole("button", { name: "Projects" }));
 		expect(within(navigation).queryByRole("textbox")).not.toBeInTheDocument();
+	});
+
+	it("returns to the workspace board when App requests it", async () => {
+		const props = {
+			projects: [mockProject],
+			dispatch: vi.fn(),
+			navigate: vi.fn(),
+			bellCounts: new Map<string, number>(),
+			onOpenAddProject: vi.fn(),
+			onOpenCreateTask: vi.fn(),
+		};
+		const { rerender } = render(
+			<I18nProvider>
+				<Dashboard {...props} workspaceBoardRequest={0} />
+			</I18nProvider>,
+		);
+		fireEvent.click(screen.getByRole("button", { name: "Projects" }));
+		expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-current", "page");
+
+		rerender(
+			<I18nProvider>
+				<Dashboard {...props} workspaceBoardRequest={1} />
+			</I18nProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-current", "page"));
 	});
 
 	describe("empty state", () => {

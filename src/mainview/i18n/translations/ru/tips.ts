@@ -130,7 +130,7 @@ const tips = {
 	"tip.worktreeConfig.title": "Настройки задачи",
 	"tip.worktreeConfig.body": "У каждого worktree свой .dev3/config.json. Нажмите шестерёнку в панели задачи для редактирования.",
 	"tip.projectTerminal.title": "Терминал проекта",
-	"tip.projectTerminal.body": "Нужен быстрый shell в корне репо? Нажми кнопку Terminal в шапке или \u2318` для переключения с любого экрана проекта. ⌘⇧` создаёт новый scratch-таск в борде Operations.",
+	"tip.projectTerminal.body": "Нужен shell в корне репо? Используйте Terminal в шапке, а хоткей настройте в Настройки → Клавиатура.",
 	"tip.portAllocation.title": "Авто-выделение портов",
 	"tip.portAllocation.body": "Задайте portCount в настройках проекта — каждой задаче выделяются свободные порты. Используйте $DEV3_PORT0, $DEV3_PORT1 в скриптах.",
 	"tip.taskWatch.title": "Следите за задачами",

@@ -15,6 +15,7 @@ const keymap = {
 	"keymap.category.app": "Приложение",
 
 	"keymap.shortcut.goToProject": "Перейти к проекту (быстрый поиск)",
+	"keymap.shortcut.workspaceBoard": "Открыть канбан всех проектов",
 	"keymap.shortcut.commandPalette": "Палитра команд",
 	"keymap.shortcut.back": "Назад",
 	"keymap.shortcut.forward": "Вперёд",

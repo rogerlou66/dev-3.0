@@ -319,6 +319,7 @@ function App() {
 	const [showAddProjectModal, setShowAddProjectModal] = useState(false);
 	const [openAddProjectOnDashboard, setOpenAddProjectOnDashboard] = useState(false);
 	const [showProjectSwitch, setShowProjectSwitch] = useState(false);
+	const [workspaceBoardRequest, setWorkspaceBoardRequest] = useState(0);
 	// Cmd/Ctrl+O picker when no app is chosen yet (or the chosen one is gone).
 	const [openInPicker, setOpenInPicker] = useState<{ path: string; taskId?: string } | null>(null);
 	const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -571,6 +572,10 @@ function App() {
 		},
 		[commitNavigation, isRouteLocked, t],
 	);
+	const openWorkspaceBoard = useCallback(() => {
+		setWorkspaceBoardRequest((request) => request + 1);
+		navigate({ screen: "dashboard" });
+	}, [navigate]);
 
 	const toggleTerminalImmersive = useCallback(() => {
 		if (!isTaskTerminalRoute(routeRef.current)) return;
@@ -920,7 +925,7 @@ function App() {
 					if (e.code === "KeyD") {
 						e.preventDefault();
 						e.stopPropagation();
-						return navigate({ screen: "dashboard" });
+						return openWorkspaceBoard();
 					}
 					if (e.code === "KeyS") {
 						e.preventDefault();
@@ -999,6 +1004,10 @@ function App() {
 				e.stopPropagation();
 				if (showQuitDialog) return;
 				openAddProject();
+			} else if (matchesShortcut(e, "workspace-board")) {
+				e.preventDefault();
+				e.stopPropagation();
+				openWorkspaceBoard();
 			} else if (matchesShortcut(e, "go-to-project")) {
 				// Project quick-switch palette (Slack/Linear/VSCode "go to anything").
 				// Not Cmd+T: that's the universal new-tab key and the live terminal
@@ -1164,7 +1173,7 @@ function App() {
 				}
 			}
 		},
-		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, showAddProjectModal, showQuitDialog, state.projects, state.route, toggleTerminalImmersive],
+		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, openWorkspaceBoard, showAddProjectModal, showQuitDialog, state.projects, state.route, toggleTerminalImmersive],
 		{ capture: true },
 	);
 
@@ -2854,6 +2863,7 @@ function App() {
 						bellCounts={state.bellCounts}
 						onOpenAddProject={() => setShowAddProjectModal(true)}
 						onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
+						workspaceBoardRequest={workspaceBoardRequest}
 					/>
 				);
 			case "project":

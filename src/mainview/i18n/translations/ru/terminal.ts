@@ -217,8 +217,7 @@ const terminal = {
 	"projectTerminal.restart": "Перезапустить",
 	"projectTerminal.label": "Терминал проекта",
 	"projectTerminal.backToBoard": "Назад к доске",
-	"projectTerminal.shortcutHint": "⌘`",
-	"projectTerminal.tooltipWithShortcut": "Терминал проекта (⌘`)",
+	"projectTerminal.tooltipWithShortcut": "Терминал проекта ({shortcut})",
 
 	// Quick Shell (встроенная Operations-консоль в $HOME)
 	"quickShell.open": "Быстрая консоль",

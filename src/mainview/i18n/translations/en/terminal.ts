@@ -209,8 +209,7 @@ const terminal = {
 	"projectTerminal.restart": "Restart",
 	"projectTerminal.label": "Project Terminal",
 	"projectTerminal.backToBoard": "Back to Board",
-	"projectTerminal.shortcutHint": "\u2318`",
-	"projectTerminal.tooltipWithShortcut": "Project Terminal (\u2318`)",
+	"projectTerminal.tooltipWithShortcut": "Project Terminal ({shortcut})",
 
 	// Quick Shell (built-in Operations shell in $HOME)
 	"quickShell.open": "Quick Shell",

@@ -15,6 +15,7 @@ this page and the website all read from it.
 | Action | macOS | Linux |
 |---|---|---|
 | Go to project (quick switch) | ⌘K | Ctrl+K |
+| Open the all-project Kanban | ⌘` | Ctrl+` |
 | Command palette | ⇧⌘P / ⇧⌘Space | Ctrl+Shift+P / Ctrl+Shift+Space |
 | Keyboard shortcuts panel | ⌘/ | Ctrl+/ |
 | Help mode (explain this screen) | ⇧⌘/ | Ctrl+Shift+/ |
@@ -35,7 +36,7 @@ this page and the website all read from it.
 | Settings | ⌘, | Ctrl+, |
 | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 | Ctrl+= / Ctrl+- / Ctrl+0 |
 | Hard refresh | ⌘R | Ctrl+R |
-| Toggle project terminal / open Quick Shell | ⌘` / ⇧⌘` | Ctrl+` / Ctrl+Shift+` |
+| Toggle project terminal / open Quick Shell | ⌘J / ⇧⌘` | Ctrl+J / Ctrl+Shift+` |
 | Close dialog / step back | Esc | Esc |
 | Quit / Hide | ⌘Q / ⌘H | Ctrl+Q / Ctrl+H |
 

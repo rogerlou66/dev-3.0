@@ -6,6 +6,10 @@ import TerminalView from "../TerminalView";
 import type { TerminalHandle } from "../TerminalView";
 import ExtraKeyBar from "./ExtraKeyBar";
 import TerminalComposer, { type TerminalComposerApi } from "./TerminalComposer";
+import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
+import { useKeymapVersion } from "../keymap-store";
+
+const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal");
 
 interface ProjectTerminalProps {
 	projectId: string;
@@ -15,6 +19,7 @@ interface ProjectTerminalProps {
 
 function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProps) {
 	const t = useT();
+	useKeymapVersion();
 	const [ptyUrl, setPtyUrl] = useState<string | null>(null);
 	const [error, setError] = useState(false);
 	const [restarting, setRestarting] = useState(false);
@@ -23,6 +28,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	const [termHandle, setTermHandle] = useState<TerminalHandle | null>(null);
 	const [rawMode, setRawMode] = useState(false);
 	const composerApiRef = useRef<TerminalComposerApi | null>(null);
+	const projectTerminalShortcut = PROJECT_TERMINAL_SHORTCUT ? shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT) : "";
 
 	function toggleRawMode() {
 		setRawMode((prev) => {
@@ -125,7 +131,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 				<div className="flex items-center gap-3">
 					<span className="text-fg-muted text-xs truncate max-w-[20rem] streamer-private">{projectPath}</span>
 					<kbd className="text-dense text-fg-muted/60 font-mono px-1.5 py-0.5 rounded bg-elevated border border-edge">
-						{t("projectTerminal.shortcutHint")}
+						{projectTerminalShortcut}
 					</kbd>
 					<HelpSpot topicId="terminal.quick-shell" />
 				</div>

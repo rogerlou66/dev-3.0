@@ -4,6 +4,11 @@ import GlobalHeader from "../GlobalHeader";
 import { I18nProvider } from "../../i18n";
 import type { Project, Task, UpdateChangelog } from "../../../shared/types";
 import type { Route } from "../../state";
+import { setShortcutOverrides } from "../../keymap-store";
+import { APP_SHORTCUTS, shortcutKeysFor } from "../../keymap";
+
+const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal")!;
+const projectTerminalLabel = () => `Project Terminal (${shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT)})`;
 
 vi.mock("../../rpc", () => ({
 	// Browser mode: the fullscreen toggle row is visible in the action sheet.
@@ -83,6 +88,7 @@ function mockMatchMedia(compact: boolean) {
 // Default to the roomy layout (labels visible). happy-dom's default viewport is
 // 1024px, which would otherwise trip the compact breakpoint and hide labels.
 beforeEach(() => mockMatchMedia(false));
+afterEach(() => setShortcutOverrides({}));
 
 const project1: Project = {
 	id: "p1",
@@ -735,7 +741,7 @@ describe("GlobalHeader — project terminal button", () => {
 		renderHeader({ screen: "project", projectId: "p1" });
 
 		const quickShellButton = screen.getByLabelText("Quick Shell \u2014 new scratch in Operations (\u2318\u21e7`)");
-		const projectButton = screen.getByLabelText("Project Terminal (\u2318`)");
+		const projectButton = screen.getByLabelText(projectTerminalLabel());
 
 		expect(
 			quickShellButton.compareDocumentPosition(projectButton) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -758,7 +764,7 @@ describe("GlobalHeader — project terminal button", () => {
 
 	it("terminal button has active style on project-terminal screen", () => {
 		renderHeader({ screen: "project-terminal", projectId: "p1" });
-		const btn = screen.getByLabelText("Project Terminal (\u2318`)");
+		const btn = screen.getByLabelText(projectTerminalLabel());
 		expect(btn.className).toContain("text-accent");
 	});
 
@@ -766,7 +772,7 @@ describe("GlobalHeader — project terminal button", () => {
 		const user = userEvent.setup();
 		const navigate = vi.fn();
 		renderHeader({ screen: "project", projectId: "p1" }, [project1, project2], navigate);
-		await user.click(screen.getByLabelText("Project Terminal (\u2318`)"));
+		await user.click(screen.getByLabelText(projectTerminalLabel()));
 		expect(navigate).toHaveBeenCalledWith({
 			screen: "project-terminal",
 			projectId: "p1",
@@ -777,11 +783,20 @@ describe("GlobalHeader — project terminal button", () => {
 		const user = userEvent.setup();
 		const navigate = vi.fn();
 		renderHeader({ screen: "project-terminal", projectId: "p1" }, [project1, project2], navigate);
-		await user.click(screen.getByLabelText("Project Terminal (\u2318`)"));
+		await user.click(screen.getByLabelText(projectTerminalLabel()));
 		expect(navigate).toHaveBeenCalledWith({
 			screen: "project",
 			projectId: "p1",
 		});
+	});
+
+	it("updates its shortcut label after a rebind", () => {
+		renderHeader({ screen: "project", projectId: "p1" });
+		expect(screen.getByLabelText(projectTerminalLabel())).toBeInTheDocument();
+
+		act(() => setShortcutOverrides({ "toggle-project-terminal": { primary: "Mod+KeyY" } }));
+
+		expect(screen.getByLabelText(projectTerminalLabel())).toBeInTheDocument();
 	});
 });
 
@@ -833,7 +848,7 @@ describe("GlobalHeader — compact layout", () => {
 		mockMatchMedia(true);
 		renderHeader({ screen: "project", projectId: "p1" });
 		// Buttons stay reachable by title, but their text labels collapse away.
-		expect(screen.getByLabelText("Project Terminal (⌘`)")).toBeInTheDocument();
+		expect(screen.getByLabelText(projectTerminalLabel())).toBeInTheDocument();
 		expect(screen.queryByText("Terminal")).not.toBeInTheDocument();
 		expect(screen.queryByText("Report")).not.toBeInTheDocument();
 		expect(screen.queryByText("Change Log")).not.toBeInTheDocument();
@@ -1009,7 +1024,7 @@ describe("GlobalHeader — narrow viewport action sheet", () => {
 		renderHeader({ screen: "project", projectId: "p1" });
 		expect(screen.getByLabelText("More")).toBeInTheDocument();
 		// Inline simple-action buttons are gone (folded into the sheet).
-		expect(screen.queryByLabelText("Project Terminal (⌘`)")).not.toBeInTheDocument();
+		expect(screen.queryByLabelText(projectTerminalLabel())).not.toBeInTheDocument();
 	});
 
 	it("folds the memory readout off the header and into the sheet", async () => {

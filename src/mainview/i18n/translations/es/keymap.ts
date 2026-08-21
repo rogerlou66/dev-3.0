@@ -15,6 +15,7 @@ const keymap = {
 	"keymap.category.app": "Aplicación",
 
 	"keymap.shortcut.goToProject": "Ir al proyecto (cambio rápido)",
+	"keymap.shortcut.workspaceBoard": "Abrir el Kanban de todos los proyectos",
 	"keymap.shortcut.commandPalette": "Paleta de comandos",
 	"keymap.shortcut.back": "Atrás",
 	"keymap.shortcut.forward": "Adelante",

@@ -130,7 +130,7 @@ const tips = {
 	"tip.worktreeConfig.title": "Ajustes por tarea",
 	"tip.worktreeConfig.body": "Cada worktree puede tener su propio .dev3/config.json. Haz clic en el engranaje en el panel de tareas para editarlo.",
 	"tip.projectTerminal.title": "Terminal del proyecto",
-	"tip.projectTerminal.body": "¿Necesitas un shell rápido en la raíz del repo? Haz clic en el botón Terminal en el encabezado o presiona \u2318` para alternarlo desde cualquier pantalla del proyecto. ⌘⇧` crea una nueva tarea scratch en el tablero Operations.",
+	"tip.projectTerminal.body": "¿Necesitas un shell en la raíz del repo? Usa Terminal en el encabezado y personaliza su atajo en Ajustes → Teclado.",
 	"tip.portAllocation.title": "Asignar puertos automáticamente",
 	"tip.portAllocation.body": "Configura portCount en ajustes del proyecto para asignar puertos libres por tarea. Usa $DEV3_PORT0, $DEV3_PORT1 en scripts.",
 	"tip.taskWatch.title": "Vigila tus tareas",

@@ -91,7 +91,9 @@ vi.mock("../task-sounds", () => ({
 
 // Mock child screens so they don't trigger their own API calls
 vi.mock("../components/Dashboard", () => ({
-	default: () => <div data-testid="dashboard-screen" />,
+	default: ({ workspaceBoardRequest }: { workspaceBoardRequest: number }) => (
+		<div data-testid="dashboard-screen" data-workspace-board-request={String(workspaceBoardRequest)} />
+	),
 }));
 vi.mock("../components/AddProjectModal", () => ({
 	default: ({ onClose }: { onClose: () => void }) => (
@@ -934,6 +936,16 @@ describe("App keyboard shortcuts", () => {
 			expect(view).toHaveAttribute("data-active-task-id", "op-task-1");
 		});
 
+		it("keeps Shift+Cmd+Backquote bound to Quick Shell", async () => {
+			vi.mocked(api.request.openQuickShell).mockResolvedValue({ id: "op-task-1", projectId: "ops-proj" } as never);
+			await renderApp();
+
+			await userEvent.keyboard("{Meta>}{Shift>}`{/Shift}{/Meta}");
+
+			expect(api.request.openQuickShell).toHaveBeenCalled();
+			expect(await screen.findByTestId("project-screen")).toHaveAttribute("data-project-id", "ops-proj");
+		});
+
 		it("fullscreen open-mode: opens the scratch op in the full-page task view", async () => {
 			localStorage.setItem("dev3-task-open-mode", "fullscreen");
 			vi.mocked(api.request.openQuickShell).mockResolvedValue({ id: "op-task-1", projectId: "ops-proj" } as never);
@@ -1716,37 +1728,80 @@ describe("App keyboard shortcuts", () => {
 		});
 	});
 
-	describe("project terminal toggle (Cmd+`)", () => {
-		it("Cmd+` from project screen opens project terminal", async () => {
-			vi.mocked(api.request.getProjects).mockResolvedValue([
-				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
-			]);
-			await renderApp();
-			// Navigate to project first
-			await userEvent.keyboard("{Meta>}1{/Meta}");
-			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
-			// Toggle terminal
-			await userEvent.keyboard("{Meta>}`{/Meta}");
-			expect(screen.getByTestId("project-terminal-screen")).toBeInTheDocument();
-		});
-
-		it("Cmd+` from project terminal goes back to project", async () => {
+	describe("workspace board and project terminal shortcuts", () => {
+		it("Cmd+` opens the workspace board from a project", async () => {
 			vi.mocked(api.request.getProjects).mockResolvedValue([
 				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
 			]);
 			await renderApp();
 			await userEvent.keyboard("{Meta>}1{/Meta}");
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
+
 			await userEvent.keyboard("{Meta>}`{/Meta}");
+
+			expect(screen.getByTestId("dashboard-screen")).toHaveAttribute("data-workspace-board-request", "1");
+		});
+
+		it("Cmd+` requests Board again while already on the dashboard", async () => {
+			await renderApp();
+			expect(screen.getByTestId("dashboard-screen")).toHaveAttribute("data-workspace-board-request", "0");
+
+			await userEvent.keyboard("{Meta>}`{/Meta}");
+
+			expect(screen.getByTestId("dashboard-screen")).toHaveAttribute("data-workspace-board-request", "1");
+		});
+
+		it("G then D reuses the workspace Board navigation outside typing contexts", async () => {
+			await renderApp();
+			await userEvent.keyboard("{Meta>},{/Meta}");
+			expect(screen.getByTestId("settings-screen")).toBeInTheDocument();
+
+			await userEvent.keyboard("gd");
+
+			expect(screen.getByTestId("dashboard-screen")).toHaveAttribute("data-workspace-board-request", "1");
+		});
+
+		it("Cmd+J from project screen opens project terminal", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			await renderApp();
+			await userEvent.keyboard("{Meta>}1{/Meta}");
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
+			await userEvent.keyboard("{Meta>}j{/Meta}");
 			expect(screen.getByTestId("project-terminal-screen")).toBeInTheDocument();
-			// Toggle back
-			await userEvent.keyboard("{Meta>}`{/Meta}");
+		});
+
+		it("Cmd+J from project terminal goes back to project", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			await renderApp();
+			await userEvent.keyboard("{Meta>}1{/Meta}");
+			await userEvent.keyboard("{Meta>}j{/Meta}");
+			expect(screen.getByTestId("project-terminal-screen")).toBeInTheDocument();
+			await userEvent.keyboard("{Meta>}j{/Meta}");
 			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
 		});
 
-		it("Cmd+` on dashboard does nothing", async () => {
+		it("Cmd+J on dashboard does nothing", async () => {
 			await renderApp();
-			await userEvent.keyboard("{Meta>}`{/Meta}");
+			await userEvent.keyboard("{Meta>}j{/Meta}");
 			expect(screen.getByTestId("dashboard-screen")).toBeInTheDocument();
+		});
+
+		it("Cmd+J does not open a project terminal for Operations", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "ops", name: "Operations", path: "/ops", kind: "virtual", builtin: true, setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			await renderApp();
+			await userEvent.keyboard("{Meta>}0{/Meta}");
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
+
+			await userEvent.keyboard("{Meta>}j{/Meta}");
+
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
+			expect(screen.queryByTestId("project-terminal-screen")).not.toBeInTheDocument();
 		});
 	});
 

@@ -39,6 +39,7 @@ function key(
 }
 const desktopMac = { mac: true, remote: false, typing: false, terminal: false, keyboardLocked: false };
 const desktopLinux = { ...desktopMac, mac: false };
+const specFor = (id: string) => APP_SHORTCUTS.find((s) => s.id === id)!;
 
 describe("keymap registry", () => {
 	it("has unique shortcut ids", () => {
@@ -105,6 +106,16 @@ describe("keymap registry", () => {
 		const spec = APP_SHORTCUTS.find((s) => s.id === "go-to-project")!;
 		expect(shortcutKeysFor(spec, true)).toBe("⌘K");
 		expect(shortcutKeysFor(spec, false)).toBe("Ctrl+K");
+	});
+
+	it("registers the workspace board and project terminal defaults", () => {
+		expect(isRemappable(specFor("workspace-board"))).toBe(true);
+		expect(shortcutsInCategory("navigation").map((spec) => spec.id)).toContain("workspace-board");
+		expect(shortcutKeysFor(specFor("workspace-board"), true)).toBe("⌘`");
+		expect(shortcutKeysFor(specFor("workspace-board"), false)).toBe("Ctrl+`");
+		expect(shortcutKeysFor(specFor("toggle-project-terminal"), true)).toBe("⌘J");
+		expect(shortcutKeysFor(specFor("toggle-project-terminal"), false)).toBe("Ctrl+J");
+		expect(shortcutKeysFor(specFor("open-quick-shell"), true)).toBe("⇧⌘`");
 	});
 
 	it("documents both route-history shortcut aliases", () => {
@@ -202,6 +213,12 @@ describe("matchesShortcut", () => {
 		expect(matchesShortcut(key("KeyN", { meta: true }), "new-task", { ...desktopMac, typing: true })).toBe(true);
 	});
 
+	it("opens the workspace board while a macOS terminal has focus", () => {
+		expect(matchesShortcut(key("Backquote", { meta: true }), "workspace-board", { ...desktopMac, terminal: true })).toBe(true);
+		expect(matchesShortcut(key("Backquote", { meta: true, shift: true }), "workspace-board", { ...desktopMac, terminal: true })).toBe(false);
+		expect(matchesShortcut(key("Backquote", { meta: true, shift: true }), "open-quick-shell", { ...desktopMac, terminal: true })).toBe(true);
+	});
+
 	it("honours the platform field on a default binding", () => {
 		expect(matchesShortcut(key("Minus", { meta: true }), "zoom-out", desktopMac)).toBe(true);
 		expect(matchesShortcut(key("Minus", { ctrl: true, alt: true }), "zoom-out", desktopMac)).toBe(false);
@@ -215,14 +232,19 @@ describe("matchesShortcut", () => {
 	});
 });
 
-const specFor = (id: string) => APP_SHORTCUTS.find((s) => s.id === id)!;
-
 describe("user overrides", () => {
 	it("an override replaces the slot's default wholesale", () => {
 		setShortcutOverrides({ "go-to-project": { primary: "Mod+KeyJ" } });
 		expect(matchesShortcut(key("KeyJ", { meta: true }), "go-to-project", desktopMac)).toBe(true);
 		expect(matchesShortcut(key("KeyK", { meta: true }), "go-to-project", desktopMac)).toBe(false);
 		expect(shortcutKeysFor(specFor("go-to-project"), true)).toBe("⌘J");
+	});
+
+	it("rebinds the workspace board without changing Project Terminal", () => {
+		setShortcutOverrides({ "workspace-board": { primary: "Mod+KeyB" } });
+		expect(matchesShortcut(key("KeyB", { meta: true }), "workspace-board", desktopMac)).toBe(true);
+		expect(matchesShortcut(key("Backquote", { meta: true }), "workspace-board", desktopMac)).toBe(false);
+		expect(matchesShortcut(key("KeyJ", { meta: true }), "toggle-project-terminal", desktopMac)).toBe(true);
 	});
 
 	it("a nulled slot means deliberately unbound", () => {

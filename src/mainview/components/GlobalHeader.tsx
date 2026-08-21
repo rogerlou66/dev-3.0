@@ -42,9 +42,11 @@ import {
 	HelpModeIcon,
 } from "./HeaderIcons";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
+import { useKeymapVersion } from "../keymap-store";
 
 // Single source of truth for the ⇧⌘/ combo shown on the header help button.
 const HELP_MODE_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "help-mode");
+const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "toggle-project-terminal");
 
 interface GlobalHeaderProps {
 	route: Route;
@@ -76,6 +78,7 @@ const COUNTS_CACHE_TTL = 30_000;
 
 function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable, remoteAccessActive }: GlobalHeaderProps) {
 	const t = useT();
+	useKeymapVersion();
 	const privacy = useProjectPrivacy();
 	const compact = useCompact();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -92,6 +95,8 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	const dropdownRef = useRef<HTMLDivElement>(null);
 	const projectDropdownRef = useRef<HTMLDivElement>(null);
 	const countsCacheTimeRef = useRef<number>(0);
+	const projectTerminalShortcut = PROJECT_TERMINAL_SHORTCUT ? shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT) : "";
+	const projectTerminalTooltip = t("projectTerminal.tooltipWithShortcut", { shortcut: projectTerminalShortcut });
 
 	// Open Remote Access instantly: fetch only the local QR (never the blocking
 	// tunnel-start path) so the modal opens on the first click, then flag the
@@ -590,7 +595,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 				    lazily per-task, so opening one throws "Project path does not
 				    exist" (same reason Git Pull below is hidden). */}
 				{"projectId" in route && !isVirtualProject && !isNarrow && (
-					<Tooltip content={t("projectTerminal.tooltipWithShortcut")} detail={t("ttip.header.projectTerminal")}>
+					<Tooltip content={projectTerminalTooltip} detail={t("ttip.header.projectTerminal")}>
 						<button
 							onClick={() => {
 								if (route.screen === "project-terminal") {
@@ -604,7 +609,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 									? "text-accent bg-accent/15 hover:bg-accent/25"
 									: "text-fg-3 hover:text-fg hover:bg-elevated"
 							}`}
-							aria-label={t("projectTerminal.tooltipWithShortcut")}
+							aria-label={projectTerminalTooltip}
 						>
 							<ProjectTerminalIcon className="w-[1.125rem] h-[1.125rem]" />
 							{!compact && <span className="text-micro font-medium">{t("projectTerminal.open")}</span>}

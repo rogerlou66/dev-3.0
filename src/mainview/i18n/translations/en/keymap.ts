@@ -18,6 +18,7 @@ const keymap = {
 
 	// Shortcut descriptions (App tab)
 	"keymap.shortcut.goToProject": "Go to project (quick switch)",
+	"keymap.shortcut.workspaceBoard": "Open the all-project Kanban",
 	"keymap.shortcut.commandPalette": "Command palette",
 	"keymap.shortcut.back": "Back",
 	"keymap.shortcut.forward": "Forward",

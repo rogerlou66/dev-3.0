@@ -4,6 +4,12 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-21 — Workspace Board owns a terminal-safe navigation shortcut
+
+- **Rule:** The remappable workspace-board action opens Dashboard → Board directly (default Command+Backquote on macOS), including when Projects is active; Project Terminal moves to Command+J, while Quick Shell keeps Shift+Command+Backquote.
+- **Why:** Bare-key `G → D` correctly yields to terminal and input focus, so it cannot be the daily path back from coding work; a modifier shortcut remains reachable without adding visible header chrome.
+- **Status:** Implemented. Evidence: `keymap.ts`, `App.tsx`, `Dashboard.tsx`.
+
 ## 2026-08-20 — Workspace Completed history discloses per project
 
 - **Rule:** Each workspace Completed cell shows its two newest tasks by default; `Show N more` expands all remaining completed tasks for only that project, and `Show less` restores the compact row.
