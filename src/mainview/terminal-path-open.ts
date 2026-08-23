@@ -2,6 +2,7 @@ import type { TFunction } from "./i18n";
 import { api, isElectrobun } from "./rpc";
 import { toast } from "./toast";
 import type { ResolvedTerminalPath, TerminalPathOpenMode } from "../shared/types";
+import { isAndroidAppHost } from "./android-client-bridge";
 
 /** App.tsx hosts the FilePreviewModal and listens for this event. */
 export const OPEN_FILE_PREVIEW_EVENT = "dev3:openFilePreview";
@@ -26,6 +27,7 @@ export function openFilePreview(path: string, line?: number, taskId?: string): v
  * machine, invisible to a remote user.
  */
 export async function activateTerminalPath(resolved: ResolvedTerminalPath, t: TFunction, line?: number, taskId?: string): Promise<void> {
+	const androidApp = isAndroidAppHost();
 	let mode: TerminalPathOpenMode = "preview";
 	if (isElectrobun) {
 		try {
@@ -36,7 +38,7 @@ export async function activateTerminalPath(resolved: ResolvedTerminalPath, t: TF
 	}
 	try {
 		if (resolved.kind === "directory") {
-			if (!isElectrobun) {
+			if (!isElectrobun && !androidApp) {
 				toast.info(t("terminal.pathLinkFolderBrowser"), { taskId, source: "terminal" });
 				return;
 			}
@@ -44,6 +46,7 @@ export async function activateTerminalPath(resolved: ResolvedTerminalPath, t: TF
 				path: resolved.path,
 				mode: mode === "reveal" ? "reveal" : "system",
 			});
+			if (androidApp) toast.success(t("terminal.pathLinkOpenedOnComputer"), { taskId, source: "terminal" });
 			return;
 		}
 		if (mode === "preview") {

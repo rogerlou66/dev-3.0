@@ -6,7 +6,7 @@ ux_architecture:
 
   product:
     name: "dev-3.0"
-    app_type: "full_screen_web_app" # Electrobun desktop shell rendering a React/Vite webview
+    app_type: "multi_client_terminal_workspace" # Computer authority + Electrobun, browser remote, and Android tablet shells
     primary_users:
       - "Developers orchestrating multiple AI coding agents (Claude Code, Codex, Gemini CLI, Cursor) across tasks"
       - "Power users who live in the terminal and want Kanban-style task tracking on top of git worktrees"
@@ -15,6 +15,7 @@ ux_architecture:
       - "Track task lifecycle across a Kanban board (todo -> in-progress -> review -> completed)"
       - "Run git operations (pull/push/PR/merge/rebase) and dev servers per task without leaving the app"
       - "Manage multiple projects, each a git repo, with per-project setup/dev/cleanup scripts"
+      - "Pair an Android tablet with a computer and operate the same workspace with native low-latency prompt input"
 
   evidence:
     audited_paths:
@@ -120,6 +121,14 @@ ux_architecture:
         - "Built-in 'What I shipped' report template pre-fills the create form; the digest result is again just a task."
         - "CLI parity: dev3 automations list/create/update/delete/run/runs."
       evidence: ["src/shared/types.ts (Automation)", "src/mainview/components/ProjectSettings.tsx (automations tab)", "src/bun/automations-scheduler.ts", "src/cli/commands/automations.ts"]
+    paired_host:
+      label: "Paired host"
+      plural: "Paired hosts"
+      observed: true
+      owner: "android_client"
+      common_actions: ["scan_or_paste_link", "connect", "reconnect", "forget"]
+      shape: "Android-local sanitized endpoint metadata plus the WebView-owned HttpOnly session cookie; never a copy of projects/tasks/terminal state."
+      evidence: ["android/app/src/main/java/com/h0x91b/dev3/ConnectionStore.kt", "android/app/src/main/java/com/h0x91b/dev3/MainActivity.kt"]
 
   navigation:
     model: "screen_router" # observed: useReducer Route union, not URL paths
@@ -164,6 +173,15 @@ ux_architecture:
       evidence: ["src/mainview/components/ProjectQuickSwitchModal.tsx", "src/mainview/components/CommandPaletteModal.tsx", "src/mainview/App.tsx (Cmd+K + Cmd+Shift+P)"]
 
   surfaces:
+    android_client_shell:
+      purpose: "Connect an Android tablet to the computer authority and provide device-native integration around the shared connected UI."
+      allowed: ["connection_gateway", "qr_scan", "host_reconnect", "native_prompt_dock", "android_back_and_ime", "file_picker", "external_intent", "notification_bridge"]
+      forbidden: ["parallel_project_task_routes", "copied_host_state", "wildcard_javascript_bridge", "silent_desktop_action_noop", "platform_gated_layout"]
+      connection_gateway: "Shell-level prerequisite shown only while unpaired/expired or switching hosts; one primary Scan QR action plus pasted-link fallback. It is not part of the connected workspace navigation budget."
+      prompt_dock: "Native multiline input below the WebView, bound to the active task or project terminal through an exact-origin, trusted-root-page, main-frame WebMessage bridge. Task Send carries delivered/unconfirmed/not-delivered; only delivered clears. Project Send and Insert keep the draft as unconfirmed because PTY acceptance is not acknowledged."
+      action_parity: "Reuse the connected route tree and shared action taxonomy. Host actions stay RPC-owned; Android-local hand-offs use platform APIs; omit desktop window chrome that has no mobile meaning."
+      status: "observed"
+      evidence: ["android/", "src/mainview/android-client-bridge.ts", "src/mainview/components/TaskTerminal.tsx", "src/mainview/components/ProjectTerminal.tsx"]
     diagnostics:
       purpose: "Make renderer faults and transport health visible in remote/mobile where there is no devtools: crash fallback, bootstrap phase/timeout, live connection state, and a captured-error viewer."
       allowed: ["crash_fallback", "bootstrap_phase_state", "connection_state_display", "retry_reload", "captured_error_list", "copy_clear", "conditional_floating_entry"]
@@ -757,7 +775,8 @@ ux_architecture:
       board_filters: { narrow: "bottom sheet behind a header funnel button (LabelFilterBar + search)", status: proposed }
       terminal_panes: { narrow: "pane carousel — one pane at a time + axis-arbitrated horizontal swipe + a slim non-overlapping top dots strip + Arrow keys; backend-neutral via taskPaneState / taskPaneAction RPCs; native tasks page the same way; MobileWindowCarousel not rendered for native tasks", status: observed, evidence: "MobilePaneCarousel.tsx, TaskTerminal.tsx, task-panes.ts taskPaneState, decision 089" }
       terminal_windows: { narrow: "window switcher — a slim 'prev / named dropdown / next' bar ABOVE the pane bar (window = outer workspace, pane = inner split); buttons + dropdown + Arrow-while-focused, NO swipe (terminal swipe is the pane carousel's); tmux tasks only (native tasks have no window concept); renders only when window count > 1; via tmuxWindowNavigate (list-windows + select-window :+/:-)", status: observed, evidence: "MobileWindowCarousel.tsx, TaskTerminal.tsx, tmux-pty.ts tmuxWindowNavigate, decision 093" }
-      terminal_input: { narrow: "touch input model (gate = !isElectrobun && isTouchDevice, NOT width — an input-model switch, tablets included): terminal tap never summons the OSK; a docked autogrow chat composer between the terminal and ExtraKeyBar owns text entry — Send = mode-2004-aware paste + Enter, Insert = paste only, expand state for long prompts, terminal tail stays visible; sticky '⌨ raw' toggle on ExtraKeyBar restores direct typing + select-to-copy/TUI mouse; chrome collapses on composer FOCUS (not visualViewport); covers TaskTerminal AND ProjectTerminal (Quick Shell); Android-first, iOS visualViewport pinning additive", status: proposed, evidence: "UX decision 2026-07-02" }
+      terminal_input: { narrow: "touch input is modality-gated, NOT width-gated. Browser touch uses TerminalComposer; Android task and project terminals use a native prompt dock outside the WebView and send whole committed text through the exact-origin bridge. Sticky raw mode returns direct PTY typing.", status: observed, evidence: "TerminalComposer.tsx, android-client-bridge.ts, android/" }
+      android_tablet: { narrow: "Layout follows the resizable app window: wide landscape keeps the split workspace, compact windows use existing sheets/carousels. Touch input stays native at every width. Never apply the phone-browser portrait gate to the Android tablet shell.", status: observed, evidence: "android/app/src/main/AndroidManifest.xml, src/mainview/android-client-bridge.ts" }
       active_tasks: { narrow: "No persistent task strip; use TaskSwitcherOverlay for keyboard task switching and the breadcrumb → board carousel on narrow viewports", status: observed, evidence: ["ProjectView.tsx browser/narrow branch", "TaskSwitcherOverlay.tsx", "MobileBoardCarousel.tsx"] }
       task_inspector: { narrow: "2x2 bar grid cannot fit -> one summary bar + 'task actions' bottom sheet (bars become sheet sections); metadata grid already reflows", tight: "ABOVE narrow the bars gate on the PANEL width (useContainerWidth, ResizeObserver — the board eats the viewport in split view): <1280 folds the label strip to +k, clamps the branch name, drops pane-layout/Runtime text labels; <900 also drops the label strip + include-tests toggle. Every bar is boxed min-w-0 overflow-hidden so nothing paints over a neighbour or the pinned chrome (decision 164).", status: observed, evidence: "TaskInfoPanel.tsx, useContainerWidth.ts" }
       diff_viewer: { narrow: "files-aside (22rem) -> bottom-sheet file picker; diff stream owns screen (live-content: explicit nav, no full-surface swipe)", status: proposed, evidence: "TaskDiffViewer.tsx w-[22rem] aside" }
@@ -825,6 +844,7 @@ ux_architecture:
     hit_area:
       desktop_floor_px: 24
       touch_floor_px: 44
+      android_native_floor_dp: 48
       mechanism: ".touch-actions helper in index.css — must be the BottomSheet default, not opt-in"
     keyboard:
       rule: "Every pointer interaction has a keyboard path. Escape closes overlays. Arrow keys move inside composite widgets."

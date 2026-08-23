@@ -33,6 +33,7 @@ import { MarkdownDocument } from "./pr-review/markdown";
 import { MarkdownRichDiff, useMarkdownDiffBlocks } from "./pr-review/markdown-diff";
 import { isTestFile } from "../../shared/test-files";
 import { useIncludeTestsInDiff } from "../utils/includeTestsInDiff";
+import { requireDeliveredAgentMessage } from "../agent-message-delivery";
 import "@git-diff-view/react/styles/diff-view-pure.css";
 import "./TaskDiffViewer.css";
 
@@ -2489,8 +2490,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		setSendingCommentIds((current) => ({ ...current, [commentId]: true }));
 		api.request.sendAgentMessageNow({ taskId: task.id, projectId: project.id, text: buildInlineReviewXml([entry]) })
 			.then((result) => {
-				// Marked, never deleted: a resolved RPC proves the keys were handed
-				// over, not that the agent ingested them, so the text must survive.
+				requireDeliveredAgentMessage(result);
 				setInlineComments((current) => markInlineCommentsSent(current, new Set([commentId])));
 				toast.success(result?.spilledPath
 					? t("infoPanel.diffReviewSendCommentSuccessFile", { path: result.spilledPath })
@@ -2517,6 +2517,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		setThreadSendStates((current) => ({ ...current, [thread.id]: "sending" }));
 		api.request.sendAgentMessageNow({ taskId: task.id, projectId: project.id, text: prompt })
 			.then((result) => {
+				requireDeliveredAgentMessage(result);
 				setThreadSendStates((current) => ({ ...current, [thread.id]: "sent" }));
 				toast.success(result?.spilledPath
 					? t("infoPanel.prSendToAgentSuccessFile", { path: result.spilledPath })
@@ -2537,6 +2538,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		setSendingCommentIds((current) => ({ ...current, [commentId]: true }));
 		api.request.sendAgentMessageNow({ taskId: task.id, projectId: project.id, text: prompt })
 			.then((result) => {
+				requireDeliveredAgentMessage(result);
 				setInlineComments((current) => markInlineCommentsSent(current, new Set([commentId])));
 				toast.success(result?.spilledPath
 					? t("infoPanel.diffReviewSendCommentSuccessFile", { path: result.spilledPath })
@@ -2571,10 +2573,9 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		setReviewSendState("sending");
 		api.request.sendAgentMessageNow({ taskId: task.id, projectId: project.id, text: snapshot })
 			.then((result) => {
+				requireDeliveredAgentMessage(result);
 				setReviewSendState("sent");
-				// Sent comments are marked, never destroyed. A resolved RPC only means
-				// the keys reached the terminal — the agent's TUI can still drop them —
-				// so wiping here silently ate reviews that never arrived.
+				// Confirmed comments are marked, never destroyed; Reset owns deletion.
 				setInlineComments((current) => markInlineCommentsSent(current, sentIds));
 				setEditingCommentId(null);
 				toast.success(result?.spilledPath

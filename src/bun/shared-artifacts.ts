@@ -284,17 +284,37 @@ export function sharedArtifactDownloadName(artifact: SharedArtifact): string {
 	return `${fromTitle || fallback || "artifact"}${ext}`;
 }
 
+export interface SharedArtifactDownloadFile {
+	path: string;
+	fileName: string;
+	mime: "application/zip" | "text/html";
+	bytes: number;
+}
+
+/** Validate and describe the portable file without loading it into memory. */
+export function sharedArtifactDownloadFile(artifact: SharedArtifact): SharedArtifactDownloadFile {
+	assertStoredArtifactRecord(artifact);
+	const path = artifact.bundlePath ?? artifact.storedPath;
+	const stat = statSync(path);
+	if (!stat.isFile()) throw new SharedArtifactError("Artifact download is not a file");
+	return {
+		path,
+		fileName: sharedArtifactDownloadName(artifact),
+		mime: artifact.bundlePath ? "application/zip" : "text/html",
+		bytes: stat.size,
+	};
+}
+
 /** Read the portable download: ZIP when assets exist, otherwise the HTML. */
 export function loadSharedArtifactDownload(artifact: SharedArtifact): {
 	fileName: string;
 	mime: "application/zip" | "text/html";
 	base64: string;
 } {
-	assertStoredArtifactRecord(artifact);
-	const path = artifact.bundlePath ?? artifact.storedPath;
+	const file = sharedArtifactDownloadFile(artifact);
 	return {
-		fileName: sharedArtifactDownloadName(artifact),
-		mime: artifact.bundlePath ? "application/zip" : "text/html",
-		base64: readFileSync(path).toString("base64"),
+		fileName: file.fileName,
+		mime: file.mime,
+		base64: readFileSync(file.path).toString("base64"),
 	};
 }

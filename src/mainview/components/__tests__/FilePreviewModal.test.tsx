@@ -4,6 +4,8 @@ import { I18nProvider } from "../../i18n";
 import type { FilePreviewResult } from "../../../shared/types";
 
 const readFilePreview = vi.fn<(params: { path: string }) => Promise<FilePreviewResult>>();
+const openTerminalPath = vi.hoisted(() => vi.fn());
+const androidRuntime = vi.hoisted(() => ({ enabled: false }));
 
 // isElectrobun=false — the browser/remote case, where host-side open actions
 // must not render (they would act invisibly on the host machine).
@@ -14,9 +16,13 @@ vi.mock("../../rpc", () => ({
 			get readFilePreview() {
 				return readFilePreview;
 			},
-			openTerminalPath: vi.fn(),
+			openTerminalPath,
 		},
 	},
+}));
+
+vi.mock("../../android-client-bridge", () => ({
+	isAndroidAppHost: () => androidRuntime.enabled,
 }));
 
 function renderModal(path = "/wt/docs/guide.md", line?: number) {
@@ -30,6 +36,21 @@ function renderModal(path = "/wt/docs/guide.md", line?: number) {
 describe("FilePreviewModal", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		androidRuntime.enabled = false;
+	});
+
+	it("offers explicit computer-side open actions in the Android app", async () => {
+		androidRuntime.enabled = true;
+		readFilePreview.mockResolvedValue({ kind: "text", content: "hello", truncated: false, size: 5 });
+		renderModal("/wt/docs/guide.txt");
+
+		const reveal = await screen.findByRole("button", { name: "Open folder on computer" });
+		const open = screen.getByRole("button", { name: "Open in default app on computer" });
+		reveal.click();
+		open.click();
+		await waitFor(() => expect(openTerminalPath).toHaveBeenCalledTimes(2));
+		expect(openTerminalPath).toHaveBeenNthCalledWith(1, { path: "/wt/docs/guide.txt", mode: "reveal" });
+		expect(openTerminalPath).toHaveBeenNthCalledWith(2, { path: "/wt/docs/guide.txt", mode: "system" });
 	});
 
 	it("hides host-side open actions in browser mode but keeps copy actions", async () => {

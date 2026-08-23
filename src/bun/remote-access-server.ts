@@ -12,18 +12,20 @@
  *   - QR code generation for easy mobile access
  */
 
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, statSync, readFileSync } from "node:fs";
 import { isAbsolute, join, extname, relative, resolve } from "node:path";
 import { networkInterfaces } from "node:os";
+import { Readable } from "node:stream";
 import QRCode from "qrcode";
 import type { RemoteNetInterface } from "../shared/types";
 import { NATIVE_STREAM_SINCE_PARAM, parseSinceParam } from "../shared/native-terminal-stream";
 import { PATHS } from "./electrobun-platform";
 import { createLogger } from "./logger";
-import { initSecret, createQrToken, createSessionToken, exchangeQrForSession, refreshSession, verifySessionToken, SESSION_TOKEN_TTL_S } from "./jwt";
+import { initSecret, createQrToken, createSessionToken, exchangeQrForSession, refreshSession, revokeSessionToken, verifySessionToken, SESSION_TOKEN_TTL_S } from "./jwt";
 import { getTunnelUrl, getTunnelState, tunnelManager } from "./cloudflare-tunnel";
 import { loadSettingsSync } from "./settings";
 import { getCurrentUiTheme } from "./theme-state";
+import { ARTIFACT_DOWNLOAD_ROUTE, resolveArtifactDownloadTicket } from "./artifact-download-tickets";
 
 const log = createLogger("remote-access");
 
@@ -56,13 +58,19 @@ export function parseCookies(header: string | null): Record<string, string> {
 }
 
 /** Build the Set-Cookie value carrying a fresh session token (24h rolling). */
-export function buildSessionCookie(token: string): string {
-	return `${SESSION_COOKIE_NAME}=${token}; Max-Age=${SESSION_TOKEN_TTL_S}; Path=/; HttpOnly; SameSite=Strict`;
+export function buildSessionCookie(token: string, secure = false): string {
+	return `${SESSION_COOKIE_NAME}=${token}; Max-Age=${SESSION_TOKEN_TTL_S}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
 }
 
 /** Build the Set-Cookie value that deletes the session cookie. */
-export function buildClearSessionCookie(): string {
-	return `${SESSION_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict`;
+export function buildClearSessionCookie(secure = false): string {
+	return `${SESSION_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+}
+
+export function requestIsSecure(req: Request): boolean {
+	const forwarded = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+	if (forwarded === "https") return true;
+	try { return new URL(req.url).protocol === "https:"; } catch { return false; }
 }
 
 /**
@@ -72,13 +80,15 @@ export function buildClearSessionCookie(): string {
  * allowed, since cookie theft via a hostile page requires a browser, and a
  * non-browser attacker gains nothing over calling the API directly.
  */
-export function checkOrigin(req: Request): boolean {
+export function checkOrigin(req: Request, requireOrigin = false): boolean {
 	const origin = req.headers.get("origin");
-	if (!origin) return true;
+	if (!origin) return !requireOrigin;
 	const host = req.headers.get("host");
 	if (!host) return false;
 	try {
-		return new URL(origin).host === host;
+		const expectedProtocol = requestIsSecure(req) ? "https:" : "http:";
+		const parsed = new URL(origin);
+		return parsed.protocol === expectedProtocol && parsed.host === host;
 	} catch {
 		return false;
 	}
@@ -128,7 +138,7 @@ export async function handleAuthExchange(req: Request, ctx: AuthHandlerContext =
 			const sessionToken = await createSessionToken();
 			log.info("Auth exchange: static code accepted", { ip: clientIp, ua });
 			ctx.onQrConsumed?.();
-			return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken) } });
+			return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken, requestIsSecure(req)) } });
 		}
 		const sessionToken = await exchangeQrForSession(body.token);
 		if (!sessionToken) {
@@ -140,7 +150,7 @@ export async function handleAuthExchange(req: Request, ctx: AuthHandlerContext =
 		}
 		log.info("Auth exchange: success", { ip: clientIp, ua });
 		ctx.onQrConsumed?.();
-		return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken) } });
+		return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken, requestIsSecure(req)) } });
 	} catch (err) {
 		log.error("Auth exchange: error", { ip: clientIp, error: String(err) });
 		return new Response("Bad request", { status: 400 });
@@ -169,11 +179,60 @@ export async function handleAuthRefresh(req: Request, ctx: AuthHandlerContext = 
 		log.warn("Auth refresh: invalid/expired session cookie", { ip: clientIp, ua });
 		return new Response("Invalid or expired session", {
 			status: 401,
-			headers: { "Set-Cookie": buildClearSessionCookie() },
+			headers: { "Set-Cookie": buildClearSessionCookie(requestIsSecure(req)) },
 		});
 	}
 	log.info("Auth refresh: success", { ip: clientIp });
-	return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(newToken) } });
+	return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(newToken, requestIsSecure(req)) } });
+}
+
+/** Revoke the current rolling session chain and clear its browser cookie. */
+export async function handleAuthLogout(req: Request, ctx: AuthHandlerContext = {}): Promise<Response> {
+	if (!checkOrigin(req)) return new Response("Forbidden", { status: 403 });
+	const token = extractSessionToken(req);
+	if (token) await revokeSessionToken(token);
+	log.info("Auth logout", { ip: ctx.clientIp, hadSession: !!token });
+	return Response.json({ ok: true }, {
+		headers: { "Set-Cookie": buildClearSessionCookie(requestIsSecure(req)) },
+	});
+}
+
+function attachmentDisposition(fileName: string): string {
+	const ascii = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "artifact";
+	const encoded = encodeURIComponent(fileName).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+	return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/** Authenticated, bounded-memory artifact transfer used by the Android SAF flow. */
+export async function handleArtifactDownload(
+	req: Request,
+	token: string,
+	resolveTicket: typeof resolveArtifactDownloadTicket = resolveArtifactDownloadTicket,
+): Promise<Response> {
+	if (req.method !== "GET" && req.method !== "HEAD") {
+		return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+	}
+	if (!(await isSessionAuthenticated(req))) return new Response("Unauthorized", { status: 401 });
+	const ticket = resolveTicket(token);
+	if (!ticket) return new Response("Not Found", { status: 404 });
+	let size: number;
+	try {
+		const stat = statSync(ticket.path);
+		if (!stat.isFile() || stat.size !== ticket.bytes) return new Response("Artifact changed", { status: 409 });
+		size = stat.size;
+	} catch {
+		return new Response("Not Found", { status: 404 });
+	}
+	const headers = new Headers({
+		"Content-Type": ticket.mime,
+		"Content-Length": String(size),
+		"Content-Disposition": attachmentDisposition(ticket.fileName),
+		"Cache-Control": "private, no-store",
+		"X-Content-Type-Options": "nosniff",
+	});
+	if (req.method === "HEAD") return new Response(null, { status: 200, headers });
+	const body = Readable.toWeb(createReadStream(ticket.path)) as unknown as ReadableStream<Uint8Array>;
+	return new Response(body, { status: 200, headers });
 }
 
 // ── Static file serving ─────────────────────────────────────────────
@@ -482,9 +541,14 @@ const HOP_BY_HOP_HEADERS = new Set([
 	"upgrade",
 	"host",
 	"content-length",
+	// The shared dev-port proxy is a separate capability surface. Never leak the
+	// dev3 session or upstream credentials into arbitrary localhost apps.
+	"cookie",
+	"authorization",
+	"set-cookie",
 ]);
 
-function stripHopByHop(headers: Headers): Headers {
+export function stripProxyHeaders(headers: Headers): Headers {
 	const out = new Headers();
 	for (const [k, v] of headers.entries()) {
 		if (!HOP_BY_HOP_HEADERS.has(k.toLowerCase())) out.append(k, v);
@@ -527,12 +591,21 @@ export function parseSharedProxyPath(pathname: string): { subToken: string; port
 	return { subToken, port, rest };
 }
 
+export function sharedProxyHostMatches(requestHost: string | null, tunnelUrl: string | null): boolean {
+	if (!requestHost || !tunnelUrl) return false;
+	try {
+		return requestHost.toLowerCase() === new URL(tunnelUrl).host.toLowerCase();
+	} catch {
+		return false;
+	}
+}
+
 async function proxyHttpToLocalhost(req: Request, port: number, rest: string, search: string): Promise<Response> {
 	const upstreamUrl = `http://localhost:${port}/${rest}${search}`;
 	try {
 		const upstream = await fetch(upstreamUrl, {
 			method: req.method,
-			headers: stripHopByHop(req.headers),
+			headers: stripProxyHeaders(req.headers),
 			body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
 			redirect: "manual",
 		});
@@ -542,7 +615,7 @@ async function proxyHttpToLocalhost(req: Request, port: number, rest: string, se
 		return new Response(upstream.body, {
 			status: upstream.status,
 			statusText: upstream.statusText,
-			headers: stripHopByHop(upstream.headers),
+			headers: stripProxyHeaders(upstream.headers),
 		});
 	} catch (err) {
 		log.warn("Shared proxy: upstream fetch failed", { port, error: String(err) });
@@ -605,10 +678,12 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 			const clientIp = req.headers.get("x-forwarded-for") || req.headers.get("cf-connecting-ip") || "direct";
 
 			// Log all non-static requests
-			if (url.pathname.startsWith("/auth") || url.pathname === "/rpc" || url.pathname === "/pty" || url.pathname === "/health") {
+			if (url.pathname.startsWith("/auth") || url.pathname === "/rpc" || url.pathname === "/pty" || url.pathname === "/health" || url.pathname.startsWith(`${ARTIFACT_DOWNLOAD_ROUTE}/`)) {
 				log.info("Remote request", {
 					method: req.method,
-					path: url.pathname,
+					path: url.pathname.startsWith(`${ARTIFACT_DOWNLOAD_ROUTE}/`)
+						? `${ARTIFACT_DOWNLOAD_ROUTE}/:token`
+						: url.pathname,
 					ip: clientIp,
 					ua,
 					hasCookie: !!extractSessionToken(req),
@@ -623,10 +698,18 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 			if (url.pathname === "/auth/refresh" && req.method === "POST") {
 				return handleAuthRefresh(req, { clientIp, ua });
 			}
+			if (url.pathname === "/auth/logout" && req.method === "POST") {
+				return handleAuthLogout(req, { clientIp, ua });
+			}
+
+			if (url.pathname.startsWith(`${ARTIFACT_DOWNLOAD_ROUTE}/`)) {
+				const token = url.pathname.slice(ARTIFACT_DOWNLOAD_ROUTE.length + 1);
+				return handleArtifactDownload(req, token);
+			}
 
 			// ── WebSocket upgrades (session cookie required) ──
 			if (url.pathname === "/rpc") {
-				if (!checkOrigin(req)) {
+				if (!checkOrigin(req, true)) {
 					log.warn("RPC WS upgrade: origin mismatch", { ip: clientIp, ua, origin: req.headers.get("origin") });
 					return new Response("Forbidden", { status: 403 });
 				}
@@ -641,7 +724,7 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 			}
 
 			if (url.pathname === "/pty") {
-				if (!checkOrigin(req)) {
+				if (!checkOrigin(req, true)) {
 					log.warn("PTY WS upgrade: origin mismatch", { ip: clientIp, ua, origin: req.headers.get("origin") });
 					return new Response("Forbidden", { status: 403 });
 				}
@@ -674,6 +757,10 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 				const tunnel = tunnelManager.list({ kind: "task-shared" }).find((t) => t.subToken === parsed.subToken);
 				if (!tunnel) {
 					log.warn("Shared proxy: unknown subtoken", { ip: clientIp });
+					return new Response("Not Found", { status: 404 });
+				}
+				if (!sharedProxyHostMatches(req.headers.get("host"), tunnel.url)) {
+					log.warn("Shared proxy: wrong tunnel host", { ip: clientIp, host: req.headers.get("host") });
 					return new Response("Not Found", { status: 404 });
 				}
 				if (!tunnel.ports.includes(parsed.port)) {

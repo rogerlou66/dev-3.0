@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">dev3</string>
+	<string name="connect_title">Conecta tu ordenador</string>
+	<string name="connect_description">Inicia Acceso remoto en el ordenador y escanea el código QR o pega el enlace de conexión.</string>
+	<string name="scan_qr">Escanear código QR</string>
+	<string name="connection_link_label">Enlace de conexión</string>
+	<string name="connection_link_hint">https://… o http://dirección-privada:puerto/…</string>
+	<string name="connect">Conectar</string>
+	<string name="forget_computer">Olvidar ordenador</string>
+	<string name="switch_computer">Conectar otro ordenador</string>
+	<string name="connection_options">Opciones de conexión</string>
+	<string name="connected_computer">Ordenador conectado</string>
+	<string name="connected_unencrypted">Conectado · LAN sin cifrar</string>
+	<string name="unsafe_connection_title">Conexión sin cifrar</string>
+	<string name="unsafe_connection_description">Quien controle esta red Wi-Fi podría leer o modificar tus indicaciones y la sesión de dev3. Es preferible usar un túnel HTTPS, reenvío SSH o Tailscale. Continúa solo en una red de confianza.</string>
+	<string name="go_back">Volver</string>
+	<string name="connect_anyway">Conectar de todos modos</string>
+	<string name="external_navigation_blocked">Se bloqueó una redirección fuera de dev3.</string>
+	<string name="port_requires_exposure">Expón este puerto desde dev3 antes de abrirlo mediante un túnel público.</string>
+	<string name="webview_crashed">Android System WebView se detuvo dos veces. Actualiza WebView y vuelve a conectarte.</string>
+	<string name="bridge_update_required">Modo limitado · actualiza dev3 en el ordenador</string>
+	<string name="bridge_incompatible">Modo limitado · puente del ordenador incompatible</string>
+	<string name="invalid_connection">Usa un enlace HTTP o HTTPS de dev3.</string>
+	<string name="public_http_blocked">No se permite HTTP público. Usa HTTPS o una dirección LAN/Tailscale privada.</string>
+	<string name="scanner_failed">No se pudo escanear el QR. Pega el enlace de conexión.</string>
+	<string name="webview_update_required">Actualiza Android System WebView para conectarte de forma segura.</string>
+	<string name="session_expired">La sesión del ordenador caducó. Escanea un nuevo código QR de dev3.</string>
+	<string name="prompt_task_label">Indicación para el agente de código</string>
+	<string name="prompt_project_label">Comando de terminal</string>
+	<string name="prompt_hint">Escribe una indicación multilínea</string>
+	<string name="insert">Insertar</string>
+	<string name="send">Enviar</string>
+	<string name="sending">Enviando…</string>
+	<string name="no_terminal">Abre un terminal activo antes de enviar.</string>
+	<string name="delivery_failed">No se confirmó la entrega de la indicación: %1$s</string>
+	<string name="inserted_draft_kept">Insertado en el terminal. El borrador se conserva por seguridad.</string>
+	<string name="prompt_may_have_sent">Es posible que la indicación se haya enviado. Revisa el terminal antes de reintentar; dev3 no reintentará automáticamente.</string>
+	<string name="notification_channel_name">Actividad de agentes</string>
+</resources>

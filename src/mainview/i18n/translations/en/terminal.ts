@@ -229,6 +229,7 @@ const terminal = {
 
 	// File path links in terminal output (Cmd/Ctrl+Click)
 	"terminal.pathLinkFolderBrowser": "Folders can't be opened from the browser — use the desktop app.",
+	"terminal.pathLinkOpenedOnComputer": "Opened on your computer.",
 	"terminal.pathLinkOpenFailed": "Couldn't open path: {error}",
 	"terminal.filePreviewLoading": "Loading preview…",
 	"terminal.filePreviewNotFound": "File not found — it may have been moved or deleted.",
@@ -240,6 +241,8 @@ const terminal = {
 	"terminal.filePreviewCopied": "Path copied",
 	"terminal.filePreviewOpenSystem": "Open in default app",
 	"terminal.filePreviewOpenFolder": "Open folder",
+	"terminal.filePreviewOpenSystemComputer": "Open in default app on computer",
+	"terminal.filePreviewOpenFolderComputer": "Open folder on computer",
 	"terminal.filePreviewCopyContent": "Copy content",
 	"terminal.filePreviewContentCopied": "Content copied",
 	"terminal.filePreviewRendered": "Rendered",

@@ -21,6 +21,7 @@ import { adjustZoom, applyZoom, mobileDensityForRoute, setMobileDensity, ZOOM_ST
 import { useViewport } from "./hooks/useViewport";
 import { useMobile } from "./hooks/useMobile";
 import { useAndroidBackGuard } from "./hooks/useAndroidBackGuard";
+import { isAndroidAppHost } from "./android-client-bridge";
 import GlobalHeader from "./components/GlobalHeader";
 import AppMenuBar from "./components/AppMenuBar";
 import GlobalSettings from "./components/GlobalSettings";
@@ -169,7 +170,7 @@ function App() {
 	const historyIndexRef = useRef(state.historyIndex);
 	historyIndexRef.current = state.historyIndex;
 	useAndroidBackGuard({
-		enabled: isMobileDevice && !isElectrobun,
+		enabled: !isElectrobun && (isMobileDevice || isAndroidAppHost()),
 		routeBack: () => {
 			if (historyIndexRef.current <= 0) return false;
 			dispatch({ type: "goBack" });
@@ -2387,6 +2388,7 @@ function App() {
 						hasTask: Boolean(routeTaskId(state.route)),
 						isVirtual: state.projects.find((p) => p.id === getProjectIdForRoute(state.route))?.kind === "virtual",
 						remote: isRemote(),
+						androidApp: isAndroidAppHost(),
 					}}
 					onRun={runCommand}
 					onClose={() => setShowCommandPalette(false)}

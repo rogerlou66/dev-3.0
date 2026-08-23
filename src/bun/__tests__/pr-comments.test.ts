@@ -255,12 +255,18 @@ describe("sendAgentMessageNow", () => {
 	it("returns no spill path when the review travelled as text", async () => {
 		sendMessageImmediately.mockResolvedValue({ status: "delivered", spilledPath: null });
 		const result = await prCommentsHandlers.sendAgentMessageNow({ taskId: "t1", projectId: "p1", text: "fix it" });
-		expect(result).toEqual({ spilledPath: null });
+		expect(result).toEqual({ spilledPath: null, status: "delivered" });
 	});
 
 	it("reports the file an oversized review was spilled to", async () => {
 		sendMessageImmediately.mockResolvedValue({ status: "delivered", spilledPath: `${taskDirRoot}/messages/message-x.md` });
 		const result = await prCommentsHandlers.sendAgentMessageNow({ taskId: "t1", projectId: "p1", text: "y".repeat(9000) });
-		expect(result).toEqual({ spilledPath: `${taskDirRoot}/messages/message-x.md` });
+		expect(result).toEqual({ spilledPath: `${taskDirRoot}/messages/message-x.md`, status: "delivered" });
+	});
+
+	it("preserves an unconfirmed delivery verdict for the client", async () => {
+		sendMessageImmediately.mockResolvedValue({ status: "unconfirmed", spilledPath: null });
+		const result = await prCommentsHandlers.sendAgentMessageNow({ taskId: "t1", projectId: "p1", text: "fix it" });
+		expect(result).toEqual({ spilledPath: null, status: "unconfirmed" });
 	});
 });

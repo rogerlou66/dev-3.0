@@ -17,8 +17,21 @@ That's the whole thing. It prints an ASCII QR code, a public URL, and an SSH-for
 ## How the connection works
 
 The access URL is signed with a short-lived JWT — **65 seconds, single use** — and the QR
-auto-refreshes every 60 seconds. Once you scan it, the browser keeps a trusted session for 8
-hours and reconnects on reload without rescanning.
+auto-refreshes every 60 seconds. Once you scan it, the client keeps a rolling trusted session for
+24 hours and reconnects on reload without rescanning.
+
+## Android tablet app
+
+Open the dev3 Android app and scan the same QR code. The tablet loads the shared boards, task
+controls, settings, diffs and terminals from the computer, while prompt composition, notifications,
+streamed artifact saving, external links and Android Back stay native. Task and project prompts are edited outside
+the WebView; only confirmed task delivery clears a draft, and ambiguous delivery is never retried
+automatically.
+
+HTTPS, SSH forwarding and Tailscale are the preferred transports. A private LAN `http://` link is
+still unencrypted: Android requires a separate warning confirmation, keeps a visible warning while
+connected and disables native handoffs that could launch content silently. Choosing **Forget
+computer** revokes that rolling server session before removing its local cookie.
 
 Three ways in, printed on every start:
 

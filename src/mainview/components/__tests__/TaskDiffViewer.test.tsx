@@ -1771,7 +1771,7 @@ describe("TaskDiffViewer", () => {
 		const longComment = 'Watch this branch edge case with "Show diff" label in the Russian locale. '.repeat(4).trim();
 		const truncatedPreview = `${longComment.slice(0, 100)}...`;
 		vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue(undefined as never);
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });
 
 		render(
 			<I18nProvider>
@@ -1862,7 +1862,7 @@ describe("TaskDiffViewer", () => {
 
 	it("sends a comment straight from the composer and keeps it, marked as sent", async () => {
 		const user = userEvent.setup();
-		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue(undefined as never);
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });
 
 		render(
 			<I18nProvider>
@@ -1902,7 +1902,7 @@ describe("TaskDiffViewer", () => {
 		const user = userEvent.setup();
 		const writeText = vi.fn().mockResolvedValue(undefined);
 		vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue(undefined as never);
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });
 
 		render(
 			<I18nProvider>
@@ -2602,9 +2602,16 @@ describe("TaskDiffViewer", () => {
 		expect(screen.getAllByText("send me").length).toBeGreaterThan(0);
 		expect(localStorage.getItem(reviewKey)).toContain("send me");
 
-		// Successful send: a resolved RPC only proves the keys left dev3, so the text
-		// is marked as sent and kept — never destroyed on an unprovable delivery.
-		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValueOnce(undefined as never);
+		// Unconfirmed means the prompt may have landed: keep it retryable and never
+		// mark it sent, because automatic resend could double-submit it.
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValueOnce({ status: "unconfirmed", spilledPath: null });
+		await user.click(screen.getByTestId("review-send-button"));
+		await waitFor(() => expect(api.request.sendAgentMessageNow).toHaveBeenCalledTimes(2));
+		expect(screen.queryByTestId("review-export-sent-marker")).not.toBeInTheDocument();
+		expect(localStorage.getItem(reviewKey)).not.toContain("sentAt");
+
+		// A confirmed send marks the text as sent and keeps it visible.
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValueOnce({ status: "delivered", spilledPath: null });
 		await user.click(screen.getByTestId("review-send-button"));
 
 		await waitFor(() => {
@@ -3337,7 +3344,7 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			updateChannel: "stable",
 		} as never);
 		vi.mocked(api.request.getTaskPrComments).mockResolvedValue(makePrPayload() as never);
-		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue(undefined as never);
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });
 		localStorage.clear();
 		// Inline thread anchoring is branch-mode only; open the viewer there.
 		localStorage.setItem("dev3-inline-diff-mode-v1", "branch");

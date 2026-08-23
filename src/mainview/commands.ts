@@ -110,6 +110,12 @@ export interface CommandContext {
 	 * silently do nothing visible for a remote user.
 	 */
 	remote?: boolean;
+	/**
+	 * The remote renderer is hosted by the paired Android shell. Unlike a generic
+	 * browser tab, Android deliberately controls the computer, so host-side
+	 * actions remain useful when their copy states where the effect appears.
+	 */
+	androidApp?: boolean;
 }
 
 /** Palette commands hidden in browser remote mode (host-local desktop effect). */
@@ -118,7 +124,7 @@ const REMOTE_HIDDEN_COMMANDS = new Set<string>(["task-open-in-finder"]);
 /** Commands runnable in the current route context, in registry order. */
 export function availableCommands(ctx: CommandContext): PaletteCommand[] {
 	return ALL_COMMANDS.filter((c) => {
-		if (ctx.remote && REMOTE_HIDDEN_COMMANDS.has(c.id)) return false;
+		if (ctx.remote && !ctx.androidApp && REMOTE_HIDDEN_COMMANDS.has(c.id)) return false;
 		if (
 			ctx.isVirtual &&
 			(c.category === "git" ||

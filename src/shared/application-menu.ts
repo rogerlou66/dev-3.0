@@ -206,22 +206,16 @@ const NOT_YET_IMPLEMENTED: ReadonlySet<MenuAction> = new Set<MenuAction>([
 	MENU_ACTIONS.findInTasks,
 	MENU_ACTIONS.findInTerminal,
 
-	// Task — most need modal/inline UX wiring; first commit ships only finder-
-	// reveal, copy-worktree-path, mark-completed and mark-cancelled.
+	// Task — modal/inline flows remain pending; watch and lifecycle moves route
+	// through the renderer alongside finder/copy/completion actions.
 	MENU_ACTIONS.taskRename,
 	MENU_ACTIONS.taskSetOverview,
 	MENU_ACTIONS.taskAddNote,
-	MENU_ACTIONS.taskToggleWatch,
 	MENU_ACTIONS.taskSpawnVariants,
 	MENU_ACTIONS.taskAddAttempts,
 	MENU_ACTIONS.taskDuplicate,
 	MENU_ACTIONS.taskDelete,
 	MENU_ACTIONS.taskOpenInIde,
-	MENU_ACTIONS.taskMoveToDo,
-	MENU_ACTIONS.taskMoveInProgress,
-	MENU_ACTIONS.taskMoveUserQuestions,
-	MENU_ACTIONS.taskMoveReviewAi,
-	MENU_ACTIONS.taskMoveReviewUser,
 
 	// Project — extras beyond the working git ops + dev server + settings
 	MENU_ACTIONS.projectPushBranch,

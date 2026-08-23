@@ -1,4 +1,5 @@
 import type { PRReviewComment, PRReviewThread, PRReviewThreadSide, Project, Task, TaskPRCommentsPayload } from "../../shared/types";
+import type { AgentPromptDeliveryStatus } from "../../shared/agent-prompt-delivery";
 import * as data from "../data";
 import * as github from "../github";
 import { sendMessageImmediately } from "../scheduled-message-scheduler";
@@ -223,11 +224,14 @@ async function getTaskPrComments(params: { taskId: string; projectId: string; fo
  * typed is spilled to a file by `sendMessageImmediately` itself, which reports the
  * path back so the toast can name it.
  */
-async function sendAgentMessageNow(params: { taskId: string; projectId: string; text: string }): Promise<{ spilledPath: string | null }> {
+async function sendAgentMessageNow(params: { taskId: string; projectId: string; text: string }): Promise<{
+	spilledPath: string | null;
+	status: AgentPromptDeliveryStatus;
+}> {
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
-	const { spilledPath } = await sendMessageImmediately(task, params.text);
-	return { spilledPath };
+	const { spilledPath, status } = await sendMessageImmediately(task, params.text);
+	return { spilledPath, status };
 }
 
 export const prCommentsHandlers = {

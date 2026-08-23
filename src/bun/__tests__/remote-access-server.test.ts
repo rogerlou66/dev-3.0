@@ -49,6 +49,7 @@ vi.mock("../jwt", () => ({
 	createSessionToken: vi.fn().mockResolvedValue("test-session-token"),
 	exchangeQrForSession: vi.fn(),
 	refreshSession: vi.fn(),
+	revokeSessionToken: vi.fn(),
 	verifySessionToken: vi.fn(),
 	SESSION_TOKEN_TTL_S: 24 * 60 * 60,
 }));

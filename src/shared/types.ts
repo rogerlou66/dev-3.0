@@ -3864,7 +3864,7 @@ export type AppRPCSchema = {
 			 */
 			sendAgentMessageNow: {
 				params: { taskId: string; projectId: string; text: string };
-				response: { spilledPath: string | null };
+				response: { spilledPath: string | null; status: AgentPromptDelivery["status"] };
 			};
 			addTaskNote: {
 				params: { taskId: string; projectId: string; content: string; source?: NoteSource };
@@ -3945,6 +3945,10 @@ export type AppRPCSchema = {
 			readArtifactDownload: {
 				params: { artifact: SharedArtifact };
 				response: { fileName: string; mime: "application/zip" | "text/html"; base64: string };
+			};
+			createArtifactDownload: {
+				params: { artifact: SharedArtifact };
+				response: { url: string; fileName: string; mime: "application/zip" | "text/html"; bytes: number };
 			};
 			openArtifactInBrowser: {
 				params: { artifact: SharedArtifact };

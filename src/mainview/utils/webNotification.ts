@@ -1,4 +1,10 @@
 import { toast } from "../toast";
+import {
+	getAndroidDeviceCapabilities,
+	isAndroidAppHost,
+	requestAndroidNotificationPermission as requestNativeNotificationPermission,
+	showAndroidNotification,
+} from "../android-client-bridge";
 
 /**
  * Browser Web Notifications for remote/headless mode.
@@ -38,6 +44,7 @@ export function setBrowserNotificationsEnabled(enabled: boolean): void {
 
 /** Whether the Notification API exists in a usable (secure) context here. */
 export function webNotificationsSupported(): boolean {
+	if (isAndroidAppHost()) return true;
 	return (
 		typeof window !== "undefined" &&
 		window.isSecureContext === true &&
@@ -45,11 +52,29 @@ export function webNotificationsSupported(): boolean {
 	);
 }
 
+export function notificationPermission(): NotificationPermission | "unsupported" {
+	if (isAndroidAppHost()) return getAndroidDeviceCapabilities()?.notificationPermission ?? "default";
+	if (!webNotificationsSupported()) return "unsupported";
+	return Notification.permission;
+}
+
+export async function requestNotificationPermission(): Promise<NotificationPermission | "unsupported"> {
+	if (isAndroidAppHost()) {
+		try {
+			return (await requestNativeNotificationPermission()).notificationPermission;
+		} catch {
+			return notificationPermission();
+		}
+	}
+	if (!webNotificationsSupported()) return "unsupported";
+	return Notification.requestPermission();
+}
+
 /** Whether a Web Notification can actually be shown right now. */
 export function canShowWebNotification(): boolean {
 	return (
 		webNotificationsSupported() &&
-		Notification.permission === "granted" &&
+		notificationPermission() === "granted" &&
 		browserNotificationsEnabled()
 	);
 }
@@ -102,6 +127,11 @@ export function showWebNotificationOrToast(
 			? () => onOpenTask(detail.taskId, detail.projectId)
 			: undefined;
 
+	if (canShowWebNotification() && isAndroidAppHost()) {
+		void showAndroidNotification(detail).catch(() => showNotificationToast(detail, openTask));
+		return;
+	}
+
 	if (canShowWebNotification()) {
 		try {
 			// Chrome can replace same-tag notifications from another tab without
@@ -125,6 +155,10 @@ export function showWebNotificationOrToast(
 		}
 	}
 
+	showNotificationToast(detail, openTask);
+}
+
+function showNotificationToast(detail: WebNotificationDetail, openTask: (() => void) | undefined): void {
 	const context =
 		[
 			detail.taskSeq !== undefined ? `#${detail.taskSeq}` : null,

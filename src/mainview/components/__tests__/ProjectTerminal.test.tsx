@@ -45,7 +45,7 @@ describe("ProjectTerminal — back-to-board toolbar", () => {
 
 	it("renders the shortcut hint", async () => {
 		renderTerminal();
-		expect(screen.getByText("\u2318`")).toBeInTheDocument();
+		expect(screen.getByText("Ctrl+J")).toBeInTheDocument();
 	});
 
 	it("calls onBack when clicking the back button", async () => {

@@ -34,6 +34,8 @@ describe("MobilePortraitGate", () => {
 	} as unknown as MediaQueryList;
 
 	beforeEach(() => {
+		delete window.__DEV3_ANDROID_APP__;
+		delete window.dev3Android;
 		landscape = false;
 		listeners.clear();
 		lock = vi.fn().mockResolvedValue(undefined);
@@ -110,6 +112,16 @@ describe("MobilePortraitGate", () => {
 		renderGate();
 
 		expect(screen.queryByTestId("mobile-portrait-gate")).not.toBeInTheDocument();
+		expect(lock).not.toHaveBeenCalled();
+	});
+
+	it("does not block an Android tablet while the native message port is still starting", () => {
+		landscape = true;
+		window.__DEV3_ANDROID_APP__ = true;
+		renderGate();
+
+		expect(screen.queryByTestId("mobile-portrait-gate")).not.toBeInTheDocument();
+		expect(screen.getByTestId("app-content").parentElement).not.toHaveAttribute("inert");
 		expect(lock).not.toHaveBeenCalled();
 	});
 

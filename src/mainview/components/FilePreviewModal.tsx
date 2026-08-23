@@ -6,6 +6,7 @@ import { useFocusTrap } from "../utils/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { formatBytes } from "../utils/formatBytes";
 import { writeClipboardText } from "../utils/clipboard-write";
+import { isAndroidAppHost } from "../android-client-bridge";
 import type { FilePreviewResult } from "../../shared/types";
 import { MarkdownDocument } from "./pr-review/markdown";
 
@@ -37,6 +38,7 @@ const GHOST_BUTTON =
  */
 export default function FilePreviewModal({ path, line, taskId, onClose }: FilePreviewModalProps) {
 	const t = useT();
+	const androidApp = isAndroidAppHost();
 	const trapRef = useFocusTrap<HTMLDivElement>();
 	useEscapeKey(onClose);
 	const [preview, setPreview] = useState<FilePreviewResult | null>(null);
@@ -174,6 +176,7 @@ export default function FilePreviewModal({ path, line, taskId, onClose }: FilePr
 	async function handleOpen(mode: "system" | "reveal") {
 		try {
 			await api.request.openTerminalPath({ path, mode });
+			if (androidApp) toast.success(t("terminal.pathLinkOpenedOnComputer"), { taskId, source: "terminal" });
 		} catch (err) {
 			toast.error(t("terminal.pathLinkOpenFailed", { error: String(err) }), { taskId, source: "terminal" });
 		}
@@ -249,13 +252,13 @@ export default function FilePreviewModal({ path, line, taskId, onClose }: FilePr
 					<button type="button" onClick={handleCopyPath} className={GHOST_BUTTON}>
 						{t("terminal.filePreviewCopyPath")}
 					</button>
-					{isElectrobun && !fileMissing && (
+					{(isElectrobun || androidApp) && !fileMissing && (
 						<>
 							<button type="button" onClick={() => handleOpen("reveal")} className={GHOST_BUTTON}>
-								{t("terminal.filePreviewOpenFolder")}
+								{t(androidApp ? "terminal.filePreviewOpenFolderComputer" : "terminal.filePreviewOpenFolder")}
 							</button>
 							<button type="button" onClick={() => handleOpen("system")} className={GHOST_BUTTON}>
-								{t("terminal.filePreviewOpenSystem")}
+								{t(androidApp ? "terminal.filePreviewOpenSystemComputer" : "terminal.filePreviewOpenSystem")}
 							</button>
 						</>
 					)}

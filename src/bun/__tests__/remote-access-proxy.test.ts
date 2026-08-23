@@ -14,12 +14,13 @@ vi.mock("../jwt", () => ({
 	createSessionToken: vi.fn(),
 	exchangeQrForSession: vi.fn(),
 	refreshSession: vi.fn(),
+	revokeSessionToken: vi.fn(),
 	verifySessionToken: vi.fn(),
 }));
 vi.mock("../settings", () => ({ loadSettingsSync: () => ({}) }));
 vi.mock("../theme-state", () => ({ getCurrentUiTheme: () => "dark" }));
 
-import { parseSharedProxyPath } from "../remote-access-server";
+import { parseSharedProxyPath, sharedProxyHostMatches, stripProxyHeaders } from "../remote-access-server";
 
 describe("parseSharedProxyPath", () => {
 	it("parses /p/<subtoken>/<port>/<rest>", () => {
@@ -54,5 +55,30 @@ describe("parseSharedProxyPath", () => {
 
 	it("rejects ports with trailing garbage (would silently parse as int otherwise)", () => {
 		expect(parseSharedProxyPath("/p/abc/3000abc/foo")).toBeNull();
+	});
+});
+
+describe("stripProxyHeaders", () => {
+	it("never forwards dev3 credentials to a proxied localhost app", () => {
+		const headers = stripProxyHeaders(new Headers({
+			cookie: "dev3_session=secret",
+			authorization: "Bearer secret",
+			connection: "keep-alive",
+			accept: "text/html",
+			"set-cookie": "dev3_session=attacker; Path=/",
+		}));
+		expect(headers.get("cookie")).toBeNull();
+		expect(headers.get("authorization")).toBeNull();
+		expect(headers.get("connection")).toBeNull();
+		expect(headers.get("set-cookie")).toBeNull();
+		expect(headers.get("accept")).toBe("text/html");
+	});
+});
+
+describe("sharedProxyHostMatches", () => {
+	it("binds the capability URL to its dedicated tunnel hostname", () => {
+		expect(sharedProxyHostMatches("task.trycloudflare.com", "https://task.trycloudflare.com")).toBe(true);
+		expect(sharedProxyHostMatches("main.trycloudflare.com", "https://task.trycloudflare.com")).toBe(false);
+		expect(sharedProxyHostMatches(null, "https://task.trycloudflare.com")).toBe(false);
 	});
 });

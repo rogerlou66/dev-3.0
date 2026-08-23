@@ -8,6 +8,7 @@ import ExtraKeyBar from "./ExtraKeyBar";
 import TerminalComposer, { type TerminalComposerApi } from "./TerminalComposer";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
+import { appendAndroidDraft, bindAndroidTerminal, isAndroidAppHost } from "../android-client-bridge";
 
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal");
 
@@ -25,6 +26,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	const [restarting, setRestarting] = useState(false);
 	// Same touch input model as TaskTerminal: compose mode by default, ⌨ raw toggle.
 	const touchInput = !isElectrobun && navigator.maxTouchPoints > 0;
+	const androidComposer = isAndroidAppHost();
 	const [termHandle, setTermHandle] = useState<TerminalHandle | null>(null);
 	const [rawMode, setRawMode] = useState(false);
 	const composerApiRef = useRef<TerminalComposerApi | null>(null);
@@ -43,11 +45,25 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	// raw mode pastes them straight onto the prompt.
 	function handleAttachPaths(paths: string[]) {
 		const escaped = paths.map((p) => p.replace(/ /g, "\\ "));
-		if (!rawMode && composerApiRef.current) composerApiRef.current.appendPaths(escaped);
+		if (!rawMode && androidComposer) {
+			appendAndroidDraft({ kind: "project", projectId, rawMode: false }, `${escaped.join(" ")} `);
+		} else if (!rawMode && composerApiRef.current) composerApiRef.current.appendPaths(escaped);
 		else termHandle?.paste(`${escaped.join(" ")} `);
 	}
 
 	const sessionKey = `project-${projectId}`;
+
+	useEffect(() => {
+		if (!termHandle) return;
+		return bindAndroidTerminal(
+			{ kind: "project", projectId, rawMode },
+			termHandle,
+			async (text) => {
+				termHandle.submit(text);
+				return "unconfirmed";
+			},
+		);
+	}, [projectId, rawMode, termHandle]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -155,7 +171,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 				)}
 			</div>
 			{/* Keep the composer mounted in raw mode (hidden) so a draft survives the toggle. */}
-			{touchInput && termHandle && (
+			{touchInput && !androidComposer && termHandle && (
 				<div className={rawMode ? "hidden" : "contents"}>
 					<TerminalComposer handle={termHandle} projectId={projectId} apiRef={composerApiRef} />
 				</div>

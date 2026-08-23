@@ -8,6 +8,7 @@ import { composeArtifactDocument } from "../utils/artifactDocument";
 import { isMac, isRemote } from "../utils/platform";
 import ArtifactSearchBar, { type ArtifactSearchBarHandle } from "./ArtifactSearchBar";
 import { registerOverlayLayer } from "../utils/overlay-layers";
+import { isAndroidAppHost, openAndroidHtml, saveAndroidBase64File, saveAndroidRemoteFile } from "../android-client-bridge";
 
 interface TaskArtifactViewerProps {
 	artifacts: SharedArtifact[];
@@ -32,7 +33,11 @@ function currentTheme(): "dark" | "light" {
 	return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
-function downloadBase64(base64: string, mime: string, fileName: string): void {
+async function downloadBase64(base64: string, mime: string, fileName: string): Promise<void> {
+	if (isAndroidAppHost()) {
+		await saveAndroidBase64File(base64, mime, fileName);
+		return;
+	}
 	const binary = atob(base64);
 	const bytes = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -173,7 +178,7 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 	}, [matches, postToFrame]);
 
 	useEffect(() => {
-		function onMessage(event: MessageEvent) {
+		async function onMessage(event: MessageEvent) {
 			if (event.source !== frameRef.current?.contentWindow) return;
 			const data = event.data as { type?: string; src?: string; alt?: string; token?: number; matches?: number; index?: number } | null;
 			if (!data) return;
@@ -190,7 +195,7 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 			const parsed = parseDataUrl(data.src);
 			if (!parsed) { toast.error(t("artifactViewer.imageSaveFailed"), { taskId }); return; }
 			try {
-				downloadBase64(parsed.base64, parsed.mime, imageFileName(data.src, data.alt ?? "", parsed.mime, assetsRef.current));
+				await downloadBase64(parsed.base64, parsed.mime, imageFileName(data.src, data.alt ?? "", parsed.mime, assetsRef.current));
 				toast.success(t("artifactViewer.imageSaved"), { taskId });
 			} catch {
 				toast.error(t("artifactViewer.imageSaveFailed"), { taskId });
@@ -290,8 +295,13 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 	const download = async () => {
 		setDownloading(true);
 		try {
+			if (isAndroidAppHost()) {
+				const ticket = await api.request.createArtifactDownload({ artifact: current });
+				await saveAndroidRemoteFile(ticket.url, ticket.mime, ticket.fileName, ticket.bytes);
+				return;
+			}
 			const payload = await api.request.readArtifactDownload({ artifact: current });
-			downloadBase64(payload.base64, payload.mime, payload.fileName);
+			await downloadBase64(payload.base64, payload.mime, payload.fileName);
 		} catch {
 			toast.error(t("artifactViewer.downloadFailed"), { taskId });
 		} finally {
@@ -308,6 +318,12 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 			return;
 		}
 		if (!srcDoc) return;
+		if (isAndroidAppHost()) {
+			const fileName = /\.html?$/i.test(current.name) ? current.name : `${current.name || "artifact"}.html`;
+			void openAndroidHtml(fileName, srcDoc)
+				.catch(() => toast.error(t("artifactViewer.openInBrowserFailed"), { taskId }));
+			return;
+		}
 		const url = URL.createObjectURL(new Blob([srcDoc], { type: "text/html" }));
 		if (!window.open(url, "_blank", "noopener,noreferrer")) {
 			URL.revokeObjectURL(url);

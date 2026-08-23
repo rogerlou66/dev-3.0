@@ -47,6 +47,9 @@ export const WINDOWS_SCOPE_PATHS = [
 	".github/workflows/release.yml",
 	".github/workflows/release-build-macos.yml",
 	".github/workflows/release-build-linux.yml",
+	// The Android client workflow does not package Windows, but it carries the shared Bun
+	// pin for host integration tests, so a pin edit must re-run the packaged-runtime proof.
+	".github/workflows/android-client.yml",
 	// The Windows leg, and unlike its two siblings above it is in under BOTH criteria: it pins
 	// Bun AND it is the only workflow that packages the app a Windows user installs. An edit
 	// here changes the shipped Windows build directly, so it must re-run the proof.

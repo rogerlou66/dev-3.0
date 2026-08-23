@@ -8,6 +8,7 @@ import {
 	createSessionToken,
 	exchangeQrForSession,
 	refreshSession,
+	revokeSessionToken,
 	verifySessionToken,
 	_resetForTests,
 } from "../jwt";
@@ -256,6 +257,26 @@ describe("verifySessionToken", () => {
 	it("returns false when secret not initialized", async () => {
 		const token = await createSessionToken();
 		_resetForTests(); // Clear the secret
+		expect(await verifySessionToken(token)).toBe(false);
+	});
+});
+
+describe("revokeSessionToken", () => {
+	it("revokes the current token and every refreshed token in its session chain", async () => {
+		const original = await createSessionToken();
+		const refreshed = await refreshSession(original);
+		expect(refreshed).toBeTruthy();
+		expect(await revokeSessionToken(original)).toBe(true);
+		expect(await verifySessionToken(original)).toBe(false);
+		expect(await verifySessionToken(refreshed!)).toBe(false);
+		expect(await refreshSession(refreshed!)).toBeNull();
+	});
+
+	it("persists revocation across secret reload", async () => {
+		const token = await createSessionToken();
+		await revokeSessionToken(token);
+		_resetForTests();
+		await initSecret(testSecretFile);
 		expect(await verifySessionToken(token)).toBe(false);
 	});
 });

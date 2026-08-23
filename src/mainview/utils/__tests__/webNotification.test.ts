@@ -7,6 +7,13 @@ const toastMock = vi.hoisted(() => ({
 	warning: vi.fn(),
 }));
 vi.mock("../../toast", () => ({ toast: toastMock }));
+const androidBridgeMock = vi.hoisted(() => ({
+	isAndroidAppHost: vi.fn(() => false),
+	getAndroidDeviceCapabilities: vi.fn(() => null),
+	requestAndroidNotificationPermission: vi.fn(),
+	showAndroidNotification: vi.fn(),
+}));
+vi.mock("../../android-client-bridge", () => androidBridgeMock);
 
 import {
 	browserNotificationsEnabled,
@@ -64,6 +71,10 @@ beforeEach(() => {
 	toastMock.success.mockClear();
 	toastMock.info.mockClear();
 	toastMock.warning.mockClear();
+	androidBridgeMock.isAndroidAppHost.mockReturnValue(false);
+	androidBridgeMock.getAndroidDeviceCapabilities.mockReturnValue(null);
+	androidBridgeMock.showAndroidNotification.mockReset();
+	androidBridgeMock.requestAndroidNotificationPermission.mockReset();
 	setSecureContext(true);
 	installNotification("granted");
 });
@@ -181,5 +192,16 @@ describe("showWebNotificationOrToast", () => {
 		expect(FakeNotification.instances).toHaveLength(1);
 		FakeNotification.instances[0].onclick?.();
 		expect(onOpen).toHaveBeenCalledWith("task-1", "proj-1");
+	});
+
+	it("uses the native Android notification bridge even on an insecure LAN origin", async () => {
+		setSecureContext(false);
+		androidBridgeMock.isAndroidAppHost.mockReturnValue(true);
+		androidBridgeMock.getAndroidDeviceCapabilities.mockReturnValue({ notificationPermission: "granted" } as never);
+		androidBridgeMock.showAndroidNotification.mockResolvedValue(undefined);
+
+		showWebNotificationOrToast(baseDetail, vi.fn());
+		await vi.waitFor(() => expect(androidBridgeMock.showAndroidNotification).toHaveBeenCalledWith(baseDetail));
+		expect(toastMock.info).not.toHaveBeenCalled();
 	});
 });

@@ -68,4 +68,9 @@ describe("availableCommands", () => {
 		// Only that one command is dropped vs desktop.
 		expect(remote.length).toBe(desktop.length - 1);
 	});
+
+	it("keeps host-local actions in the paired Android app", () => {
+		const android = availableCommands({ hasProject: true, hasTask: true, remote: true, androidApp: true });
+		expect(android.map((c) => c.id)).toContain("task-open-in-finder");
+	});
 });

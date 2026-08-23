@@ -34,8 +34,9 @@ export function FileAttachmentCard({ path, onRemove }: FileAttachmentCardProps) 
 			{onRemove && (
 				<button
 					onClick={(e) => { e.stopPropagation(); onRemove(); }}
-					className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-danger-fill text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+					className="absolute -top-1.5 -right-1.5 w-5 h-5 [@media(hover:none)]:w-6 [@media(hover:none)]:h-6 rounded-full bg-danger-fill text-white flex items-center justify-center opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
 					title={t("attachments.removeFile")}
+					aria-label={t("attachments.removeFile")}
 				>
 					<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

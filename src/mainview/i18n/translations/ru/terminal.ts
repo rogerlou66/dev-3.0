@@ -237,6 +237,7 @@ const terminal = {
 
 	// File path links in terminal output (Cmd/Ctrl+Click)
 	"terminal.pathLinkFolderBrowser": "Папки нельзя открыть из браузера — используйте настольное приложение.",
+	"terminal.pathLinkOpenedOnComputer": "Открыто на вашем компьютере.",
 	"terminal.pathLinkOpenFailed": "Не удалось открыть путь: {error}",
 	"terminal.filePreviewLoading": "Загрузка предпросмотра…",
 	"terminal.filePreviewNotFound": "Файл не найден — возможно, его переместили или удалили.",
@@ -248,6 +249,8 @@ const terminal = {
 	"terminal.filePreviewCopied": "Путь скопирован",
 	"terminal.filePreviewOpenSystem": "Открыть в приложении по умолчанию",
 	"terminal.filePreviewOpenFolder": "Открыть папку",
+	"terminal.filePreviewOpenSystemComputer": "Открыть в приложении по умолчанию на компьютере",
+	"terminal.filePreviewOpenFolderComputer": "Открыть папку на компьютере",
 	"terminal.filePreviewCopyContent": "Скопировать содержимое",
 	"terminal.filePreviewContentCopied": "Содержимое скопировано",
 	"terminal.filePreviewRendered": "Рендер",

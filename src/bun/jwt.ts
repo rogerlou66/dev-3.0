@@ -43,6 +43,8 @@ export interface JwtPayload {
 	iat: number; // issued at (epoch seconds)
 	exp: number; // expiration (epoch seconds)
 	jti: string; // unique token ID
+	/** Stable session-chain ID; refresh rotates jti but preserves sid. */
+	sid?: string;
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -51,6 +53,8 @@ let secret: CryptoKey | null = null;
 
 /** Set of used QR token JTIs for replay prevention. Maps jti → exp. */
 const usedQrTokens = new Map<string, number>();
+const revokedSessions = new Map<string, number>();
+let revocationFile = `${DEV3_HOME}/remote-revoked-sessions.json`;
 
 // ── Base64url helpers ────────────────────────────────────────────────
 
@@ -120,6 +124,8 @@ function loadPersistedSecret(secretFilePath: string): Uint8Array | null {
  */
 export async function initSecret(secretFilePath: string = SECRET_FILE): Promise<void> {
 	if (secret) return;
+	revocationFile = `${dirname(secretFilePath)}/remote-revoked-sessions.json`;
+	loadRevokedSessions();
 	let raw = loadPersistedSecret(secretFilePath);
 	if (!raw) {
 		raw = crypto.getRandomValues(new Uint8Array(32));
@@ -137,6 +143,41 @@ export async function initSecret(secretFilePath: string = SECRET_FILE): Promise<
 		false,
 		["sign", "verify"],
 	);
+}
+
+function sessionId(payload: JwtPayload): string {
+	return payload.sid ?? payload.jti;
+}
+
+function loadRevokedSessions(): void {
+	revokedSessions.clear();
+	try {
+		const parsed = JSON.parse(readFileSync(revocationFile, "utf-8")) as Array<{ sid?: unknown; exp?: unknown }>;
+		const now = Math.floor(Date.now() / 1000);
+		for (const entry of parsed) {
+			if (typeof entry.sid === "string" && typeof entry.exp === "number" && entry.exp > now) {
+				revokedSessions.set(entry.sid, entry.exp);
+			}
+		}
+	} catch {
+		/* Missing/corrupt additive registry starts empty. */
+	}
+}
+
+function persistRevokedSessions(): void {
+	cleanupRevokedSessions();
+	try {
+		mkdirSync(dirname(revocationFile), { recursive: true });
+		const entries = [...revokedSessions].map(([sid, exp]) => ({ sid, exp }));
+		writeFileSync(revocationFile, `${JSON.stringify(entries)}\n`, { mode: 0o600 });
+	} catch (err) {
+		console.warn("[jwt] Could not persist revoked remote sessions:", err);
+	}
+}
+
+function cleanupRevokedSessions(): void {
+	const now = Math.floor(Date.now() / 1000);
+	for (const [sid, exp] of revokedSessions) if (exp <= now) revokedSessions.delete(sid);
 }
 
 async function signJwt(payload: JwtPayload): Promise<string> {
@@ -201,13 +242,14 @@ export async function createQrToken(): Promise<string> {
 }
 
 /** Create a long-lived session token (24h). */
-export async function createSessionToken(): Promise<string> {
+export async function createSessionToken(sid: string = crypto.randomUUID()): Promise<string> {
 	const now = Math.floor(Date.now() / 1000);
 	return signJwt({
 		type: "session",
 		iat: now,
 		exp: now + SESSION_TOKEN_TTL_S,
 		jti: crypto.randomUUID(),
+		sid,
 	});
 }
 
@@ -238,7 +280,9 @@ export async function refreshSession(token: string): Promise<string | null> {
 	const payload = await verifyJwt(token);
 	if (!payload) return null;
 	if (payload.type !== "session") return null;
-	return createSessionToken();
+	const sid = sessionId(payload);
+	if (revokedSessions.has(sid)) return null;
+	return createSessionToken(sid);
 }
 
 /**
@@ -247,7 +291,16 @@ export async function refreshSession(token: string): Promise<string | null> {
 export async function verifySessionToken(token: string): Promise<boolean> {
 	const payload = await verifyJwt(token);
 	if (!payload) return false;
-	return payload.type === "session";
+	return payload.type === "session" && !revokedSessions.has(sessionId(payload));
+}
+
+/** Revoke the whole rolling session chain represented by this token. */
+export async function revokeSessionToken(token: string): Promise<boolean> {
+	const payload = await verifyJwt(token);
+	if (!payload || payload.type !== "session") return false;
+	revokedSessions.set(sessionId(payload), payload.exp);
+	persistRevokedSessions();
+	return true;
 }
 
 // ── Testing helpers ──────────────────────────────────────────────────
@@ -256,4 +309,6 @@ export async function verifySessionToken(token: string): Promise<boolean> {
 export function _resetForTests(): void {
 	secret = null;
 	usedQrTokens.clear();
+	revokedSessions.clear();
+	revocationFile = `${DEV3_HOME}/remote-revoked-sessions.json`;
 }

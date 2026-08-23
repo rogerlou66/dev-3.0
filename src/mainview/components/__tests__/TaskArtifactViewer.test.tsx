@@ -6,8 +6,15 @@ import TaskArtifactViewer from "../TaskArtifactViewer";
 import { useEscapeKey } from "../../hooks/useEscapeKey";
 
 vi.mock("../../rpc", () => ({
-	api: { request: { readArtifactContent: vi.fn(), readArtifactDownload: vi.fn(), openArtifactInBrowser: vi.fn() } },
+	api: { request: { readArtifactContent: vi.fn(), readArtifactDownload: vi.fn(), createArtifactDownload: vi.fn(), openArtifactInBrowser: vi.fn() } },
 }));
+const androidBridge = vi.hoisted(() => ({
+	isAndroidAppHost: vi.fn(() => false),
+	openAndroidHtml: vi.fn(),
+	saveAndroidBase64File: vi.fn(),
+	saveAndroidRemoteFile: vi.fn(),
+}));
+vi.mock("../../android-client-bridge", () => androidBridge);
 
 // Pin the platform so the ⌘F assertions don't depend on the host running them.
 const platform = vi.hoisted(() => ({ remote: false }));
@@ -31,6 +38,7 @@ function artifact(id: string, withBundle = false): SharedArtifact {
 }
 
 beforeEach(() => {
+	vi.clearAllMocks();
 	vi.mocked(mockedApi.request.readArtifactContent).mockResolvedValue({
 		html: '<!doctype html><html><head></head><body><img src="chart.png"></body></html>',
 		assets: [{ name: "chart.png", mime: "image/png", dataUrl: "data:image/png;base64,AAA" }],
@@ -42,6 +50,19 @@ beforeEach(() => {
 		mime: "application/zip",
 		base64: "UEsDBA==",
 	});
+	vi.mocked(mockedApi.request.createArtifactDownload).mockResolvedValue({
+		url: "/api/artifact-download/ticket",
+		fileName: "b.zip",
+		mime: "application/zip",
+		bytes: 42_000_000,
+	});
+	androidBridge.isAndroidAppHost.mockReturnValue(false);
+	androidBridge.openAndroidHtml.mockReset();
+	androidBridge.saveAndroidBase64File.mockReset();
+	androidBridge.saveAndroidRemoteFile.mockReset();
+	androidBridge.openAndroidHtml.mockResolvedValue(undefined);
+	androidBridge.saveAndroidBase64File.mockResolvedValue(undefined);
+	androidBridge.saveAndroidRemoteFile.mockResolvedValue(undefined);
 });
 
 describe("TaskArtifactViewer", () => {
@@ -288,6 +309,25 @@ describe("TaskArtifactViewer", () => {
 		expect(click).toHaveBeenCalled();
 		createObjectURL.mockRestore();
 		click.mockRestore();
+	});
+
+	it("uses Android device handoffs for artifact download and browser open", async () => {
+		platform.remote = true;
+		androidBridge.isAndroidAppHost.mockReturnValue(true);
+		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("b", true)]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		const frame = await screen.findByTitle("Artifact b") as HTMLIFrameElement;
+		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain("<!doctype html>"));
+
+		await userEvent.click(screen.getByRole("button", { name: /download zip/i }));
+		await waitFor(() => expect(androidBridge.saveAndroidRemoteFile).toHaveBeenCalledWith(
+			"/api/artifact-download/ticket",
+			"application/zip",
+			"b.zip",
+			42_000_000,
+		));
+		expect(mockedApi.request.readArtifactDownload).not.toHaveBeenCalled();
+		await userEvent.click(screen.getByTestId("artifact-viewer-open-browser"));
+		await waitFor(() => expect(androidBridge.openAndroidHtml).toHaveBeenCalledWith("b.html", expect.stringContaining("<!doctype html>")));
 	});
 	describe("standalone overlay", () => {
 		it("opens as an overlay with no fullscreen toggle to dock back with", async () => {

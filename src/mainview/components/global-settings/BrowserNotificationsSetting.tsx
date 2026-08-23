@@ -3,15 +3,15 @@ import type { TFunction } from "../../i18n";
 import { isElectrobun } from "../../rpc";
 import {
 	browserNotificationsEnabled,
+	notificationPermission,
+	requestNotificationPermission,
 	setBrowserNotificationsEnabled,
-	webNotificationsSupported,
 } from "../../utils/webNotification";
 
 type Permission = "default" | "granted" | "denied" | "unsupported";
 
 function readPermission(): Permission {
-	if (!webNotificationsSupported()) return "unsupported";
-	return Notification.permission as Permission;
+	return notificationPermission() as Permission;
 }
 
 /**
@@ -28,7 +28,11 @@ export default function BrowserNotificationsSetting({ t }: { t: TFunction }) {
 	useEffect(() => {
 		const onFocus = () => setPermission(readPermission());
 		window.addEventListener("focus", onFocus);
-		return () => window.removeEventListener("focus", onFocus);
+		window.addEventListener("dev3:androidCapabilities", onFocus);
+		return () => {
+			window.removeEventListener("focus", onFocus);
+			window.removeEventListener("dev3:androidCapabilities", onFocus);
+		};
 	}, []);
 
 	// Desktop app uses native notifications — nothing to configure here.
@@ -36,7 +40,7 @@ export default function BrowserNotificationsSetting({ t }: { t: TFunction }) {
 
 	async function requestPermission() {
 		try {
-			const result = await Notification.requestPermission();
+			const result = await requestNotificationPermission();
 			setPermission(result as Permission);
 			if (result === "granted") {
 				setBrowserNotificationsEnabled(true);

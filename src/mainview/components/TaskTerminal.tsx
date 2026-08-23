@@ -24,6 +24,7 @@ import {
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { isElectrobun } from "../rpc";
+import { appendAndroidDraft, bindAndroidTerminal, isAndroidAppHost } from "../android-client-bridge";
 import type { TaskPaneState } from "../../shared/task-panes";
 import { getPaneRects, restoreSplitTree, serializeSplitTree, setSplitRatio } from "../../shared/split-tree";
 import NativePaneDividers from "./NativePaneDividers";
@@ -52,6 +53,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	const t = useT();
 	const isTouchDevice = navigator.maxTouchPoints > 0;
 	const touchInput = !isElectrobun && isTouchDevice;
+	const androidComposer = isAndroidAppHost();
 	const [rawMode, setRawMode] = useState(false);
 	const composerApiRef = useRef<TerminalComposerApi | null>(null);
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -85,6 +87,15 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	// act that clears the flag.
 	const [hibernated, setHibernated] = useState(false);
 	const [restarting, setRestarting] = useState(false);
+
+	useEffect(() => {
+		if (!termHandle) return;
+		return bindAndroidTerminal(
+			{ kind: "task", taskId, projectId, rawMode },
+			termHandle,
+			async (text) => (await api.request.sendAgentMessageNow({ taskId, projectId, text })).status,
+		);
+	}, [projectId, rawMode, taskId, termHandle]);
 	const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	// ── Native multi-pane state ─────────────────────────────────────────────────
@@ -277,6 +288,11 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		?? nativePaneState?.activePaneId
 		?? nativePaneState?.panes[0]?.paneId
 		?? null;
+	useEffect(() => {
+		if (!isNative || !nativeFocusPaneId) return;
+		const handle = paneHandlesRef.current.get(nativeFocusPaneId);
+		if (handle) setTermHandle(handle);
+	}, [isNative, nativeFocusPaneId]);
 
 	// ── Someone asked for the keyboard ────────────────────────────────────────
 	useEffect(() => {
@@ -513,7 +529,9 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 
 	function handleAttachPaths(paths: string[]) {
 		const escaped = paths.map((p) => p.replace(/ /g, "\\ "));
-		if (!rawMode && composerApiRef.current) composerApiRef.current.appendPaths(escaped);
+		if (!rawMode && androidComposer) {
+			appendAndroidDraft({ kind: "task", taskId, projectId, rawMode: false }, `${escaped.join(" ")} `);
+		} else if (!rawMode && composerApiRef.current) composerApiRef.current.appendPaths(escaped);
 		else termHandle?.paste(`${escaped.join(" ")} `);
 	}
 
@@ -545,6 +563,8 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 
 		function handleFocusPane(paneId: string) {
 			setClientFocusPaneId(paneId);
+			const handle = paneHandlesRef.current.get(paneId);
+			if (handle) setTermHandle(handle);
 			publishNativePaneFocus(taskId, paneId);
 			// Restored from the pane's own recorded snapshot — no extra frame required.
 			const stored = paneRolesRef.current.get(paneId);
@@ -671,7 +691,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 						/>
 					)}
 					<MobilePaneCarousel taskId={taskId}>{nativeTerminalArea}</MobilePaneCarousel>
-					{touchInput && focusedPaneHandle && (
+					{touchInput && !androidComposer && focusedPaneHandle && (
 						<div className={rawMode ? "hidden" : "contents"}>
 							<TerminalComposer handle={focusedPaneHandle} task={task} project={project} dispatch={dispatch} apiRef={composerApiRef} />
 						</div>
@@ -781,7 +801,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 						</div>
 					</div>
 				)}
-				{touchInput && focusedPaneHandle && (
+				{touchInput && !androidComposer && focusedPaneHandle && (
 					<div className={rawMode ? "hidden" : "contents"}>
 						<TerminalComposer handle={focusedPaneHandle} task={task} project={project} dispatch={dispatch} apiRef={composerApiRef} />
 					</div>
@@ -851,7 +871,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 					{ptyUrl && <ClosePanePicker taskId={taskId} />}
 				</div>
 			)}
-			{touchInput && termHandle && (
+			{touchInput && !androidComposer && termHandle && (
 				<div className={rawMode ? "hidden" : "contents"}>
 					<TerminalComposer handle={termHandle} task={task} project={project} dispatch={dispatch} apiRef={composerApiRef} />
 				</div>

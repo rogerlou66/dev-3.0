@@ -1,12 +1,13 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "../i18n";
+import { isAndroidAppShell } from "../android-client-bridge";
 import { useMobile } from "../hooks/useMobile";
 import { usePortraitOrientation } from "../hooks/usePortraitOrientation";
 
 export default function MobilePortraitGate({ children }: { children: ReactNode }) {
 	const t = useT();
 	const isMobile = useMobile();
-	const landscape = usePortraitOrientation(isMobile);
+	const landscape = usePortraitOrientation(isMobile && !isAndroidAppShell());
 	const appRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {

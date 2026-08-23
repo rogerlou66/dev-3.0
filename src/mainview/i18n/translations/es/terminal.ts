@@ -229,6 +229,7 @@ const terminal = {
 
 	// File path links in terminal output (Cmd/Ctrl+Click)
 	"terminal.pathLinkFolderBrowser": "Las carpetas no se pueden abrir desde el navegador — usa la aplicación de escritorio.",
+	"terminal.pathLinkOpenedOnComputer": "Se abrió en tu ordenador.",
 	"terminal.pathLinkOpenFailed": "No se pudo abrir la ruta: {error}",
 	"terminal.filePreviewLoading": "Cargando vista previa…",
 	"terminal.filePreviewNotFound": "Archivo no encontrado — puede que se haya movido o eliminado.",
@@ -240,6 +241,8 @@ const terminal = {
 	"terminal.filePreviewCopied": "Ruta copiada",
 	"terminal.filePreviewOpenSystem": "Abrir en la aplicación predeterminada",
 	"terminal.filePreviewOpenFolder": "Abrir carpeta",
+	"terminal.filePreviewOpenSystemComputer": "Abrir en la aplicación predeterminada del ordenador",
+	"terminal.filePreviewOpenFolderComputer": "Abrir carpeta en el ordenador",
 	"terminal.filePreviewCopyContent": "Copiar contenido",
 	"terminal.filePreviewContentCopied": "Contenido copiado",
 	"terminal.filePreviewRendered": "Renderizado",

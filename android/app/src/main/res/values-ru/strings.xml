@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">dev3</string>
+	<string name="connect_title">Подключение к компьютеру</string>
+	<string name="connect_description">Запустите удалённый доступ на компьютере, затем отсканируйте QR-код или вставьте ссылку.</string>
+	<string name="scan_qr">Сканировать QR-код</string>
+	<string name="connection_link_label">Ссылка подключения</string>
+	<string name="connection_link_hint">https://… или http://частный-адрес:порт/…</string>
+	<string name="connect">Подключиться</string>
+	<string name="forget_computer">Забыть компьютер</string>
+	<string name="switch_computer">Подключить другой компьютер</string>
+	<string name="connection_options">Параметры подключения</string>
+	<string name="connected_computer">Подключённый компьютер</string>
+	<string name="connected_unencrypted">Подключено · LAN без шифрования</string>
+	<string name="unsafe_connection_title">Незашифрованное подключение</string>
+	<string name="unsafe_connection_description">Тот, кто контролирует эту Wi-Fi сеть, может прочитать или изменить ваши запросы и сеанс dev3. Предпочтительны HTTPS-туннель, SSH-перенаправление или Tailscale. Продолжайте только в доверенной сети.</string>
+	<string name="go_back">Назад</string>
+	<string name="connect_anyway">Всё равно подключиться</string>
+	<string name="external_navigation_blocked">Переход страницы за пределы dev3 заблокирован.</string>
+	<string name="port_requires_exposure">Опубликуйте этот порт в dev3, прежде чем открывать его через публичный туннель.</string>
+	<string name="webview_crashed">Android System WebView дважды остановился. Обновите WebView и подключитесь снова.</string>
+	<string name="bridge_update_required">Ограниченный режим · обновите dev3 на компьютере</string>
+	<string name="bridge_incompatible">Ограниченный режим · несовместимый мост компьютера</string>
+	<string name="invalid_connection">Используйте HTTP- или HTTPS-ссылку dev3.</string>
+	<string name="public_http_blocked">Публичный HTTP запрещён. Используйте HTTPS или частный адрес LAN/Tailscale.</string>
+	<string name="scanner_failed">Не удалось отсканировать QR-код. Вставьте ссылку подключения.</string>
+	<string name="webview_update_required">Обновите Android System WebView для безопасного подключения.</string>
+	<string name="session_expired">Сеанс компьютера истёк. Отсканируйте новый QR-код dev3.</string>
+	<string name="prompt_task_label">Запрос coding-агенту</string>
+	<string name="prompt_project_label">Команда терминала</string>
+	<string name="prompt_hint">Введите многострочный запрос</string>
+	<string name="insert">Вставить</string>
+	<string name="send">Отправить</string>
+	<string name="sending">Отправка…</string>
+	<string name="no_terminal">Перед отправкой откройте активный терминал.</string>
+	<string name="delivery_failed">Доставка запроса не подтверждена: %1$s</string>
+	<string name="inserted_draft_kept">Текст вставлен в терминал. Черновик сохранён для безопасности.</string>
+	<string name="prompt_may_have_sent">Запрос мог быть отправлен. Проверьте терминал перед повтором; dev3 не повторяет отправку автоматически.</string>
+	<string name="notification_channel_name">Активность агентов</string>
+</resources>

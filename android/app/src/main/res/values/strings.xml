@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">dev3</string>
+	<string name="connect_title">Connect to your computer</string>
+	<string name="connect_description">Start Remote Access on the computer, then scan its QR code or paste the connection link.</string>
+	<string name="scan_qr">Scan QR code</string>
+	<string name="connection_link_label">Connection link</string>
+	<string name="connection_link_hint">https://… or http://private-address:port/…</string>
+	<string name="connect">Connect</string>
+	<string name="forget_computer">Forget computer</string>
+	<string name="switch_computer">Connect another computer</string>
+	<string name="connection_options">Connection options</string>
+	<string name="connected_computer">Connected computer</string>
+	<string name="connected_unencrypted">Connected · unencrypted LAN</string>
+	<string name="unsafe_connection_title">Unencrypted connection</string>
+	<string name="unsafe_connection_description">Anyone controlling this Wi-Fi network could read or change your prompts and dev3 session. Prefer an HTTPS tunnel, SSH forwarding, or Tailscale. Continue only on a network you trust.</string>
+	<string name="go_back">Go back</string>
+	<string name="connect_anyway">Connect anyway</string>
+	<string name="external_navigation_blocked">Blocked a page redirect outside dev3.</string>
+	<string name="port_requires_exposure">Expose this port from dev3 before opening it through a public tunnel.</string>
+	<string name="webview_crashed">Android System WebView stopped twice. Update WebView, then reconnect.</string>
+	<string name="bridge_update_required">Limited mode · update dev3 on the computer</string>
+	<string name="bridge_incompatible">Limited mode · incompatible computer bridge</string>
+	<string name="invalid_connection">Use a dev3 HTTP or HTTPS connection link.</string>
+	<string name="public_http_blocked">Public HTTP is not allowed. Use HTTPS or a private LAN/Tailscale address.</string>
+	<string name="scanner_failed">QR scanning failed. Paste the connection link instead.</string>
+	<string name="webview_update_required">Update Android System WebView to connect securely.</string>
+	<string name="session_expired">This computer session expired. Scan a fresh dev3 QR code.</string>
+	<string name="prompt_task_label">Prompt to coding agent</string>
+	<string name="prompt_project_label">Terminal command</string>
+	<string name="prompt_hint">Type a multiline prompt</string>
+	<string name="insert">Insert</string>
+	<string name="send">Send</string>
+	<string name="sending">Sending…</string>
+	<string name="no_terminal">Open a live terminal before sending.</string>
+	<string name="delivery_failed">Prompt delivery was not confirmed: %1$s</string>
+	<string name="inserted_draft_kept">Inserted into the terminal. Draft kept for safety.</string>
+	<string name="prompt_may_have_sent">The prompt may have been sent. Check the terminal before retrying; dev3 will not retry automatically.</string>
+	<string name="notification_channel_name">Agent activity</string>
+</resources>

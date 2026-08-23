@@ -57,7 +57,8 @@ export function useAndroidBackGuard(opts: {
 			// A forward navigation INTO the sentinel entry (e.g. swipe-forward)
 			// is not a Back press — the guard is simply re-armed by it.
 			if (isBackSentinelState(e.state)) return;
-			handleBackPress();
+			const outcome = handleBackPress();
+			window.dispatchEvent(new CustomEvent("dev3:backOutcome", { detail: { outcome } }));
 		};
 		window.addEventListener("popstate", onPopState);
 		return () => window.removeEventListener("popstate", onPopState);

@@ -24,7 +24,8 @@ import { spawn, spawnSync } from "../spawn";
 import { writeSystemClipboard } from "../system-clipboard";
 import { getPushMessage, getUploadedImageExtension, hideAppNative, log, logRendererError, logRendererDiagnostic, setActiveContext, setAppForeground, setStreamerPrivacy, setTerminalFocus } from "./shared";
 import { applyMenuContext, type MenuContext } from "../../shared/application-menu";
-import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactHtmlPath } from "../shared-artifacts";
+import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactDownloadFile, sharedArtifactHtmlPath } from "../shared-artifacts";
+import { issueArtifactDownloadTicket } from "../artifact-download-tickets";
 import { isFullyQualifiedPath } from "../../shared/absolute-path";
 import { clipboardImageToPng } from "../clipboard-image";
 
@@ -844,6 +845,10 @@ async function readArtifactDownload(params: { artifact: SharedArtifact }) {
 	return loadSharedArtifactDownload(params.artifact);
 }
 
+async function createArtifactDownload(params: { artifact: SharedArtifact }) {
+	return issueArtifactDownloadTicket(sharedArtifactDownloadFile(params.artifact));
+}
+
 async function openArtifactInBrowser(params: { artifact: SharedArtifact }): Promise<void> {
 	const path = sharedArtifactHtmlPath(params.artifact);
 	log.info("→ openArtifactInBrowser", { path });
@@ -1066,6 +1071,7 @@ export const appHandlers = {
 	readImageBase64,
 	readArtifactContent,
 	readArtifactDownload,
+	createArtifactDownload,
 	openArtifactInBrowser,
 	openImageFile,
 	openFolder,

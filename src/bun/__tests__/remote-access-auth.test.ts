@@ -7,7 +7,7 @@
  * exercised end-to-end at the Request/Response seam.
  */
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -57,6 +57,8 @@ import {
 	buildClearSessionCookie,
 	checkOrigin,
 	handleAuthExchange,
+	handleArtifactDownload,
+	handleAuthLogout,
 	handleAuthRefresh,
 } from "../remote-access-server";
 import { initSecret, createQrToken, _resetForTests } from "../jwt";
@@ -93,6 +95,20 @@ function refreshRequest(cookie?: string, headers: Record<string, string> = {}): 
 			...(cookie ? { cookie } : {}),
 			...headers,
 		},
+	});
+}
+
+function logoutRequest(cookie?: string): Request {
+	return new Request("http://192.168.1.10:4242/auth/logout", {
+		method: "POST",
+		headers: { host: "192.168.1.10:4242", origin: "http://192.168.1.10:4242", ...(cookie ? { cookie } : {}) },
+	});
+}
+
+function artifactRequest(token: string, cookie?: string, method = "GET"): Request {
+	return new Request(`http://192.168.1.10:4242/api/artifact-download/${token}`, {
+		method,
+		headers: { host: "192.168.1.10:4242", ...(cookie ? { cookie } : {}) },
 	});
 }
 
@@ -147,6 +163,12 @@ describe("session cookie builders", () => {
 		expect(cookie).toContain(`${SESSION_COOKIE_NAME}=;`);
 		expect(cookie).toContain("Max-Age=0");
 	});
+
+	it("adds Secure only for HTTPS-facing sessions", () => {
+		expect(buildSessionCookie("tok123", true)).toContain("; Secure");
+		expect(buildClearSessionCookie(true)).toContain("; Secure");
+		expect(buildSessionCookie("tok123")).not.toContain("; Secure");
+	});
 });
 
 // ── checkOrigin ──────────────────────────────────────────────────────
@@ -160,8 +182,16 @@ describe("checkOrigin", () => {
 		expect(checkOrigin(reqWith({ host: "10.0.0.5:4242", origin: "http://10.0.0.5:4242" }))).toBe(true);
 	});
 
-	it("allows a matching https tunnel origin (scheme ignored, authority compared)", () => {
-		expect(checkOrigin(reqWith({ host: "foo.trycloudflare.com", origin: "https://foo.trycloudflare.com" }))).toBe(true);
+	it("allows a matching https tunnel origin through the trusted forwarded protocol", () => {
+		expect(checkOrigin(reqWith({
+			host: "foo.trycloudflare.com",
+			origin: "https://foo.trycloudflare.com",
+			"x-forwarded-proto": "https",
+		}))).toBe(true);
+	});
+
+	it("rejects a same-host origin with the wrong scheme", () => {
+		expect(checkOrigin(reqWith({ host: "10.0.0.5:4242", origin: "https://10.0.0.5:4242" }))).toBe(false);
 	});
 
 	it("rejects a foreign origin (CSWSH)", () => {
@@ -174,6 +204,7 @@ describe("checkOrigin", () => {
 
 	it("allows a request without Origin header (non-browser client)", () => {
 		expect(checkOrigin(reqWith({ host: "10.0.0.5:4242" }))).toBe(true);
+		expect(checkOrigin(reqWith({ host: "10.0.0.5:4242" }), true)).toBe(false);
 	});
 
 	it("rejects an unparseable Origin header", () => {
@@ -311,5 +342,72 @@ describe("handleAuthRefresh", () => {
 		await initSecret(testSecretFile);
 		const resp = await handleAuthRefresh(refreshRequest(cookie));
 		expect(resp.status).toBe(401);
+	});
+});
+
+describe("handleAuthLogout", () => {
+	it("revokes the rolling session chain durably and clears the cookie", async () => {
+		const qr = await createQrToken();
+		const exchange = await handleAuthExchange(exchangeRequest(qr));
+		const token = cookieValue(exchange.headers.get("set-cookie"));
+		const cookie = `${SESSION_COOKIE_NAME}=${token}`;
+
+		const logout = await handleAuthLogout(logoutRequest(cookie));
+		expect(logout.status).toBe(200);
+		expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+		expect((await handleAuthRefresh(refreshRequest(cookie))).status).toBe(401);
+
+		_resetForTests();
+		await initSecret(testSecretFile);
+		expect((await handleAuthRefresh(refreshRequest(cookie))).status).toBe(401);
+	});
+});
+
+describe("handleArtifactDownload", () => {
+	it("requires the trusted session cookie before resolving a ticket", async () => {
+		const resolver = vi.fn();
+		const response = await handleArtifactDownload(artifactRequest("ticket"), "ticket", resolver);
+		expect(response.status).toBe(401);
+		expect(resolver).not.toHaveBeenCalled();
+	});
+
+	it("streams the exact file with download headers and no base64 envelope", async () => {
+		const qr = await createQrToken();
+		const exchange = await handleAuthExchange(exchangeRequest(qr));
+		const session = cookieValue(exchange.headers.get("set-cookie"))!;
+		const cookie = `${SESSION_COOKIE_NAME}=${session}`;
+		const path = join(testSecretDir, "report.zip");
+		const bytes = Buffer.from("PK\u0003\u0004streamed-artifact");
+		writeFileSync(path, bytes);
+		const response = await handleArtifactDownload(
+			artifactRequest("ticket", cookie),
+			"ticket",
+			() => ({ path, fileName: "报告.zip", mime: "application/zip", bytes: bytes.length }),
+		);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-length")).toBe(String(bytes.length));
+		expect(response.headers.get("content-type")).toBe("application/zip");
+		expect(response.headers.get("cache-control")).toContain("no-store");
+		expect(response.headers.get("content-disposition")).toContain("filename*=UTF-8''");
+		expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+	});
+
+	it("supports HEAD and rejects changed files", async () => {
+		const qr = await createQrToken();
+		const exchange = await handleAuthExchange(exchangeRequest(qr));
+		const session = cookieValue(exchange.headers.get("set-cookie"))!;
+		const cookie = `${SESSION_COOKIE_NAME}=${session}`;
+		const path = join(testSecretDir, "artifact.html");
+		writeFileSync(path, "hello");
+		const ticket = { path, fileName: "artifact.html", mime: "text/html" as const, bytes: 5 };
+		const head = await handleArtifactDownload(artifactRequest("ticket", cookie, "HEAD"), "ticket", () => ticket);
+		expect(head.status).toBe(200);
+		expect(head.headers.get("content-length")).toBe("5");
+		expect(await head.text()).toBe("");
+
+		writeFileSync(path, "changed");
+		const changed = await handleArtifactDownload(artifactRequest("ticket", cookie), "ticket", () => ticket);
+		expect(changed.status).toBe(409);
 	});
 });

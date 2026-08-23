@@ -4,6 +4,12 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-23 — Android is a native shell over the computer authority
+
+- **Rule:** Android adds a shell-level connection gateway and exact-origin native prompt dock, then reuses the existing dashboard/project/task routes and host RPC/PTY authority; tablet layout follows window width and supports landscape.
+- **Why:** A WebView-only wrapper leaves IME/render contention untouched, while a full native rewrite duplicates the product IA and hundreds of evolving actions; the hybrid shell isolates the latency-critical input path without forking state.
+- **Status:** Foundation implemented and APK build-verified; emulator/real-tablet QA remains. Evidence: `android/`, `src/mainview/android-client-bridge.ts`, `decisions/2026/08/23/android-hybrid-client-native-prompt-bridge.md`.
+
 ## 2026-08-21 — Workspace Board owns a terminal-safe navigation shortcut
 
 - **Rule:** The remappable workspace-board action opens Dashboard → Board directly (default Command+Backquote on macOS), including when Projects is active; Project Terminal moves to Command+J, while Quick Shell keeps Shift+Command+Backquote.
