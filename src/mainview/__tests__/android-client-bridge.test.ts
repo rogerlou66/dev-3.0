@@ -6,10 +6,12 @@ import {
 	androidTerminalContextKey,
 	bindAndroidTerminal,
 	getAndroidDeviceCapabilities,
+	forgetAndroidComputer,
 	installAndroidClientBridge,
 	isAndroidAppHost,
 	isAndroidAppShell,
 	requestAndroidDevice,
+	switchAndroidComputer,
 	type AndroidWebMessageEvent,
 	type AndroidWebMessagePort,
 } from "../android-client-bridge";
@@ -227,6 +229,25 @@ describe("android client bridge", () => {
 		expect(packet.requestId).toMatch(/^device-[a-z0-9]+-1$/);
 		await native.deliver({ type: "device-result", requestId: packet.requestId, ok: true, payload: { value: "done" } });
 		await expect(request).resolves.toEqual({ value: "done" });
+	});
+
+	it("routes computer switching and forgetting through explicit device actions", async () => {
+		const native = makePort();
+		window.__DEV3_ANDROID_APP__ = true;
+		window.dev3Android = native.port;
+		installAndroidClientBridge();
+
+		const switching = switchAndroidComputer();
+		const switchPacket = native.sent[native.sent.length - 1] as { requestId: string };
+		expect(native.sent[native.sent.length - 1]).toMatchObject({ type: "device-request", action: "switch-computer", payload: {} });
+		await native.deliver({ type: "device-result", requestId: switchPacket.requestId, ok: true });
+		await expect(switching).resolves.toBeUndefined();
+
+		const forgetting = forgetAndroidComputer();
+		const forgetPacket = native.sent[native.sent.length - 1] as { requestId: string };
+		expect(native.sent[native.sent.length - 1]).toMatchObject({ type: "device-request", action: "forget-computer", payload: {} });
+		await native.deliver({ type: "device-result", requestId: forgetPacket.requestId, ok: true });
+		await expect(forgetting).resolves.toBeUndefined();
 	});
 
 	it("stores native capability updates", async () => {

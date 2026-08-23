@@ -7,8 +7,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -111,6 +114,55 @@ class MainActivityRobolectricTest {
 		assertTrue(input.text.toString() == "first task draft")
 	}
 
+	@Test
+	fun connectedHostChromeIsACompactOverlayInsteadOfAFullWidthRow() {
+		val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+		val parent = FrameLayout(activity)
+		invoke(activity, "createHostMenuButton", arrayOf(FrameLayout::class.java), parent)
+
+		val button = descendants(parent).filterIsInstance<Button>().single { it.tag == "android-host-menu" }
+		val layout = button.layoutParams as FrameLayout.LayoutParams
+		assertEquals(dp(activity, 48), layout.width)
+		assertEquals(dp(activity, 48), layout.height)
+		assertTrue(button.contentDescription.contains(activity.getString(R.string.connected_computer)))
+		assertTrue(descendants(parent).filterIsInstance<TextView>().none { it.text == activity.getString(R.string.connected_computer) })
+	}
+
+	@Test
+	fun narrowSafeConnectionUsesTheSharedMoreSheetButWarningsKeepNativeRecoveryVisible() {
+		val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+		activity.resources.configuration.screenWidthDp = 390
+		val parent = FrameLayout(activity)
+		invoke(activity, "createHostMenuButton", arrayOf(FrameLayout::class.java), parent)
+		val button = descendants(parent).filterIsInstance<Button>().single { it.tag == "android-host-menu" }
+		setField(activity, "bridgeReady", true)
+		setField(activity, "currentTarget", ConnectionUrl.parse("https://example.com"))
+		invoke(activity, "refreshHostMenuButton")
+		assertEquals(View.GONE, button.visibility)
+
+		setField(activity, "currentTarget", ConnectionUrl.parse("http://192.168.1.20:3017"))
+		invoke(activity, "setHostStatus", arrayOf(Int::class.javaPrimitiveType!!), R.string.connected_unencrypted)
+		assertEquals(View.VISIBLE, button.visibility)
+		assertTrue(button.contentDescription.contains(activity.getString(R.string.connected_unencrypted)))
+	}
+
+	@Test
+	fun bridgeSwitchComputerActionClearsTheSavedHostAndReturnsToPairing() {
+		val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+		ConnectionStore(activity).save("https://example.com/")
+		invoke(
+			activity,
+			"onDeviceRequest",
+			arrayOf(JSONObject::class.java),
+			JSONObject().put("type", "device-request").put("requestId", "switch-1").put("action", "switch-computer"),
+		)
+		shadowOf(Looper.getMainLooper()).idle()
+
+		assertEquals(null, ConnectionStore(activity).load())
+		assertTrue(descendants(activity.findViewById(android.R.id.content)).filterIsInstance<TextView>()
+			.any { it.text == activity.getString(R.string.connect_title) })
+	}
+
 	private fun attachComposer(activity: MainActivity, context: TerminalContext): Pair<LinearLayout, EditText> {
 		val parent = LinearLayout(activity)
 		val createComposer = MainActivity::class.java.getDeclaredMethod("createComposer", ViewGroup::class.java)
@@ -127,6 +179,20 @@ class MainActivityRobolectricTest {
 		onTerminalContext.invoke(activity, context)
 		shadowOf(Looper.getMainLooper()).idle()
 	}
+
+	private fun invoke(activity: MainActivity, name: String, parameterTypes: Array<Class<*>> = emptyArray(), vararg args: Any) {
+		val method = MainActivity::class.java.getDeclaredMethod(name, *parameterTypes)
+		method.isAccessible = true
+		method.invoke(activity, *args)
+	}
+
+	private fun setField(activity: MainActivity, name: String, value: Any) {
+		val field = MainActivity::class.java.getDeclaredField(name)
+		field.isAccessible = true
+		field.set(activity, value)
+	}
+
+	private fun dp(activity: MainActivity, value: Int): Int = (value * activity.resources.displayMetrics.density).toInt()
 
 	private fun descendants(root: View): List<View> {
 		val result = mutableListOf<View>()

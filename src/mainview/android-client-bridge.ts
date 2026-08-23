@@ -244,6 +244,14 @@ export function requestAndroidDevice<T = unknown>(action: string, payload?: Reco
 	});
 }
 
+export function switchAndroidComputer(): Promise<void> {
+	return requestAndroidDevice<void>("switch-computer");
+}
+
+export function forgetAndroidComputer(): Promise<void> {
+	return requestAndroidDevice<void>("forget-computer");
+}
+
 export function writeAndroidClipboardText(text: string): Promise<void> {
 	return requestAndroidDevice<void>("clipboard-write-text", { text });
 }

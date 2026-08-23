@@ -39,7 +39,7 @@ class MainActivitySmokeTest {
 			return
 		}
 
-		assertNotNull(device.findObject(By.text("Connected computer")))
+		assertNotNull(device.findObject(By.clazz("android.webkit.WebView")))
 		val nativePrompt = device.findObject(By.text("Prompt to coding agent"))
 		if (nativePrompt != null) {
 			val send = device.findObject(By.text("Send"))
@@ -67,6 +67,20 @@ class MainActivitySmokeTest {
 		assertTrue(send.isEnabled)
 		Log.i("Dev3PromptPerf", "setTextMs=$elapsedMs chars=${prompt.length}")
 		promptInput.text = ""
+	}
+
+	@Test
+	fun compactConnectionControlKeepsHostActionsReachable() {
+		val device = launchTarget()
+		val connectionMenu = device.wait(
+			Until.findObject(By.descContains("Connection options")),
+			PROMPT_TIMEOUT_MS,
+		)
+		assumeNotNull(connectionMenu)
+		requireNotNull(connectionMenu).click()
+
+		assertNotNull(device.wait(Until.findObject(By.text("Connect another computer")), PROMPT_TIMEOUT_MS))
+		assertNotNull(device.findObject(By.text("Forget computer")))
 	}
 
 	@Test

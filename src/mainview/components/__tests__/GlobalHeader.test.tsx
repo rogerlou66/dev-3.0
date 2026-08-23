@@ -7,6 +7,18 @@ import type { Route } from "../../state";
 import { setShortcutOverrides } from "../../keymap-store";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../../keymap";
 
+const androidBridge = vi.hoisted(() => ({
+	shell: false,
+	switchComputer: vi.fn(async () => {}),
+	forgetComputer: vi.fn(async () => {}),
+}));
+
+vi.mock("../../android-client-bridge", () => ({
+	isAndroidAppShell: () => androidBridge.shell,
+	switchAndroidComputer: androidBridge.switchComputer,
+	forgetAndroidComputer: androidBridge.forgetComputer,
+}));
+
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal")!;
 const projectTerminalLabel = () => `Project Terminal (${shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT)})`;
 
@@ -87,7 +99,12 @@ function mockMatchMedia(compact: boolean) {
 
 // Default to the roomy layout (labels visible). happy-dom's default viewport is
 // 1024px, which would otherwise trip the compact breakpoint and hide labels.
-beforeEach(() => mockMatchMedia(false));
+beforeEach(() => {
+	mockMatchMedia(false);
+	androidBridge.shell = false;
+	androidBridge.switchComputer.mockClear();
+	androidBridge.forgetComputer.mockClear();
+});
 afterEach(() => setShortcutOverrides({}));
 
 const project1: Project = {
@@ -1123,6 +1140,22 @@ describe("GlobalHeader — narrow viewport action sheet", () => {
 		// Git pull + tmux manager now live in the sheet's controls strip.
 		expect(screen.getByTestId("git-pull-button")).toBeInTheDocument();
 		expect(screen.getByLabelText("tmux Sessions")).toBeInTheDocument();
+	});
+
+	it("keeps Android computer actions in the existing narrow More sheet", async () => {
+		androidBridge.shell = true;
+		const user = userEvent.setup();
+		renderHeader({ screen: "project", projectId: "p1" });
+
+		await user.click(screen.getByLabelText("More"));
+		await user.click(screen.getByText("Connect another computer"));
+		expect(androidBridge.switchComputer).toHaveBeenCalledOnce();
+
+		await user.click(screen.getByLabelText("More"));
+		const forget = screen.getByText("Forget computer");
+		expect(forget).toHaveClass("text-danger");
+		await user.click(forget);
+		expect(androidBridge.forgetComputer).toHaveBeenCalledOnce();
 	});
 });
 

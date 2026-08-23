@@ -43,6 +43,7 @@ import {
 } from "./HeaderIcons";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
+import { forgetAndroidComputer, isAndroidAppShell, switchAndroidComputer } from "../android-client-bridge";
 
 // Single source of truth for the ⇧⌘/ combo shown on the header help button.
 const HELP_MODE_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "help-mode");
@@ -82,6 +83,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	const privacy = useProjectPrivacy();
 	const compact = useCompact();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	const androidShell = isAndroidAppShell();
 	// Live fullscreen state for the action-sheet toggle label (browser only).
 	const fullscreenActive = useSyncExternalStore(subscribeFullscreen, isFullscreenActive);
 	const [showActionSheet, setShowActionSheet] = useState(false);
@@ -302,7 +304,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	// a single kebab → BottomSheet. The Command Palette gets a touch entry here
 	// (it is otherwise keyboard-only, and the native menu is absent in remote).
 	// Stateful widgets (prevent-sleep, git pull, tmux, update indicator) stay inline.
-	const headerSheetRows: { key: string; label: string; run: () => void }[] = isNarrow
+	const headerSheetRows: { key: string; label: string; run: () => void; danger?: boolean }[] = isNarrow
 		? [
 				{ key: "palette", label: t("header.commandPalette"), run: () => window.dispatchEvent(new CustomEvent("menu:open-command-palette")) },
 				// Help mode's keyboard entry (⇧⌘/) and the native Help menu are both
@@ -343,6 +345,29 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 				...(currentProjectId && route.screen !== "project-settings"
 					? [{ key: "projectSettings", label: t("header.projectSettings"), run: () => navigate({ screen: "project-settings", projectId: currentProjectId }) }]
 					: []),
+				...(androidShell
+					? [
+							{
+								key: "androidSwitchComputer",
+								label: t("android.connection.switchComputer"),
+								run: () => {
+									void switchAndroidComputer().catch((error) => {
+										toast.error(t("android.connection.actionFailed", { error: String(error) }), { source: "menu" });
+									});
+								},
+							},
+							{
+								key: "androidForgetComputer",
+								label: t("android.connection.forgetComputer"),
+								danger: true,
+								run: () => {
+									void forgetAndroidComputer().catch((error) => {
+										toast.error(t("android.connection.actionFailed", { error: String(error) }), { source: "menu" });
+									});
+								},
+							},
+						]
+						: []),
 				...(route.screen !== "settings" ? [{ key: "settings", label: t("header.settingsLabel"), run: () => navigate({ screen: "settings" }) }] : []),
 			]
 		: [];
@@ -810,7 +835,11 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 								setShowActionSheet(false);
 								row.run();
 							}}
-							className="w-full text-left px-2 py-3 rounded-lg text-fg-2 hover:bg-elevated hover:text-fg transition-colors text-sm"
+							className={`w-full text-left px-2 py-3 rounded-lg transition-colors text-sm ${
+								row.danger
+									? "text-danger hover:bg-danger/10"
+									: "text-fg-2 hover:bg-elevated hover:text-fg"
+							}`}
 						>
 							{row.label}
 						</button>

@@ -7,10 +7,13 @@ import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Bitmap
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -79,6 +82,8 @@ class MainActivity : ComponentActivity() {
 		private const val MAX_OPEN_HTML_CHARS = 10 * 1024 * 1024
 		private const val MAX_SAVED_DRAFT_CHARS = 500_000
 		private const val DRAFTS_STATE_KEY = "dev3-drafts"
+		private const val NARROW_WINDOW_WIDTH_DP = 768
+		private const val HOST_MENU_TAG = "android-host-menu"
 	}
 
 	private lateinit var root: FrameLayout
@@ -103,7 +108,8 @@ class MainActivity : ComponentActivity() {
 	private var trustedBridgePage = false
 	private var lastRendererCrashAt = 0L
 	private var bridgeReady = false
-	private var hostStatusLabel: TextView? = null
+	private var hostMenuButton: Button? = null
+	private var hostStatusTextId = R.string.connected_computer
 	private var logoutPending = false
 	private val devicePreferences by lazy { getSharedPreferences("dev3-device", MODE_PRIVATE) }
 
@@ -179,6 +185,11 @@ class MainActivity : ComponentActivity() {
 		super.onDestroy()
 	}
 
+	override fun onConfigurationChanged(newConfig: Configuration) {
+		super.onConfigurationChanged(newConfig)
+		refreshHostMenuButton()
+	}
+
 	override fun onSaveInstanceState(outState: Bundle) {
 		activeContext?.let { drafts.put(it.key, composerInput?.text?.toString().orEmpty()) }
 		val savedDrafts = Bundle()
@@ -228,7 +239,8 @@ class MainActivity : ComponentActivity() {
 		webBridge = null
 		webView?.destroy()
 		webView = null
-		hostStatusLabel = null
+		hostMenuButton = null
+		hostStatusTextId = R.string.connected_computer
 		root.removeAllViews()
 
 		val panel = LinearLayout(this).apply {
@@ -360,19 +372,19 @@ class MainActivity : ComponentActivity() {
 		root.removeAllViews()
 		currentTarget = target
 		bridgeReady = false
+		hostStatusTextId = if (target.unsafeCleartext) R.string.connected_unencrypted else R.string.connected_computer
 		val shell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-		createHostBar(shell)
 		val browser = WebView(this)
 		webView = browser
 		configureWebView(browser, target)
 		shell.addView(browser, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 		createComposer(shell)
 		root.addView(shell, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+		createHostMenuButton(root)
 		browser.loadUrl(target.initialUrl)
 		root.postDelayed({
 			if (!bridgeReady && currentTarget == target) {
-				hostStatusLabel?.setText(R.string.bridge_update_required)
-				hostStatusLabel?.setTextColor(color(R.color.warning))
+				setHostStatus(R.string.bridge_update_required)
 			}
 		}, 12_000)
 	}
@@ -495,48 +507,85 @@ class MainActivity : ComponentActivity() {
 		return runCatching { ConnectionUrl.parse(url).origin == target.origin }.getOrDefault(false)
 	}
 
-	private fun createHostBar(parent: LinearLayout) {
-		val bar = LinearLayout(this).apply {
-			orientation = LinearLayout.HORIZONTAL
-			gravity = Gravity.CENTER_VERTICAL
-			setPadding(dp(12), 0, dp(4), 0)
-			setBackgroundResource(R.color.surface_raised)
-		}
-		val unsafe = currentTarget?.unsafeCleartext == true
-		val label = textView(
-			if (unsafe) R.string.connected_unencrypted else R.string.connected_computer,
-			14f,
-			if (unsafe) R.color.warning else R.color.text_secondary,
-		)
-		hostStatusLabel = label
+	private fun createHostMenuButton(parent: FrameLayout) {
 		val menuButton = Button(this).apply {
-			text = "⋮"
-			contentDescription = getString(R.string.connection_options)
+			tag = HOST_MENU_TAG
 			isAllCaps = false
-			minWidth = dp(48)
-			minHeight = dp(48)
+			minWidth = 0
+			minHeight = 0
+			textSize = 17f
+			setPadding(0, 0, 0, 0)
+			elevation = dp(4).toFloat()
+			stateListAnimator = null
 			setOnClickListener { showConnectionMenu(this) }
 		}
-		bar.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-		bar.addView(menuButton, LinearLayout.LayoutParams(dp(48), dp(48)))
-		parent.addView(bar, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+		hostMenuButton = menuButton
+		parent.addView(
+			menuButton,
+			FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END).apply {
+				topMargin = dp(2)
+				marginEnd = dp(2)
+			},
+		)
+		refreshHostMenuButton()
+	}
+
+	private fun setHostStatus(textId: Int) {
+		hostStatusTextId = textId
+		refreshHostMenuButton()
+	}
+
+	private fun refreshHostMenuButton() {
+		val button = hostMenuButton ?: return
+		val warning = hostStatusTextId != R.string.connected_computer
+		button.text = if (warning) "!⋮" else "⋮"
+		button.setTextColor(color(if (warning) R.color.warning else R.color.text_secondary))
+		button.contentDescription = "${getString(R.string.connection_options)} · ${getString(hostStatusTextId)}"
+		ViewCompat.setTooltipText(button, getString(hostStatusTextId))
+		button.background = InsetDrawable(
+			GradientDrawable().apply {
+				shape = GradientDrawable.RECTANGLE
+				cornerRadius = dp(10).toFloat()
+				setColor(color(R.color.surface_raised))
+				setStroke(dp(1), color(if (warning) R.color.warning else R.color.edge))
+			},
+			dp(8),
+		)
+		val keepNativeRecoveryVisible = !bridgeReady || currentTarget?.unsafeCleartext == true
+		button.visibility = if (resources.configuration.screenWidthDp >= NARROW_WINDOW_WIDTH_DP || keepNativeRecoveryVisible) {
+			View.VISIBLE
+		} else {
+			View.GONE
+		}
 	}
 
 	private fun showConnectionMenu(anchor: View) {
 		PopupMenu(this, anchor).apply {
-			menu.add(0, 1, 0, R.string.switch_computer)
-			menu.add(0, 2, 1, R.string.forget_computer)
+			menu.add(0, 0, 0, hostStatusTextId).isEnabled = false
+			menu.add(0, 1, 1, R.string.switch_computer)
+			menu.add(0, 2, 2, R.string.forget_computer)
 			setOnMenuItemClickListener { item ->
-				connectionStore.clear()
 				if (item.itemId == 2) {
-					requestSessionLogout()
+					forgetComputer()
 				} else {
-					showConnection()
+					switchComputer()
 				}
 				true
 			}
 			show()
 		}
+	}
+
+	private fun switchComputer(requestId: String? = null) {
+		requestId?.let { webBridge?.postDeviceResult(it, true) }
+		connectionStore.clear()
+		showConnection()
+	}
+
+	private fun forgetComputer(requestId: String? = null) {
+		requestId?.let { webBridge?.postDeviceResult(it, true) }
+		connectionStore.clear()
+		requestSessionLogout()
 	}
 
 	private fun createComposer(parent: ViewGroup) {
@@ -705,13 +754,11 @@ class MainActivity : ComponentActivity() {
 		runOnUiThread {
 			bridgeReady = version == 1
 			if (!bridgeReady) {
-				hostStatusLabel?.setText(R.string.bridge_incompatible)
-				hostStatusLabel?.setTextColor(color(R.color.warning))
+				setHostStatus(R.string.bridge_incompatible)
 				return@runOnUiThread
 			}
 			val unsafe = currentTarget?.unsafeCleartext == true
-			hostStatusLabel?.setText(if (unsafe) R.string.connected_unencrypted else R.string.connected_computer)
-			hostStatusLabel?.setTextColor(color(if (unsafe) R.color.warning else R.color.text_secondary))
+			setHostStatus(if (unsafe) R.string.connected_unencrypted else R.string.connected_computer)
 			postCapabilities()
 			postPendingTaskNavigation()
 		}
@@ -728,6 +775,8 @@ class MainActivity : ComponentActivity() {
 				return@runOnUiThread
 			}
 			when (action) {
+				"switch-computer" -> switchComputer(requestId)
+				"forget-computer" -> forgetComputer(requestId)
 				"clipboard-write-text" -> writeClipboardText(requestId, payload.optString("text"))
 				"save-file" -> saveFile(requestId, payload)
 				"save-remote-file" -> saveRemoteFile(requestId, payload)
