@@ -59,13 +59,14 @@ const agent = (baseCommand: string): CodingAgent => ({
 const cfg = (o?: Partial<AgentConfiguration>): AgentConfiguration => ({ id: "d", name: "D", model: "sonnet", ...o });
 
 const SID = "11111111-1111-1111-1111-111111111111";
-const BASES = ["claude", "codex", "gemini", "agent", "opencode", "aider"];
+const BASES = ["claude", "codex", "gemini", "agy", "agent", "opencode", "aider"];
 
 /** Per-agent model, matching the generator that produced EXPECTED below. */
 function modelFor(base: string): string | undefined {
 	if (base === "codex") return "gpt-5.6-sol";
 	if (base === "opencode") return "anthropic/claude-opus-4-6";
 	if (base === "gemini") return "gemini-3-pro";
+	if (base === "agy") return undefined;
 	if (base === "agent") return undefined;
 	return "sonnet";
 }
@@ -156,6 +157,21 @@ const EXPECTED: Record<string, string> = {
 	"gemini/budget": "gemini --model gemini-3-pro -- 'Fix the login bug'",
 	"gemini/addargs": "gemini --model gemini-3-pro --foo bar -- 'Fix the login bug'",
 	"gemini/appendPrompt": "gemini --model gemini-3-pro -- 'Fix the login bug\n\nExtra: Fix bug'",
+	"agy/fresh": "agy --prompt-interactive 'Fix the login bug'",
+	"agy/fresh-empty": "agy",
+	"agy/resume-nosid": "agy --continue",
+	"agy/resume-sid": "agy --conversation 11111111-1111-1111-1111-111111111111",
+	"agy/preassign-sid": "agy --prompt-interactive 'Fix the login bug'",
+	"agy/skipSysPrompt": "agy --prompt-interactive 'Fix the login bug'",
+	"agy/statusline": "agy --prompt-interactive 'Fix the login bug'",
+	"agy/pm-plan": "agy --mode plan --prompt-interactive 'Fix the login bug'",
+	"agy/pm-acceptEdits": "agy --mode accept-edits --prompt-interactive 'Fix the login bug'",
+	"agy/pm-bypassPermissions": "agy --dangerously-skip-permissions --prompt-interactive 'Fix the login bug'",
+	"agy/pm-dontAsk": "agy --dangerously-skip-permissions --prompt-interactive 'Fix the login bug'",
+	"agy/effort": "agy --effort high --prompt-interactive 'Fix the login bug'",
+	"agy/budget": "agy --prompt-interactive 'Fix the login bug'",
+	"agy/addargs": "agy --foo bar --prompt-interactive 'Fix the login bug'",
+	"agy/appendPrompt": "agy --prompt-interactive 'Fix the login bug\n\nExtra: Fix bug'",
 	"agent/fresh": "agent -- 'Fix the login bug\n\n<GENERIC_BODY>'",
 	"agent/fresh-empty": "agent",
 	"agent/resume-nosid": "agent --continue",
@@ -241,6 +257,8 @@ describe("buildResumeCommand — golden", () => {
 		["codex", "sid-x", "codex resume sid-x"],
 		["gemini", undefined, "gemini --resume latest"],
 		["gemini", "sid-x", "gemini --resume sid-x"],
+		["agy", undefined, "agy --continue"],
+		["agy", "sid-x", "agy --conversation sid-x"],
 		["agent", undefined, "agent --continue"],
 		["agent", "sid-x", "agent --resume sid-x"],
 		["opencode", undefined, "opencode --continue"],

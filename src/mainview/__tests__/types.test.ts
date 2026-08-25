@@ -310,6 +310,18 @@ describe("DEFAULT_AGENTS", () => {
 		expect(claude!.baseCommand).toBe("claude");
 	});
 
+	it("includes Antigravity with native safe modes and no pinned model", () => {
+		const antigravity = DEFAULT_AGENTS.find((a) => a.id === "builtin-antigravity");
+		expect(antigravity).toBeDefined();
+		expect(antigravity!.baseCommand).toBe("agy");
+		expect(antigravity!.defaultConfigId).toBe("antigravity-default");
+		expect(antigravity!.configurations).toEqual([
+			{ id: "antigravity-default", name: "Default", version: 1 },
+			{ id: "antigravity-plan", name: "Plan", permissionMode: "plan", version: 1 },
+			{ id: "antigravity-accept-edits", name: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
+		]);
+	});
+
 	it("uses the pinned Opus 5 model in Opus 5 presets", () => {
 		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
 		expect(claude).toBeDefined();

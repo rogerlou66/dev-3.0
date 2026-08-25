@@ -10,6 +10,7 @@ import {
 	claudeAdapter,
 	codexAdapter,
 	geminiAdapter,
+	antigravityAdapter,
 	cursorAdapter,
 	opencodeAdapter,
 	genericAdapter,
@@ -56,6 +57,7 @@ describe("registry", () => {
 		expect(getAgentAdapter("claude")).toBe(claudeAdapter);
 		expect(getAgentAdapter("/opt/homebrew/bin/codex")).toBe(codexAdapter);
 		expect(getAgentAdapter("/usr/local/bin/gemini")).toBe(geminiAdapter);
+		expect(getAgentAdapter("/Users/me/.local/bin/agy")).toBe(antigravityAdapter);
 		expect(getAgentAdapter("agent")).toBe(cursorAdapter);
 		expect(getAgentAdapter("opencode")).toBe(opencodeAdapter);
 	});
@@ -79,7 +81,7 @@ describe("registry", () => {
 // drag every skill body (~32 KB) along — so hook-families.ts restates the two
 // facts as plain data. These are the tests that keep the copy honest.
 describe("hook families (the renderer's copy of the registry)", () => {
-	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, cursorAdapter, opencodeAdapter];
+	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, antigravityAdapter, cursorAdapter, opencodeAdapter];
 
 	it("lists exactly the commands that have a first-class adapter", () => {
 		expect([...KNOWN_AGENT_COMMANDS].sort()).toEqual(ADAPTERS.map((a) => a.command).sort());
@@ -127,6 +129,7 @@ describe("capability flags", () => {
 		[claudeAdapter, "claude", true, true],
 		[codexAdapter, "codex", true, false],
 		[geminiAdapter, "gemini", true, true],
+		[antigravityAdapter, "agy", true, false],
 		[cursorAdapter, "agent", true, true],
 		[opencodeAdapter, "opencode", true, false],
 		[genericAdapter, "", false, false],
@@ -142,6 +145,7 @@ describe("trustKinds", () => {
 		[claudeAdapter, ["claude"]],
 		[codexAdapter, ["claude", "codex"]],
 		[geminiAdapter, ["claude", "gemini"]],
+		[antigravityAdapter, ["claude"]],
 		[cursorAdapter, ["claude"]],
 		[opencodeAdapter, ["claude"]],
 		[genericAdapter, ["claude"]],
@@ -159,8 +163,9 @@ describe("hooksSpec", () => {
 	it("Codex is a bare codex spec", () => {
 		expect(codexAdapter.hooksSpec()).toEqual({ kind: "codex" });
 	});
-	it("Gemini / Cursor / OpenCode / Generic install no hooks", () => {
+	it("Gemini / Antigravity / Cursor / OpenCode / Generic install no hooks", () => {
 		expect(geminiAdapter.hooksSpec()).toBeNull();
+		expect(antigravityAdapter.hooksSpec()).toBeNull();
 		expect(cursorAdapter.hooksSpec()).toBeNull();
 		expect(opencodeAdapter.hooksSpec()).toBeNull();
 		expect(genericAdapter.hooksSpec()).toBeNull();
@@ -175,6 +180,8 @@ describe("buildResumeCommand", () => {
 		[codexAdapter, "codex", "sid", "codex resume sid"],
 		[geminiAdapter, "gemini", undefined, "gemini --resume latest"],
 		[geminiAdapter, "gemini", "sid", "gemini --resume sid"],
+		[antigravityAdapter, "agy", undefined, "agy --continue"],
+		[antigravityAdapter, "agy", "sid", "agy --conversation sid"],
 		[cursorAdapter, "agent", undefined, "agent --continue"],
 		[cursorAdapter, "agent", "sid", "agent --resume sid"],
 		[opencodeAdapter, "opencode", undefined, "opencode --continue"],
@@ -191,6 +198,7 @@ describe("skillBody", () => {
 		expect(codexAdapter.skillBody).toBe(CODEX_SKILL_BODY);
 		// Gemini/Cursor/OpenCode/Generic use the generic body.
 		expect(geminiAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
+		expect(antigravityAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
 		expect(cursorAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
 		expect(opencodeAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
 		expect(genericAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
@@ -256,6 +264,18 @@ describe("launchArgs — Gemini / Cursor / OpenCode / Generic", () => {
 		expect(launch("gemini", cfg({ model: "gemini-3-pro", permissionMode: "bypassPermissions" })))
 			.toBe("gemini --model gemini-3-pro --approval-mode yolo -- 'Fix the login bug'");
 	});
+	it("Antigravity uses interactive prompts and maps its native modes", () => {
+		expect(launch("agy", cfg({ permissionMode: "plan" })))
+			.toBe("agy --mode plan --prompt-interactive 'Fix the login bug'");
+		expect(launch("agy", cfg({ permissionMode: "acceptEdits" })))
+			.toBe("agy --mode accept-edits --prompt-interactive 'Fix the login bug'");
+		expect(launch("agy", cfg({ permissionMode: "bypassPermissions" })))
+			.toBe("agy --dangerously-skip-permissions --prompt-interactive 'Fix the login bug'");
+	});
+	it("Antigravity resumes by conversation id and clamps xhigh effort", () => {
+		expect(launch("agy", cfg({ model: "gemini-3.6-pro", effort: "xhigh" }), { resume: true, sessionId: "sid" }))
+			.toBe("agy --conversation sid --model gemini-3.6-pro --effort high");
+	});
 	it("Cursor injects the generic body via the prompt and maps modes", () => {
 		expect(launch("agent", cfg({ permissionMode: "plan" })))
 			.toBe("agent --mode plan -- 'Fix the login bug\n\n<GENERIC_BODY>'");
@@ -280,7 +300,7 @@ describe("launchArgs — provider routing args (registry promise)", () => {
 	// The llm-provider registry promises that a backend's enableArgs reach the
 	// launch with no adapter special-casing. Pin it for EVERY adapter so a future
 	// backend (e.g. one for gemini) can't silently drop its routing args.
-	it.each(["claude", "codex", "gemini", "agent", "opencode", "aider"])(
+	it.each(["claude", "codex", "gemini", "agy", "agent", "opencode", "aider"])(
 		"%s emits options.providerArgs (shell-quoted)",
 		(base) => {
 			const cmd = launch(base, cfg({ model: undefined }), {

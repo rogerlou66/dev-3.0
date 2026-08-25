@@ -102,6 +102,7 @@ const CODEX_SKILL_DIR = ".codex/skills/dev3";
 const GENERIC_SKILL_DIRS = [
 	".cursor/skills/dev3",
 	".agents/skills/dev3",
+	".gemini/config/skills/dev3",
 	".opencode/skills/dev3",
 	".config/opencode/skills/dev3",
 ];
@@ -700,7 +701,7 @@ A **flow** is a path through dev3's features. Most work travels one **main flow*
 2. **What to put in the description → treat it as the agent's prompt.** The description is fed to the agent verbatim, so write it like a brief: the goal, the constraints, pointers to the files involved. Paste screenshots straight in, add labels inline with \`#\`, and type \`/\` to autocomplete an installed agent skill into the brief.
 3. **Where the branch starts → tasks inherit your current branch.** A new task branches off the project's currently checked-out branch, so small tasks stack naturally onto a big feature you're building; clear the branch field to start from the base branch instead.
 4. **One attempt or several → variants.** For ambiguous, risky, or design-heavy work, launch the task with **2–5 variants**: independent agents attack the same brief in parallel, each in its own worktree, blind to the others. Compare the results and keep the winner (⇧⌘[ / ⇧⌘] cycle between variants). Routine work → a single variant.
-5. **Launch — dev3 does the setup for you.** Starting a task creates a git worktree + branch + tmux session and boots the agent with your description. Which agent is your call — Claude, Codex, Gemini, or a custom shell agent, configured per project. The project's \`setupScript\` installs deps, \`clonePaths\` copy-on-write-clone heavy dirs (node_modules in about a second), and each task gets its own ports so parallel dev servers never collide. (Project not configured yet? → \`/dev3-project-config\`.)
+5. **Launch — dev3 does the setup for you.** Starting a task creates a git worktree + branch + tmux session and boots the agent with your description. Which agent is your call — Claude, Codex, Antigravity, Gemini, or a custom shell agent, configured per project. The project's \`setupScript\` installs deps, \`clonePaths\` copy-on-write-clone heavy dirs (node_modules in about a second), and each task gets its own ports so parallel dev servers never collide. (Project not configured yet? → \`/dev3-project-config\`.)
 6. **Work across projects → use Dashboard → Board.** The workspace board aligns every project as a swimlane; questions stay in Agent Working as amber **Needs input** cards, AI Review appears only when occupied, and PR Review stays visible as the external-review queue. Cancelled tasks remain available on each project's board instead of occupying the daily workspace matrix. Open **Projects** beside Board for project management, or hover a card for a live terminal preview.
 7. **How the agent reaches you → it pings, you don't poll.** It raises an attention badge when blocked, fires toasts / desktop notifications on milestones, and moves the task into the **User questions** column when it needs an answer. Subscribe to any task for watch notifications.
 8. **Review the changes → Show Diff.** On the card, *Show Diff* lets you hide test noise and leave inline comments — each one has its own **Send to agent** so a fix can start the moment you spot it, or ship the whole batch at the end. Confirmed sends mark comments **Sent** and keep them for reference; ambiguous delivery leaves them retryable and never auto-resends. Turn on **AI Review** so a machine pass (the AI review column) pre-chews the diff before your human pass.
@@ -852,6 +853,7 @@ const CLAUDE_PROJECT_CONFIG_DIR = ".claude/skills/dev3-project-config";
 const GENERIC_PROJECT_CONFIG_DIRS = [
 	".cursor/skills/dev3-project-config",
 	".agents/skills/dev3-project-config",
+	".gemini/config/skills/dev3-project-config",
 	".codex/skills/dev3-project-config",
 	".opencode/skills/dev3-project-config",
 	".config/opencode/skills/dev3-project-config",
@@ -864,6 +866,7 @@ const CLAUDE_TMUX_DIR = ".claude/skills/dev3-tmux";
 const GENERIC_TMUX_DIRS = [
 	".cursor/skills/dev3-tmux",
 	".agents/skills/dev3-tmux",
+	".gemini/config/skills/dev3-tmux",
 	".codex/skills/dev3-tmux",
 	".opencode/skills/dev3-tmux",
 	".config/opencode/skills/dev3-tmux",
@@ -873,6 +876,7 @@ const BUG_HUNTER_SKILL_DIRS = [
 	".claude/skills/dev3-bug-hunter",
 	".cursor/skills/dev3-bug-hunter",
 	".agents/skills/dev3-bug-hunter",
+	".gemini/config/skills/dev3-bug-hunter",
 	".codex/skills/dev3-bug-hunter",
 	".opencode/skills/dev3-bug-hunter",
 	".config/opencode/skills/dev3-bug-hunter",
@@ -882,6 +886,7 @@ const ASK_DEV3_SKILL_DIRS = [
 	".claude/skills/ask-dev3",
 	".cursor/skills/ask-dev3",
 	".agents/skills/ask-dev3",
+	".gemini/config/skills/ask-dev3",
 	".codex/skills/ask-dev3",
 	".opencode/skills/ask-dev3",
 	".config/opencode/skills/ask-dev3",

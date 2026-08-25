@@ -17,6 +17,7 @@ export { interpolateTemplate, buildTaskPrompt } from "./template";
 export { claudeAdapter } from "./claude";
 export { codexAdapter } from "./codex";
 export { geminiAdapter } from "./gemini";
+export { antigravityAdapter } from "./antigravity";
 export { cursorAdapter } from "./cursor";
 export { opencodeAdapter } from "./opencode";
 export { genericAdapter } from "./generic";

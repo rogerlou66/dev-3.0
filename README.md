@@ -43,7 +43,7 @@ Six steps. You write the first one and approve the last; the middle four happen 
 
 ### 1. Write a task, pick who does it
 
-You describe the work and choose the agent. Claude Code, Codex, Gemini, Cursor Agent, opencode
+You describe the work and choose the agent. Claude Code, Codex, Antigravity CLI, Gemini, Cursor Agent, opencode
 — or several at once, each in its own pane of the same task.
 
 <p align="center">
@@ -293,7 +293,7 @@ Run. That is the whole onboarding.
 
 | | Runs today |
 |---|---|
-| **Agents** | Claude Code · Codex · Gemini CLI · Cursor Agent · opencode · any CLI tool you configure |
+| **Agents** | Claude Code · Codex · Antigravity CLI · Gemini CLI · Cursor Agent · opencode · any CLI tool you configure |
 | **Desktop** | macOS — Apple Silicon and Intel. Windows x64 — brand new and may still be rough; attached to every release, unsigned at this time |
 | **Headless** | Linux x64 and arm64 (`dev3` CLI + browser UI) |
 

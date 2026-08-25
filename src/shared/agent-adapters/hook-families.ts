@@ -11,7 +11,7 @@
 import type { AgentHooksIntegration } from "../types";
 
 /** Every agent command with a first-class adapter (i.e. not the generic fallback). */
-export const KNOWN_AGENT_COMMANDS: readonly string[] = ["claude", "codex", "gemini", "agent", "opencode"];
+export const KNOWN_AGENT_COMMANDS: readonly string[] = ["claude", "codex", "gemini", "agy", "agent", "opencode"];
 
 /** Agent commands that install lifecycle hooks, and which family they install. */
 const HOOK_FAMILY: Record<string, AgentHooksIntegration> = { claude: "claude", codex: "codex" };

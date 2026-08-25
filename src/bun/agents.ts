@@ -394,7 +394,7 @@ function codexLaunchRuntime(): CodexLaunchRuntime {
 export interface CommandOptions {
 	/** When true, resume the previous session instead of starting a new one.
 	 *  Supported agents: Claude (--continue), Codex (resume --last),
-	 *  Gemini (--resume latest), Cursor Agent (--continue). */
+	 *  Gemini (--resume latest), Antigravity (--continue), Cursor Agent (--continue). */
 	resume?: boolean;
 	/** Specific session ID to resume or pre-assign. When resuming, agents that
 	 *  support targeted resume (e.g. Claude --resume <id>) use this instead of

@@ -448,7 +448,7 @@ export interface CodingAgent {
 	providerConfig?: ProviderConfig;
 	/**
 	 * Which agent-native lifecycle hooks dev3 installs into the worktree.
-	 * Undefined = auto-detect from `baseCommand`, which recognizes only the five
+	 * Undefined = auto-detect from `baseCommand`, which recognizes only the six
 	 * literal CLI names — a wrapper script or an aliased command got no hooks at
 	 * all, and therefore no automatic Kanban transitions, without saying so. This
 	 * lets the user declare "that command is Claude Code"; `"none"` is the
@@ -711,6 +711,20 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "gemini-flash-lite-yolo", name: "YOLO (3.1 Flash Lite)", model: "gemini-3.1-flash-lite-preview", permissionMode: "bypassPermissions", version: 1 },
 		],
 		defaultConfigId: "gemini-default",
+	},
+	{
+		id: "builtin-antigravity",
+		name: "Antigravity",
+		baseCommand: "agy",
+		isDefault: true,
+		installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+		installUrl: "https://antigravity.google/docs/cli/getting-started/",
+		configurations: [
+			{ id: "antigravity-default", name: "Default", version: 1 },
+			{ id: "antigravity-plan", name: "Plan", permissionMode: "plan", version: 1 },
+			{ id: "antigravity-accept-edits", name: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
+		],
+		defaultConfigId: "antigravity-default",
 	},
 	{
 		id: "builtin-cursor",

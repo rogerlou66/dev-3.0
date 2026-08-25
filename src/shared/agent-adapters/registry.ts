@@ -7,6 +7,7 @@
 import { claudeAdapter } from "./claude";
 import { codexAdapter } from "./codex";
 import { cursorAdapter } from "./cursor";
+import { antigravityAdapter } from "./antigravity";
 import { geminiAdapter } from "./gemini";
 import { genericAdapter } from "./generic";
 import { opencodeAdapter } from "./opencode";
@@ -17,6 +18,7 @@ const REGISTRY: Record<string, AgentAdapter> = {
 	[claudeAdapter.command]: claudeAdapter,
 	[codexAdapter.command]: codexAdapter,
 	[geminiAdapter.command]: geminiAdapter,
+	[antigravityAdapter.command]: antigravityAdapter,
 	[cursorAdapter.command]: cursorAdapter,
 	[opencodeAdapter.command]: opencodeAdapter,
 };

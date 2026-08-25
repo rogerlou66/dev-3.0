@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import { Claude, Codex, Cursor, Gemini, OpenCode } from "@lobehub/icons/es/icons";
+import { Antigravity, Claude, Codex, Cursor, Gemini, OpenCode } from "@lobehub/icons/es/icons";
 import type { CodingAgent } from "../../shared/types";
 
 type AgentLauncherIconComponent = ComponentType<any>;
@@ -15,6 +15,9 @@ export function resolveAgentLauncherIcon(agent: CodingAgent): AgentLauncherIconC
 	}
 	if (agent.id === "builtin-gemini" || agent.baseCommand === "gemini" || agentName.includes("gemini")) {
 		return Gemini.Color;
+	}
+	if (agent.id === "builtin-antigravity" || agent.baseCommand === "agy" || agentName.includes("antigravity")) {
+		return Antigravity.Color;
 	}
 	if (agent.id === "builtin-cursor" || agentName.includes("cursor")) {
 		return Cursor.Avatar;

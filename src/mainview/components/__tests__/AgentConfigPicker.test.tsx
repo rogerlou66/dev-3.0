@@ -47,7 +47,20 @@ const codexAgent: CodingAgent = {
 	defaultConfigId: "codex-default",
 };
 
-const agents = [claudeAgent, codexAgent];
+const antigravityAgent: CodingAgent = {
+	id: "builtin-antigravity",
+	name: "Antigravity",
+	baseCommand: "agy",
+	isDefault: true,
+	configurations: [
+		{ id: "antigravity-default", name: "Default" },
+		{ id: "antigravity-plan", name: "Plan", permissionMode: "plan" },
+		{ id: "antigravity-accept-edits", name: "Accept Edits", permissionMode: "acceptEdits" },
+	],
+	defaultConfigId: "antigravity-default",
+};
+
+const agents = [claudeAgent, codexAgent, antigravityAgent];
 
 /** Controlled harness mirroring how real parents wire the picker. */
 function Harness({ initial, onChange, showLabels }: { initial: AgentConfigSelection; onChange?: (n: AgentConfigSelection) => void; showLabels?: boolean }) {
@@ -102,6 +115,20 @@ describe("AgentConfigPicker", () => {
 		expect(text(provider())).toBe("Codex");
 		expect(text(model())).toBe("GPT-5.5");
 		expect(text(mode())).toBe("Default");
+	});
+
+	it("offers Antigravity with its native mode presets", async () => {
+		const user = userEvent.setup();
+		const onChange = vi.fn();
+		render(<Harness initial={{ agentId: "builtin-claude", configId: "fable-auto-medium" }} onChange={onChange} />);
+
+		await pick(user, provider(), "Antigravity");
+		expect(onChange).toHaveBeenLastCalledWith({ agentId: "builtin-antigravity", configId: "antigravity-default" });
+		expect(text(model())).toBe("Agent's own default");
+		expect(text(mode())).toBe("Default");
+
+		await pick(user, mode(), "Plan");
+		expect(onChange).toHaveBeenLastCalledWith({ agentId: "builtin-antigravity", configId: "antigravity-plan" });
 	});
 
 	it("changing Model preserves the Mode kind (permissionMode + effort) across the group switch", async () => {
