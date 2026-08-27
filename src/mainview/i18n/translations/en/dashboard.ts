@@ -30,6 +30,13 @@ const dashboard = {
 	"workspaceBoard.dropHere": "Move task to {status} in {project}",
 	"workspaceBoard.dropHereShort": "Drop to move",
 	"workspaceBoard.notApplicable": "N/A",
+	"workspaceTaskOverlay.title": "Task workspace",
+	"workspaceTaskOverlay.openFullPage": "Open full page",
+	"workspaceTaskOverlay.close": "Close task workspace",
+	"workspaceTaskOverlay.loading": "Loading task workspace…",
+	"workspaceTaskOverlay.retry": "Retry",
+	"workspaceTaskOverlay.loadFailed": "Unable to refresh this task workspace. Retry to continue. ({error})",
+	"workspaceTaskOverlay.taskMissing": "This task is no longer available. The workspace board is still open.",
 
 	// Activity overview
 	"activity.noActiveTasks": "No active tasks across any project",

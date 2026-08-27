@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch } from "react";
 import { toast } from "../toast";
-import type { Project } from "../../shared/types";
+import type { Project, Task } from "../../shared/types";
 import { orderProjectsForDisplay } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { api } from "../rpc";
@@ -16,10 +16,11 @@ interface DashboardProps {
 	bellCounts: Map<string, number>;
 	onOpenAddProject: () => void;
 	onOpenCreateTask: (projectId: string) => void;
+	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
 	workspaceBoardRequest: number;
 }
 
-function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask, workspaceBoardRequest }: DashboardProps) {
+function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject, onOpenCreateTask, onOpenWorkspaceTask, workspaceBoardRequest }: DashboardProps) {
 	const t = useT();
 	const [surface, setSurface] = useState<"board" | "projects">("board");
 	const [workspaceQuery, setWorkspaceQuery] = useState("");
@@ -97,6 +98,7 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject,
 						navigate={navigate}
 						bellCounts={bellCounts}
 						onOpenCreateTask={onOpenCreateTask}
+						onOpenWorkspaceTask={onOpenWorkspaceTask}
 					/> : <ActivityOverview
 						projects={projects}
 						dispatch={dispatch}

@@ -91,8 +91,33 @@ vi.mock("../task-sounds", () => ({
 
 // Mock child screens so they don't trigger their own API calls
 vi.mock("../components/Dashboard", () => ({
-	default: ({ workspaceBoardRequest }: { workspaceBoardRequest: number }) => (
-		<div data-testid="dashboard-screen" data-workspace-board-request={String(workspaceBoardRequest)} />
+	default: ({ workspaceBoardRequest, projects, onOpenWorkspaceTask }: { workspaceBoardRequest: number; projects: Array<{ id: string; name: string }>; onOpenWorkspaceTask?: (...args: any[]) => void }) => (
+		<div data-testid="dashboard-screen" data-workspace-board-request={String(workspaceBoardRequest)}>
+			{projects[0] && onOpenWorkspaceTask && (
+				<button onClick={(event) => onOpenWorkspaceTask(projects[0], {
+					id: "overlay-task",
+					projectId: projects[0].id,
+					seq: 9,
+					title: "Overlay task",
+					description: "Overlay task",
+					status: "in-progress",
+					worktreePath: "/tmp/overlay-task",
+				}, [{ id: "overlay-task", projectId: projects[0].id, seq: 9, title: "Overlay task", description: "Overlay task", status: "in-progress", worktreePath: "/tmp/overlay-task" }], event.currentTarget)}>
+					Open workspace overlay
+				</button>
+			)}
+		</div>
+	),
+}));
+vi.mock("../components/WorkspaceTaskOverlay", () => ({
+	default: ({ taskId, onRequestClose, onOpenFullPage, navigationGuardRef }: { taskId: string; onRequestClose: () => void; onOpenFullPage: () => void; navigationGuardRef?: { current: { isDirty: () => boolean; onSave: () => Promise<void> } | null } }) => (
+		<div data-testid="workspace-task-overlay" data-task-id={taskId}>
+			<button onClick={onOpenFullPage}>Open full page</button>
+			<button onClick={onRequestClose}>Close task workspace</button>
+			<button onClick={() => {
+				if (navigationGuardRef) navigationGuardRef.current = { isDirty: () => true, onSave: vi.fn().mockResolvedValue(undefined) };
+			}}>Make workspace dirty</button>
+		</div>
 	),
 }));
 vi.mock("../components/AddProjectModal", () => ({
@@ -129,7 +154,7 @@ vi.mock("../components/ProjectView", () => ({
 	),
 }));
 vi.mock("../components/TaskWorkspaceView", () => ({
-	default: (props: { immersive?: boolean }) => <div data-testid="task-screen" data-immersive={props.immersive ? "true" : "false"} />,
+	default: (props: { presentation?: "full-page" | "overlay" | "immersive" }) => <div data-testid="task-screen" data-immersive={props.presentation === "immersive" ? "true" : "false"} />,
 }));
 vi.mock("../components/TaskTerminal", () => ({
 	default: () => <div data-testid="task-screen" />,
@@ -449,6 +474,58 @@ describe("App keyboard shortcuts", () => {
 			act(() => window.dispatchEvent(forward));
 			expect(forward.defaultPrevented).toBe(true);
 			expect(screen.getByTestId("settings-screen")).toBeInTheDocument();
+		});
+	});
+
+	describe("workspace task overlay", () => {
+		const project = {
+			id: "p-overlay",
+			name: "Overlay Project",
+			path: "/overlay",
+			setupScript: "",
+			devScript: "",
+			cleanupScript: "",
+			defaultBaseBranch: "main",
+			createdAt: "",
+		};
+
+		it("opens and closes over Dashboard without replacing the board route", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+
+			const trigger = screen.getByRole("button", { name: "Open workspace overlay" });
+			await userEvent.click(trigger);
+			expect(screen.getByTestId("workspace-task-overlay")).toHaveAttribute("data-task-id", "overlay-task");
+			expect(screen.getByTestId("dashboard-screen")).toBeInTheDocument();
+			expect(screen.getByRole("main")).toHaveAttribute("inert");
+
+			await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
+			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
+			expect(screen.getByTestId("dashboard-screen")).toBeInTheDocument();
+			await waitFor(() => expect(trigger).toHaveFocus());
+		});
+
+		it("hands off to the existing full-page task route", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			await userEvent.click(screen.getByRole("button", { name: "Open full page" }));
+
+			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
+			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+		});
+
+		it("runs overlay close through the shared unsaved-changes guard", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			await userEvent.click(screen.getByRole("button", { name: "Make workspace dirty" }));
+			await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
+
+			expect(screen.getByText("Unsaved Changes")).toBeInTheDocument();
+			expect(screen.getByTestId("workspace-task-overlay")).toBeInTheDocument();
+			await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
 		});
 	});
 

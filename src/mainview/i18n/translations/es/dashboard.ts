@@ -30,6 +30,13 @@ const dashboard = {
 	"workspaceBoard.dropHere": "Mover tarea a {status} en {project}",
 	"workspaceBoard.dropHereShort": "Soltar para mover",
 	"workspaceBoard.notApplicable": "No aplicable",
+	"workspaceTaskOverlay.title": "Espacio de trabajo de la tarea",
+	"workspaceTaskOverlay.openFullPage": "Abrir a página completa",
+	"workspaceTaskOverlay.close": "Cerrar el espacio de trabajo de la tarea",
+	"workspaceTaskOverlay.loading": "Cargando el espacio de trabajo…",
+	"workspaceTaskOverlay.retry": "Reintentar",
+	"workspaceTaskOverlay.loadFailed": "No se pudo actualizar este espacio de trabajo. Reinténtalo para continuar. ({error})",
+	"workspaceTaskOverlay.taskMissing": "Esta tarea ya no está disponible. El tablero global sigue abierto.",
 
 	// Activity overview
 	"activity.noActiveTasks": "Sin tareas activas en ningún proyecto",

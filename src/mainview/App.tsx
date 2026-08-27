@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, routeTaskId, projectIdForRoute, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type Route, type SettingsSectionId } from "./state";
+import { useAppState, routeTaskId, projectIdForRoute, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type Route, type SettingsSectionId } from "./state";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
 import { useT, useLocale } from "./i18n";
@@ -9,7 +9,7 @@ import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
 import type { AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
-import { orderProjectsForDisplay, getTaskTitle } from "../shared/types";
+import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { isRemote } from "./utils/platform";
@@ -77,6 +77,8 @@ import { reconnectRpc } from "./rpc";
 import { DIAGNOSTICS_OPEN_EVENT } from "./diagnostics";
 import { getAdjacentAliveVariant } from "./utils/variantGroups";
 import { isTaskTerminalRoute } from "./utils/terminalFullscreen";
+import WorkspaceTaskOverlay from "./components/WorkspaceTaskOverlay";
+import { closeTopBackLayer } from "./back-navigation";
 
 /** Command shown when cloudflared is missing (Cloudflare Tunnel remote access). */
 const CLOUDFLARED_INSTALL_CMD = "brew install cloudflared";
@@ -92,6 +94,46 @@ type RemoteAccessQRData = {
 	interfaces?: RemoteNetInterface[];
 	selectedHost?: string;
 };
+
+interface WorkspaceTaskTarget {
+	projectId: string;
+	taskId: string;
+	tasks: Task[];
+	trigger: HTMLElement | null;
+}
+
+type PendingTransition =
+	| { kind: "route"; route: Route }
+	| { kind: "dismiss-workspace" };
+
+function reduceWorkspaceTasks(target: WorkspaceTaskTarget, action: AppAction): WorkspaceTaskTarget {
+	let tasks = target.tasks;
+	switch (action.type) {
+		case "setTasks":
+			if (action.projectId === target.projectId) tasks = action.tasks;
+			break;
+		case "updateTask":
+		case "addTask":
+			if (action.task.projectId !== target.projectId) break;
+			tasks = tasks.some((task) => task.id === action.task.id)
+				? tasks.map((task) => task.id === action.task.id ? action.task : task)
+				: [...tasks, action.task];
+			break;
+		case "removeTask":
+			if (!action.projectId || action.projectId === target.projectId) {
+				tasks = tasks.filter((task) => task.id !== action.taskId);
+			}
+			break;
+		case "spawnVariants":
+			tasks = [...tasks.filter((task) => !action.variants.some((variant) => variant.id === task.id)), ...action.variants];
+			break;
+		case "addAttempts":
+			tasks = tasks.map((task) => task.id === action.updatedSource.id ? action.updatedSource : task);
+			tasks = [...tasks.filter((task) => !action.newAttempts.some((attempt) => attempt.id === task.id)), ...action.newAttempts];
+			break;
+	}
+	return tasks === target.tasks ? target : { ...target, tasks };
+}
 
 function isRemoteTunnelActive(tunnelState?: string): boolean {
 	return tunnelState === "starting" || tunnelState === "connected";
@@ -114,6 +156,20 @@ function findVisibleSearchInput(): HTMLElement | null {
 
 function App() {
 	const [state, dispatch] = useAppState();
+	const [workspaceTaskTarget, setWorkspaceTaskTarget] = useState<WorkspaceTaskTarget | null>(null);
+	const workspaceTaskTargetRef = useRef(workspaceTaskTarget);
+	workspaceTaskTargetRef.current = workspaceTaskTarget;
+	const effectiveProjectId = workspaceTaskTarget?.projectId ?? projectIdForRoute(state.route);
+	const effectiveTaskId = workspaceTaskTarget?.taskId ?? routeTaskId(state.route);
+	const effectiveTasks = workspaceTaskTarget?.tasks ?? state.currentProjectTasks;
+	const workspaceDispatch = useCallback((action: AppAction) => {
+		setWorkspaceTaskTarget((target) => target ? reduceWorkspaceTasks(target, action) : target);
+		dispatch(action);
+	}, [dispatch]);
+	const addBellUnlessFocused = useCallback((taskId: string, reason?: string) => {
+		if (workspaceTaskTargetRef.current?.taskId === taskId) return;
+		dispatch({ type: "addBell", taskId, reason });
+	}, [dispatch]);
 	const handleToastOverflow = useCallback((entry: ToastEntry) => {
 		if (!entry.taskId) return;
 		dispatch({ type: "addBell", taskId: entry.taskId, reason: entry.message, force: true });
@@ -121,7 +177,7 @@ function App() {
 	const t = useT();
 	const [, setLocale] = useLocale();
 	const [terminalImmersive, setTerminalImmersive] = useState(false);
-	const terminalImmersiveVisible = terminalImmersive && isTaskTerminalRoute(state.route);
+	const terminalImmersiveVisible = terminalImmersive && (isTaskTerminalRoute(state.route) || workspaceTaskTarget !== null);
 	const skipNextTerminalCopyResetRef = useRef(false);
 	const skipTerminalCopyReset = terminalImmersiveVisible || skipNextTerminalCopyResetRef.current;
 	const setTerminalImmersiveActive = useCallback((active: boolean) => {
@@ -187,17 +243,22 @@ function App() {
 	// Listen for menu actions routed from the bun side. Any menu item that the
 	// renderer is responsible for arrives here as `rpc:menuAction` with
 	// `{ action: <string> }`. The router in `menuRouter.ts` handles dispatch.
+	const effectiveMenuState = useMemo(() => workspaceTaskTarget ? {
+		...state,
+		route: { screen: "task", projectId: workspaceTaskTarget.projectId, taskId: workspaceTaskTarget.taskId } as Route,
+		currentProjectTasks: workspaceTaskTarget.tasks,
+	} : state, [state, workspaceTaskTarget]);
 	useEffect(() => {
 		function onMenuAction(e: Event) {
 			const detail = (e as CustomEvent).detail;
 			if (!detail?.action) return;
-			handleMenuAction(detail.action, { state, dispatch, setLocale, t }).catch((err) => {
+			handleMenuAction(detail.action, { state: effectiveMenuState, dispatch: workspaceDispatch, setLocale, t }).catch((err) => {
 				console.error("[App] handleMenuAction failed", err);
 			});
 		}
 		window.addEventListener("rpc:menuAction", onMenuAction);
 		return () => window.removeEventListener("rpc:menuAction", onMenuAction);
-	}, [state, dispatch, setLocale]);
+	}, [effectiveMenuState, setLocale, workspaceDispatch]);
 
 	// Unified keyboard-shortcuts overlay (App + Terminal tabs).
 	//  - Help > Keyboard Shortcuts / ⌘/      → App tab
@@ -230,11 +291,11 @@ function App() {
 	// the browser-mode React menu bar (`AppMenuBar`).
 	const menuContext = useMemo(() => {
 		const r = state.route;
-		const hasProject = r.screen === "project" || r.screen === "task" || r.screen === "project-terminal" || r.screen === "project-settings";
-		const hasTask = r.screen === "task" || (r.screen === "project" && Boolean(r.activeTaskId));
-		const hasTerminal = r.screen === "task" || r.screen === "project-terminal";
+		const hasProject = workspaceTaskTarget !== null || r.screen === "project" || r.screen === "task" || r.screen === "project-terminal" || r.screen === "project-settings";
+		const hasTask = workspaceTaskTarget !== null || r.screen === "task" || (r.screen === "project" && Boolean(r.activeTaskId));
+		const hasTerminal = workspaceTaskTarget !== null || r.screen === "task" || r.screen === "project-terminal";
 		return { hasTask, hasProject, hasTerminal };
-	}, [state.route]);
+	}, [state.route, workspaceTaskTarget]);
 
 	// Push the current MenuContext to the bun side on every route change so the
 	// native menu can grey out task / project / terminal items that don't apply.
@@ -468,7 +529,7 @@ function App() {
 
 	// Navigation guard for unsaved-changes prompts (e.g. ProjectSettings, diff viewer)
 	const navigationGuardRef = useRef<NavigationGuard | null>(null);
-	const [pendingNavigation, setPendingNavigation] = useState<Route | null>(null);
+	const [pendingNavigation, setPendingNavigation] = useState<PendingTransition | null>(null);
 
 	// Latest route mirror — async event handlers read this to make routing decisions
 	// without re-subscribing every navigation.
@@ -476,6 +537,9 @@ function App() {
 	useEffect(() => {
 		routeRef.current = state.route;
 	}, [state.route]);
+	useEffect(() => {
+		if (state.route.screen !== "dashboard") setWorkspaceTaskTarget(null);
+	}, [state.route.screen]);
 
 	// Drive document.title from the current route so the browser tab shows the
 	// project/task name — the only orientation cue in remote (browser) mode.
@@ -502,9 +566,14 @@ function App() {
 		let prefix = "";
 		// A tab title cannot be blurred (CSS reaches the document, not the chrome),
 		// so a sensitive project's context is replaced rather than masked.
-		const locked = isRouteLocked(route);
+		const locked = workspaceTaskTarget
+			? isRouteLocked({ screen: "project", projectId: workspaceTaskTarget.projectId })
+			: isRouteLocked(route);
 		if (locked) {
 			prefix = `${t("streamer.privateTitle")} · `;
+		} else if (workspaceTaskTarget) {
+			const task = workspaceTaskTarget.tasks.find((candidate) => candidate.id === workspaceTaskTarget.taskId);
+			if (task) prefix = `${getTaskTitle(task)} · `;
 		} else if (route.screen === "project" || route.screen === "project-terminal" || route.screen === "project-settings") {
 			const project = state.projects.find((p) => p.id === route.projectId);
 			if (project) prefix = `${project.name} · `;
@@ -513,7 +582,7 @@ function App() {
 			if (task) prefix = `${getTaskTitle(task)} · `;
 		}
 		document.title = prefix ? `${prefix}${base}` : base;
-	}, [state.route, state.currentProjectTasks, state.projects, isRouteLocked, t]);
+	}, [state.route, state.currentProjectTasks, state.projects, isRouteLocked, t, workspaceTaskTarget]);
 
 	// Route persistence is enabled only after the initial restore attempt has
 	// run (see the projects-load effect). Without this gate, the bootstrap
@@ -550,12 +619,32 @@ function App() {
 	// covered automatically — they all funnel through here.
 	const commitNavigation = useCallback(
 		(route: Route) => {
+			setWorkspaceTaskTarget(null);
 			const projectId = projectIdForRoute(route);
 			if (projectId) recordProjectJump(projectId);
 			dispatch({ type: "navigate", route });
 		},
 		[dispatch],
 	);
+	const dismissWorkspaceTask = useCallback(() => {
+		const trigger = workspaceTaskTargetRef.current?.trigger;
+		setTerminalImmersiveActive(false);
+		setWorkspaceTaskTarget(null);
+		requestAnimationFrame(() => {
+			if (trigger?.isConnected) {
+				trigger.focus({ preventScroll: true });
+				return;
+			}
+			document.querySelector<HTMLElement>('[data-help-id="dashboard.workspace-board"]')?.focus({ preventScroll: true });
+		});
+	}, [setTerminalImmersiveActive]);
+	const requestWorkspaceDismiss = useCallback(() => {
+		if (navigationGuardRef.current?.isDirty()) {
+			setPendingNavigation({ kind: "dismiss-workspace" });
+			return;
+		}
+		dismissWorkspaceTask();
+	}, [dismissWorkspaceTask]);
 	const navigate = useCallback(
 		(route: Route) => {
 			// One guard for every entry point into a sensitive project (card, Cmd+1..9,
@@ -566,20 +655,50 @@ function App() {
 				return;
 			}
 			if (navigationGuardRef.current?.isDirty()) {
-				setPendingNavigation(route);
+				setPendingNavigation({ kind: "route", route });
 				return;
 			}
 			commitNavigation(route);
 		},
 		[commitNavigation, isRouteLocked, t],
 	);
+	const openWorkspaceTask = useCallback((project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => {
+		if (isRouteLocked({ screen: "project", projectId: project.id })) {
+			toast.info(t("streamer.projectLocked"), { projectId: project.id });
+			return;
+		}
+		setWorkspaceTaskTarget({ projectId: project.id, taskId: task.id, tasks, trigger });
+		dispatch({ type: "focusTask", taskId: task.id });
+	}, [dispatch, isRouteLocked, t]);
+	useEffect(() => {
+		if (!workspaceTaskTarget) return;
+		const selected = workspaceTaskTarget.tasks.find((task) => task.id === workspaceTaskTarget.taskId);
+		if (!selected || (!selected.preparing && !ACTIVE_STATUSES.includes(selected.status))) {
+			dismissWorkspaceTask();
+		}
+	}, [dismissWorkspaceTask, workspaceTaskTarget]);
+	const navigateFromWorkspace = useCallback((route: Route) => {
+		const target = workspaceTaskTargetRef.current;
+		if (target && route.screen === "project" && route.projectId === target.projectId) {
+			if (route.activeTaskId) {
+				if (target.tasks.some((task) => task.id === route.activeTaskId)) {
+					setWorkspaceTaskTarget({ ...target, taskId: route.activeTaskId });
+					dispatch({ type: "focusTask", taskId: route.activeTaskId });
+				}
+				return;
+			}
+			requestWorkspaceDismiss();
+			return;
+		}
+		navigate(route);
+	}, [dispatch, navigate, requestWorkspaceDismiss]);
 	const openWorkspaceBoard = useCallback(() => {
 		setWorkspaceBoardRequest((request) => request + 1);
 		navigate({ screen: "dashboard" });
 	}, [navigate]);
 
 	const toggleTerminalImmersive = useCallback(() => {
-		if (!isTaskTerminalRoute(routeRef.current)) return;
+		if (!isTaskTerminalRoute(routeRef.current) && !workspaceTaskTargetRef.current) return;
 		setTerminalImmersiveActive(!terminalImmersive);
 	}, [setTerminalImmersiveActive, terminalImmersive]);
 
@@ -730,14 +849,14 @@ function App() {
 	// or the current project when no task is active. The picker lists the installed
 	// apps and opens the chosen one (see OpenInPickerModal).
 	const openInCurrent = useCallback(() => {
-		const taskId = routeTaskId(state.route);
-		const activeTask = taskId ? state.currentProjectTasks.find((task) => task.id === taskId) : null;
-		const projectId = projectIdForRoute(state.route);
+		const taskId = effectiveTaskId;
+		const activeTask = taskId ? effectiveTasks.find((task) => task.id === taskId) : null;
+		const projectId = effectiveProjectId;
 		const project = projectId ? state.projects.find((p) => p.id === projectId) : null;
 		const path = activeTask?.worktreePath || project?.path || null;
 		if (!path) return;
 		setOpenInPicker({ path, taskId: activeTask?.id });
-	}, [state.route, state.currentProjectTasks, state.projects]);
+	}, [effectiveProjectId, effectiveTaskId, effectiveTasks, state.projects]);
 
 	// `g`-prefix "go to" sequence (Linear/GitHub style), kept in refs so the
 	// global keydown handler stays pure. Tiny state machine:
@@ -797,12 +916,12 @@ function App() {
 
 	// Option+Tab (project) / Option+Shift+Tab (global) task switcher.
 	const switcher = useTaskSwitcher({
-		projectTasks: state.currentProjectTasks,
-		currentProjectId: "projectId" in state.route ? state.route.projectId : null,
-		currentTaskId: routeTaskId(state.route),
+		projectTasks: effectiveTasks,
+		currentProjectId: effectiveProjectId,
+		currentTaskId: effectiveTaskId,
 		mru: state.taskMru,
 		navigate,
-		disabled: hintMode,
+		disabled: hintMode || workspaceTaskTarget !== null,
 	});
 	const switcherProjectById = useMemo(() => {
 		const map = new Map<string, Project>();
@@ -858,22 +977,22 @@ function App() {
 	const runCommand = useCallback(
 		(actionId: string) => {
 			setShowCommandPalette(false);
-			handleMenuAction(actionId, { state, dispatch, setLocale, t }).catch((err) => {
+			handleMenuAction(actionId, { state: effectiveMenuState, dispatch: workspaceDispatch, setLocale, t }).catch((err) => {
 				console.error("[App] runCommand failed", err);
 			});
 		},
-		[state, dispatch, setLocale],
+		[effectiveMenuState, setLocale, workspaceDispatch],
 	);
 
 	// Browser-mode menu bar (`AppMenuBar`) dispatches through the same router as
 	// the native menu and the command palette.
 	const handleMenuBarAction = useCallback(
 		(actionId: string) => {
-			handleMenuAction(actionId, { state, dispatch, setLocale, t }).catch((err) => {
+			handleMenuAction(actionId, { state: effectiveMenuState, dispatch: workspaceDispatch, setLocale, t }).catch((err) => {
 				console.error("[App] menu bar action failed", err);
 			});
 		},
-		[state, dispatch, setLocale],
+		[effectiveMenuState, setLocale, workspaceDispatch],
 	);
 
 	// The create-flow commands (`open-new-task` / `open-add-project`) live as
@@ -905,7 +1024,7 @@ function App() {
 	useGlobalShortcut(
 		(e) => {
 			if (!e.repeat && matchesShortcut(e, "terminal-fullscreen")) {
-				if (!isTaskTerminalRoute(state.route)) return;
+				if (!isTaskTerminalRoute(state.route) && !workspaceTaskTarget) return;
 				e.preventDefault();
 				e.stopPropagation();
 				toggleTerminalImmersive();
@@ -913,6 +1032,17 @@ function App() {
 			}
 			// While hint mode is active the overlay owns every keystroke.
 			if (hintMode) return;
+			if (workspaceTaskTarget && !terminalImmersiveVisible) {
+				if (matchesShortcut(e, "back")) {
+					e.preventDefault();
+					e.stopPropagation();
+					requestWorkspaceDismiss();
+				} else if (matchesShortcut(e, "forward")) {
+					e.preventDefault();
+					e.stopPropagation();
+				}
+				return;
+			}
 
 			// ── A `g …` go-to sequence in flight owns the next keystroke, ahead of
 			// every combo below — otherwise `g` then `c` would create a task instead
@@ -1174,7 +1304,7 @@ function App() {
 				}
 			}
 		},
-		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, openWorkspaceBoard, showAddProjectModal, showQuitDialog, state.projects, state.route, toggleTerminalImmersive],
+		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, openWorkspaceBoard, requestWorkspaceDismiss, showAddProjectModal, showQuitDialog, state.projects, state.route, terminalImmersiveVisible, toggleTerminalImmersive, workspaceTaskTarget],
 		{ capture: true },
 	);
 
@@ -1185,6 +1315,7 @@ function App() {
 		function handleMouseUp(e: MouseEvent) {
 			if (e.button === 3) {
 				e.preventDefault();
+				if (closeTopBackLayer()) return;
 				dispatch({ type: "goBack" });
 			} else if (e.button === 4) {
 				e.preventDefault();
@@ -1272,22 +1403,22 @@ function App() {
 	useEffect(() => {
 		function onTaskUpdated(e: Event) {
 			const { task } = (e as CustomEvent).detail;
-			dispatch({ type: "updateTask", task });
+			workspaceDispatch({ type: "updateTask", task });
 		}
 		window.addEventListener("rpc:taskUpdated", onTaskUpdated);
 		return () => window.removeEventListener("rpc:taskUpdated", onTaskUpdated);
-	}, [dispatch]);
+	}, [workspaceDispatch]);
 
 	// A task left a project's board (moved to another project). Scoped to the
 	// source project so a window viewing the TARGET keeps the just-added card.
 	useEffect(() => {
 		function onTaskRemoved(e: Event) {
 			const { taskId, projectId } = (e as CustomEvent).detail;
-			dispatch({ type: "removeTask", taskId, projectId });
+			workspaceDispatch({ type: "removeTask", taskId, projectId });
 		}
 		window.addEventListener("rpc:taskRemoved", onTaskRemoved);
 		return () => window.removeEventListener("rpc:taskRemoved", onTaskRemoved);
-	}, [dispatch]);
+	}, [workspaceDispatch]);
 
 	useEffect(() => {
 		function onGlobalSettingsUpdated(e: Event) {
@@ -1325,11 +1456,11 @@ function App() {
 	useEffect(() => {
 		function onTerminalBell(e: Event) {
 			const { taskId } = (e as CustomEvent).detail;
-			dispatch({ type: "addBell", taskId });
+			addBellUnlessFocused(taskId);
 		}
 		window.addEventListener("rpc:terminalBell", onTerminalBell);
 		return () => window.removeEventListener("rpc:terminalBell", onTerminalBell);
-	}, [dispatch]);
+	}, [addBellUnlessFocused]);
 
 	// CLI-initiated attention badge (`dev3 attention "reason"`). Same red badge as
 	// the terminal bell, but carries a hoverable reason.
@@ -1338,11 +1469,11 @@ function App() {
 			const { taskId, projectId, reason } = (e as CustomEvent).detail as { taskId: string; projectId?: string; reason: string };
 			if (!taskId) return;
 			if (isProjectSilencedForDisplay(projectId)) return;
-			dispatch({ type: "addBell", taskId, reason: reason ?? "" });
+			addBellUnlessFocused(taskId, reason ?? "");
 		}
 		window.addEventListener("rpc:cliAttention", onCliAttention);
 		return () => window.removeEventListener("rpc:cliAttention", onCliAttention);
-	}, [dispatch]);
+	}, [addBellUnlessFocused]);
 
 	// CLI-initiated in-app toast (`dev3 notify`). When a task is attached the toast
 	// is clickable and opens that task, honoring the user's task-open-mode.
@@ -1436,11 +1567,9 @@ function App() {
 			if (!taskId || !images?.length) return;
 
 			// Attention badge (the reducer self-suppresses it when already viewing the task).
-			dispatch({ type: "addBell", taskId, reason: t.plural("showImage.attention", newCount ?? 1) });
+			addBellUnlessFocused(taskId, t.plural("showImage.attention", newCount ?? 1));
 
-			const viewingThisTask =
-				(state.route.screen === "task" && state.route.taskId === taskId) ||
-				(state.route.screen === "project" && state.route.activeTaskId === taskId);
+			const viewingThisTask = effectiveTaskId === taskId;
 			const autoOpen = localStorage.getItem("dev3-auto-open-shared-images") !== "off";
 			const foreground = typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
 			const alreadyOpenForTask = imageViewerRef.current?.taskId === taskId;
@@ -1465,7 +1594,7 @@ function App() {
 		}
 		window.addEventListener("rpc:cliShowImage", onCliShowImage);
 		return () => window.removeEventListener("rpc:cliShowImage", onCliShowImage);
-	}, [dispatch, markSharedItemsRead, openTaskFromNotification, t, state.route]);
+	}, [addBellUnlessFocused, effectiveTaskId, markSharedItemsRead, openTaskFromNotification, t]);
 
 	// Reopen the image viewer from a task-scoped trigger (the inspector image badge).
 	useEffect(() => {
@@ -1496,10 +1625,8 @@ function App() {
 				projectName?: string;
 			};
 			if (!taskId || !artifacts?.length) return;
-			dispatch({ type: "addBell", taskId, reason: t.plural("showArtifact.attention", newCount ?? 1) });
-			const viewingThisTask =
-				(state.route.screen === "task" && state.route.taskId === taskId) ||
-				(state.route.screen === "project" && state.route.activeTaskId === taskId);
+			addBellUnlessFocused(taskId, t.plural("showArtifact.attention", newCount ?? 1));
+			const viewingThisTask = effectiveTaskId === taskId;
 			const foreground = typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
 			const alreadyOpenForTask = artifactViewerRef.current?.taskId === taskId;
 			if (alreadyOpenForTask || (viewingThisTask && foreground)) {
@@ -1521,7 +1648,7 @@ function App() {
 		}
 		window.addEventListener("rpc:cliShowArtifact", onCliShowArtifact);
 		return () => window.removeEventListener("rpc:cliShowArtifact", onCliShowArtifact);
-	}, [dispatch, markSharedItemsRead, openTaskFromNotification, state.route, t]);
+	}, [addBellUnlessFocused, effectiveTaskId, markSharedItemsRead, openTaskFromNotification, t]);
 
 	useEffect(() => {
 		function onOpenArtifactViewer(e: Event) {
@@ -2320,7 +2447,7 @@ function App() {
 			{terminalImmersiveVisible ? (
 				<TerminalImmersiveChrome onExit={() => setTerminalImmersiveActive(false)} />
 			) : (
-				<header aria-label={t("nav.appHeader")}>
+					<header aria-label={t("nav.appHeader")} inert={workspaceTaskTarget ? true : undefined}>
 					{!isElectrobun && <AppMenuBar context={menuContext} onAction={handleMenuBarAction} />}
 					<GlobalHeader
 						route={route}
@@ -2346,12 +2473,32 @@ function App() {
 					)}
 				</header>
 			)}
-			<main className="flex-1 min-h-0 flex flex-col overflow-hidden">
+			<main className="flex-1 min-h-0 flex flex-col overflow-hidden" inert={workspaceTaskTarget && !terminalImmersiveVisible ? true : undefined}>
 				{routeH1 && <h1 className="sr-only">{routeH1}</h1>}
 				{terminalImmersiveVisible ? renderTerminalImmersiveScreen() : renderScreen()}
 			</main>
 			{!terminalImmersiveVisible && (
 			<>
+			{workspaceTaskTarget && (
+				<WorkspaceTaskOverlay
+					projectId={workspaceTaskTarget.projectId}
+					taskId={workspaceTaskTarget.taskId}
+					tasks={workspaceTaskTarget.tasks}
+					projects={state.projects}
+					dispatch={workspaceDispatch}
+					navigate={navigateFromWorkspace}
+					onRequestClose={requestWorkspaceDismiss}
+					onOpenFullPage={() => navigate({ screen: "task", projectId: workspaceTaskTarget.projectId, taskId: workspaceTaskTarget.taskId })}
+					onTaskMissing={() => {
+						toast.info(t("workspaceTaskOverlay.taskMissing"), { projectId: workspaceTaskTarget.projectId });
+						dismissWorkspaceTask();
+					}}
+					navigationGuardRef={navigationGuardRef}
+					artifactViewer={artifactViewer?.standalone ? null : artifactViewer}
+					onCloseArtifactViewer={closeArtifactViewer}
+					skipCopyModeReset={skipTerminalCopyReset}
+				/>
+			)}
 			{switcher.session && (
 				<TaskSwitcherOverlay
 					session={switcher.session}
@@ -2382,11 +2529,11 @@ function App() {
 				/>
 			)}
 			{showCommandPalette && (
-				<CommandPaletteModal
-					context={{
-						hasProject: Boolean(getProjectIdForRoute(state.route)),
-						hasTask: Boolean(routeTaskId(state.route)),
-						isVirtual: state.projects.find((p) => p.id === getProjectIdForRoute(state.route))?.kind === "virtual",
+					<CommandPaletteModal
+						context={{
+							hasProject: Boolean(effectiveProjectId),
+							hasTask: Boolean(effectiveTaskId),
+							isVirtual: state.projects.find((p) => p.id === effectiveProjectId)?.kind === "virtual",
 						remote: isRemote(),
 						androidApp: isAndroidAppHost(),
 					}}
@@ -2453,10 +2600,11 @@ function App() {
 							</button>
 							<button
 								onClick={() => {
-									const route = pendingNavigation;
+									const transition = pendingNavigation;
 									navigationGuardRef.current = null;
 									setPendingNavigation(null);
-									commitNavigation(route);
+									if (transition.kind === "route") commitNavigation(transition.route);
+									else dismissWorkspaceTask();
 								}}
 								className="px-4 py-2 text-sm rounded-lg text-danger hover:bg-danger/10 transition-colors"
 							>
@@ -2464,13 +2612,14 @@ function App() {
 							</button>
 							<button
 								onClick={async () => {
-									const route = pendingNavigation;
+									const transition = pendingNavigation;
 									if (navigationGuardRef.current) {
 										await navigationGuardRef.current.onSave();
 									}
 									navigationGuardRef.current = null;
 									setPendingNavigation(null);
-									commitNavigation(route);
+									if (transition.kind === "route") commitNavigation(transition.route);
+									else dismissWorkspaceTask();
 								}}
 								className="px-4 py-2 text-sm rounded-lg bg-accent-fill text-white hover:bg-accent-fill-hover transition-colors"
 							>
@@ -2760,7 +2909,7 @@ function App() {
 					</div>
 				</div>
 			)}
-			<StuckPreparationPopover tasks={state.currentProjectTasks} />
+			<StuckPreparationPopover tasks={effectiveTasks} />
 			<FolderPickerHost />
 			<KeyboardShortcutsModal
 				open={shortcutsModal.open}
@@ -2831,19 +2980,19 @@ function App() {
 	);
 
 	function renderTerminalImmersiveScreen() {
-		const taskId = routeTaskId(route);
-		const projectId = projectIdForRoute(route);
+		const taskId = workspaceTaskTarget?.taskId ?? routeTaskId(route);
+		const projectId = workspaceTaskTarget?.projectId ?? projectIdForRoute(route);
 		if (!taskId || !projectId) return null;
 		return (
 			<TaskWorkspaceView
 				projectId={projectId}
 				taskId={taskId}
-				tasks={state.currentProjectTasks}
+				tasks={workspaceTaskTarget?.tasks ?? state.currentProjectTasks}
 				projects={state.projects}
-				navigate={navigate}
-				dispatch={dispatch}
+				navigate={workspaceTaskTarget ? navigateFromWorkspace : navigate}
+				dispatch={workspaceTaskTarget ? workspaceDispatch : dispatch}
 				navigationGuardRef={navigationGuardRef}
-				immersive
+					presentation="immersive"
 				isTerminalFullscreen
 				onToggleTerminalFullscreen={toggleTerminalImmersive}
 				artifactViewer={null}
@@ -2863,9 +3012,10 @@ function App() {
 						dispatch={dispatch}
 						navigate={navigate}
 						bellCounts={state.bellCounts}
-						onOpenAddProject={() => setShowAddProjectModal(true)}
-						onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
-						workspaceBoardRequest={workspaceBoardRequest}
+							onOpenAddProject={() => setShowAddProjectModal(true)}
+							onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
+							onOpenWorkspaceTask={openWorkspaceTask}
+							workspaceBoardRequest={workspaceBoardRequest}
 					/>
 				);
 			case "project":

@@ -180,7 +180,8 @@ export type AppAction =
 	| { type: "setPorts"; taskId: string; ports: PortInfo[] }
 	| { type: "clearPorts"; taskId: string }
 	| { type: "setResourceUsage"; taskId: string; usage: ResourceUsage }
-	| { type: "clearResourceUsage"; taskId: string };
+	| { type: "clearResourceUsage"; taskId: string }
+	| { type: "focusTask"; taskId: string };
 
 /**
  * Clear the attention badge (count + reason) for whichever task the given route
@@ -391,6 +392,18 @@ export function reducer(state: AppState, action: AppAction): AppState {
 			};
 		case "setLoading":
 			return { ...state, loading: action.loading };
+		case "focusTask": {
+			const bellCounts = new Map(state.bellCounts);
+			const bellReasons = new Map(state.bellReasons);
+			bellCounts.delete(action.taskId);
+			bellReasons.delete(action.taskId);
+			return {
+				...state,
+				bellCounts,
+				bellReasons,
+				taskMru: [action.taskId, ...state.taskMru.filter((id) => id !== action.taskId)],
+			};
+		}
 		case "addBell": {
 			// Don't add bell if user is already viewing this task's terminal
 			if (!action.force &&

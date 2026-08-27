@@ -71,7 +71,7 @@ ux_architecture:
       plural: "Tasks"
       observed: true
       primary_route: "screen:project"          # appears as a card on the board
-      detail_route: "screen:task"              # full-screen terminal; also screen:project activeTaskId (split)
+      detail_route: "screen:task"              # full-screen; also screen:project activeTaskId (split) and ephemeral dashboard overlay
       owner: "project"
       owns: ["note", "task_terminal", "worktree", "variant", "attempt"]
       lifecycle_states: ["todo", "in-progress", "user-questions", "review-by-ai", "review-by-user", "review-by-colleague", "completed", "cancelled"]
@@ -242,6 +242,18 @@ ux_architecture:
       completed_disclosure: "Each project cell shows its two newest Completed tasks by default; Show N more expands all remaining Completed history for that project, and Show less restores the compact state."
       status: "observed"
       evidence: ["src/mainview/components/WorkspaceBoard.tsx", "src/mainview/components/Dashboard.tsx", "src/bun/rpc-handlers/task-lifecycle.ts (getWorkspaceBoardTasks)"]
+    workspace_task_overlay:
+      purpose: "Focused, non-route coding workspace for one active task opened from Dashboard > Board while the board remains mounted underneath."
+      feature_class: ["object_detail_overlay", "task_workspace"]
+      reached_from: ["dashboard.workspace_board.active_task_card"]
+      allowed: ["task_info_panel", "task_terminal", "inline_diff", "task_artifact_workspace", "explicit_full_page_handoff", "close"]
+      forbidden: ["new_destination", "breadcrumb", "multiple_windows", "todo_or_archived_terminal", "native_dialog", "backdrop_dismissal", "drag_or_resize", "persisted_geometry"]
+      state: "Renderer-only and ephemeral: opening/closing does not change Route, route history, last-route persistence, board search, scroll, carousel, or disclosure state."
+      interaction: "One focused modal layer at a time. Background board + global chrome are inert; close restores the invoking card. Terminal-focused Tab/Escape stay in the TUI; outside the terminal focus is contained and Escape/Back close after nested layers and dirty-review guards."
+      open_policy: "Active/preparing/hibernated/recoverable task cards open it only from Workspace Board. Todo/draft/completed/cancelled retain detail/edit; project cards, sidebar, notifications, and deep links retain configured split/fullscreen behavior."
+      layout: "Wide: centered 92vw x 88dvh solid overlay with a light scrim. Narrow: full-bleed one-at-a-time workspace over the still-mounted board."
+      status: "observed"
+      evidence: ["src/mainview/components/WorkspaceTaskOverlay.tsx", "src/mainview/App.tsx", "src/mainview/components/TaskWorkspaceView.tsx"]
     task_card:
       purpose: "Compact object summary on the board with the most relevant per-task affordances."
       allowed: ["status_dot", "label_chip", "variant_dots", "open_action", "context_menu", "git_status_badge", "deferred_timer_chip", "native_backend_mark"]
@@ -686,6 +698,12 @@ ux_architecture:
       status: "observed"
       rationale: "Task actions belong to the task surface, not the app chrome."
       exception: "dashboard-task-row-single-complete"
+    - id: "workspace-board-active-task-opens-overlay"
+      when: { feature_class: "object_jump", scope: "single_task", surface: "dashboard.workspace_board" }
+      place_in: ["workspace_task_overlay: reuse the full task inspector + workspace without changing Route"]
+      reject: ["screen:task navigation as the default", "screen:project split navigation", "new dashboard tab", "drawer", "popover", "multiple floating terminals"]
+      status: "observed"
+      rationale: "The cross-project board is the user's scan context. A focused modal overlay preserves that exact context while giving the terminal enough room; explicit full-page handoff remains available."
     - id: "dashboard-task-row-single-complete"
       when: { feature_class: "object_action", scope: "single_task", surface: "dashboard.task_row" }
       place_in: ["dashboard.task_row (row end): exactly one Complete check, hover/focus-revealed on desktop (md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100), always visible >=44x44 on narrow, always alwaysConfirm, hidden while hibernated"]
@@ -771,6 +789,7 @@ ux_architecture:
       mobile_orientation: { narrow: "portrait-only device guard — best-effort Screen Orientation API lock, with a blocking localized rotate prompt and inert app fallback when landscape cannot be locked", status: observed, evidence: "MobilePortraitGate.tsx, usePortraitOrientation.ts" }
       kanban_board: { narrow: "status carousel (one column/screen, swipe; vertical task scroll; empty persistent columns kept)", status: observed, evidence: "MobileBoardCarousel.tsx, KanbanBoard.tsx useNarrowViewport(768)" }
       workspace_board: { narrow: "status carousel; every slide stacks project sections vertically; task moves use the lifecycle sheet, never cross-project drag", status: observed, evidence: "WorkspaceBoard.tsx, MobileBoardCarousel.tsx" }
+      workspace_task_overlay: { narrow: "full-bleed focused task workspace; the board remains mounted underneath and close restores its exact carousel/scroll state", status: observed, evidence: "WorkspaceTaskOverlay.tsx" }
       task_move_drag: { narrow: "drag impossible -> 'Move to <status>' bottom action sheet (long-press) on existing status path; completion reuses confirmTaskCompletion", status: proposed }
       board_filters: { narrow: "bottom sheet behind a header funnel button (LabelFilterBar + search)", status: proposed }
       terminal_panes: { narrow: "pane carousel — one pane at a time + axis-arbitrated horizontal swipe + a slim non-overlapping top dots strip + Arrow keys; backend-neutral via taskPaneState / taskPaneAction RPCs; native tasks page the same way; MobileWindowCarousel not rendered for native tasks", status: observed, evidence: "MobilePaneCarousel.tsx, TaskTerminal.tsx, task-panes.ts taskPaneState, decision 089" }

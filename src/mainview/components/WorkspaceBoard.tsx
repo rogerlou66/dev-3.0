@@ -24,13 +24,14 @@ interface WorkspaceBoardProps {
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
 	onOpenCreateTask: (projectId: string) => void;
+	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
 }
 
 const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
 const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 
-function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask }: WorkspaceBoardProps) {
+function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenWorkspaceTask }: WorkspaceBoardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -249,6 +250,9 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					return next;
 				})}
 				siblingMap={siblingMap}
+				onOpenWorkspaceTask={onOpenWorkspaceTask
+					? (candidate, candidateProject, trigger) => onOpenWorkspaceTask(candidateProject, candidate, tasksByProject.get(candidateProject.id) ?? [candidate], trigger)
+					: undefined}
 				compact
 			/>
 		);
@@ -302,7 +306,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	})) : [];
 
 	return (
-		<div className="flex h-full min-h-0 flex-col" data-help-id="dashboard.workspace-board">
+		<div className="flex h-full min-h-0 flex-col" data-help-id="dashboard.workspace-board" tabIndex={-1}>
 		{loadErrors.length > 0 && <div className="flex justify-end border-b border-edge px-3 py-2"><button onClick={load} className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">{t("workspaceBoard.retry")}</button></div>}
 		{isNarrow ? (
 			<MobileBoardCarousel columns={carouselColumns} initialColumnId={carouselColumns.find((column) => column.id === "in-progress" && column.count > 0)?.id ?? "review-by-user"} />

@@ -18,11 +18,12 @@ interface TaskWorkspaceViewProps {
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
 	artifactViewer?: { taskId: string; artifacts: SharedArtifact[]; index: number } | null;
 	onCloseArtifactViewer?: () => void;
-	immersive?: boolean;
+	presentation?: "full-page" | "overlay" | "immersive";
 	isTerminalFullscreen?: boolean;
 	onToggleTerminalFullscreen?: () => void;
 	skipCopyModeReset?: boolean;
 	openUnresolvedComments?: boolean;
+	loadTasks?: boolean;
 }
 
 function TaskWorkspaceView({
@@ -35,11 +36,12 @@ function TaskWorkspaceView({
 	navigationGuardRef,
 	artifactViewer,
 	onCloseArtifactViewer,
-	immersive = false,
+	presentation = "full-page",
 	isTerminalFullscreen,
 	onToggleTerminalFullscreen,
 	skipCopyModeReset,
 	openUnresolvedComments,
+	loadTasks = true,
 }: TaskWorkspaceViewProps) {
 	const task = tasks.find((item) => item.id === taskId);
 	const project = projects.find((item) => item.id === projectId);
@@ -55,6 +57,7 @@ function TaskWorkspaceView({
 	// Load the project's tasks on mount, mirroring ProjectView, so the chrome
 	// always renders regardless of the entry point.
 	useEffect(() => {
+		if (!loadTasks) return;
 		let cancelled = false;
 		(async () => {
 			try {
@@ -67,7 +70,7 @@ function TaskWorkspaceView({
 		return () => {
 			cancelled = true;
 		};
-	}, [projectId, dispatch]);
+	}, [projectId, dispatch, loadTasks]);
 
 	useEffect(() => {
 		if (!openUnresolvedComments) {
@@ -83,14 +86,14 @@ function TaskWorkspaceView({
 
 	return (
 		<div className="flex-1 min-h-0 flex flex-col">
-			{!immersive && task && project && (
+			{presentation !== "immersive" && task && project && (
 				<TaskInfoPanel
 					task={task}
 					project={project}
 					dispatch={dispatch}
 					navigate={navigate}
 					tasks={tasks}
-					isFullPage
+					isFullPage={presentation === "full-page"}
 					isTerminalFullscreen={isTerminalFullscreen}
 					onToggleTerminalFullscreen={onToggleTerminalFullscreen}
 					onOpenInlineDiff={inlineDiff.open}

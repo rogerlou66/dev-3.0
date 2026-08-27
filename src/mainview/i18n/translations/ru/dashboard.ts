@@ -32,6 +32,13 @@ const dashboard = {
 	"workspaceBoard.dropHere": "Переместить задачу в {status}, проект {project}",
 	"workspaceBoard.dropHereShort": "Отпустите для перемещения",
 	"workspaceBoard.notApplicable": "Не применяется",
+	"workspaceTaskOverlay.title": "Рабочая область задачи",
+	"workspaceTaskOverlay.openFullPage": "Открыть на всю страницу",
+	"workspaceTaskOverlay.close": "Закрыть рабочую область задачи",
+	"workspaceTaskOverlay.loading": "Загрузка рабочей области…",
+	"workspaceTaskOverlay.retry": "Повторить",
+	"workspaceTaskOverlay.loadFailed": "Не удалось обновить рабочую область задачи. Повторите попытку. ({error})",
+	"workspaceTaskOverlay.taskMissing": "Эта задача больше недоступна. Общая доска осталась открыта.",
 
 	// Activity overview
 	"activity.noActiveTasks": "Нет активных задач ни в одном проекте",

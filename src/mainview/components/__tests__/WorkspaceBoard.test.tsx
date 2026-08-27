@@ -13,7 +13,15 @@ vi.mock("../../rpc", () => ({
 }));
 
 vi.mock("../TaskCard", () => ({
-	default: ({ task }: { task: Task }) => <div data-testid={`workspace-task-${task.id}`} data-needs-input={task.status === "user-questions" || undefined}>{task.title}</div>,
+	default: ({ task, project, onOpenWorkspaceTask }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void }) => (
+		<button
+			data-testid={`workspace-task-${task.id}`}
+			data-needs-input={task.status === "user-questions" || undefined}
+			onClick={(event) => onOpenWorkspaceTask?.(task, project, event.currentTarget)}
+		>
+			{task.title}
+		</button>
+	),
 }));
 
 vi.mock("../LaunchVariantsModal", () => ({ default: () => null }));
@@ -83,6 +91,18 @@ describe("WorkspaceBoard", () => {
 		await screen.findByText("Alpha");
 		await userEvent.click(screen.getAllByRole("button", { name: "+ New Task" })[1]);
 		expect(onOpenCreateTask).toHaveBeenCalledWith("p2");
+	});
+
+	it("hands an active task and its project cache to the workspace overlay host", async () => {
+		const onOpenWorkspaceTask = vi.fn();
+		const active = { ...task("active", "p1", "in-progress"), worktreePath: "/tmp/active" };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [active] }]);
+
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onOpenWorkspaceTask={onOpenWorkspaceTask} /></I18nProvider>);
+		const trigger = await screen.findByTestId("workspace-task-active");
+		await userEvent.click(trigger);
+
+		expect(onOpenWorkspaceTask).toHaveBeenCalledWith(projects[0], active, [active], trigger);
 	});
 
 	it("shows a newly created task from the live update without remounting", async () => {

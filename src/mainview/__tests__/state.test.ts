@@ -1094,6 +1094,21 @@ describe("taskMru tracking", () => {
 		expect(s.taskMru).toEqual(["a", "b"]);
 	});
 
+	it("focusTask updates MRU and clears attention without navigating", () => {
+		const state: AppState = {
+			...initialState,
+			bellCounts: new Map([["a", 2]]),
+			bellReasons: new Map([["a", ["Needs input"]]]),
+			taskMru: ["b", "a"],
+		};
+		const next = reducer(state, { type: "focusTask", taskId: "a" });
+
+		expect(next.route).toEqual({ screen: "dashboard" });
+		expect(next.taskMru).toEqual(["a", "b"]);
+		expect(next.bellCounts.has("a")).toBe(false);
+		expect(next.bellReasons.has("a")).toBe(false);
+	});
+
 	it("goBack/goForward also bump the MRU for the task they land on", () => {
 		let s: AppState = initialState;
 		s = reducer(s, { type: "navigate", route: { screen: "task", projectId: "p1", taskId: "a" } });

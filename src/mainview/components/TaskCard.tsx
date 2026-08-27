@@ -71,11 +71,13 @@ interface TaskCardProps {
 	onOpenUnresolvedComments?: (task: Task) => void;
 	/** Reopens the New Task popup on a draft card instead of the detail modal. */
 	onEditDraft?: (task: Task) => void;
+	/** Opens an active task in a host-owned workspace surface instead of navigating. */
+	onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 	/** Jira-like board density: keep identity, title, lifecycle, and the To Do run action. */
 	compact?: boolean;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, compact = false }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false }: TaskCardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -94,6 +96,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 	const preview = useTerminalPreview();
 	const cardRef = useRef<HTMLDivElement>(null);
+	const suppressOpenUntilRef = useRef(0);
 
 	// Ports popover state
 	const [portsPopoverOpen, setPortsPopoverOpen] = useState(false);
@@ -341,6 +344,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const preparingStageLabel = t(PREPARING_STAGE_LABELS[preparingStage]);
 
 	function handleClick() {
+		if (Date.now() < suppressOpenUntilRef.current) return;
 		// A still-preparing task is `isDisabled` (no drag, dimmed) but must remain
 		// openable so the main view can show its loading state instead of leaving
 		// the previously-active task's terminal on screen.
@@ -352,6 +356,10 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		}
 		if (isActive && !menuOpen) {
 			preview.close();
+			if (onOpenWorkspaceTask) {
+				onOpenWorkspaceTask(task, project, cardRef.current);
+				return;
+			}
 			const openMode = getTaskOpenMode();
 			if (openMode === "fullscreen") {
 				navigate({ screen: "task", projectId: project.id, taskId: task.id });
@@ -395,10 +403,15 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	}
 
 	function handleDragStart(e: React.DragEvent) {
+		suppressOpenUntilRef.current = Date.now() + 1_000;
 		preview.close();
 		e.dataTransfer.setData("text/plain", task.id);
 		e.dataTransfer.effectAllowed = "move";
 		onDragStartProp(task.id);
+	}
+
+	function handleDragEnd() {
+		suppressOpenUntilRef.current = Date.now() + 250;
 	}
 
 	function handleTitleClick(e: React.MouseEvent) {
@@ -741,8 +754,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			data-hint-id={task.id}
 			data-help-id="board.task-card"
 			data-needs-input={needsInput || undefined}
-			draggable={!isDisabled && !detailOpen && !isHibernated}
-			onDragStart={handleDragStart}
+				draggable={!isDisabled && !detailOpen && !isHibernated}
+				onDragStart={handleDragStart}
+				onDragEnd={handleDragEnd}
 			onContextMenu={handleContextMenu}
 			onMouseEnter={handleCardMouseEnter}
 			onMouseLeave={handleCardMouseLeave}
@@ -756,8 +770,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				borderColor: `${statusColors["user-questions"]}70`,
 				boxShadow: `0 0 0 1px ${statusColors["user-questions"]}18, 0 8px 24px ${statusColors["user-questions"]}12`,
 			} : undefined}
-			onClick={handleClick}
-		>
+				onClick={handleClick}
+				tabIndex={-1}
+			>
 			{/* Moving spinner overlay */}
 			{isMovingProp && (
 				<div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-base/40">

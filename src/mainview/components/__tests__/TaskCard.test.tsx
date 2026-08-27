@@ -164,6 +164,7 @@ function renderCard(
 		onOpenUnresolvedComments?: (task: Task) => void;
 		siblingMap?: Map<string, Task[]>;
 		onEditDraft?: (task: Task) => void;
+		onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 	},
 ) {
 	return render(
@@ -184,12 +185,38 @@ function renderCard(
 				onOpenUnresolvedComments={opts?.onOpenUnresolvedComments}
 				siblingMap={opts?.siblingMap}
 				onEditDraft={opts?.onEditDraft}
+				onOpenWorkspaceTask={opts?.onOpenWorkspaceTask}
 			/>
 		</I18nProvider>,
 	);
 }
 
 describe("TaskCard", () => {
+	it("lets a workspace host open an active task without route navigation", async () => {
+		const navigate = vi.fn();
+		const onOpenWorkspaceTask = vi.fn();
+		renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/wt" }), { navigate, onOpenWorkspaceTask });
+
+		const card = document.querySelector<HTMLElement>('[data-task-id="t1"]')!;
+		await userEvent.click(card);
+
+		expect(onOpenWorkspaceTask).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), project, card);
+		expect(navigate).not.toHaveBeenCalled();
+	});
+
+	it("does not open the workspace from the click that follows a drag", () => {
+		const onOpenWorkspaceTask = vi.fn();
+		renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/wt" }), { onOpenWorkspaceTask });
+		const card = document.querySelector<HTMLElement>('[data-task-id="t1"]')!;
+		const dataTransfer = { setData: vi.fn(), effectAllowed: "" } as unknown as DataTransfer;
+
+		fireEvent.dragStart(card, { dataTransfer });
+		fireEvent.dragEnd(card);
+		fireEvent.click(card);
+
+		expect(onOpenWorkspaceTask).not.toHaveBeenCalled();
+	});
+
 	it("uses a full-card attention treatment when the agent needs input", () => {
 		renderCard(makeTask({ status: "user-questions" }));
 

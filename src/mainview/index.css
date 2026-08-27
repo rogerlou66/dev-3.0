@@ -636,11 +636,12 @@ button {
    On a phone-width viewport, centered modal/palette panels keep their fixed
    `w-[..rem]` width and overflow off-screen. Clamp every modal (role="dialog"
    + aria-modal) to the viewport minus a gutter and let it scroll. Bottom sheets
-   opt out via [data-bottom-sheet] (they own their full-width/85dvh layout).
+   opt out via [data-bottom-sheet] or [data-full-bleed] when they own their
+   viewport-filling layout.
    Authored after `@tailwind utilities`, so this wins over the fixed-width
    utilities at equal-or-lower specificity (later source order). */
 @media (max-width: 767px) {
-	[role="dialog"][aria-modal="true"]:not([data-bottom-sheet]) {
+	[role="dialog"][aria-modal="true"]:not([data-bottom-sheet]):not([data-full-bleed]) {
 		max-width: calc(100vw - 1.5rem);
 		max-height: calc(100dvh - 1.5rem);
 		overflow-y: auto;

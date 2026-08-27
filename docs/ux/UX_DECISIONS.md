@@ -4,6 +4,12 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-26 — Workspace Board opens one focused task overlay
+
+- **Rule:** Clicking an active/preparing/recoverable task on Dashboard → Board opens one modal, non-route `WorkspaceTaskOverlay` (`92vw × 88dvh`, full-bleed narrow) over the still-mounted inert board; terminal Tab/Escape pass through, explicit Close/Back and Open full page are the only wrapper actions, and non-live cards keep their detail/edit flow.
+- **Why:** Route navigation discarded the cross-project scan context the user was working from; a drawer squeezed the terminal, a popover could not host the full inspector/workspace, and multiple draggable windows would create a second window manager.
+- **Status:** Implemented. Evidence: `WorkspaceTaskOverlay.tsx`, `App.tsx`, `WorkspaceBoard.tsx`, bible §5/§12.
+
 ## 2026-08-23 — Android is a native shell over the computer authority
 
 - **Rule:** Android adds a shell-level connection gateway and exact-origin native prompt dock, then reuses the existing dashboard/project/task routes and host RPC/PTY authority; tablet layout follows window width and supports landscape.

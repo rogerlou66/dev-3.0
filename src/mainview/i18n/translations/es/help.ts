@@ -50,7 +50,9 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Proyectos",
 	"help.dashboard.workspaceBoard.title": "Tablero global",
-	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. Crea desde la celda Por hacer de un proyecto; los movimientos permanecen en ese proyecto y las preguntas aparecen como tarjetas ámbar Requiere respuesta.",
+	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. Crea desde la celda Por hacer de cada proyecto y haz clic en una tarea activa para abrir su espacio de trabajo sin abandonar el tablero.",
+	"help.dashboard.workspaceTaskOverlay.title": "Espacio de trabajo sobre el tablero",
+	"help.dashboard.workspaceTaskOverlay.body": "El inspector completo y el terminal del agente flotan sobre el tablero global. Ciérralo para volver a la misma posición o abre la tarea a página completa.",
 	"help.dashboard.projects.body":
 		"Cada proyecto es un repositorio git con su propio tablero Kanban, etiquetas y scripts de ciclo de vida. Un tablero de Operaciones es un proyecto virtual: sus tareas ejecutan agentes en carpetas gestionadas, sin git.",
 	"help.dashboard.statsEntry.title": "Estadísticas de productividad",

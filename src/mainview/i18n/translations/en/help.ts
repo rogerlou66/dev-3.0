@@ -56,7 +56,9 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Projects",
 	"help.dashboard.workspaceBoard.title": "Workspace board",
-	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Create from a project's To Do cell; moves stay inside that project, and questions appear as amber Needs input cards in Agent Working.",
+	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Create from a project's To Do cell; moves stay inside that project, and click any active task to open its coding workspace without leaving the board.",
+	"help.dashboard.workspaceTaskOverlay.title": "Task workspace over the board",
+	"help.dashboard.workspaceTaskOverlay.body": "The full task inspector and coding terminal float above the workspace board. Close it to return to the exact board position, or open the task full page when you want to leave the cross-project view.",
 	"help.dashboard.projects.body":
 		"Each project is a git repository with its own Kanban board, labels and lifecycle scripts. An Operations board is a virtual project: its tasks run agents in managed folders, without git.",
 	"help.dashboard.statsEntry.title": "Productivity Stats",
