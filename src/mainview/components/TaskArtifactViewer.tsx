@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SharedArtifact } from "../../shared/types";
+import { artifactAtVersion, latestArtifactVersion } from "../../shared/artifact-versions";
 import { api } from "../rpc";
 import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
@@ -7,8 +8,10 @@ import { toast } from "../toast";
 import { composeArtifactDocument } from "../utils/artifactDocument";
 import { isMac, isRemote } from "../utils/platform";
 import ArtifactSearchBar, { type ArtifactSearchBarHandle } from "./ArtifactSearchBar";
+import ArtifactVersionPicker from "./ArtifactVersionPicker";
 import { registerOverlayLayer } from "../utils/overlay-layers";
 import { isAndroidAppHost, openAndroidHtml, saveAndroidBase64File, saveAndroidRemoteFile } from "../android-client-bridge";
+import { parseDataUrl } from "../utils/downloadBytes";
 
 interface TaskArtifactViewerProps {
 	artifacts: SharedArtifact[];
@@ -64,17 +67,6 @@ const EXT_BY_MIME: Record<string, string> = {
 	"image/svg+xml": "svg",
 };
 
-function parseDataUrl(src: string): { mime: string; base64: string } | null {
-	const match = /^data:([^;,]*)(;base64)?,(.*)$/s.exec(src);
-	if (!match) return null;
-	const mime = match[1] || "application/octet-stream";
-	if (match[2]) return { mime, base64: match[3] };
-	try {
-		return { mime, base64: btoa(decodeURIComponent(match[3])) };
-	} catch {
-		return null;
-	}
-}
 
 /** Prefer the copied asset's original file name; otherwise derive one from alt + mime. */
 function imageFileName(src: string, alt: string, mime: string, assets: ArtifactAsset[]): string {
@@ -105,9 +97,21 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 	const searchToggleRef = useRef<HTMLButtonElement>(null);
 	// Guards against out-of-order replies from the iframe while typing fast.
 	const searchTokenRef = useRef(0);
-	const current = artifacts[index];
+	const group = artifacts[index];
+	// Keyed by artifact id rather than reset in an effect: an artifact the user
+	// just opened has no pick, so it renders its newest version on the first
+	// frame instead of flashing the previous artifact's version.
+	const [pick, setPick] = useState<{ id: string; version: number } | null>(null);
+	const selectedVersion = group && pick?.id === group.id ? pick.version : group ? latestArtifactVersion(group) : 1;
+	// Memoized: an older version is a projected record, and a fresh object every
+	// render would re-fetch its content forever.
+	const current = useMemo(
+		() => (group ? artifactAtVersion(group, selectedVersion) : undefined),
+		[group, selectedVersion],
+	);
 
 	useEffect(() => {
+		setPick(null);
 		setIndex(Math.max(0, Math.min(artifacts.length - 1, initialIndex)));
 	}, [artifacts.length, initialIndex]);
 
@@ -227,6 +231,10 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 	}, [fullscreen]);
 
 	const go = useCallback((delta: number) => {
+		// Drop the version pick with the artifact: paging back to an artifact must
+		// land on its newest version, never on the one that was open a moment ago —
+		// a silently stale version is the confusion this whole feature removes.
+		setPick(null);
 		setIndex((value) => Math.max(0, Math.min(artifacts.length - 1, value + delta)));
 	}, [artifacts.length]);
 
@@ -354,12 +362,19 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, onClose, t
 				? "fixed inset-0 z-[70] flex min-h-0 flex-col bg-base"
 				: "flex h-full min-h-0 w-full flex-col bg-base border-l border-edge"}
 		>
-			<header className="flex flex-shrink-0 items-center gap-2 border-b border-edge bg-raised px-3 py-2">
+			<header className="relative flex flex-shrink-0 items-center gap-2 border-b border-edge bg-raised px-3 py-2">
 				<div className="min-w-0 flex-1">
 					<div className="truncate text-sm font-medium text-fg">{current.title}</div>
 					<div className="truncate text-micro text-fg-muted">{current.name}</div>
 				</div>
 				<HelpSpot topicId="viewer.artifact" />
+				{group && (
+					<ArtifactVersionPicker
+						artifact={group}
+						selected={selectedVersion}
+						onSelect={(version) => setPick({ id: group.id, version })}
+					/>
+				)}
 				{artifacts.length > 1 && (
 					<>
 						<button type="button" className={iconButton} disabled={index === 0} onClick={() => go(-1)} aria-label={t("artifactViewer.previous")}><span style={{ fontFamily: ICON }}></span></button>

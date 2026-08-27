@@ -38,11 +38,13 @@ function svgBase(className?: string, strokeWidth = 1.7): SVGProps<SVGSVGElement>
 }
 
 // 01 — Back: the chevron lunges left, a ghost echo trails off.
+// Path spans x 8.75-15.25, so its box is centred on the 24×24 viewBox — the old
+// 8-14.5 leaned a stroke's width left of centre inside the button.
 export function BackIcon({ className }: HeaderIconProps) {
 	return (
 		<svg {...svgBase(className, 2)}>
-			<path d="M14.5 5.5 8 12l6.5 6.5" className="hdr hdr-back" />
-			<path d="M14.5 5.5 8 12l6.5 6.5" className="hdr hdr-back-ghost" opacity="0" />
+			<path d="M15.25 5.5 8.75 12l6.5 6.5" className="hdr hdr-back" />
+			<path d="M15.25 5.5 8.75 12l6.5 6.5" className="hdr hdr-back-ghost" opacity="0" />
 		</svg>
 	);
 }
@@ -51,8 +53,8 @@ export function BackIcon({ className }: HeaderIconProps) {
 export function ForwardIcon({ className }: HeaderIconProps) {
 	return (
 		<svg {...svgBase(className, 2)}>
-			<path d="M9.5 5.5 16 12l-6.5 6.5" className="hdr hdr-fwd" />
-			<path d="M9.5 5.5 16 12l-6.5 6.5" className="hdr hdr-fwd-ghost" opacity="0" />
+			<path d="M8.75 5.5 15.25 12l-6.5 6.5" className="hdr hdr-fwd" />
+			<path d="M8.75 5.5 15.25 12l-6.5 6.5" className="hdr hdr-fwd-ghost" opacity="0" />
 		</svg>
 	);
 }
@@ -245,13 +247,18 @@ export function ChangelogIcon({ className }: HeaderIconProps) {
 	);
 }
 
-// 18 — Overflow kebab: the dots do the wave, top to bottom.
-export function KebabIcon({ className }: HeaderIconProps) {
+
+/**
+ * Overflow menu ("More"): the same three dots laid out HORIZONTALLY. The vertical
+ * column read as one of the header's `|` separators — the one thing the icon must
+ * never look like. The dots keep the kebab's bounce animation.
+ */
+export function OverflowDotsIcon({ className }: HeaderIconProps) {
 	return (
 		<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-			<circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none" className="hdr hdr-kb1" />
-			<circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" className="hdr hdr-kb2" />
-			<circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none" className="hdr hdr-kb3" />
+			<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none" className="hdr hdr-kb1" />
+			<circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" className="hdr hdr-kb2" />
+			<circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none" className="hdr hdr-kb3" />
 		</svg>
 	);
 }
@@ -278,6 +285,22 @@ export function SlidersIcon({ className }: HeaderIconProps) {
 			<circle cx="6" cy="15.5" r="2" fill="currentColor" stroke="none" className="hdr hdr-sl1" />
 			<circle cx="12" cy="8" r="2" fill="currentColor" stroke="none" className="hdr hdr-sl2" />
 			<circle cx="18" cy="13" r="2" fill="currentColor" stroke="none" className="hdr hdr-sl3" />
+		</svg>
+	);
+}
+
+// 21b — Agent traffic: three wires between two tasks, dots travelling them, the
+// middle one against the flow. Same 24×24 stroke body as its neighbours, so it
+// reads as one of the header's own glyphs rather than a bespoke badge.
+export function AgentTrafficIcon({ className }: HeaderIconProps) {
+	return (
+		<svg {...svgBase(className)}>
+			<path d="M5 6.5h14" />
+			<path d="M5 12h14" />
+			<path d="M5 17.5h14" />
+			<circle cx="7" cy="6.5" r="1.6" fill="currentColor" stroke="none" className="hdr hdr-wire-1" />
+			<circle cx="17" cy="12" r="1.6" fill="currentColor" stroke="none" className="hdr hdr-wire-2" />
+			<circle cx="7" cy="17.5" r="1.6" fill="currentColor" stroke="none" className="hdr hdr-wire-3" />
 		</svg>
 	);
 }

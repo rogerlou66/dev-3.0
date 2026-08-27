@@ -3,11 +3,13 @@ import type { Task, Project, TaskSessionState } from "../../shared/types";
 import { getTaskOpenMode, taskClosedHomeRoute, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
+import { toast } from "../toast";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import TerminalView from "../TerminalView";
 import type { TerminalHandle } from "../TerminalView";
 import TaskInfoPanel from "./TaskInfoPanel";
 import TaskPreparingView from "./TaskPreparingView";
+import BackToKanbanEmptyState from "./BackToKanbanEmptyState";
 import ExtraKeyBar from "./ExtraKeyBar";
 import TerminalComposer, { type TerminalComposerApi } from "./TerminalComposer";
 import MobilePaneCarousel from "./MobilePaneCarousel";
@@ -44,6 +46,8 @@ interface TaskTerminalProps {
 
 const PTY_CONNECT_TIMEOUT_MS = 10_000;
 const NATIVE_PANE_POLL_MS = 2500;
+/** How many consecutive session-absent reads turn the spinner into the restart offer. */
+const NATIVE_ABSENT_READS = 2;
 /** How long a "give the terminal the keyboard" wish waits for a pane to attach. */
 const FOCUS_REQUEST_TTL_MS = 15_000;
 
@@ -62,6 +66,10 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	const task = tasks.find((t) => t.id === taskId);
 	const project = projects.find((p) => p.id === projectId);
 	const isPreparing = task?.preparing === true;
+	// Completed/cancelled by design: the worktree and the session are gone on
+	// purpose, so every recovery offer in here would be a lie. This view has one
+	// honest exit, and it must win over the error and restart screens below.
+	const isClosed = task?.status === "completed" || task?.status === "cancelled";
 
 	// Detect native backend from the task record (available before state loads).
 	const isNative = task?.terminalBackend === "native";
@@ -87,6 +95,34 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	// act that clears the flag.
 	const [hibernated, setHibernated] = useState(false);
 	const [restarting, setRestarting] = useState(false);
+	const setupFailedExitCode = task?.setupFailedExitCode ?? null;
+	const setupFailedAgentRunning = task?.setupFailedAgentRunning === true;
+	const [setupFailureDismissed, setSetupFailureDismissed] = useState(false);
+	const [rerunningSetup, setRerunningSetup] = useState(false);
+	useEffect(() => {
+		if (setupFailedExitCode == null) setSetupFailureDismissed(false);
+	}, [setupFailedExitCode]);
+
+	const dismissSetupFailure = useCallback(() => {
+		setSetupFailureDismissed(true);
+		api.request.dismissSetupFailure({ taskId }).catch((err) => {
+			console.error("[TaskTerminal] dismissSetupFailure failed:", err);
+		});
+	}, [taskId]);
+
+	async function handleRerunSetup() {
+		setRerunningSetup(true);
+		try {
+			await api.request.rerunSetupScript({ taskId });
+			setSetupFailureDismissed(true);
+			if (isNative) await fetchPaneState(taskId);
+		} catch (err) {
+			console.error("[TaskTerminal] rerunSetupScript failed:", err);
+			toast.error(t("terminal.setupRerunFailed", { error: String(err) }));
+		} finally {
+			setRerunningSetup(false);
+		}
+	}
 
 	useEffect(() => {
 		if (!termHandle) return;
@@ -100,6 +136,8 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 
 	// ── Native multi-pane state ─────────────────────────────────────────────────
 	const [nativePaneState, setNativePaneState] = useState<TaskPaneState | null>(null);
+	/** Consecutive pane reads that found no native session. @see NATIVE_ABSENT_READS */
+	const [absentReads, setAbsentReads] = useState(0);
 	const [paneUrls, setPaneUrls] = useState<Map<string, string>>(() => new Map());
 	// Panes whose host this viewer could not attach to. Kept next to `alive` so a
 	// lost socket and a dead pane render the SAME recovery block in every viewer,
@@ -169,7 +207,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	// ── Tmux PTY URL effect (skipped for native) ──────────────────────────────
 	useEffect(() => {
 		if (isNative) return;
-		if (isPreparing) return;
+		if (isPreparing || isClosed) return;
 		let cancelled = false;
 		(async () => {
 			console.log("[TaskTerminal] Requesting PTY URL for task", taskId.slice(0, 8));
@@ -191,16 +229,21 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 			}
 		})();
 		return () => { cancelled = true; };
-	}, [taskId, isPreparing, isNative]);
+	}, [taskId, isPreparing, isNative, isClosed]);
 
 	// ── Native pane state ──────────────────────────────────────────────────────
 	// Every arrival — this poll, the inspector toolbar's poll, or any pane action's
 	// own response — comes through the bus, so a toolbar click repaints the canvas
 	// as soon as the server answers instead of on the next poll tick.
 	useEffect(() => {
-		if (!isNative || isPreparing) return;
+		if (!isNative || isPreparing || isClosed) return;
+		setAbsentReads(0);
 		return subscribePaneState(taskId, (state) => {
 			setNativePaneState(state);
+			// Two reads, not one: a task whose panes are still being created answers
+			// absent for ~1s, and flashing "the terminal is gone" at someone whose
+			// terminal is opening would be its own lie. Any live read resets it.
+			setAbsentReads((n) => (state.sessionAbsent ? n + 1 : 0));
 			// Forget panes the coordinator has since reconciled away.
 			setGonePaneIds((prev) => {
 				if (prev.size === 0) return prev;
@@ -240,12 +283,12 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 				return next;
 			});
 		});
-	}, [taskId, isPreparing, isNative]);
+	}, [taskId, isPreparing, isNative, isClosed]);
 
 	// Reconciliation only: the server owns the tree, and a failed read is how this
 	// view learns the session died.
 	useEffect(() => {
-		if (!isNative || isPreparing) return;
+		if (!isNative || isPreparing || isClosed) return;
 		let cancelled = false;
 		const fetch = async () => {
 			try {
@@ -257,7 +300,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		void fetch();
 		const timer = setInterval(() => { void fetch(); }, NATIVE_PANE_POLL_MS);
 		return () => { cancelled = true; clearInterval(timer); };
-	}, [taskId, isPreparing, isNative]);
+	}, [taskId, isPreparing, isNative, isClosed]);
 
 	// ── Fetch per-pane URLs when new panes appear ─────────────────────────────
 	useEffect(() => {
@@ -327,13 +370,13 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 	useEffect(() => {
 		function onPtyDied(e: Event) {
 			const detail = (e as CustomEvent).detail;
-			if (detail?.taskId === taskId) {
+			if (detail?.taskId === taskId && !isClosed) {
 				void classifyAndSetError();
 			}
 		}
 		window.addEventListener("rpc:ptyDied", onPtyDied);
 		return () => window.removeEventListener("rpc:ptyDied", onPtyDied);
-	}, [taskId, task?.worktreePath]);
+	}, [taskId, task?.worktreePath, isClosed]);
 
 	// Fallback timeout for cases where ptyDied doesn't fire
 	useEffect(() => {
@@ -379,6 +422,29 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		}
 	}
 
+	/**
+	 * The native counterpart of {@link handleRestart}: same server call, but the
+	 * native canvas is driven by pane state, not by a single `ptyUrl`, so a
+	 * relaunched session is picked up by re-reading the panes.
+	 */
+	async function handleNativeRestart() {
+		setRestarting(true);
+		try {
+			const result = await api.request.getPtyUrl({ taskId, resume: true });
+			if ("recoverable" in result) {
+				setRecoverable(result.sessionState);
+				setHibernated(result.hibernated === true);
+			} else {
+				await fetchPaneState(taskId);
+			}
+		} catch (err) {
+			console.error("[TaskTerminal] Native restart failed:", err);
+			await classifyAndSetError();
+		} finally {
+			setRestarting(false);
+		}
+	}
+
 	async function handleResumeSession() {
 		setRestarting(true);
 		setRecoverable(null);
@@ -407,6 +473,114 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		} finally {
 			setRestarting(false);
 		}
+	}
+
+	const showSetupFailure = setupFailedExitCode != null && !setupFailureDismissed;
+	const setupFailedTitle = t("terminal.setupFailedTitle", { code: String(setupFailedExitCode) });
+	const rerunSetupLabel = rerunningSetup ? t("terminal.setupRerunning") : t("terminal.setupFailedRerun");
+
+	// The agent is alive and typing into it still works, so this must not be a
+	// modal: a dialog here would cover a running session and — with autofocus —
+	// swallow the next Enter into a button. A strip states the fact and offers the
+	// only action that helps, which is re-running setup, never a session restart.
+	const setupFailedStrip = showSetupFailure && setupFailedAgentRunning && (
+		<div
+			data-testid="terminal-setup-failed-strip"
+			role="status"
+			className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-3 py-2 rounded-lg bg-raised border border-danger/40 shadow-lg max-w-[calc(100%-1rem)]"
+		>
+			<span className="text-danger shrink-0">⚠</span>
+			<div className="min-w-0">
+				<div className="text-fg text-sm font-medium truncate">{setupFailedTitle}</div>
+				<div className="text-fg-3 text-xs">{t("terminal.setupFailedAgentRunningDesc")}</div>
+			</div>
+			<button
+				onClick={handleRerunSetup}
+				disabled={rerunningSetup}
+				className="shrink-0 px-3 py-1.5 bg-elevated text-fg-2 rounded text-xs font-medium hover:bg-elevated-hover transition-colors disabled:opacity-50"
+			>
+				{rerunSetupLabel}
+			</button>
+			<button
+				onClick={dismissSetupFailure}
+				aria-label={t("terminal.setupFailedDismiss")}
+				className="shrink-0 px-2 py-1 text-fg-3 rounded hover:bg-elevated-hover hover:text-fg transition-colors"
+			>
+				✕
+			</button>
+		</div>
+	);
+
+	// The agent never started, so nothing is behind this to interrupt: a dialog is
+	// honest here. Re-running setup leads, because starting the agent on a broken
+	// worktree is the fallback, not the fix.
+	const setupFailedCard = showSetupFailure && !setupFailedAgentRunning && (
+		<div className="absolute inset-0 z-20 flex items-center justify-center p-4" onClick={dismissSetupFailure}>
+			<div
+				data-testid="terminal-setup-failed-card"
+				role="alertdialog"
+				aria-labelledby="setup-failed-title"
+				onClick={(event) => event.stopPropagation()}
+				onKeyDown={(event) => {
+					if (event.key !== "Escape") return;
+					event.stopPropagation();
+					dismissSetupFailure();
+				}}
+				className="relative bg-raised border border-edge rounded-lg p-6 space-y-4 w-[28rem] max-w-[calc(100vw-2rem)] shadow-2xl"
+			>
+				<button
+					autoFocus
+					onClick={dismissSetupFailure}
+					aria-label={t("terminal.setupFailedDismiss")}
+					className="absolute top-3 right-3 px-2 py-1 text-fg-3 rounded hover:bg-elevated-hover hover:text-fg transition-colors"
+				>
+					✕
+				</button>
+				<div id="setup-failed-title" className="flex items-center gap-2 font-medium text-danger pr-8">
+					<span className="text-lg">⚠</span>
+					<span>{setupFailedTitle}</span>
+				</div>
+				<p className="text-fg-3 text-sm">{t("terminal.setupFailedDesc")}</p>
+				<div className="flex gap-3 pt-2">
+					<button
+						onClick={handleRerunSetup}
+						disabled={rerunningSetup}
+						className="flex-1 px-4 py-2 bg-accent-fill text-white rounded text-sm font-medium hover:bg-accent-fill-hover transition-colors disabled:opacity-50"
+					>
+						{rerunSetupLabel}
+					</button>
+					<button
+						onClick={handleStartFresh}
+						disabled={restarting}
+						className="flex-1 px-4 py-2 bg-elevated text-fg-2 rounded text-sm font-medium hover:bg-elevated-hover transition-colors disabled:opacity-50"
+					>
+						{restarting ? t("terminal.connecting") : t("terminal.setupFailedStartAnyway")}
+					</button>
+				</div>
+				<p className="text-fg-muted text-xs">{t("terminal.setupFailedHint")}</p>
+			</div>
+		</div>
+	);
+
+	const setupFailedNotice = (
+		<>
+			{setupFailedStrip}
+			{setupFailedCard}
+		</>
+	);
+
+	// A closed task has no workspace left to recover, so the only thing this pane
+	// owes the user is the way out — same empty state the task view shows when no
+	// task is selected.
+	if (isClosed) {
+		return (
+			<BackToKanbanEmptyState
+				testId="terminal-task-closed-screen"
+				message={task?.status === "cancelled" ? t("terminal.taskCancelledTitle") : t("terminal.taskCompletedTitle")}
+				hint={t("terminal.taskClosedHint")}
+				onBack={() => navigate({ screen: "project", projectId })}
+			/>
+		);
 	}
 
 	if (isPreparing && task && project) {
@@ -533,6 +707,33 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 			appendAndroidDraft({ kind: "task", taskId, projectId, rawMode: false }, `${escaped.join(" ")} `);
 		} else if (!rawMode && composerApiRef.current) composerApiRef.current.appendPaths(escaped);
 		else termHandle?.paste(`${escaped.join(" ")} `);
+	}
+
+	// The backend looked and found no session — the host was killed, died, or was
+	// never started. A dead terminal has to LOOK dead: the spinner it replaces
+	// could never resolve, because nothing is coming.
+	if (isNative && absentReads >= NATIVE_ABSENT_READS) {
+		return (
+			<div className="flex items-center justify-center h-full">
+				<div
+					data-testid="terminal-host-gone-screen"
+					className="bg-raised border border-edge rounded-lg p-6 max-w-md w-full space-y-4"
+				>
+					<div className="flex items-center gap-2 font-medium text-danger">
+						<span className="text-lg">⚠</span>
+						<span>{t("terminal.hostGoneTitle")}</span>
+					</div>
+					<p className="text-fg-3 text-sm">{t("terminal.hostGoneDesc")}</p>
+					<button
+						onClick={handleNativeRestart}
+						disabled={restarting}
+						className="w-full px-4 py-2 bg-accent-fill text-white rounded text-sm font-medium hover:bg-accent-fill-hover transition-colors disabled:opacity-50"
+					>
+						{restarting ? t("terminal.connecting") : t("terminal.hostGoneRestart")}
+					</button>
+				</div>
+			</div>
+		);
 	}
 
 	// ── Native multi-pane rendering ─────────────────────────────────────────────
@@ -843,6 +1044,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		</div>
 	);
 
+
 	return (
 		<div className="relative h-full w-full flex flex-col overflow-hidden">
 			{!hideInfoPanel && task && project && (
@@ -861,14 +1063,18 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 			)}
 			{narrow && ptyUrl ? (
 				// Narrow: a window switcher (outer) wraps the pane carousel (inner).
-				<MobileWindowCarousel taskId={taskId} onSwitch={() => setWindowEpoch((e) => e + 1)}>
-					<MobilePaneCarousel taskId={taskId} refreshKey={windowEpoch}>{terminalArea}</MobilePaneCarousel>
-				</MobileWindowCarousel>
+				<div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+					<MobileWindowCarousel taskId={taskId} onSwitch={() => setWindowEpoch((e) => e + 1)}>
+						<MobilePaneCarousel taskId={taskId} refreshKey={windowEpoch}>{terminalArea}</MobilePaneCarousel>
+					</MobileWindowCarousel>
+					{setupFailedNotice}
+				</div>
 			) : (
 				<div className="relative isolate flex-1 min-h-0 overflow-hidden">
 					{terminalArea}
 					{ptyUrl && <PaneZoomBadge taskId={taskId} />}
 					{ptyUrl && <ClosePanePicker taskId={taskId} />}
+					{setupFailedNotice}
 				</div>
 			)}
 			{touchInput && !androidComposer && termHandle && (

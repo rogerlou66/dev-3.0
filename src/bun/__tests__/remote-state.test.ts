@@ -20,7 +20,9 @@ import {
 	clearRemoteState,
 	clearRemoteStateIfOwnedBy,
 	isProcessAlive,
+	carriedOverState,
 	readRemoteState,
+	recordUpdateFailure,
 	releaseStartLock,
 	writeRemoteState,
 } from "../remote-state";
@@ -182,5 +184,164 @@ describe("isProcessAlive", () => {
 		expect(isProcessAlive(0)).toBe(false);
 		expect(isProcessAlive(-1)).toBe(false);
 		expect(isProcessAlive(1.5)).toBe(false);
+	});
+});
+
+describe("handoff records", () => {
+	// A dead pid that is not going to be recycled inside a test run. `fromPid` MUST
+	// look dead for a handoff to be ours to take, and `tunnel.pid` MUST look alive
+	// for the inherited process to be worth adopting — so these tests use
+	// process.pid for "alive" and this for "dead".
+	const DEAD_PID = 2_000_000_000;
+
+	it("round-trips a handoff whose writer has exited and whose tunnel is alive", () => {
+		writeRemoteState(sampleState({
+			handoff: { port: 41234, fromPid: DEAD_PID, tunnel: { pid: process.pid, url: "https://x.trycloudflare.com", metricsReadyUrl: "http://127.0.0.1:20241/ready" } },
+			lastUpdate: { fromVersion: "1.45.0", toVersion: "1.45.2", startedAt: "2026-08-20T01:00:00.000Z" },
+		}));
+		const read = readRemoteState();
+		expect(read?.handoff).toEqual({
+			port: 41234,
+			fromPid: DEAD_PID,
+			tunnel: { pid: process.pid, url: "https://x.trycloudflare.com", metricsReadyUrl: "http://127.0.0.1:20241/ready" },
+		});
+		expect(read?.lastUpdate?.toVersion).toBe("1.45.2");
+	});
+
+	it("discards a handoff whose writer is still running — it is not ours to take", () => {
+		writeRemoteState(sampleState({
+			handoff: { port: 41234, fromPid: process.pid, tunnel: null },
+		}));
+		expect(readRemoteState()?.handoff).toBeUndefined();
+	});
+
+	it("drops a DEAD tunnel but keeps the port — adopting it would publish an NXDOMAIN link", () => {
+		writeRemoteState(sampleState({
+			handoff: { port: 41234, fromPid: DEAD_PID, tunnel: { pid: DEAD_PID, url: "https://x.trycloudflare.com", metricsReadyUrl: null } },
+		}));
+		const handoff = readRemoteState()?.handoff;
+		expect(handoff?.port).toBe(41234);
+		expect(handoff?.tunnel).toBeNull();
+	});
+
+	it("rejects a handoff with an out-of-range port instead of trying to bind it", () => {
+		writeRemoteState(sampleState({
+			handoff: { port: 999_999, fromPid: DEAD_PID, tunnel: null },
+		}));
+		expect(readRemoteState()?.handoff).toBeUndefined();
+	});
+
+	it("leaves the keys absent for a record written before handoffs existed", () => {
+		writeRemoteState(sampleState());
+		expect(readRemoteState()?.handoff).toBeUndefined();
+		expect(readRemoteState()?.lastUpdate).toBeUndefined();
+	});
+
+	it("ignores a malformed handoff block rather than throwing", () => {
+		mkdirSync(REMOTE_DIR, { recursive: true });
+		writeFileSync(REMOTE_STATE_FILE, JSON.stringify({
+			...sampleState(),
+			handoff: "not an object",
+			lastUpdate: { fromVersion: 7 },
+		}));
+		const read = readRemoteState();
+		expect(read?.handoff).toBeUndefined();
+		expect(read?.lastUpdate).toBeUndefined();
+	});
+});
+
+// The failure that matters most — an update that applies and then does not boot —
+// destroys the process holding the in-memory attempt counter. The supervisor runs
+// in a DIFFERENT process, so the count only survives if it is on disk.
+describe("recordUpdateFailure", () => {
+	it("counts up across calls for the same version", () => {
+		writeRemoteState(sampleState());
+		recordUpdateFailure("1.46.0", "did not boot", 1000);
+		recordUpdateFailure("1.46.0", "did not boot again", 2000);
+
+		expect(readRemoteState()?.updateAttempts).toEqual({
+			version: "1.46.0",
+			failures: 2,
+			lastFailureMs: 2000,
+			lastError: "did not boot again",
+		});
+	});
+
+	it("resets the count when a NEW version starts failing", () => {
+		writeRemoteState(sampleState());
+		recordUpdateFailure("1.46.0", "boom", 1000);
+		recordUpdateFailure("1.47.0", "boom", 2000);
+
+		expect(readRemoteState()?.updateAttempts?.failures).toBe(1);
+		expect(readRemoteState()?.updateAttempts?.version).toBe("1.47.0");
+	});
+
+	it("keeps every other field of the record intact", () => {
+		writeRemoteState(sampleState({ port: 5555 }));
+		recordUpdateFailure("1.46.0", "boom", 1000);
+
+		const after = readRemoteState();
+		expect(after?.port).toBe(5555);
+		expect(after?.pid).toBe(process.pid);
+	});
+
+	it("does nothing when there is no server record to annotate", () => {
+		clearRemoteState();
+		expect(() => recordUpdateFailure("1.46.0", "boom", 1000)).not.toThrow();
+		expect(readRemoteState()).toBeNull();
+	});
+
+	it("stays absent on an ordinary record, so nothing drifts for older readers", () => {
+		writeRemoteState(sampleState());
+		expect(readRemoteState()?.updateAttempts).toBeUndefined();
+	});
+
+	it("rejects a malformed attempts block instead of trusting it", () => {
+		writeRemoteState(sampleState());
+		const raw = JSON.parse(require("node:fs").readFileSync(REMOTE_STATE_FILE, "utf-8"));
+		raw.updateAttempts = { version: "", failures: -3 };
+		writeFileSync(REMOTE_STATE_FILE, JSON.stringify(raw));
+
+		expect(readRemoteState()?.updateAttempts).toBeUndefined();
+	});
+});
+
+describe("carriedOverState", () => {
+	// The failure this exists for happens in ANOTHER process: the new build applies,
+	// does not boot, the supervisor rolls back, and the restored server writes its
+	// own state file BEFORE the failure is recorded. Dropping the counter on that
+	// write pinned it at 1 forever — the give-up after five attempts was unreachable
+	// and the box re-downloaded the same non-booting release every quiet window.
+	it("carries the update record AND the attempt counter across a restart", () => {
+		const prior: RemoteServerState = {
+			...sampleState(),
+			lastUpdate: { fromVersion: "1.45.0", toVersion: "1.46.0", startedAt: "2026-08-21T12:00:00Z" },
+			updateAttempts: { version: "1.46.0", failures: 3, lastFailureMs: 1000, lastError: "did not boot" },
+		};
+		writeRemoteState(prior);
+
+		const carried = carriedOverState(readRemoteState());
+
+		expect(carried.lastUpdate?.toVersion).toBe("1.46.0");
+		expect(carried.updateAttempts?.failures).toBe(3);
+	});
+
+	it("carries nulls when there was no predecessor at all", () => {
+		expect(carriedOverState(null)).toEqual({ lastUpdate: null, updateAttempts: null });
+	});
+
+	// Written back through a full round-trip, because the point is that the NEXT
+	// process reads it — and `recordUpdateFailure` then increments rather than resets.
+	it("survives being written into the successor's own record", () => {
+		writeRemoteState({
+			...sampleState(),
+			updateAttempts: { version: "1.46.0", failures: 4, lastFailureMs: 1000 },
+		});
+		const carried = carriedOverState(readRemoteState());
+
+		writeRemoteState({ ...sampleState(), pid: process.pid, ...carried });
+		recordUpdateFailure("1.46.0", "did not boot again", 2000);
+
+		expect(readRemoteState()?.updateAttempts?.failures).toBe(5);
 	});
 });

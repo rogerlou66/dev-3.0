@@ -331,6 +331,8 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 		}
 	}
 
+	// Copied for an agent to run, so it stays English in every locale — the same
+	// reason `bugHunters.nextPrompt` does. Not an untranslated string.
 	const devServerHintPrompt = t("header.devServerHintPrompt");
 
 	// Active + has-script states drive the glanceable running indicator. Green
@@ -340,7 +342,7 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 	const isStarting = hasDevScript && isTaskActive && devState === "starting";
 
 	const stateClasses = !hasDevScript
-		? "text-warning hover:text-warning hover:bg-warning/15 cursor-pointer border border-dashed border-warning/40"
+		? "text-warning-strong hover:text-warning-strong hover:bg-warning/15 cursor-pointer border border-dashed border-warning/40"
 		: !isTaskActive
 			? "text-fg-muted/50 cursor-not-allowed border border-transparent"
 			: isStarting
@@ -413,6 +415,7 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 					className={`flex items-center gap-1 px-2 py-1 rounded-lg transition-colors flex-shrink-0 ${stateClasses}`}
 					aria-label={devServerTitle}
 					aria-busy={isStarting}
+					data-tour-anchor="task.dev-server"
 				>
 					{devServerIcon}
 					{!compact && <span className="text-micro font-semibold">{devServerLabel}</span>}

@@ -78,6 +78,7 @@ const columns = {
 	"filter.funnelLabel": "Фильтровать задачи",
 	"filter.group.priority": "Приоритет",
 	"filter.group.status": "Статус",
+	"filter.group.spaces": "Пространства",
 	"filter.group.labels": "Метки",
 	"filter.group.agents": "Агенты",
 	"filter.group.flags": "Флаги",

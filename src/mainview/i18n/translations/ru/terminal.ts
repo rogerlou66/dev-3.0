@@ -2,6 +2,9 @@ const terminal = {
 	// TaskTerminal
 	"terminal.connecting": "Подключение...",
 	"terminal.syncing": "Синхронизация терминала...",
+	"terminal.taskCompletedTitle": "Задача завершена",
+	"terminal.taskCancelledTitle": "Задача отменена",
+	"terminal.taskClosedHint": "Её терминал и worktree удалены при закрытии задачи — запускать больше нечего.",
 	"terminal.envError": "Ошибка окружения задачи",
 	"terminal.worktreeNotFound": "Рабочая директория задачи больше не существует. Это может произойти, если worktree был удалён извне.",
 	"terminal.errorPath": "Worktree не найден:",
@@ -9,6 +12,9 @@ const terminal = {
 	"terminal.cancelTask": "Отменить задачу",
 	"terminal.sessionEnded": "Терминальная сессия завершена",
 	"terminal.sessionEndedDesc": "Процесс терминала завершился. Worktree и все файлы на месте.",
+	"terminal.hostGoneTitle": "Терминал этой задачи не запущен",
+	"terminal.hostGoneDesc": "Процесс-хост терминала пропал — убит, упал или ещё не стартовал. Worktree и все файлы на месте, разговор агента можно продолжить.",
+	"terminal.hostGoneRestart": "Перезапустить терминал",
 	"terminal.resumeAgentSession": "Возобновить сессию",
 	"terminal.copyHint": "Скопировано! Просто выделите текст в любой панели терминала — он автоматически попадает в буфер обмена, ⌘C не нужен.",
 	"terminal.searchPlaceholder": "Поиск в терминале…",
@@ -25,6 +31,15 @@ const terminal = {
 	"terminal.wakeResume": "Разбудить и продолжить агента",
 	"terminal.wakeShell": "Разбудить с чистым шеллом",
 	"terminal.wakeShellDesc": "Чистый шелл поднимается мгновенно; продолжение перечитывает переписку агента.",
+	"terminal.setupFailedTitle": "Setup упал (код {code})",
+	"terminal.setupFailedDesc": "Скрипт настройки проекта не доработал, поэтому агент не был запущен. Его можно запустить всё равно — промпт задачи сохранён.",
+	"terminal.setupFailedStartAnyway": "Всё равно запустить агента",
+	"terminal.setupFailedRerun": "Перезапустить setup",
+	"terminal.setupRerunning": "Setup идёт…",
+	"terminal.setupRerunFailed": "Не удалось перезапустить setup: {error}",
+	"terminal.setupFailedDismiss": "Закрыть",
+	"terminal.setupFailedAgentRunningDesc": "Агент работает — зависимостей может не быть.",
+	"terminal.setupFailedHint": "Зависимостей может не быть. Перезапуск setup агента не трогает, запуск с нуля — трогает.",
 
 	// Mobile pane pager (narrow viewport: one zoomed pane at a time)
 	"panePager.role": "Панели терминала",
@@ -119,6 +134,7 @@ const terminal = {
 	"cheatSheet.lastPane": "Последняя активная панель",
 	"cheatSheet.showPaneNumbers": "Показать номера панелей (прыжок по цифре)",
 	"cheatSheet.directionalSelect": "Выбрать панель по направлению",
+	"cheatSheet.directionalSelectNoPrefix": "Выбрать панель по направлению (без префикса)",
 	"cheatSheet.markPane": "Пометить текущую панель",
 	"cheatSheet.swapWithMarked": "Поменять текущую панель с помеченной",
 	"cheatSheet.swapWithPrevNext": "Поменять с предыдущей / следующей панелью",
@@ -255,6 +271,11 @@ const terminal = {
 	"terminal.filePreviewContentCopied": "Содержимое скопировано",
 	"terminal.filePreviewRendered": "Рендер",
 	"terminal.filePreviewRaw": "Исходник",
+	"terminal.rendererCrashed": "Отрисовщик терминала упал и не смог подняться сам. Нажмите, чтобы перезагрузить окно — сессия продолжает работать.",
+	"terminal.perf.title": "Производительность терминала",
+	"terminal.perf.close": "Закрыть панель производительности",
+	"terminal.perf.noPanes": "Ни один терминал не открыт. Откройте терминал задачи, чтобы начать измерения.",
+	"terminal.perf.legend": "p50 / p95 / max. fps — это цикл отрисовки, upd — как часто менялась картинка.",
 };
 
 export default terminal;

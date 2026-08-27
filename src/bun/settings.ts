@@ -57,6 +57,21 @@ function sanitizeShortcutOverrides(raw: unknown): GlobalSettings["keyboardShortc
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * `provider: "custom"` survives even with a blank command: the user's choice
+ * to leave Cloudflare must fail closed (no tunnel starts, the UI says the
+ * command is empty), never silently collapse back to the built-in provider —
+ * see the `misconfigured` kind in tunnel-provider.ts.
+ */
+function sanitizeRemoteTunnel(raw: unknown): GlobalSettings["remoteTunnel"] {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const r = raw as Record<string, unknown>;
+	if (r.provider !== "custom") return undefined;
+	const command = typeof r.command === "string" ? r.command : "";
+	const urlPattern = typeof r.urlPattern === "string" && r.urlPattern.trim() ? r.urlPattern : undefined;
+	return { provider: "custom", command, urlPattern };
+}
+
 const DEFAULT_SETTINGS: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
 	defaultConfigId: "claude-auto-opus5-medium",
@@ -112,6 +127,8 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		playSoundOnTaskComplete: d.playSoundOnTaskComplete ?? true,
 		externalApps: Array.isArray(d.externalApps) ? d.externalApps : undefined,
 		tipsDisabled: d.tipsDisabled === true ? true : undefined,
+		helpModeDiscovered: d.helpModeDiscovered === true ? true : undefined,
+		completedTours: Array.isArray(d.completedTours) ? d.completedTours.filter((id: unknown): id is string => typeof id === "string") : undefined,
 		taskOpenMode: d.taskOpenMode === "fullscreen" ? "fullscreen" : undefined,
 		terminalPathOpenMode:
 			d.terminalPathOpenMode === "preview" ||
@@ -127,9 +144,17 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 					: d.defaultDiffViewMode === "auto"
 						? "auto"
 						: undefined,
+		// Default-on toggle — only an explicit false is a stored opt-out.
+		remoteSilentUpdate: d.remoteSilentUpdate === false ? false : undefined,
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
 		skipQuitDialog: d.skipQuitDialog === true ? true : undefined,
 		importShellEnv: d.importShellEnv === false ? false : undefined,
+		// Undefined is the meaningful default here ("auto-detect"), so only one of
+		// the three known flavors is ever stored.
+		terminalShell:
+			d.terminalShell === "zsh" || d.terminalShell === "bash" || d.terminalShell === "sh"
+				? d.terminalShell
+				: undefined,
 		focusMode: d.focusMode === true ? true : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		agentRateLimitTracking: d.agentRateLimitTracking === false ? false : undefined,
@@ -138,20 +163,36 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		watchByDefault: typeof d.watchByDefault === "boolean" ? d.watchByDefault : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		suggestCompletingTasksAfterMerge: d.suggestCompletingTasksAfterMerge === false ? false : undefined,
+		// 0 is a meaningful stored value ("never auto-approve"), so only a missing
+		// or nonsensical entry falls back to the built-in default.
+		agentLaunchAutoApproveMinutes:
+			typeof d.agentLaunchAutoApproveMinutes === "number" &&
+			Number.isFinite(d.agentLaunchAutoApproveMinutes) &&
+			d.agentLaunchAutoApproveMinutes >= 0
+				? d.agentLaunchAutoApproveMinutes
+				: undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		prOriginTaskLink: d.prOriginTaskLink === false ? false : undefined,
 		agentsLayoutRevision: typeof d.agentsLayoutRevision === "number" ? d.agentsLayoutRevision : undefined,
 		// Default-off experimental toggle — only an explicit true is a stored opt-in.
 		pxpipeProxyEnabled: d.pxpipeProxyEnabled === true ? true : undefined,
+		// Bring-your-own-tunnel config; kept only when it names a runnable custom command.
+		remoteTunnel: sanitizeRemoteTunnel(d.remoteTunnel),
 		// Default-off beta toggle — only an explicit true is a stored opt-in.
 		experimentalTerminalBidi: d.experimentalTerminalBidi === true ? true : undefined,
+		// Default-off beta toggle — only an explicit true is a stored opt-in.
+		experimentalAgentTraffic: d.experimentalAgentTraffic === true ? true : undefined,
 		// Cross-provider favorite pointers; shape-validated, capped, empty ⇒ undefined.
 		favorites: sanitizeFavorites(d.favorites),
 		// User shortcut rebinds; sparse by design — absent means "all defaults".
 		keyboardShortcuts: sanitizeShortcutOverrides(d.keyboardShortcuts),
-		// Custom Review-toggle prompt; blank ⇒ the localized built-in text.
+		// Custom PR-review preset prompt; blank ⇒ the localized built-in text.
 		reviewModePrompt: typeof d.reviewModePrompt === "string" && d.reviewModePrompt.trim()
 			? d.reviewModePrompt
+			: undefined,
+		// Custom Coordinator preset prompt; blank ⇒ the built-in COORDINATOR_PROMPT.
+		coordinatorPrompt: typeof d.coordinatorPrompt === "string" && d.coordinatorPrompt.trim()
+			? d.coordinatorPrompt
 			: undefined,
 	};
 }

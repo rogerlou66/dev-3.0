@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type Dispatch } from "react";
 import { toast } from "../toast";
-import type { BoardColumnSlot, CodingAgent, CustomColumn, GlobalSettings, PortInfo, PRInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
+import type { BoardColumnSlot, CustomColumn, DevServerSummary, GlobalSettings, PortInfo, PRInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
 import { ALL_STATUSES, ACTIVE_STATUSES, ALL_PRIORITIES, getBoardColumns, DEFAULT_PRIORITY } from "../../shared/types";
 import { PRIORITY_NAME_KEYS } from "./priorityStyles";
 
@@ -23,6 +23,7 @@ import { useTipRotation } from "../hooks/useTipRotation";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useStatusColors } from "../hooks/useStatusColors";
+import { useAgents } from "../hooks/useAgents";
 import MobileBoardCarousel, { CAROUSEL_MAX_WIDTH, type CarouselColumn } from "./MobileBoardCarousel";
 
 interface KanbanBoardProps {
@@ -33,6 +34,7 @@ interface KanbanBoardProps {
 	bellCounts: Map<string, number>;
 	bellReasons?: Map<string, string[]>;
 	taskPorts: Map<string, PortInfo[]>;
+	taskDevServers: Map<string, DevServerSummary>;
 	taskResourceUsage?: Map<string, ResourceUsage>;
 	activeTaskId?: string;
 	disableGlobalFindShortcut?: boolean;
@@ -102,6 +104,7 @@ function KanbanBoard({
 	bellCounts,
 	bellReasons,
 	taskPorts,
+	taskDevServers,
 	taskResourceUsage,
 	activeTaskId,
 	disableGlobalFindShortcut = false,
@@ -110,7 +113,7 @@ function KanbanBoard({
 	const t = useT();
 	const isCarousel = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const statusColors = useStatusColors();
-	const [agents, setAgents] = useState<CodingAgent[]>([]);
+	const agents = useAgents();
 	const [globalSettings, setGlobalSettings] = useState<GlobalSettings>({
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-auto",
@@ -147,7 +150,6 @@ function KanbanBoard({
 	}, []);
 
 	useEffect(() => {
-		api.request.getAgents().then(setAgents).catch(() => {});
 		api.request.getGlobalSettings().then(setGlobalSettings).catch(() => {});
 		// Follow the settings push, like the sidebar's useTaskSortOrder does: a sort
 		// order changed in another window (or the remote browser) has to reorder this
@@ -400,7 +402,7 @@ function KanbanBoard({
 		() => buildFilterGroups(tasks, resolver, {
 			priorityCandidates,
 			statusCandidates,
-			flagLabels: { attention: t("filter.flag.attention"), port: t("filter.flag.port") },
+			flagLabels: { attention: t("filter.flag.attention"), port: t("filter.flag.port"), home: t("spaces.homeGroup") },
 		}),
 		[tasks, resolver, priorityCandidates, statusCandidates, t],
 	);
@@ -561,6 +563,10 @@ function KanbanBoard({
 	// Find the first column with room for the single board tip card.
 	const tipColumnId: string | null = useMemo(() => {
 		if (!currentTip) return null;
+		// A board with no tasks at all belongs to someone who has not started yet:
+		// the To Do column's own empty state has to explain the first task, and a
+		// tip about hovering a task card is noise to a user who has no cards.
+		if (tasks.length === 0) return null;
 		const orderedCols = getOrderedColumns();
 		for (const slot of orderedCols) {
 			if (slot.type === "builtin") {
@@ -601,6 +607,7 @@ function KanbanBoard({
 		</button>
 	);
 	const commonProps = {
+		boardEmpty: tasks.length === 0,
 		project,
 		dispatch,
 		navigate,
@@ -619,6 +626,7 @@ function KanbanBoard({
 		bellCounts,
 		bellReasons,
 		taskPorts,
+		taskDevServers,
 		taskResourceUsage,
 		activeTaskId,
 		movingTaskIds,

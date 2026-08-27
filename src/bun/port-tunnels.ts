@@ -49,7 +49,7 @@ function emitChanged(taskId: string): void {
 	pushFn("exposedPortsChanged", { taskId, ports: getExposedPorts(taskId) });
 }
 
-// A readiness-watchdog restart rotates the random Quick Tunnel hostname.
+// A readiness-watchdog restart may rotate the tunnel's random hostname.
 // Reuse the existing push path so every port surface replaces the stale URL.
 tunnelManager.setChangeHook((entry) => {
 	if (entry.taskId) emitChanged(entry.taskId);
@@ -149,7 +149,7 @@ export function findSharedTunnelByPort(port: number): TunnelEntry | undefined {
 /**
  * Called by the port-scan poller every ~10 s with the live port set for a task.
  * Increments a per-tunnel miss counter; after `LIVENESS_MISS_LIMIT` consecutive
- * misses (~20 s) the tunnel is stopped automatically — keeps stale cloudflared
+ * misses (~20 s) the tunnel is stopped automatically — keeps stale tunnel
  * processes from outliving the dev-server they were exposing.
  *
  * Synthetic taskId `__headless__` (used by `--expose-ports`) is intentionally

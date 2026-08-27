@@ -86,7 +86,7 @@ html {
 	--success-fill: 15 118 54;
 	--success-fill-hover: 11 91 42;
 	--warning: 240 210 78;
-	--warning-strong: 240 210 78; /* warning ink on a warning-tinted fill */
+	--warning-strong: 240 210 78; /* the ink; on dark paper it is the same yellow */
 	/* Solid fills under white ink — --warning is a light yellow, unsuitable for
 	   filled buttons. These deeper values give white Lc ≥ 75. */
 	--warning-fill: 133 77 14;
@@ -153,6 +153,15 @@ html {
 	/* ---- Shadows ---- */
 	--shadow-column: 0 10px 30px -10px rgb(0 0 0 / 0.3);
 	--shadow-card-hover: 0 8px 20px -6px rgb(0 0 0 / 0.25);
+	/* Floating layer (tooltips, hover cards). The inset rim light is load-bearing: a black
+	   shadow darkens --surface-base by ~2/255, so on dark the cast shadow alone cannot lift
+	   anything. See decisions/2026/08/22/popover-elevation-needs-a-rim-light.md. */
+	--shadow-popover:
+		0 0 0 1px rgb(0 0 0 / 0.55),
+		0 2px 4px -1px rgb(0 0 0 / 0.5),
+		0 12px 24px -8px rgb(0 0 0 / 0.7),
+		0 32px 64px -24px rgb(0 0 0 / 0.75),
+		inset 0 1px 0 rgb(255 255 255 / 0.07);
 }
 
 [data-theme="light"] {
@@ -201,8 +210,13 @@ html {
 	/* Solid fills under white ink. */
 	--success-fill: 10 114 57;
 	--success-fill-hover: 8 88 44;
-	--warning: 145 118 13;
-	--warning-strong: 118 96 9; /* --warning on a warning/10 fill is only 3.82:1 */
+	/* Yellow is the one hue sRGB cannot make dark and yellow at the same time:
+	   at the ~0.575 lightness every other light-theme token sits at, its chroma
+	   ceiling is 0.114 against danger's 0.218, so "yellow ink" renders as mud.
+	   So the roles split here — --warning is paper/border/fill, --warning-strong
+	   is the ink that goes on it (9.6:1 on a warning/15 chip). */
+	--warning: 227 185 20;
+	--warning-strong: 70 57 15;
 	/* Solid fills under white ink. */
 	--warning-fill: 105 86 9;
 	--warning-fill-hover: 82 67 7;
@@ -273,6 +287,13 @@ html {
 	/* ---- Shadows (blue-tinted, layered for depth) ---- */
 	--shadow-column: 0 8px 30px -8px rgb(80 100 140 / 0.13), 0 2px 8px -2px rgb(80 100 140 / 0.06);
 	--shadow-card-hover: 0 8px 24px -6px rgb(80 100 140 / 0.14);
+	/* Floating layer. No rim light here — on paper it washes out, so the shadow carries
+	   the whole separation and is heavier than the card lift above. */
+	--shadow-popover:
+		0 0 0 1px rgb(80 100 140 / 0.12),
+		0 2px 4px -1px rgb(80 100 140 / 0.14),
+		0 12px 24px -8px rgb(80 100 140 / 0.22),
+		0 32px 64px -24px rgb(80 100 140 / 0.26);
 }
 
 html {
@@ -314,6 +335,14 @@ body, #root {
 .glass-card:hover {
 	background: rgb(var(--glass-card-rgb) / var(--glass-card-hover-alpha));
 	border-color: rgb(var(--glass-border-rgb) / var(--glass-border-card-hover-alpha));
+}
+/* A coordinator's identity border, hover included. Needed as a class rule because
+   .glass-card sets border-color and outranks a Tailwind border utility. 2px, because
+   a dashed hairline reads as noise rather than as a deliberate marker. */
+.task-card-coordinator,
+.task-card-coordinator:hover {
+	border-color: rgb(var(--success) / 0.6);
+	border-width: 2px;
 }
 
 .glass-header {
@@ -466,6 +495,18 @@ button {
 	outline: none;
 }
 
+/* ---- Image edge ------------------------------------------------------------
+   A screenshot rendered flush on a panel has no edge of its own where its own
+   pixels happen to match the surface. Pure black/white at 10% rather than a
+   tinted neutral: a tinted line picks up the surface under it and reads as
+   dirt on the image edge. */
+.img-edge {
+	box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.1);
+}
+[data-theme="light"] .img-edge {
+	box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.1);
+}
+
 /* ---- Toast auto-dismiss progress bar ---- */
 
 @keyframes toast-shrink {
@@ -600,6 +641,27 @@ button {
 		align-items: center;
 		justify-content: center;
 	}
+}
+
+/* ---- Warning paper -------------------------------------------------------
+   Every other state role says "this is mine" with coloured ink. Yellow cannot:
+   see the --warning note above. So a control that must read as yellow carries
+   the hue in its background instead, and only in the light theme — in dark the
+   ink is already yellow and this rule is a deliberate no-op. Alpha 0.5 puts the
+   --warning-strong ink at 7.9:1 on the result. */
+[data-theme="light"] .warning-paper {
+	background-color: rgb(var(--warning) / 0.5);
+	/* The paper already says "yellow", so the outline goes back to the neutral
+	   one every other control wears — a yellow border on yellow paper reads as
+	   a fuzzy edge, not as a button. One step darker than --border-default,
+	   because the yellow paper eats the contrast a neutral button's outline
+	   gets for free: --border-active on this fill matches the 1.7:1 a plain
+	   button's edge has against its own surface. */
+	border-color: rgb(var(--border-active));
+}
+[data-theme="light"] .warning-paper:hover {
+	background-color: rgb(var(--warning) / 0.65);
+	border-color: rgb(var(--text-tertiary));
 }
 
 /* ---- Close-pane picker: marching-ants selection marquee -------------------
@@ -1186,6 +1248,37 @@ svg .hdr-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 .header-anim:hover .hdr-ptd2 { animation: hdr-pt-dot 2.4s ease-in-out .2s infinite; }
 .header-anim:hover .hdr-pt-prompt { animation: hdr-pt-prompt 2.4s ease-in-out infinite; }
 .header-anim:hover .hdr-pt-cursor { animation: hdr-pt-cursor 2.4s steps(1) infinite; }
+
+/* -- Agent traffic: dots travel the wires, the middle one against the flow -- */
+@keyframes hdr-wire-out {
+	0%, 6% { transform: translateX(0); opacity: 0; }
+	18% { opacity: 1; }
+	72% { opacity: 1; }
+	88%, 100% { transform: translateX(10px); opacity: 0; }
+}
+@keyframes hdr-wire-back {
+	0%, 6% { transform: translateX(0); opacity: 0; }
+	18% { opacity: 1; }
+	72% { opacity: 1; }
+	88%, 100% { transform: translateX(-10px); opacity: 0; }
+}
+/* One-shot on arrival: a message landed, and the count moved while nobody looked. */
+@keyframes hdr-wire-arrive {
+	0% { transform: scale(1); }
+	35% { transform: scale(1.14); }
+	100% { transform: scale(1); }
+}
+.header-anim:hover .hdr-wire-1 { animation: hdr-wire-out 2.4s ease-in-out infinite; }
+.header-anim:hover .hdr-wire-2 { animation: hdr-wire-back 2.4s ease-in-out .35s infinite; }
+.header-anim:hover .hdr-wire-3 { animation: hdr-wire-out 2.4s ease-in-out .7s infinite; }
+.hdr-wire-arrive { animation: hdr-wire-arrive .55s cubic-bezier(0.2, 0, 0, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+	.header-anim:hover .hdr-wire-1,
+	.header-anim:hover .hdr-wire-2,
+	.header-anim:hover .hdr-wire-3,
+	.hdr-wire-arrive { animation: none; }
+}
 
 /* -- Pull / Update: the arrow drops out of / launches into the cloud -- */
 @keyframes hdr-pull-arrow {

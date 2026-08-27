@@ -2,7 +2,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PATHS } from "../electrobun-platform";
-import type { AgentCheckResult, CodingAgent, ConfigSourceEntry, Dev3RepoConfig, GitHubCliStatus, GlobalSettings, Project, ProjectSettingsUpdate, RequirementCheckResult, RosettaWarningInfo } from "../../shared/types";
+import type { AgentCheckResult, CodingAgent, ConfigSourceEntry, Dev3RepoConfig, GitHubCliStatus, GlobalSettings, HarnessReadinessReport, Project, ProjectSettingsUpdate, RequirementCheckResult, RosettaWarningInfo, ShellAvailability } from "../../shared/types";
+import { SHELL_FALLBACK_ORDER, type ShellFlavor, shellCandidatePaths } from "../../shared/posix-shell";
+import { getUserShell, resolveUserShell, setShellPreference } from "../shell-env";
 import * as data from "../data";
 import * as agents from "../agents";
 import * as github from "../github";
@@ -11,22 +13,33 @@ import * as rosetta from "../rosetta";
 import * as repoConfig from "../repo-config";
 import * as pty from "../pty-server";
 import { tmux } from "../tmux";
+import { writeTmuxConfigs } from "../tmux/config";
 import { loadSettings, saveSettings } from "../settings";
 import { toggleFavorite } from "../../shared/favorites";
 import { DEV3_HOME } from "../paths";
+import { writeDev3SelfShim } from "../cli-self-install";
 import { isFreshStartMode } from "../fresh-start";
 import { spawn } from "../spawn";
-import { setCurrentUiTheme } from "../theme-state";
+import { getCurrentUiTheme, setCurrentUiTheme } from "../theme-state";
 import { extractConfigFromParams, getPushMessage, getSystemRequirements, log, resolveBinaryPath, setFocusMode } from "./shared";
 import { binaryCandidatesOnPath, hasModelProviderSection, tmuxSearchPaths } from "./shared-pure";
 import { agentBinaryPathOverride, isExecutableFile } from "../executable";
+import { harnessReadinessFrom } from "../harness-readiness";
 import { validateEnvMap } from "../../shared/env-text";
+import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH } from "../../shared/types";
 
 /** Reject malformed env maps at the RPC boundary — the UI validates too, but
  *  saves must not depend on the client being well-behaved. */
 function assertValidEnvParam(env: unknown): void {
 	const problems = validateEnvMap(env);
 	if (problems.length > 0) throw new Error(`Invalid env config: ${problems.join("; ")}`);
+}
+
+/** A rename must never be able to blank a project's name out of the board. */
+function requireProjectName(raw: string): string {
+	const name = normalizeProjectName(raw);
+	if (!name) throw new Error(`Invalid project name: must be 1-${PROJECT_NAME_MAX_LENGTH} characters`);
+	return name;
 }
 
 // `resolveOperationalProjectConfig` moved to ../repo-config (it depends only on
@@ -72,6 +85,7 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 		: await repoConfig.saveConfigToWinningLayer(project.path, extractConfigFromParams(params));
 	const updates = {
 		...configUpdates,
+		...(params.name !== undefined ? { name: requireProjectName(params.name) } : {}),
 		...(params.githubAuthHost !== undefined ? { githubAuthHost: params.githubAuthHost } : {}),
 		...(params.githubAuthLogin !== undefined ? { githubAuthLogin: params.githubAuthLogin } : {}),
 		...(params.sensitive !== undefined ? { sensitive: params.sensitive } : {}),
@@ -79,6 +93,9 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 		// record so the global setting takes over again.
 		...(params.reviewModePrompt !== undefined
 			? { reviewModePrompt: params.reviewModePrompt.trim() ? params.reviewModePrompt : undefined }
+			: {}),
+		...(params.coordinatorPrompt !== undefined
+			? { coordinatorPrompt: params.coordinatorPrompt.trim() ? params.coordinatorPrompt : undefined }
 			: {}),
 	};
 	const saved = await data.updateProject(params.projectId, updates);
@@ -150,8 +167,53 @@ async function getGitHubCliStatus(): Promise<GitHubCliStatus> {
 	return status;
 }
 
+/**
+ * Which shells this machine has and which one dev3 runs, so the Settings screen
+ * can say "zsh is not installed here — using bash" instead of leaving the user
+ * with a chosen shell that silently never starts.
+ */
+function getShellAvailability(): ShellAvailability {
+	const installed: Partial<Record<ShellFlavor, string>> = {};
+	if (process.platform !== "win32") {
+		for (const flavor of SHELL_FALLBACK_ORDER) {
+			const found = shellCandidatePaths(flavor).find((path) => isExecutableFile(path));
+			if (found) installed[flavor] = found;
+		}
+	}
+	const availability: ShellAvailability = {
+		resolved: process.platform === "win32" ? null : resolveUserShell(),
+		installed,
+	};
+	log.info("← getShellAvailability", { resolved: availability.resolved?.path, installed });
+	return availability;
+}
+
+/**
+ * Push the new shell everywhere a live process still reads the old one.
+ *
+ * `$SHELL` is what the native backend launches (`defaultNativeShellLaunchSpec`)
+ * and `default-shell` in the tmux config is what a pane the user splits off
+ * inherits. Both are frozen at boot, so without this the picker only takes
+ * effect after a restart while Settings already reports the new shell.
+ *
+ * The theme is re-applied, not chosen: sourcing the config into a live server
+ * goes through `applyTmuxTheme`, which also pins the active themed config path.
+ */
+async function applyShellChange(theme: "dark" | "light"): Promise<void> {
+	try {
+		process.env.SHELL = getUserShell();
+		writeTmuxConfigs();
+		await pty.applyTmuxTheme(theme);
+	} catch (err) {
+		log.warn("Failed to push the shell change into tmux (non-fatal)", { error: String(err) });
+	}
+}
+
 async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	log.info("→ saveGlobalSettings", { params });
+	// Terminals launched after this point must use the newly chosen shell; the
+	// resolver caches for an hour, so it has to be told.
+	setShellPreference(params.terminalShell);
 	// A JSON-RPC patch may omit optional `focusMode`; preserve the live gate in
 	// that case instead of accidentally releasing queued agent notifications while
 	// the user changes an unrelated setting.
@@ -163,6 +225,12 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	const stored = await loadSettings();
 	const next: GlobalSettings = { ...params, analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId };
 	await saveSettings(next);
+	// `resolvedTheme` may be absent (nothing has called setTmuxTheme yet); the
+	// live in-memory theme is the fallback, never a hardcoded "dark" — that would
+	// flip a light-theme user's terminals on an unrelated shell change.
+	if (process.platform !== "win32" && stored.terminalShell !== next.terminalShell) {
+		await applyShellChange(next.resolvedTheme ?? getCurrentUiTheme());
+	}
 	getPushMessage()?.("globalSettingsUpdated", next);
 	log.info("← saveGlobalSettings done");
 }
@@ -180,7 +248,19 @@ async function toggleFavoriteAgent(params: { agentId: string; configId: string }
 	return next;
 }
 
-async function installDev3Cli(): Promise<{ installedFrom: string }> {
+/**
+ * Link this build's CLI to the frozen `~/.dev3.0/bin/dev3`, and arm a sibling
+ * `dev3-self` aimed at THIS instance.
+ *
+ * The two halves answer different questions. `bin/dev3` decides which BINARY
+ * every shell and every agent hook runs — unchanged behavior, and it must stay
+ * instance-neutral. `dev3-self` decides which INSTANCE a human's shell reaches:
+ * a dev build booted by this task's devScript owns its own dev-server, and a
+ * freshly built CLI talking to the installed app is why new flags look broken.
+ * See `writeDev3SelfShim` for why arming the second name — never `bin/dev3` —
+ * is what keeps agent hooks out of a guest instance.
+ */
+async function installDev3Cli(): Promise<{ installedFrom: string; selfShimPath: string; selfInstance: string }> {
 	log.info("→ installDev3Cli");
 	const cliBinDir = `${DEV3_HOME}/bin`;
 	const cliDest = `${cliBinDir}/dev3`;
@@ -192,8 +272,13 @@ async function installDev3Cli(): Promise<{ installedFrom: string }> {
 	try { unlinkSync(cliDest); } catch {}
 	symlinkSync(source, cliDest);
 	chmodSync(cliDest, 0o755);
-	log.info("← installDev3Cli", { from: source, to: cliDest });
-	return { installedFrom: source };
+	// DEV3_TASK_ID is set only when this app instance was itself launched from a
+	// task (a devScript dev build, or `dev3 remote` from an agent pane) — exactly
+	// the "guest" case worth aiming at. The primary app arms `primary`, which is
+	// honest and idempotent rather than a file that quietly means something else.
+	const shim = writeDev3SelfShim(DEV3_HOME, source, process.env.DEV3_TASK_ID || null);
+	log.info("← installDev3Cli", { from: source, to: cliDest, shim: shim.path, selector: shim.selector });
+	return { installedFrom: source, selfShimPath: shim.path, selfInstance: shim.selector };
 }
 
 async function getAgents(): Promise<CodingAgent[]> {
@@ -206,6 +291,9 @@ async function getAgents(): Promise<CodingAgent[]> {
 async function saveAgents(params: { agents: CodingAgent[] }): Promise<void> {
 	log.info("→ saveAgents", { count: params.agents.length });
 	await agents.saveAllAgents(params.agents);
+	// The merged list, not what the caller sent: built-in presets and user
+	// overrides only exist merged, and every listener renders that view.
+	getPushMessage()?.("agentsUpdated", await agents.getAllAgents());
 	log.info("← saveAgents done");
 }
 
@@ -217,9 +305,26 @@ async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: st
 	return result;
 }
 
+/** True in the `dev3 remote` server, where the bundle-swap updater does not exist. */
+function isHeadless(): boolean {
+	return process.env.DEV3_HEADLESS === "1";
+}
+
 async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
 	log.info("-> downloadUpdate");
 	const settings = await loadSettings();
+	// Headless has no bundle to download: the update is a brew upgrade or a CLI
+	// tarball, and "download" means pre-fetching it while the server keeps serving.
+	if (isHeadless()) {
+		const { buildPlan, stageUpdate } = await import("../self-update");
+		const { plan } = await buildPlan(settings.updateChannel);
+		if (plan.kind === "refused") return { ok: false, error: plan.reason };
+		if (plan.kind === "up-to-date") return { ok: true };
+		getPushMessage()?.("updateDownloadProgress", { status: "downloading", progress: 0 });
+		const staged = await stageUpdate(plan);
+		getPushMessage()?.("updateDownloadProgress", { status: staged.ok ? "complete" : "error", progress: 100 });
+		return staged.ok ? { ok: true } : { ok: false, error: staged.error };
+	}
 	const result = await updater.downloadUpdateForChannel(
 		settings.updateChannel,
 		(status, progress) => {
@@ -230,9 +335,53 @@ async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
 	return result;
 }
 
-async function applyUpdate(): Promise<void> {
+async function applyUpdate(): Promise<{ restarting: boolean; message?: string }> {
 	log.info("-> applyUpdate");
+	if (isHeadless()) {
+		const settings = await loadSettings();
+		const { runSelfUpdate } = await import("../self-update");
+		const outcome = await runSelfUpdate({ channel: settings.updateChannel, restart: true });
+		// Throwing is how the renderer's Restart button reports a failure (it toasts
+		// the message), and a refusal IS a failure from the button's point of view.
+		if (!outcome.ok) throw new Error(outcome.message);
+		// A SUCCESS THAT IS NOT A RESTART STILL HAS TO BE REPORTED. An interactive
+		// `dev3 remote --no-detach` has no supervisor, so the update is installed and the
+		// process stays alive — resolving silently left the button spinning "Restarting…"
+		// with the sentence explaining the manual restart going nowhere.
+		return { restarting: outcome.restarting, message: outcome.message };
+	}
 	await updater.applyUpdate();
+	return { restarting: true };
+}
+
+/**
+ * What the update popover needs to warn before restarting: whether this is a
+ * headless box at all, whether the app is being reached remotely, and how many
+ * tasks are mid-flight right now.
+ *
+ * The task count is a WARNING, not a gate. A restart does not kill an agent — tmux
+ * sessions are detached and lifecycles are rehydrated at boot — so the button stays
+ * enabled; the count just lets someone on a phone decide to wait a minute.
+ *
+ * `remoteActive` IS a gate, but only over the unattended countdown: nobody in a
+ * browser can see a timer running on the desktop, so it must not fire under them.
+ * The manual restart stays available in every state.
+ */
+async function getUpdateRestartContext(): Promise<{ headless: boolean; remoteActive: boolean; tasksInProgress: number }> {
+	const headless = isHeadless();
+	const { isRemoteAccessActive } = await import("../remote-access-server");
+	const remoteActive = isRemoteAccessActive();
+	let tasksInProgress = 0;
+	try {
+		const projects = [...await data.loadProjects(), ...await data.loadVirtualProjects()];
+		for (const project of projects) {
+			const tasks = await data.loadTasks(project);
+			tasksInProgress += tasks.filter((task) => task.status === "in-progress").length;
+		}
+	} catch (err) {
+		log.warn("getUpdateRestartContext: could not count in-progress tasks", { error: String(err) });
+	}
+	return { headless, remoteActive, tasksInProgress };
 }
 
 async function saveLastRoute({ route }: { route: string }): Promise<void> {
@@ -413,6 +562,14 @@ async function checkAgentAvailability(): Promise<AgentCheckResult[]> {
 	return results;
 }
 
+/** Availability plus credential evidence — see `harness-readiness.ts` for why the
+ *  two are separate questions. */
+async function checkHarnessReadiness(): Promise<HarnessReadinessReport> {
+	const report = harnessReadinessFrom(await checkAgentAvailability());
+	log.info("<- checkHarnessReadiness", { usable: report.usable, noneInstalled: report.noneInstalled });
+	return report;
+}
+
 async function setAgentBinaryPath(params: { agentId: string; path: string }): Promise<void> {
 	log.info("-> setAgentBinaryPath", params);
 	if (!existsSync(params.path)) {
@@ -464,6 +621,7 @@ export const settingsConfigHandlers = {
 	getRepoConfigSources,
 	getGlobalSettings,
 	getGitHubCliStatus,
+	getShellAvailability,
 	saveGlobalSettings,
 	toggleFavoriteAgent,
 	installDev3Cli,
@@ -472,6 +630,7 @@ export const settingsConfigHandlers = {
 	checkForUpdate,
 	downloadUpdate,
 	applyUpdate,
+	getUpdateRestartContext,
 	saveLastRoute,
 	getLastRoute,
 	getAppVersion,
@@ -480,6 +639,7 @@ export const settingsConfigHandlers = {
 	checkGhAvailable,
 	setCustomBinaryPath,
 	checkAgentAvailability,
+	checkHarnessReadiness,
 	setAgentBinaryPath,
 	checkCodexBedrockConfig,
 	setTmuxTheme,

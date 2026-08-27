@@ -498,6 +498,66 @@ describe("task update", () => {
 		});
 	});
 
+	it("sends --type coordinator as a standalone update", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, taskType: "coordinator" },
+			titlePreserved: false,
+			roleDelivery: "delivered",
+		}));
+
+		await handleTask("update", args(["aaaaaaaa"], { type: "coordinator" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.update", {
+			taskId: "aaaaaaaa",
+			taskType: "coordinator",
+		});
+		expect(stderrOutput).toContain("told the running agent");
+	});
+
+	it("maps --type standard onto a cleared type", async () => {
+		mockSend.mockResolvedValue(okResp({ task: FAKE_TASK, titlePreserved: false, roleDelivery: "no-session" }));
+
+		await handleTask("update", args(["aaaaaaaa"], { type: "standard" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.update", { taskId: "aaaaaaaa", taskType: null });
+	});
+
+	// A role change nobody could deliver must never read like a success.
+	it("warns loudly when the running agent could not be told", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, taskType: "coordinator" },
+			titlePreserved: false,
+			roleDelivery: "not-delivered",
+		}));
+
+		await handleTask("update", args(["aaaaaaaa"], { type: "coordinator" }), SOCKET, null);
+
+		expect(stderrOutput).toContain("could NOT tell the running agent");
+	});
+
+	it("sends --type pr-review", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, taskType: "pr-review" },
+			titlePreserved: false,
+			roleDelivery: "no-session",
+		}));
+
+		await handleTask("update", args(["aaaaaaaa"], { type: "pr-review" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.update", {
+			taskId: "aaaaaaaa",
+			taskType: "pr-review",
+		});
+	});
+
+	it("rejects an unknown --type before sending", async () => {
+		await expect(
+			handleTask("update", args(["aaaaaaaa"], { type: "overlord" }), SOCKET, null),
+		).rejects.toThrow("EXIT_3");
+		expect(stderrOutput).toContain("--type");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
 	it("rejects an invalid --manual-completion value before sending", async () => {
 		await expect(
 			handleTask("update", args(["aaaaaaaa"], { "manual-completion": "sometimes" }), SOCKET, null),
@@ -1407,7 +1467,7 @@ describe("task move — agent asking to start another task", () => {
 	const OTHER = "bbbbbbbb-1111-2222-3333-444444444444";
 
 	it("tells the app which task is asking, so a foreign activation can be gated", async () => {
-		mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other task", replyCommand: 'dev3 message --task seq:77 "your message"' }));
+		mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other task", launched: [{ variantIndex: null, replyCommand: 'dev3 message --task seq:77 "your message"' }] }));
 
 		await handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX);
 
@@ -1419,7 +1479,7 @@ describe("task move — agent asking to start another task", () => {
 	});
 
 	it("prints the new task's seq and how to talk to it on approval", async () => {
-		mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other task", replyCommand: 'dev3 message --task seq:77 "your message"' }));
+		mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other task", launched: [{ variantIndex: null, replyCommand: 'dev3 message --task seq:77 "your message"' }] }));
 
 		await handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX);
 
@@ -1434,6 +1494,29 @@ describe("task move — agent asking to start another task", () => {
 			handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX),
 		).rejects.toThrow(`EXIT_${CLI_EXIT_CODE_LAUNCH_DECLINED}`);
 		expect(stderrOutput).toContain("declined the launch request");
+	});
+
+	it("hands out one address per variant when the user launched a group", async () => {
+		// The seq is shared by the whole group, so quoting it as THE address would
+		// give the requester a handle the CLI rejects as ambiguous.
+		mockSend.mockResolvedValue(okResp({
+			approved: true,
+			seq: 77,
+			title: "Other task",
+			launched: [
+				{ variantIndex: 1, replyCommand: 'dev3 message --task 11111111 "your message"' },
+				{ variantIndex: 2, replyCommand: 'dev3 message --task 22222222 "your message"' },
+				{ variantIndex: 3, replyCommand: 'dev3 message --task 33333333 "your message"' },
+			],
+		}));
+
+		await handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX);
+
+		expect(stdoutOutput).toContain("starting as 3 variants");
+		expect(stdoutOutput).toContain("variant #1  dev3 message --task 11111111");
+		expect(stdoutOutput).toContain("variant #3  dev3 message --task 33333333");
+		// Never hand back the shared seq as an address for a live group.
+		expect(stdoutOutput).not.toContain('--task seq:77 "your message"');
 	});
 
 	it("keeps the agent's OWN status move on the fast path", async () => {
@@ -1496,5 +1579,48 @@ describe("task create --scratch --run", () => {
 		await expect(
 			handleTask("create", args([], { scratch: "true", run: "true" }), SOCKET, CTX),
 		).rejects.toThrow(`EXIT_${CLI_EXIT_CODE_LAUNCH_DECLINED}`);
+	});
+});
+
+describe("task open", () => {
+	it("sends task.open with the explicit id", async () => {
+		mockSend.mockResolvedValue(okResp({ taskId: FAKE_TASK.id, projectId: "proj-001", delivered: true }));
+
+		await handleTask("open", args(["aaaaaaaa"]), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.open", { taskId: "aaaaaaaa" });
+		expect(stdoutOutput).toContain("Opened task aaaaaaaa in the app.");
+	});
+
+	it("auto-detects the task and project from the worktree context", async () => {
+		mockSend.mockResolvedValue(okResp({ taskId: FAKE_TASK.id, projectId: "proj-001", delivered: true }));
+
+		await handleTask("open", args([]), SOCKET, CTX);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.open", {
+			taskId: CTX.taskId,
+			projectId: CTX.projectId,
+		});
+	});
+
+	it("reports a reopened window separately from a focused one", async () => {
+		mockSend.mockResolvedValue(okResp({ taskId: FAKE_TASK.id, delivered: true, reopened: true }));
+
+		await handleTask("open", args(["aaaaaaaa"]), SOCKET, null);
+
+		expect(stdoutOutput).toContain("Opening a window on task aaaaaaaa.");
+	});
+
+	it("says nothing was opened when the app has no renderer to navigate", async () => {
+		mockSend.mockResolvedValue(okResp({ taskId: FAKE_TASK.id, delivered: false }));
+
+		await handleTask("open", args(["aaaaaaaa"]), SOCKET, null);
+
+		expect(stdoutOutput).toContain("nothing was opened");
+	});
+
+	it("exits with a usage error when no task can be resolved", async () => {
+		await expect(handleTask("open", args([]), SOCKET, null)).rejects.toThrow(/EXIT_/);
+		expect(mockSend).not.toHaveBeenCalled();
 	});
 });

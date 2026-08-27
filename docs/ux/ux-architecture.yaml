@@ -66,6 +66,21 @@ ux_architecture:
         git: "Repo-backed project; tasks get a git worktree + branch (default when kind absent)."
         virtual: "An 'Operations' board: tasks run an agent + shell in a managed temp dir (or a chosen folder), NO git worktree/branch/diff/PR; review columns hidden. Stored in a separate ~/.dev3.0/virtual-projects.json. One built-in board ships by default and hosts the Quick-shell operation (⇧⌘`)."
       evidence: ["src/shared/types.ts (Project.kind)", "src/mainview/components/ActivityOverview.tsx", "src/mainview/components/AddProjectModal.tsx", "src/bun/data.ts (addVirtualProject)", "decisions/2026/06/24/virtual-operations-board-identity.md"]
+    space:
+      label: "Space"
+      plural: "Spaces"
+      observed: true
+      primary_route: "screen:dashboard"      # a rail entry + a group header; NEVER its own screen
+      detail_route: null                     # a space is a grouping, not a place: no board, no breadcrumb
+      owner: "workspace"
+      owns: []                               # references projects; owns nothing (git never moves)
+      common_actions: ["create", "rename", "delete", "reorder", "edit_projects", "filter_dashboard", "hide_on_camera"]
+      membership: "Many-to-many by project.id, ordered per space. A project in several spaces renders under each. Dangling ids are normal and skipped silently."
+      computed_home: "Projects with no membership group under a computed `Home` heading — never stored, not renameable/deletable, absent from every membership picker."
+      never: "A merged space board, a space route, per-space columns/labels, a space colour or letter badge, drag-changed membership, a stored Home, an add-only + beside the space name, activity dots on a rail row, a filter cleared because its control went off screen."
+      fields: "id, name, parentId (always null in v1), projectIds (membership AND per-space order), createdAt, deleted?, sensitive? — the last one is the space's own hide-on-camera flag, additive and deleted rather than written false so an older app version reads spaces.json unchanged."
+      narrow_filter: "Below the rail's 1024px CONTAINER width the rail is absent and the same choice (Everything, each space, Home) opens as a BottomSheet from a control beside the dashboard search field. The selection survives the resize."
+      evidence: ["src/shared/types.ts (Space)", "src/bun/spaces-data.ts", "src/mainview/components/SpacesRail.tsx", "src/mainview/components/SpaceGroupedProjects.tsx", "decisions/2026/08/14/spaces-group-projects-without-replacing-boards.md", "decisions/2026/08/17/spaces-dashboard-follows-the-proposal-mock.md"]
     task:
       label: "Task"
       plural: "Tasks"
@@ -121,14 +136,7 @@ ux_architecture:
         - "Built-in 'What I shipped' report template pre-fills the create form; the digest result is again just a task."
         - "CLI parity: dev3 automations list/create/update/delete/run/runs."
       evidence: ["src/shared/types.ts (Automation)", "src/mainview/components/ProjectSettings.tsx (automations tab)", "src/bun/automations-scheduler.ts", "src/cli/commands/automations.ts"]
-    paired_host:
-      label: "Paired host"
-      plural: "Paired hosts"
-      observed: true
-      owner: "android_client"
-      common_actions: ["scan_or_paste_link", "connect", "reconnect", "forget"]
-      shape: "Android-local sanitized endpoint metadata plus the WebView-owned HttpOnly session cookie; never a copy of projects/tasks/terminal state."
-      evidence: ["android/app/src/main/java/com/h0x91b/dev3/ConnectionStore.kt", "android/app/src/main/java/com/h0x91b/dev3/MainActivity.kt"]
+    paired_host: { label: "Paired host", observed: true, owner: "android_client", common_actions: ["scan_or_paste_link", "connect", "reconnect", "forget"], shape: "Android-local endpoint metadata + WebView cookie; host state stays computer-owned.", evidence: ["android/", "android-client-bridge.ts"] }
 
   navigation:
     model: "screen_router" # observed: useReducer Route union, not URL paths
@@ -148,14 +156,14 @@ ux_architecture:
       mechanism: "GlobalHeader breadcrumbs + back/forward history (HISTORY_LIMIT=15) + native application menu 'View'"
       allowed: ["destination", "workspace", "major_product_area"]
       forbidden: ["one_off_action", "filter", "temporary_state", "object_specific_control"]
-      max_top_level_items: 7   # proposed budget; debug screens (gauge-demo, viewport-lab) should stay menu-only
+      max_top_level_items: 8   # fully spent by the list above; debug screens (gauge-demo, viewport-lab) stay menu-only
       max_depth: 2
       status: "observed"
       evidence: ["src/mainview/state.ts (Route)", "src/mainview/components/GlobalHeader.tsx", "src/bun/application-menu.ts"]
     breadcrumbs:
       purpose: "Show location: Dashboard > Project > Task. Project chevron opens a project switcher dropdown."
       rules:
-        - "Text click navigates; chevron toggles the project-switcher dropdown."
+        - "Text click navigates; a segment chevron toggles a switcher over that segment's object: project name -> project switcher, task #seq-N badge -> variant menu (SiblingPopover; chevron only when the group has >=2 live variants)."
         - "Breadcrumbs show place, not bulk actions."
         - "The task segment also carries the passive native_backend_mark (see identity_markers.native_backend_mark) — identity, not an action."
       status: "observed"
@@ -174,14 +182,12 @@ ux_architecture:
 
   surfaces:
     android_client_shell:
-      purpose: "Connect an Android tablet to the computer authority and provide device-native integration around the shared connected UI."
-      allowed: ["connection_gateway", "qr_scan", "host_reconnect", "native_prompt_dock", "android_back_and_ime", "file_picker", "external_intent", "notification_bridge"]
-      forbidden: ["parallel_project_task_routes", "copied_host_state", "wildcard_javascript_bridge", "silent_desktop_action_noop", "platform_gated_layout"]
-      connection_gateway: "Shell-level prerequisite shown only while unpaired/expired or switching hosts; one primary Scan QR action plus pasted-link fallback. It is not part of the connected workspace navigation budget."
-      prompt_dock: "Native multiline input below the WebView, bound to the active task or project terminal through an exact-origin, trusted-root-page, main-frame WebMessage bridge. Task Send carries delivered/unconfirmed/not-delivered; only delivered clears. Project Send and Insert keep the draft as unconfirmed because PTY acceptance is not acknowledged."
-      action_parity: "Reuse the connected route tree and shared action taxonomy. Host actions stay RPC-owned; Android-local hand-offs use platform APIs; omit desktop window chrome that has no mobile meaning."
+      purpose: "Pair a tablet to the computer authority and wrap the shared route tree with native device integration."
+      allowed: ["connection_gateway", "qr_scan", "reconnect", "native_prompt_dock", "android_back_and_ime", "file_picker", "external_intent", "notifications"]
+      forbidden: ["parallel_ia", "copied_host_state", "wildcard_bridge", "silent_desktop_action_noop", "platform_gated_layout"]
+      contract: "Gateway appears only while unpaired/expired/switching. Exact-origin main-frame bridge binds a native multiline dock to task/project terminals; only confirmed task delivery clears. Host actions remain RPC-owned."
       status: "observed"
-      evidence: ["android/", "src/mainview/android-client-bridge.ts", "src/mainview/components/TaskTerminal.tsx", "src/mainview/components/ProjectTerminal.tsx"]
+      evidence: ["android/", "src/mainview/android-client-bridge.ts"]
     diagnostics:
       purpose: "Make renderer faults and transport health visible in remote/mobile where there is no devtools: crash fallback, bootstrap phase/timeout, live connection state, and a captured-error viewer."
       allowed: ["crash_fallback", "bootstrap_phase_state", "connection_state_display", "retry_reload", "captured_error_list", "copy_clear", "conditional_floating_entry"]
@@ -194,12 +200,18 @@ ux_architecture:
       evidence: ["src/mainview/diagnostics.ts", "src/mainview/components/RootErrorBoundary.tsx", "src/mainview/components/BootstrapScreen.tsx", "src/mainview/components/DiagnosticsPanel.tsx", "src/mainview/components/StatusDock.tsx", "src/mainview/components/ConnectionStatusPill.tsx", "src/mainview/components/DiagnosticsIndicator.tsx", "src/mainview/components/KanbanBoardSkeleton.tsx", "src/mainview/components/BoardLoadFailed.tsx", "src/mainview/index.html (pre-React loader)"]
     global_header:
       purpose: "Breadcrumb location, project switcher, and app-level destinations/utilities."
-      allowed: ["history_nav", "breadcrumb", "destination", "project_switcher", "changelog", "settings_entry", "tmux_session_manager", "prevent_sleep_toggle", "agent_rate_limit_indicator", "ambient_resource_readout"]
+      allowed: ["history_nav", "breadcrumb", "destination", "project_switcher", "variant_switcher", "changelog", "settings_entry", "tmux_session_manager", "prevent_sleep_toggle", "agent_rate_limit_indicator", "ambient_resource_readout", "agent_traffic_readout"]
+      agent_traffic_readout:
+        budget: 1
+        spec: "Home is the labelled kebab row. A violet identity pill earns a bar slot only for unread traffic (per-browser stamp, 9+ cap) and remains while its panel is open; warning ink means unproven delivery. Rows navigate to the receiver. No invented importance axis."
+        narrow: "NEVER on the bar. The kebab bottom sheet is the only mobile entry, as a LABELLED row (an unnamed glyph is unfindable among the sheet's numbers); >=44px; panel renders as BottomSheet."
+        flag: "experimentalAgentTraffic (Settings -> System -> Advanced Experience), default OFF, and off leaves NO trace: no kebab row, pill, keymap listing, menu row, palette command or tip. A greyed row is a trace."
+        status: "proposed"
       ambient_resource_readout:
         budget: 1   # currently memory headroom; a second one folds into the narrow sheet instead
         spec: "Permanent on roomy widths. Shows headroom LEFT (free GB), never a bare quantity labelled 'memory'; colour = OS pressure verdict (normal -> text-fg-3 neutral, warn -> text-warning, critical -> text-danger); never success-green (green means Completed here). Hover/tap opens a breakdown: system, swap, top-5 consumers outside the app, then the app's own share split from the agent share. NOT a link."
         narrow: "folds into the kebab bottom sheet with prevent_sleep_toggle / agent_rate_limit_indicator; >=44x44px target there; breakdown renders as BottomSheet, not a floating popover (no hover on touch)."
-        reclaim_action: "The breakdown may carry destructive actions ONLY over memory the app itself is WASTING: leftover processes still running inside task worktrees. A conditional 5th section at the bottom of the dev3 group, gated on count > 0 (no reassuring empty state), ghost-danger styling (text-danger + border-danger/30 + hover:bg-danger/10) — never primary/accent fill. Three controls, no more: a header 'Kill all' behind confirm({ danger: true }) with the popover/sheet closed before the dialog opens; a hover/focus-revealed per-row kill with NO dialog (one named task, its count already on screen, the row vanishing is the receipt); and a rescan icon button. Confirmation is priced by blast radius, not by the word 'kill'. The scan is on-demand (popover open, plus once at startup for the log), NEVER in the memory poller — it costs an lsof snapshot. Startup NEVER kills: dev3 does not end a user's process without a click, and a worktree still claimed by a live task may legitimately hold a running browser. This is the only mutation allowed in an ambient-status surface and does not license actions for memory we do not own: top consumers stay read-only."
+        reclaim_action: "Only leftover processes inside task worktrees are actionable; top consumers remain read-only. When leftovers exist, show ghost-danger Kill all (confirmed), per-row kill (named target, no dialog), and rescan. Scan on demand plus startup logging, never in the memory poller; startup never kills. This is the ambient-status mutation exception."
         status: "proposed"
       forbidden: ["task_scoped_action", "dense_filters", "destructive_primary"]
       note: "history_nav = back/forward arrows pinned at the far left of the breadcrumb row (browser convention), driven by the route-history stack in state.ts. Also bound to Cmd+[/Cmd+] and mouse side buttons. Buttons are neutral/ghost icon-only and disable when canGoBack/canGoForward is false."
@@ -232,32 +244,22 @@ ux_architecture:
       lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review mounts only while occupied; PR Review remains visible for peer-reviewed git projects; Completed remains visible; the workspace board omits Cancelled while project boards retain it as reachable history."
       desktop_layout: "Compact equal-width grid across available space; no default horizontal scrollbar for the standard lifecycle columns."
     workspace_board:
-      purpose: "Cross-project daily-work surface on Dashboard > Board: one canonical status header with projects as swimlanes."
-      shortcut: "A remappable app-level shortcut opens this surface directly (default: Command+Backquote on macOS, Ctrl+Backquote elsewhere) and forces Board when Dashboard > Projects is active."
-      creation: "Each project swimlane owns a New Task action in its To Do cell; it opens the existing create-task modal preselected to that project."
-      search_placement: "One trailing field in the Board | Projects tab row, visible only while Board is active and flex-shrinking before either tab."
-      allowed: ["object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search"]
-      forbidden: ["cross_project_drag", "project_specific_column_config", "custom_column_drop"]
-      project_order: "The persisted project order is shared with Dashboard > Projects and moves the entire swimlane. Desktop uses a dedicated drag handle plus keyboard step controls; narrow layouts use 44px up/down controls. Virtual projects cannot be reordered and the built-in Operations board stays pinned first."
-      custom_columns: "Project-specific custom columns roll up into one occupied-only Custom display column; lifecycle menu retains the precise project column."
-      completed_disclosure: "Each project cell shows its two newest Completed tasks by default; Show N more expands all remaining Completed history for that project, and Show less restores the compact state."
+      purpose: "Cross-project daily work: one lifecycle header, project swimlanes."
+      allowed: ["object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create"]
+      forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
+      contract: "Board-tab search; occupied-only Custom; two newest Completed + local disclosure; direct shortcut. Persisted project order moves whole swimlanes (desktop handle/steps, narrow 44px arrows); virtual boards stay fixed and Operations pinned."
       status: "observed"
-      evidence: ["src/mainview/components/WorkspaceBoard.tsx", "src/mainview/components/Dashboard.tsx", "src/bun/rpc-handlers/task-lifecycle.ts (getWorkspaceBoardTasks)"]
+      evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
     workspace_task_overlay:
-      purpose: "Focused, non-route coding workspace for one active task opened from Dashboard > Board while the board remains mounted underneath."
-      feature_class: ["object_detail_overlay", "task_workspace"]
-      reached_from: ["dashboard.workspace_board.active_task_card"]
-      allowed: ["task_info_panel", "task_terminal", "inline_diff", "task_artifact_workspace", "explicit_full_page_handoff", "close"]
-      forbidden: ["new_destination", "breadcrumb", "multiple_windows", "todo_or_archived_terminal", "native_dialog", "drag_or_resize", "persisted_geometry"]
-      state: "Renderer-only and ephemeral: opening/closing does not change Route, route history, last-route persistence, board search, scroll, carousel, or disclosure state."
-      interaction: "One focused modal layer at a time. Background board + global chrome are inert; Close, Back, backdrop click, or the existing Global Kanban action restores the board. Terminal-focused Tab/Escape stay in the TUI; outside the terminal focus is contained and every dismissal path retains nested-layer and dirty-review guards."
-      open_policy: "Active/preparing/hibernated/recoverable task cards open it only from Workspace Board. Todo/draft/completed/cancelled retain detail/edit; project cards, sidebar, notifications, and deep links retain configured split/fullscreen behavior."
-      layout: "Wide: centered 92vw x 88dvh solid overlay with a light scrim. Narrow: full-bleed one-at-a-time workspace over the still-mounted board."
+      purpose: "Ephemeral coding workspace over the still-mounted Workspace Board."
+      allowed: ["task_info", "terminal", "diff", "artifacts", "full_page_handoff", "close"]
+      forbidden: ["route_or_breadcrumb", "multiple_windows", "non_live_terminal", "native_dialog", "drag_resize", "persisted_geometry"]
+      contract: "Live/recoverable cards only; renderer-local state preserves board state. Wide 92vw x 88dvh, full-bleed narrow. Background inert; Close/Back/backdrop/Global Kanban restore it; terminal Tab/Escape stay in TUI; guarded full-page handoff remains."
       status: "observed"
-      evidence: ["src/mainview/components/WorkspaceTaskOverlay.tsx", "src/mainview/App.tsx", "src/mainview/components/TaskWorkspaceView.tsx"]
+      evidence: ["WorkspaceTaskOverlay.tsx", "App.tsx", "TaskWorkspaceView.tsx"]
     task_card:
       purpose: "Compact object summary on the board with the most relevant per-task affordances."
-      allowed: ["status_dot", "label_chip", "variant_dots", "open_action", "context_menu", "git_status_badge", "deferred_timer_chip", "native_backend_mark"]
+      allowed: ["status_dot", "label_chip", "variant_dots", "open_action", "context_menu", "git_status_badge", "deferred_timer_chip", "native_backend_mark", "dev_server_control"]
       forbidden: ["full_settings", "global_destination"]
       zone_model:
         rationale: "The card had no zoning: identity, content, state, signals and actions stacked at one visual weight across up to three badge rows, and every feature added a row. Five zones, each with one admission rule, give a new feature a home instead of a new row."
@@ -270,11 +272,21 @@ ux_architecture:
       rail_label: "Short uppercase status form, max 8 upright letters (status.rail.* keys per locale; custom columns clipped to 8 chars). Upright means writing-mode: vertical-rl + text-orientation: upright — never rotated 90deg. The full column label lives in the rail's accessible name and tooltip."
       deferred_timer_chip: "One shared countdown-chip slot (popover with cancel / run-now, 30s re-render) for deferred agent interactions. Content depends on state and the two NEVER coexist: scheduledLaunch on a `todo` card, scheduledMessages on a live-agent card. Do not add a second timer badge class."
       variant_dots: "Max 3 status dots (self — ring-highlighted — + lowest-variantIndex siblings; NO +N counter), always a clickable button opening SiblingPopover — the group overview: per-variant title, agent/config, status, current-variant marker; dead variants greyed, non-navigable. Same pattern on sidebar cards; do not fork the mechanic per surface."
+      dev_server_control: "The card's ONE split control (open | stop), in the actions strip, leading. Renders only when the task is active, has a worktree, has a resolved devScript and is not hibernated. Left half opens the lowest dev port; right half stops the server (risk INK, never a danger fill, no confirmation — a dev server loses no data and restart is one click). Port is the label; extra ports, uptime and any port conflict live in the hover popover. State colours follow the 2026-06-29 dev-server token decision: green = running only, spinner = transient start, neutral dashed = stopped, danger ink = port conflict. On narrow it sheds to the icon-only open target and Stop moves to the context menu. No second split control may be added to the card."
       visible_budget:
-        max_inline_actions: 2
+        max_inline_actions: 4   # reconciled with zone_model.actions (was 2, which shipped code already exceeded)
         overflow_to: "context_menu"
-      status: "inferred" # card is dense; treat budget as a guardrail
+        split_controls: 1       # only dev_server_control; one budget slot, two focus stops
+      status: "observed"
       evidence: ["src/mainview/components/TaskCard.tsx (32.9K - large, watch density)"]
+    agent_traffic_log:
+      purpose: "Every dev3 message the project's agents typed into each other, newest first."
+      allowed: ["read_history", "pair_filter", "delivery_status_filter", "open_receiving_task"]
+      forbidden: ["global_destination", "send_message", "task_lifecycle_action", "importance_filter"]
+      narrow_form: "bottom_sheet"   # wide renders the same content as a centered dialog
+      entry_point: "The header agent_traffic_readout panel, Shift+Cmd/Ctrl+M, View menu, command palette. NOT a nav destination — the 8-destination budget is spent, and this is a log opened to answer one question."
+      note: "Reads the log that already existed on disk (data/<slug>/messages/*.jsonl, 30 days, readAgentMessageLog RPC) with no UI at all. Filters are ONLY what the data supports: one pair, or messages whose delivery was never proven — an importance/blocker filter would invent a fact no sender can set. Trimmed history must read as trimmed: the footer names the retention window and the oldest day still on disk. Behind experimentalAgentTraffic, default off."
+      evidence: ["src/mainview/components/agent-traffic/AgentTrafficLog.tsx", "src/mainview/components/agent-traffic/AgentTrafficIndicator.tsx", "src/mainview/agent-traffic.ts", "src/shared/agent-message-log.ts"]
     task_notes_log:
       purpose: "The whole agent-written note log of one task, on its own surface."
       allowed: ["notes", "secondary_edit"]
@@ -343,7 +355,7 @@ ux_architecture:
     diff_review_viewer:
       purpose: "Full-screen read + inline-review of a task's diff; export comments as an XML review prompt for the agent."
       reached_from: ["inspector:show_diff", "inspector:diff_summary_badge"]
-      allowed: ["view_mode_toggle", "diff_mode_toggle", "file_tree_nav", "in_diff_search", "mark_read", "copy_file_path", "inline_comment", "review_export", "review_copy", "review_reset", "send_comment_to_agent", "github_review_layer_readonly", "pr_conversation_block", "send_thread_to_agent", "open_on_github_link"]
+      allowed: ["view_mode_toggle", "diff_mode_toggle", "file_tree_nav", "in_diff_search", "mark_read", "copy_file_path", "inline_comment", "inline_comment_from_md_selection", "md_preview_toggle", "review_export", "review_copy", "review_reset", "send_comment_to_agent", "github_review_layer_readonly", "pr_conversation_block", "send_thread_to_agent", "open_on_github_link"]
       forbidden: ["task_lifecycle_action", "git_mutation", "global_destination", "github_write_action"]
       layout: "left Files aside (collapsible, 22rem: Review-export card + Files card) + right diff stream"
       github_review_layer:
@@ -355,6 +367,12 @@ ux_architecture:
           send_to_agent:    { role: "secondary", note: "pushes the thread into the task terminal as a fix prompt; the surface primary stays review_copy" }
           open_on_github:   { role: "link",      note: "external deep link to the exact comment" }
           include_in_export: { role: "toggle",   note: "opt-in selection into the existing XML export; exported entries carry an origin marker (github vs local)" }
+      md_preview_review:
+        note: "The per-file markdown rendered preview is a full review surface, not a read-only detour: it both creates and shows local comments, on the SAME per-file/per-side/per-line threads as the source diff."
+        trigger: "Text selection inside the preview -> floating 'Add comment' button over the selection rect -> shared InlineCommentComposer in a card anchored under the selection. Zero toolbar slots (same exemption class as the split-resize grip)."
+        anchoring: "Rendered blocks carry data-md-line-start/end from mdast node positions; the selection's line range = min(start)..max(end) of the blocks it touches. Side follows the rich-diff block: data-diff-kind=removed -> oldFile, added/context -> newFile."
+        forbidden: ["gutter in the preview", "per-block hover + widget", "toolbar comment-mode toggle", "a disabled button for an unmappable selection (show nothing)"]
+        existing_threads: "Two halves, both required: the commented block is marked in place (accent left border, via the line-stamping component override - never by mutating the DOM under React), and the threads render in full under the preview, ordered by line, each row scrolling to and flashing its block. Bubbles are NOT interleaved between blocks - the document is parsed as one unit, and splitting it would break reference links and footnote definitions. GitHub threads get one slim 'N review threads -> Source diff' link. Never silently dropped."
       inline_comment_actions:
         note: "Actions on ONE local review comment, inside its bubble in the diff. Budget: 3 controls, no growth."
         controls:
@@ -437,7 +455,8 @@ ux_architecture:
         two_identity_exception: "Agent-to-agent `dev3 message` is the ONE event with a sender AND a receiver: its source line is the pair `#fromSeq title -> #toSeq title` and the click target is the RECEIVER (its terminal holds the text, and the reply is typed there). Own push channel `agentMessage`, raised from the single delivery seam so an immediate send and a queued Send-later fire announce identically; dropped when EITHER side's project is sensitive in streamer mode. Silent for human-sent messages and for `not-delivered`; `unconfirmed` still announces."
         click_target: "The MOST SPECIFIC surface the toast is about (image viewer, diff, settings section). The owning task is the fallback, never an override. Task navigation honours the user's task-open-mode via openTaskFromNotification."
         dismiss: "swipe right (pointer+touch) AND the X button AND auto-timeout — swipe is never the only way (mobile_doctrine.gesture law)."
-      identity_resolution: "CENTRAL. A call site passes ONE token - `taskId`, `projectId` or `source` - and ToastHost composes the line plus the default click target through the `resolveOrigin` prop injected by App.tsx; app areas need no state and are localized in the host (`toast.source.<id>`). Resolution happens ONCE when the toast is raised, never per render: the resolver reads the current project's tasks, so a live toast would otherwise lose its line and its click target the moment the user navigates away. toast.tsx imports no app state. ~180 call sites stay one field long and future toasts are correct by default; explicitly passed context/onClick always win (e.g. cliShowImage opens the lightbox, not the task). An app area gets NO click target - a label is not a destination."
+        stack_dismiss: "ONE ghost `Clear all (n)` under the stack, only at 2+ visible toasts — a stack-level dismiss, not a persistent_action: it arrives with the pile and leaves with it. Hover/focus pauses every timer so it cannot slip away. The sweep skips onTaskOverflow — that handler preserves what capacity dropped behind the user's back; badges for toasts just swept would defeat the button."
+      identity_resolution: "ToastHost resolves one taskId/projectId/source into a source line and default click target once when raised; explicit context/onClick wins. App sources are localized labels with no target. toast.tsx imports no app state, so call sites stay one token long and navigation cannot erase a live toast's identity."
       a11y: "The clickable overlay's accessible name is `context — message`, not the message alone: a screen reader must hear WHICH task it navigates to. Dismiss button label localized (en/ru/es)."
       narrow: "max-w-[calc(100vw-2rem)] + NARROW_MAX_VISIBLE_TOASTS=1 bound total height; the source line adds one truncated line, not a wrap."
       evidence: ["src/mainview/toast.tsx", "src/mainview/App.tsx (ToastHost mount, openTaskFromNotification)", "PRODUCT_UX_BIBLE §5.7"]
@@ -470,13 +489,20 @@ ux_architecture:
         i18n_domain: "help.ts in en/ru/es"
         rule: "help copy is never hardcoded in components; topics may crosslink tips instead of duplicating text; field.* namespace for form-field topics"
       evidence: ["docs/ux/PRODUCT_UX_BIBLE.md §5.4", "UX_DECISIONS 2026-07-03 (inline help)", "UX_DECISIONS 2026-07-17 (coverage law + correlation invariant)"]
+    guided_tour:
+      purpose: "Ordered walk-through of a flow spanning several surfaces (board -> Create Task -> Launch -> task screen): the sequence half of onboarding/help, help mode being the per-zone half."
+      mechanism: "one registry (src/mainview/tour.ts) + TourOverlay; a participating control carries data-tour-anchor=<id>; a step ends when the DOM shows the next anchor, so components never call in"
+      allowed: ["pointing_at_a_real_control", "pressing_the_step_own_control", "shielding_everything_else", "explanatory_copy", "prefilling_what_the_user_would_not_type", "back_next_skip"]
+      forbidden: ["faking_progress_the_app_did_not_make", "being_the_only_route_to_a_control", "durable_configuration"]
+      state: "GlobalSettings.completedTours (only walking to the END counts); auto-starts on every visit to an empty sandbox board until then; help mode's banner restarts it afterwards; a lost anchor offers restart-or-leave instead of exiting"
+      evidence: ["bible §5.4b", "decisions/2026/08/23/a-guided-tour-points-it-does-not-drive.md"]
     keyboard_shortcuts_reference:
       purpose: "Read-only keymap reference overlay (Modal). ONE component with two tabs — App (renders from the keymap.ts registry) and Terminal (tmux) (folds in the tmux cheat sheet). onboarding/help + expert_shortcut content, same shell as TmuxCheatSheetModal."
       allowed: ["shortcut_reference", "tab_switch"]
       forbidden: ["command_runner", "object_action", "durable_configuration", "primary_navigation", "toolbar_button"]
       source_of_truth: "src/mainview/keymap.ts — every app-level shortcut declared as data (id, machine-readable defaults bindings, descKey, category, remappable). DRIVES dispatch via matchesShortcut(e, id); display strings are derived from bindings, never authored twice. Same data renders the README table + website (docs/index.html). Renders the RESOLVED combo (defaults + user overrides), never the raw default."
       entry_points: ["application_menu.Help (Keyboard Shortcuts — wires the currently-dead help-keyboard-shortcuts action; Tmux Cheat Sheet opens the Terminal tab)", "keyboard: Cmd+/ (Ctrl+/ on Linux), App.tsx capture-phase handler, label shows (⌘/)", "command_palette ⇧⌘P via commands.ts entry"]
-      rationale: "No toolbar/header button (toolbar-button-creep is the #1 anti-pattern); not a nav destination (ephemeral reference ≠ a place; nav budget ≤7). One modal with tabs per the user's 'единый вид'; tab split keeps ~40 tmux bindings from drowning ~25 app shortcuts. Cmd+/ over bare ? because the live terminal must receive a bare ?."
+      rationale: "No toolbar/header button (toolbar-button-creep is the #1 anti-pattern); not a nav destination (ephemeral reference ≠ a place; nav budget spent at 8). One modal with tabs per the user's 'единый вид'; tab split keeps ~40 tmux bindings from drowning ~25 app shortcuts. Cmd+/ over bare ? because the live terminal must receive a bare ?."
       editing: "FORBIDDEN here — rebinding is durable configuration and lives in settings.keyboard_shortcuts_editor. The overlay may carry exactly ONE link ('Customize…') to that editor and no inline edit affordance."
       observed: ["KeyboardShortcutsModal", "keymap.ts", "TmuxCheatSheetModal"]
       evidence: ["UX_DECISIONS 2026-06-19", "UX_DECISIONS 2026-08-02", "src/bun/application-menu.ts (helpKeyboardShortcuts)", "src/mainview/components/TmuxCheatSheetModal.tsx"]
@@ -491,7 +517,7 @@ ux_architecture:
       layout: "Fixed-height toolbar and a reserved reset slot on EVERY row (including read-only ones), so no combo shifts when a row gains a reset button or the toolbar gains the changed-count. The filter matches the rendered combo as well as the name."
       storage: "GlobalSettings.keyboardShortcuts — sparse Record<shortcutId, {primary?, alias?}>; a slot that is absent keeps its default and a slot set to null was deliberately emptied. Only overrides are persisted, so a changed default reaches every user who never touched that row."
       rationale: "Settings owns durable configuration; the Cmd+/ overlay is help content and the manifest forbids configuration there. A new eighth Settings category rather than a Terminal/Appearance tenant, because 'where do I change a key' deserves one destination — the deleted iTerm2-compatibility preset folded into it as four ordinary rebindable rows, so the category consolidates rather than merely adds."
-      terminal_shortcuts: "dev3's Cmd-key pane shortcuts (Cmd+D / Cmd+Shift+D / Cmd+W / Cmd+T) are registry rows in the `terminal` conflict group: the renderer dispatches them only while a terminal has focus, so they may share a combo with an app-level shortcut. Pane NAVIGATION is deliberately not a registry row — tmux binds Alt+arrows prefix-free and owns it."
+      terminal_shortcuts: "dev3's Cmd-key pane shortcuts (Cmd+D / Cmd+Shift+D / Cmd+W / Cmd+T) are registry rows in the `terminal` conflict group: the renderer dispatches them only while a terminal has focus, so they may share a combo with an app-level shortcut. Pane NAVIGATION is not a registry row — tmux owns it via prefix-free Alt+Shift+arrows; plain Alt+arrows are word motion."
       evidence: ["UX_DECISIONS 2026-08-02", "UX_DECISIONS 2026-08-03", "src/mainview/components/global-settings/KeyboardSettingsSection.tsx", "src/mainview/components/global-settings/ShortcutRow.tsx", "src/mainview/keymap.ts", "src/mainview/settings-registry.ts"]
     task_switcher:
       purpose: "Transient keyboard-summoned HUD overlay for hold-cycle jumping between active tasks (Option+Tab project / Option+Shift+Tab global). A presentation of the sidebar's task_jump action, not a command palette."
@@ -525,7 +551,7 @@ ux_architecture:
       purpose: "Task-bound lightbox overlay showing images an agent surfaced via `dev3 show-image`, with a clickable history (thumbnail rail; newest activated first). One large image + prev/next + Esc; opened for a taskId regardless of route (closing restores position). Read/view only — no git/lifecycle/mutation (same rule as the diff viewer)."
       feature_class: ["overlay_viewer", "object_action", "notification"]
       reached_from: ["arrival_push (rpc:cliShowImage — auto-open only when already focused on that task + window foreground; else toast + attention badge)", "inspector:image_count_badge (Context bar, conditional count>0, next to diff_summary_badge)", "archived_task_modal:shared-outputs row (completed/cancelled task, enumerated per image)", "command_palette ⇧⌘P (Show shared images, scope task)", "application_menu.Task"]
-      allowed: ["image_display", "history_nav (thumbnail rail + prev/next + arrows)", "copy_image", "reveal_original_path", "clear_images (destructive, confirm)"]
+      allowed: ["image_display", "history_nav (thumbnail rail + prev/next + arrows)", "copy_image", "download_image (header icon + own right-click menu — native WKWebView Save Image As is dead)", "reveal_original_path", "clear_images (destructive, confirm)"]
       forbidden: ["global_destination", "task_lifecycle_action", "git_mutation", "persistent_inspector_button (badge is conditional on count>0)", "native_os_dialog", "svg_render (v1 — webview XSS)"]
       transport: "Reuses the notify/attention socket+pushMessage machinery: CLI `ui.show-image` -> bun copies files -> getPushMessage()('cliShowImage', …) -> rpc:cliShowImage CustomEvent -> App.tsx listener (badge + toast + auto-open rule)."
       persistence:
@@ -570,8 +596,9 @@ ux_architecture:
       note: "Git ops run in a visible terminal (decision 008). Keep frequent ones inline, rare ones in menu."
     dev_server_action:
       definition: "Start/stop/restart/status of a project's dev server."
-      placement: ["task_info_panel (TaskDevServer)", "application_menu.Project.DevServer"]
+      placement: ["task_info_panel (TaskDevServer)", "application_menu.Project.DevServer", "task_card.actions (open|stop split only — see surfaces.task_card.dev_server_control)"]
       token_role: "neutral; restart/stop carry risk styling where data loss possible"
+      note: "The card carries open + stop only. Start, restart, log viewing and port sharing stay in the inspector — the card answers 'is it up, on which port' and lets you kill it, nothing more."
     lifecycle_action:
       definition: "Move task across statuses (mostly hook-driven), complete, cancel."
       placement: ["kanban drag", "status dropdown", "application_menu.Task.MoveToStatus"]
@@ -663,14 +690,15 @@ ux_architecture:
 
   complexity_budgets:
     global_nav:
-      max_top_level_items: 7
+      max_top_level_items: 8   # spent — a ninth destination replaces one
       max_depth: 2
     page_header:
       max_primary_actions: 1
       max_secondary_actions: 2
     task_card:
-      max_inline_actions: 2
-      overflow_after: 2     # push extra affordances into the context menu
+      max_inline_actions: 4   # matches surfaces.task_card.zone_model.actions; the strip is now FULL
+      overflow_after: 4     # push extra affordances into the context menu
+      note: "Open-in, dev-server split, Watch and +Variant fill it on an active card. The next control replaces one or goes to the context menu — there is no slot 5."
     task_info_panel:
       layout: "2x2 bar model (see surfaces.task_info_panel.bar_model)"
       per_bar_visible_budget: 4
@@ -711,6 +739,13 @@ ux_architecture:
       reject: ["a second dashboard row action", "dashboard row kebab or context menu", "the action repeated in dashboard chrome or the project header"]
       status: "observed"
       rationale: "The dashboard is the attention triage list; the row is the task's own surface, and clearing a finished row is that screen's job. Capped at one action so the row never needs a menu (issue #1252)."
+    - id: "dev-server-control-on-task-card"
+      when: { feature_class: "dev_server_action", scope: "single_task", surface: "task_card" }
+      place_in: ["task_card.actions (leading): exactly one split control — open the lowest dev port | stop the server; conditional on active + worktree + resolved devScript + not hibernated"]
+      reject: ["a second split or dev-server control on the card", "start/restart/logs/share on the card (inspector owns those)", "a danger FILL on the stop half", "a confirmation dialog before stop", "hiding the control when the server is stopped (the row would reflow the moment a server dies)"]
+      token_role: "success ink = running, warning + spinner = starting, danger ink = port conflict, neutral dashed = stopped; stop half is danger INK on a hover tint"
+      status: "observed"
+      rationale: "The board is where the user decides what to look at, and 'which task is serving, on which port' was answerable only by opening each task. Stop is on the card because a forgotten dev server is a machine-wide cost and reversal is one click; start is NOT, because starting is a deliberate act that belongs where the script is configured. This is an explicit, capped exception to the button-creep anti-pattern (§11) and it consumes the card's last action slot."
     - id: "git-frequent-inline-rare-in-menu"
       when: { feature_class: "git_action" }
       place_in: ["task_info_panel.TaskGitActions (frequent)", "application_menu.Project (rare)"]
@@ -755,12 +790,22 @@ ux_architecture:
       token_role: "neutral (lock glyph text-fg-muted); toast level info"
       status: "proposed"
       rationale: "The flag protects one moment — the camera is on — against one accident: a click into the wrong project. The guard therefore belongs at the routing choke point, not in the ~10 entry points that reach it. Visible-but-locked (blurred name + lock + toast) keeps the demo continuous, which is the same reason decision 161 chose blur over text replacement. See PRODUCT_UX_BIBLE §3 + §10 + UX_DECISIONS 2026-08-05."
+    - id: "stored-secret-revealed-before-edit"
+      when: { feature_class: "configuration", trait: "security_sensitive_stored_credential" }
+      place_in: ["the field's own cell in the settings table: masked read-only input + one resting-visible ghost eye icon button (labelled, aria-pressed, tooltip) that fetches THAT provider's secret through its own RPC; after reveal the field is editable and an emptied field removes the credential on save; the revealed value carries streamer-private"]
+      reject: ["shipping credentials to the renderer with the object they belong to", "an editable field over a secret the user cannot see", "a separate Remove key button next to the field", "hover-to-reveal", "logging or toasting the revealed value"]
+      token_role: "icon / ghost (text-fg-3 resting, text-fg + bg-elevated on hover); the pending-removal caption is text-danger"
+      status: "observed"
+      rationale: "The reveal IS the edit gate: a secret you cannot see cannot be safely replaced, and without it 'clear the field to remove the key' is indistinguishable from 'I typed nothing'. Per-click, per-provider fetching keeps a credential off the wire until the user looks at it — which matters because the same UI is served to a browser over a remote tunnel. See UX_DECISIONS 2026-08-17."
     - id: "inline-help-placement"
       when: { feature_class: "onboarding_help" }
       place_in: ["help.ts registry topic + HelpSpot in a header-bearing section", "help-mode coverage via data-help-id (dense/headerless zones)", "application_menu.Help / ⇧⌘/ / command_palette entry"]
-      reject: ["permanent_info_icon_in_quickbars_cards_or_toolbars", "hardcoded_help_strings_in_components", "multi_step_tour_v1", "new_nav_destination_for_help"]
+      reject: ["permanent_info_icon_in_quickbars_cards_or_toolbars", "hardcoded_help_strings_in_components", "new_nav_destination_for_help"]  # tours are their own surface: guided_tour (bible 5.4b)
+      carve_outs:
+        - "first_run_callout: anchored to the one control it advertises, dismissible, once-only, killed by the same one-way flag entering help mode sets (bible 5.4a)"
+        - "blast_radius_copy: standing quiet statement at the top of a dialog that acts on the user's own files or remotes — what dev3 writes and where, TWO LINES MAX. Never an (i), never dismissible, never hedged, no unverified OS-behaviour claim"
       status: "observed"
-      rationale: "Help must add ZERO chrome to budget-protected zones (quickbars, task cards, toolbars) — they are covered by the help-mode overlay, not by standing icons. Header-bearing sections may carry at most one ghost (i). Content is data (help.ts + i18n domain), never JSX, so the same topics feed HelpSpot, help mode, and any future docs surface. See PRODUCT_UX_BIBLE §5.4 + UX_DECISIONS 2026-07-03."
+      rationale: "Help must add ZERO chrome to budget-protected zones (quickbars, task cards, toolbars) — they are covered by the help-mode overlay, not by standing icons. Header-bearing sections may carry at most one ghost (i). Content is data (help.ts + i18n domain), never JSX, so the same topics feed HelpSpot, help mode, and any future docs surface. The carve-outs are a different failure: a dialog pointed at someone's work monorepo has no second visit, and a user who cannot answer 'what will this write' closes the app instead of filing an issue. See PRODUCT_UX_BIBLE §5.4 + UX_DECISIONS 2026-07-03."
 
   responsive:
     status: "partial" # board_carousel implemented; full mobile doctrine proposed — see bible §12 (full doctrine plan in git history)

@@ -7,6 +7,17 @@ const dashboard = {
 	"dashboard.noProjects": "No projects yet",
 	"dashboard.noProjectsHint": "Add a git repository to get started",
 	"dashboard.addProject": "Add project",
+	// First run: shown while no git project exists yet (the builtin Operations
+	// board does not count as one).
+	"dashboard.firstRun.title": "Add a repository and dev-3.0 starts working",
+	"dashboard.firstRun.body":
+		"dev-3.0 runs AI coding agents on your own git repositories. Every task you create gets its own branch, its own folder and its own terminal, so several agents can work at the same time without touching each other's files.",
+	"dashboard.firstRun.sandboxAction": "Try a sandbox repo",
+	"dashboard.firstRun.sandboxHint": "dev-3.0 makes a small throwaway repository of its own — none of your work involved.",
+	"dashboard.firstRun.sandboxFailed": "Unable to create the sandbox repository. ({error})",
+	"dashboard.firstRun.connectAgentAction": "Connect an agent first",
+	"dashboard.firstRun.noAgentInstalled": "No agent CLI found on this machine. Install one — Claude Code, Codex, Gemini, Cursor Agent or OpenCode — and dev-3.0 will pick it up.",
+	"dashboard.firstRun.noAgentSignedIn": "An agent CLI is installed but not signed in. Run it once in a terminal and log in; a sandbox task would die on the login prompt.",
 	"dashboard.openInFinder": "Open in Finder",
 	"dashboard.remove": "Remove",
 	"dashboard.confirmRemoveTitle": "Remove this project?",
@@ -42,6 +53,8 @@ const dashboard = {
 	"activity.noActiveTasks": "No active tasks across any project",
 	"activity.taskCount_one": "{count} active task",
 	"activity.taskCount_other": "{count} active tasks",
+	"activity.todoOnBoard_one": "{count} in To Do",
+	"activity.todoOnBoard_other": "{count} in To Do",
 	// Narrow viewport: the noun phrase would push the project name into
 	// truncation, so the count keeps its short form there.
 	"activity.taskCountShort_one": "{count} active",
@@ -112,6 +125,10 @@ const dashboard = {
 	"header.changelogLabel": "Change Log",
 	"header.changelogTooltip": "View changelog",
 	"header.helpTooltip": "Explain this screen",
+	"header.helpCallout.title": "Start here",
+	"header.helpCallout.body":
+		"This works on every screen: it outlines each part of what you are looking at and explains what it does. dev-3.0 has no manual — this is it.",
+	"header.helpCallout.dismiss": "Dismiss",
 	"header.githubTooltip": "Website",
 	"header.githubLabel": "Website",
 	"header.statsTooltip": "Productivity stats",
@@ -130,6 +147,7 @@ const dashboard = {
 	"header.reportLabel": "Report",
 	"header.gitPullLabel": "Pull",
 	"header.switchProject": "Switch project",
+	"header.switchVariant": "Switch variant",
 	"header.navBack": "Back (⌘[)",
 	"header.navForward": "Forward (⌘])",
 	"header.activeTaskCount_one": "{count} active",
@@ -167,12 +185,20 @@ const dashboard = {
 	"remote.addressLabel": "Reachable at",
 	"remote.localhostLabel": "Localhost",
 	"remote.anywhereToggle": "Accessible from anywhere (Cloudflare Tunnel)",
+	"remote.anywhereToggleCustom": "Accessible from anywhere (custom tunnel)",
+	"remote.customTunnelNotFound": "The custom tunnel command was not found",
+	"remote.customTunnelNotFoundHint": "The shell could not run it (exit 127). Check the command in Settings, or install the tool it runs.",
+	"remote.customTunnelEmpty": "The custom tunnel command is empty",
+	"remote.customTunnelEmptyHint": "Set the command in Tunnel settings — no tunnel starts until it is filled in.",
+	"remote.tunnelSettingsLink": "Tunnel settings",
 	"remote.cloudflaredNotFound": "cloudflared is not installed",
 	"remote.cloudflaredInstallHint": "Run this command to install it:",
 	"remote.copyCommand": "Copy command",
-	"remote.recheckCloudflared": "Recheck",
+	"remote.recheckTunnelBinary": "Recheck",
 	"remote.tunnelStarting": "Starting tunnel...",
 	"remote.tunnelConnected": "Public tunnel active",
+	"remote.stopTunnel": "Stop tunnel",
+	"remote.stopTunnelHint": "Stop the public tunnel and go back to local-network access",
 	"remote.tunnelPropagationHint": "Give Cloudflare a few seconds to publish the domain. If the link errors with “domain not resolved”, wait a moment — or toggle this off and back on — then reopen it.",
 	"remote.tunnelFailed": "Tunnel failed to start",
 	"remote.copyUrl": "Copy URL",
@@ -239,6 +265,7 @@ const dashboard = {
 	"memory.bannerLoaded_other": "This machine is already loaded — {count} more tasks are a lot to ask of it.",
 	"memory.bannerOutOfRoom_one": "This machine is out of memory — one more task will likely make it crawl.",
 	"memory.bannerOutOfRoom_other": "This machine is out of memory — {count} more tasks will likely make it crawl.",
+	"dashboard.noSpaceGroup": "Home",
 } as const;
 
 export default dashboard;

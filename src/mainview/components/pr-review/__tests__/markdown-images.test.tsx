@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import type { FilePreviewResult } from "../../../../shared/types";
-import { isDiskImageSrc, resolveDiskImagePath } from "../markdown-images";
-import { MarkdownDocument, renderMarkdownDocument } from "../markdown";
+import { resolveDiskImagePath } from "../markdown-images";
+import { MarkdownDocument } from "../markdown";
 import { MarkdownRichDiff, buildMarkdownDiffBlocks } from "../markdown-diff";
 
 const readFilePreview = vi.fn<(params: { path: string }) => Promise<FilePreviewResult>>();
@@ -22,22 +22,6 @@ const PNG_DATA_URL = "data:image/png;base64,AAAA";
 beforeEach(() => {
 	readFilePreview.mockReset();
 	readFilePreview.mockImplementation(async () => ({ kind: "image", dataUrl: PNG_DATA_URL, size: 3 }));
-});
-
-describe("isDiskImageSrc", () => {
-	it.each([
-		["docs/shot.png", true],
-		["./shot.png", true],
-		["../assets/shot.png", true],
-		["/docs/shot.png", true],
-		["https://example.com/a.png", false],
-		["http://example.com/a.png", false],
-		["data:image/png;base64,AAAA", false],
-		["//example.com/a.png", false],
-		["", false],
-	])("classifies %s as disk-backed: %s", (src, expected) => {
-		expect(isDiskImageSrc(src)).toBe(expected);
-	});
 });
 
 describe("resolveDiskImagePath", () => {
@@ -70,7 +54,20 @@ describe("resolveDiskImagePath", () => {
 
 describe("markdown image sanitization", () => {
 	it("keeps a repo-relative img src through the sanitizer", () => {
-		expect(renderMarkdownDocument("![board](docs/screenshots/board.png)")).toContain('src="docs/screenshots/board.png"');
+		render(<MarkdownDocument body={"![board](docs/screenshots/board.png)"} />);
+		expect(screen.getByAltText("board")).toHaveAttribute("src", "docs/screenshots/board.png");
+	});
+
+	it("ignores a hand-written token instead of reading it off disk", () => {
+		const forged = "https://dev3.invalid/0/..%2F..%2F..%2Fetc%2Fpasswd";
+		render(<MarkdownDocument body={`![x](${forged})`} imageBaseDir="/wt/docs" />);
+		expect(readFilePreview).not.toHaveBeenCalled();
+		expect(screen.getByAltText("x")).toHaveAttribute("src", forged);
+	});
+
+	it("keeps reference-style repo images through the sanitizer", () => {
+		render(<MarkdownDocument body={"![board][shot]\n\n[shot]: docs/screenshots/board.png"} />);
+		expect(screen.getByAltText("board")).toHaveAttribute("src", "docs/screenshots/board.png");
 	});
 });
 
@@ -82,8 +79,6 @@ describe("MarkdownDocument images", () => {
 		expect(screen.getByAltText("board").dataset.dev3MdImage).toBe("loaded");
 	});
 
-	// The swap lives in the HTML, not in the rendered <img> nodes: React rebuilds
-	// that subtree on re-render, which would silently discard a DOM-level edit.
 	it("keeps the resolved image across a re-render", async () => {
 		const { rerender } = render(<MarkdownDocument body={"![board](screenshots/board.png)"} imageBaseDir="/wt/docs" />);
 		await waitFor(() => expect(screen.getByAltText("board")).toHaveAttribute("src", PNG_DATA_URL));

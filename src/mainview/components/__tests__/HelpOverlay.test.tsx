@@ -26,10 +26,10 @@ function makeZone(helpId: string, rect: { top: number; left: number; width: numb
 	return el;
 }
 
-function renderOverlay(onExit = vi.fn()) {
+function renderOverlay(onExit = vi.fn(), onRunTour?: () => void) {
 	const utils = render(
 		<I18nProvider>
-			<HelpOverlay onExit={onExit} />
+			<HelpOverlay onExit={onExit} onRunTour={onRunTour} />
 		</I18nProvider>,
 	);
 	return { onExit, ...utils };
@@ -78,11 +78,62 @@ describe("HelpOverlay", () => {
 		expect(onExit).toHaveBeenCalled();
 	});
 
+	// A conditional readout (the memory pill, the remote connection readout) renders
+	// only while it has bad news, so it can unmount and remount while help mode is
+	// open. The captured node is then detached and measures 0×0, which used to put
+	// the badge, the outline and the card in the top-left corner of the screen.
+	it("follows a zone whose element was replaced while the mode was open", async () => {
+		const user = userEvent.setup();
+		const first = makeZone("header.memory", { top: 40, left: 700, width: 60, height: 24 });
+		renderOverlay();
+		expect(screen.getByTestId("help-badge").style.left).toBe("692px");
+
+		first.remove();
+		makeZone("header.memory", { top: 40, left: 400, width: 60, height: 24 });
+		await user.click(screen.getByTestId("help-badge"));
+
+		expect(screen.getByTestId("help-badge").style.left).toBe("392px");
+		const card = screen.getByRole("dialog");
+		expect(card.style.left).not.toBe("8px");
+		expect(card.style.visibility).toBe("visible");
+	});
+
+	it("drops the badge of a zone whose element left the screen entirely", async () => {
+		const user = userEvent.setup();
+		const conditional = makeZone("header.memory", { top: 40, left: 700, width: 60, height: 24 });
+		makeZone("board.task-card", { top: 100, left: 20, width: 180, height: 90 });
+		renderOverlay();
+		expect(screen.getAllByTestId("help-badge")).toHaveLength(2);
+
+		// The readout went quiet and unmounted; the next render must not keep a
+		// marker pinned to a node that is no longer anywhere.
+		conditional.remove();
+		await user.click(screen.getAllByTestId("help-badge")[1]);
+		const left = screen.getAllByTestId("help-badge");
+		expect(left).toHaveLength(1);
+		expect(left[0].getAttribute("data-help-badge")).toBe("board.task-card");
+	});
+
 	it("Escape exits the mode when no card is open", async () => {
 		const user = userEvent.setup();
 		makeZone("header.utilities", { top: 10, left: 500, width: 200, height: 30 });
 		const { onExit } = renderOverlay();
 		await user.keyboard("{Escape}");
 		expect(onExit).toHaveBeenCalled();
+	});
+
+	// The only way back into a finished walkthrough. Absent where no tour applies,
+	// so help mode does not advertise something that would not start.
+	it("offers the walkthrough only when a tour applies to this screen", async () => {
+		const user = userEvent.setup();
+		makeZone("header.utilities", { top: 10, left: 500, width: 200, height: 30 });
+		const { unmount } = renderOverlay();
+		expect(screen.queryByTestId("help-run-tour")).not.toBeInTheDocument();
+		unmount();
+
+		const onRunTour = vi.fn();
+		renderOverlay(vi.fn(), onRunTour);
+		await user.click(screen.getByTestId("help-run-tour"));
+		expect(onRunTour).toHaveBeenCalled();
 	});
 });

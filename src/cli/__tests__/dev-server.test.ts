@@ -48,6 +48,7 @@ const STATUS: DevServerStatus = {
 	assignedPorts: [50001, 55930, 55937],
 	ports: [{ port: 5173, pid: 81298, processName: "bun" }],
 	devPorts: [{ port: 5173, pid: 81298, processName: "bun" }],
+	publishedPorts: [],
 	portConflicts: [],
 	resourceUsage: { cpu: 3.1, rss: 104857600 },
 };
@@ -247,6 +248,30 @@ describe("dev-server port conflicts", () => {
 		expect(stdoutOutput).toContain("WARNING: port 55930 is already in use by python3 (pid 1001)");
 	});
 
+	// A container runtime publishes the port, so the listener is never in the
+	// pane's process tree. That is the healthy state, not a conflict (#1427).
+	it("prints published ports on their own line instead of a warning", async () => {
+		mockSend.mockResolvedValue(okResp({
+			...STATUS,
+			devPorts: [],
+			publishedPorts: [{ port: 10569, pid: 1380, processName: "com.docker.backend" }],
+		}));
+
+		await handleDevServer("status", { positional: [], flags: {} }, SOCKET, CTX);
+
+		expect(stdoutOutput).toContain("Published Ports:");
+		expect(stdoutOutput).toContain("10569 (com.docker.backend pid 1380)");
+		expect(stdoutOutput).not.toContain("WARNING: port");
+	});
+
+	it("omits the Published Ports line when nothing was published", async () => {
+		mockSend.mockResolvedValue(okResp(STATUS));
+
+		await handleDevServer("status", { positional: [], flags: {} }, SOCKET, CTX);
+
+		expect(stdoutOutput).not.toContain("Published Ports:");
+	});
+
 	it("prints no warnings when there are no conflicts", async () => {
 		mockSend.mockResolvedValue(okResp(STATUS));
 
@@ -261,13 +286,17 @@ describe("dev-server start --wait", () => {
 		vi.useRealTimers();
 	});
 
-	it("polls status until the dev server opens a port, then prints Ready", async () => {
+	// The assigned port is the one the caller is about to curl, so it is the only
+	// port that ends the wait immediately.
+	const ASSIGNED_UP = { ...STATUS, devPorts: [{ port: 50001, pid: 81298, processName: "bun" }] };
+
+	it("polls status until the dev server opens its assigned port, then prints Ready", async () => {
 		vi.useFakeTimers();
 		let statusCalls = 0;
 		mockSend.mockImplementation(async (_socket: string, method: string) => {
 			if (method === "devServer.start") return okResp({ ...STATUS, devPorts: [] });
 			statusCalls++;
-			return okResp(statusCalls >= 2 ? STATUS : { ...STATUS, devPorts: [] });
+			return okResp(statusCalls >= 2 ? ASSIGNED_UP : { ...STATUS, devPorts: [] });
 		});
 
 		const promise = handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
@@ -275,7 +304,104 @@ describe("dev-server start --wait", () => {
 		await promise;
 
 		expect(statusCalls).toBe(2);
-		expect(stdoutOutput).toContain("Ready: listening on 5173");
+		expect(stdoutOutput).toContain("Ready: listening on 50001");
+	});
+
+	// The vent behind #1502: a bundler's HMR socket or a sidecar opens first, and
+	// returning there made the caller's curl against $DEV3_PORT0 race the server.
+	it("keeps waiting when only an auxiliary port is up, then reports the assigned one", async () => {
+		vi.useFakeTimers();
+		let statusCalls = 0;
+		const auxOnly = { ...STATUS, devPorts: [{ port: 5173, pid: 81298, processName: "bun" }] };
+		mockSend.mockImplementation(async (_socket: string, method: string) => {
+			if (method === "devServer.start") return okResp({ ...STATUS, devPorts: [] });
+			statusCalls++;
+			return okResp(statusCalls >= 6 ? ASSIGNED_UP : auxOnly);
+		});
+
+		const promise = handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
+		await vi.advanceTimersByTimeAsync(4000);
+		await promise;
+
+		expect(stdoutOutput).toContain("but not yet on the assigned 50001, 55930, 55937");
+		expect(stdoutOutput).toContain("Ready: listening on 50001");
+		expect(stdoutOutput).not.toContain("Ready: listening on 5173");
+	});
+
+	// A devScript is free to bind a fixed port and ignore the pool — hanging on
+	// that project until the timeout would be worse than a slightly early ready.
+	it("falls back to the auxiliary port once the grace window expires", async () => {
+		vi.useFakeTimers();
+		mockSend.mockResolvedValue(okResp({ ...STATUS, devPorts: [{ port: 3000, pid: 81298, processName: "bun" }] }));
+
+		const promise = handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
+		await vi.advanceTimersByTimeAsync(11_000);
+		await promise;
+
+		expect(stdoutOutput).toContain("Ready: listening on 3000");
+		expect(stdoutOutput).toContain("the assigned 50001, 55930, 55937 never came up");
+	});
+
+	it("reports ready on any port when the task has no assigned ports", async () => {
+		vi.useFakeTimers();
+		mockSend.mockResolvedValue(okResp({
+			...STATUS,
+			assignedPorts: [],
+			devPorts: [{ port: 3000, pid: 81298, processName: "bun" }],
+		}));
+
+		const promise = handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
+		await vi.advanceTimersByTimeAsync(1000);
+		await promise;
+
+		expect(stdoutOutput).toContain("Ready: listening on 3000");
+		expect(stdoutOutput).not.toContain("never came up");
+	});
+
+	// The whole point of #1427: for a containerised devScript the dev server's
+	// own tree never owns the socket, so devPorts stays empty forever.
+	it("becomes ready on a port published for the dev server by another process", async () => {
+		vi.useFakeTimers();
+		let statusCalls = 0;
+		// Published ports are assigned pool ports by construction — a foreign
+		// holder of anything else is never classified as published.
+		const published = { port: 50001, pid: 1380, processName: "com.docker.backend" };
+		mockSend.mockImplementation(async (_socket: string, method: string) => {
+			if (method === "devServer.start") return okResp({ ...STATUS, devPorts: [], publishedPorts: [] });
+			statusCalls++;
+			return okResp(
+				statusCalls >= 2
+					? { ...STATUS, devPorts: [], publishedPorts: [published] }
+					: { ...STATUS, devPorts: [], publishedPorts: [] },
+			);
+		});
+
+		const promise = handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
+		await vi.advanceTimersByTimeAsync(1000);
+		await promise;
+
+		expect(statusCalls).toBe(2);
+		expect(stdoutOutput).toContain("Ready: listening on 50001");
+	});
+
+	it("names the squatting process when the timeout elapses on a conflicted port", async () => {
+		vi.useFakeTimers();
+		mockSend.mockResolvedValue(okResp({
+			...STATUS,
+			devPorts: [],
+			portConflicts: [{ port: 50001, pid: 999, processName: "node" }],
+		}));
+
+		const promise = handleDevServer(
+			"start",
+			{ positional: [], flags: { wait: "true", timeout: "1" } },
+			SOCKET,
+			CTX,
+		).catch((err: Error) => err);
+		await vi.advanceTimersByTimeAsync(5000);
+		await promise;
+
+		expect(stderrOutput).toContain("50001 held by node (pid 999)");
 	});
 
 	it("exits with an error when the timeout elapses before a port appears", async () => {
@@ -417,13 +543,13 @@ describe("dev-server instance failover", () => {
 			statusCalls++;
 			if (statusCalls === 1) throw appNotRunningError();
 			expect(socket).toBe(FALLBACK_SOCKET);
-			return okResp(STATUS);
+			return okResp({ ...STATUS, devPorts: [{ port: 50001, pid: 81298, processName: "bun" }] });
 		});
 		mockDiscoverExcluding.mockReturnValue(FALLBACK_SOCKET);
 
 		await handleDevServer("start", { positional: [], flags: { wait: "true" } }, SOCKET, CTX);
 
-		expect(stdoutOutput).toContain("Ready: listening on 5173");
+		expect(stdoutOutput).toContain("Ready: listening on 50001");
 	});
 });
 

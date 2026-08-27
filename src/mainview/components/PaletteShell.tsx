@@ -29,6 +29,9 @@ interface PaletteShellProps<T> {
 	getKey: (item: T) => string;
 	/** Text the fuzzy matcher ranks on and the row highlights. */
 	getText: (item: T) => string;
+	/** Optional wider haystack for matching only (e.g. name + space names).
+	 *  Must start with `getText`'s value so highlight indices stay aligned. */
+	getSearchText?: (item: T) => string;
 	onSelect: (item: T) => void;
 	onClose: () => void;
 	placeholder: string;
@@ -52,6 +55,7 @@ export function PaletteShell<T>({
 	items,
 	getKey,
 	getText,
+	getSearchText,
 	onSelect,
 	onClose,
 	placeholder,
@@ -66,7 +70,10 @@ export function PaletteShell<T>({
 	const [index, setIndex] = useState(0);
 	const trapRef = useFocusTrap<HTMLDivElement>();
 
-	const results = useMemo(() => fuzzyRank(query, items, getText), [query, items, getText]);
+	const results = useMemo(
+		() => fuzzyRank(query, items, getSearchText ?? getText),
+		[query, items, getText, getSearchText],
+	);
 
 	// Keep the selection within bounds whenever the result set shrinks/grows.
 	const selected = results.length === 0 ? -1 : Math.min(index, results.length - 1);

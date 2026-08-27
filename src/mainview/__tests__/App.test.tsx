@@ -44,6 +44,8 @@ vi.mock("../rpc", () => ({
 				taskSortOrder: "oldest-first",
 				updateChannel: "stable",
 			}),
+			// Entering help mode records the one-way discovery flag.
+			saveGlobalSettings: vi.fn().mockResolvedValue(undefined),
 			moveTask: vi.fn().mockResolvedValue({}),
 			openQuickShell: vi.fn().mockResolvedValue({ id: "op-task-1", projectId: "ops-proj" }),
 			dismissMergeCompletionPrompt: vi.fn().mockResolvedValue(undefined),
@@ -57,7 +59,9 @@ vi.mock("../rpc", () => ({
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "http://127.0.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: false,
+				tunnelBinaryInstalled: false,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 				interfaces: [],
 				selectedHost: "127.0.0.1",
 			}),
@@ -175,7 +179,9 @@ vi.mock("../components/ProjectTerminal", () => ({
 	default: () => <div data-testid="project-terminal-screen" />,
 }));
 vi.mock("../components/TaskImageViewer", () => ({
-	default: () => <div data-testid="image-viewer" />,
+	default: ({ initialIndex, newIds }: { initialIndex: number; newIds?: string[] }) => (
+		<div data-testid="image-viewer" data-initial-index={initialIndex} data-new-ids={(newIds ?? []).join(",")} />
+	),
 }));
 
 import { api } from "../rpc";
@@ -859,7 +865,13 @@ describe("App keyboard shortcuts", () => {
 			});
 
 			await renderApp();
-			setStreamerMode(true);
+			// Must be flushed before the keystroke: the Cmd+1..9 guard reads the flag
+			// through React state, so an unflushed toggle lets the jump into the
+			// sensitive project through, and the eviction effect then removes the whole
+			// project screen — which is why this failed as a missing testid.
+			await act(async () => {
+				setStreamerMode(true);
+			});
 
 			await userEvent.keyboard("{Meta>}2{/Meta}");
 
@@ -1110,6 +1122,55 @@ describe("App keyboard shortcuts", () => {
 				kind: "images",
 				itemIds: ["img1"],
 			});
+		});
+
+		// A batch of three lands the user on the FIRST new image, not the last, and
+		// hands the viewer the frozen unread ids — opening marks them read, so
+		// nothing downstream can still see which ones were new.
+		it("opens on the first unread image of a batch and passes the frozen new ids", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-img" }),
+			});
+
+			await renderApp();
+			const images = [
+				{ ...sharedImage, id: "old", isUnread: false },
+				{ ...sharedImage, id: "n1" },
+				{ ...sharedImage, id: "n2" },
+				{ ...sharedImage, id: "n3" },
+			];
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openImageViewer", {
+					detail: { taskId: "t-img", projectId: "p1", images },
+				}));
+			});
+
+			const viewer = await screen.findByTestId("image-viewer");
+			expect(viewer).toHaveAttribute("data-initial-index", "1");
+			expect(viewer).toHaveAttribute("data-new-ids", "n1,n2,n3");
+		});
+
+		it("falls back to the newest image when nothing is unread", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-img" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openImageViewer", {
+					detail: {
+						taskId: "t-img",
+						projectId: "p1",
+						images: [{ ...sharedImage, id: "a", isUnread: false }, { ...sharedImage, id: "b", isUnread: false }],
+					},
+				}));
+			});
+
+			const viewer = await screen.findByTestId("image-viewer");
+			expect(viewer).toHaveAttribute("data-initial-index", "1");
+			expect(viewer).toHaveAttribute("data-new-ids", "");
 		});
 
 		it("fullscreen open-mode: clicking the toast opens the full-page task view", async () => {
@@ -1962,7 +2023,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "http://192.168.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: false,
+				tunnelBinaryInstalled: false,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 			};
 
 			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", { detail: qrData }));
@@ -1984,7 +2047,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "https://public.trycloudflare.com/?token=test",
 				tunnelState: "connected",
-				cloudflaredInstalled: true,
+				tunnelBinaryInstalled: true,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 			};
 
 			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", { detail: qrData }));
@@ -2007,7 +2072,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "http://192.168.0.1:1234/?token=test",
 					tunnelState: "idle",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 				},
 			}));
 			await waitFor(() => expect(screen.getByText("Copy URL")).toBeInTheDocument());
@@ -2023,7 +2090,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "https://public.trycloudflare.com/?token=test",
 					tunnelState: "starting",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 				},
 			}));
 			await waitFor(() => expect(remoteButton.className).toContain("remote-access-active"));
@@ -2033,7 +2102,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "https://public.trycloudflare.com/?token=test",
 					tunnelState: "failed",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 				},
 			}));
 			await waitFor(() => expect(remoteButton.className).not.toContain("remote-access-active"));
@@ -2047,7 +2118,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "http://192.168.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: false,
+				tunnelBinaryInstalled: false,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 			};
 			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", { detail: qrData }));
 
@@ -2067,6 +2140,65 @@ describe("App keyboard shortcuts", () => {
 			expect(screen.getByText("Connected")).toBeInTheDocument();
 		});
 
+		it("is a real dialog: labelled, focus pulled in, Escape closes it", async () => {
+			await renderApp();
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,test",
+					accessUrl: "http://192.168.0.1:1234/?token=test",
+					tunnelState: "idle",
+					tunnelBinaryInstalled: false,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+				},
+			}));
+
+			const dialog = await screen.findByRole("dialog");
+			expect(dialog).toHaveAttribute("aria-modal", "true");
+			expect(dialog).toHaveAccessibleName("Remote Access");
+			await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+			await userEvent.keyboard("{Escape}");
+			await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+		});
+
+		it("stops the tunnel and clears the toggle from the Stop button", async () => {
+			await renderApp();
+			vi.mocked(api.request.getRemoteAccessQR).mockResolvedValue({
+				qrDataUrl: "data:image/png;base64,local",
+				accessUrl: "http://192.168.0.1:1234/?token=local",
+				tunnelState: "idle",
+				tunnelBinaryInstalled: true,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
+				interfaces: [],
+				selectedHost: "192.168.0.1",
+			});
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,tunnel",
+					accessUrl: "https://foo.trycloudflare.com/?token=t",
+					tunnelState: "connected",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+				},
+			}));
+
+			const stop = await screen.findByTestId("remote-stop-tunnel");
+			expect(screen.getByText("Public tunnel active")).toBeInTheDocument();
+
+			await userEvent.click(stop);
+
+			await waitFor(() => expect(api.request.stopTunnel).toHaveBeenCalled());
+			await waitFor(() => {
+				expect(screen.queryByTestId("remote-stop-tunnel")).not.toBeInTheDocument();
+			});
+			expect(screen.getByLabelText("Accessible from anywhere (Cloudflare Tunnel)", { selector: "input" })).not.toBeChecked();
+			expect(api.request.getRemoteAccessQR).toHaveBeenCalledWith({ tunnel: false });
+		});
+
 		it("resets consumed state when modal is reopened", async () => {
 			await renderApp();
 
@@ -2074,7 +2206,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "http://192.168.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: false,
+				tunnelBinaryInstalled: false,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 			};
 
 			// Open → consume → should be disabled
@@ -2105,7 +2239,9 @@ describe("App keyboard shortcuts", () => {
 						qrDataUrl: "data:image/png;base64,stale",
 						accessUrl: "https://stale.trycloudflare.com/?token=old",
 						tunnelState: "connected",
-						cloudflaredInstalled: true,
+						tunnelBinaryInstalled: true,
+						tunnelProvider: "cloudflare" as const,
+						tunnelFailureReason: null,
 					},
 				}));
 				window.dispatchEvent(new CustomEvent("rpc:qrTokenConsumed"));
@@ -2115,7 +2251,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,recovered",
 					accessUrl: "https://recovered.trycloudflare.com/?token=new",
 					tunnelState: "connected",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
 				});
@@ -2140,7 +2278,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,tunnel",
 				accessUrl: "https://public.trycloudflare.com/?token=t",
 				tunnelState: "connected",
-				cloudflaredInstalled: true,
+				tunnelBinaryInstalled: true,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 				interfaces: [],
 				selectedHost: "",
 			});
@@ -2152,7 +2292,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,local",
 					accessUrl: "http://192.168.0.1:1234/?token=l",
 					tunnelState: "idle",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
 					autoStartTunnel: true,
@@ -2179,7 +2321,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,local",
 					accessUrl: "http://192.168.0.1:1234/?token=l",
 					tunnelState: "idle",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
 					autoStartTunnel: true,
@@ -2196,7 +2340,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,tunnel",
 					accessUrl: "https://public.trycloudflare.com/?token=t",
 					tunnelState: "connected",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
 				});
@@ -2215,7 +2361,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,local",
 					accessUrl: "http://192.168.0.1:1234/?token=l",
 					tunnelState: "idle",
-					cloudflaredInstalled: false,
+					tunnelBinaryInstalled: false,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
 				},
@@ -2238,7 +2386,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,live",
 					accessUrl: "https://public.trycloudflare.com/?token=c",
 					tunnelState: "connected",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
 					autoStartTunnel: true,
@@ -2289,7 +2439,9 @@ describe("App keyboard shortcuts", () => {
 				qrDataUrl: "data:image/png;base64,test2",
 				accessUrl: "http://127.0.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: false,
+				tunnelBinaryInstalled: false,
+				tunnelProvider: "cloudflare" as const,
+				tunnelFailureReason: null,
 				interfaces,
 				selectedHost: "127.0.0.1",
 			});
@@ -2298,7 +2450,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "http://192.168.0.1:1234/?token=test",
 					tunnelState: "idle",
-					cloudflaredInstalled: false,
+					tunnelBinaryInstalled: false,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces,
 					selectedHost: "192.168.0.1",
 				},
@@ -2323,7 +2477,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "http://192.168.0.1:1234/?token=test",
 					tunnelState: "idle",
-					cloudflaredInstalled: false,
+					tunnelBinaryInstalled: false,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 				},
 			}));
 			const toggle = await screen.findByLabelText("Accessible from anywhere (Cloudflare Tunnel)");
@@ -2346,7 +2502,9 @@ describe("App keyboard shortcuts", () => {
 					qrDataUrl: "data:image/png;base64,test",
 					accessUrl: "https://abc.trycloudflare.com/?token=test",
 					tunnelState: "connected",
-					cloudflaredInstalled: true,
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
 					interfaces: [
 						{ name: "en0", address: "192.168.0.1", internal: false },
 						{ name: "loopback", address: "127.0.0.1", internal: true },

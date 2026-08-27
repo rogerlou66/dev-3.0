@@ -18,6 +18,7 @@ this page and the website all read from it.
 | Open the all-project Kanban | ⌘` | Ctrl+` |
 | Command palette | ⇧⌘P / ⇧⌘Space | Ctrl+Shift+P / Ctrl+Shift+Space |
 | Keyboard shortcuts panel | ⌘/ | Ctrl+/ |
+| Agent traffic log (beta — Settings → System → Advanced Experience) | ⇧⌘M | Ctrl+Shift+M |
 | Help mode (explain this screen) | ⇧⌘/ | Ctrl+Shift+/ |
 | Open current project/worktree in an app (picker) | ⌘O | Ctrl+O |
 | Terminal immersive fullscreen | F11 / ⇧⌘F | F11 / Ctrl+Shift+F |
@@ -64,6 +65,8 @@ above are the whole story.
 
 On a task whose terminal runs on the **tmux** backend, multiplexing uses tmux's `⌃B` prefix
 bindings — see the **Terminal (tmux)** tab in the in-app panel for the current set. They are
-defined in [`src/bun/tmux-config.ts`](../src/bun/tmux-config.ts). A task on the **native**
+defined in [`src/bun/tmux/config.ts`](../src/bun/tmux/config.ts). The one prefix-free binding is
+**⌥⇧ + arrows** (Alt+Shift), which selects the pane in that direction; plain **⌥ + arrows** and
+**Ctrl + arrows** are deliberately left alone so the shell and agent TUIs keep word motion. A task on the **native**
 backend has no tmux and therefore no `⌃B` prefix; its panes are driven from the app's own
 controls (and, for agents, `dev3 pane`).

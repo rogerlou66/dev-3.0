@@ -2,17 +2,19 @@ import { useState, useEffect, useRef, useCallback, useMemo, type Dispatch, type 
 import { toast } from "../toast";
 import { confirm } from "../confirm";
 import type { CodingAgent, ColumnAgentConfig, CustomColumn, Dev3RepoConfig, GitHubAccount, GitHubCliStatus, Label, Project, SetupScriptLaunchMode, Task } from "../../shared/types";
-import { ACTIVE_STATUSES, getTaskTitle } from "../../shared/types";
+import { ACTIVE_STATUSES, PROJECT_NAME_MAX_LENGTH, getTaskTitle, normalizeProjectName } from "../../shared/types";
 import { hasEnvLineBreak, parseEnvText, serializeEnvText } from "../../shared/env-text";
-import { CUSTOM_COLUMN_INSTRUCTION_MAX_CHARS, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, DEFAULT_REVIEW_PROMPT, resolveReviewModePrompt } from "../../shared/types";
+import { COORDINATOR_PROMPT, CUSTOM_COLUMN_INSTRUCTION_MAX_CHARS, DEFAULT_PR_REVIEW_PROMPT, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, DEFAULT_REVIEW_PROMPT, resolvePresetPrompt } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
-import { ListEditor } from "./ListEditor";
+import { ListEditor, type ListEditorBrowse } from "./ListEditor";
+import { openFolderPicker, openFolderPickerMulti } from "../folder-picker";
 import AgentConfigPicker from "./AgentConfigPicker";
 import AutomationsPanel from "./AutomationsPanel";
 import ColorSwatchPicker from "./ColorSwatchPicker";
 import SettingsSection from "./global-settings/SettingsSection";
+import ProjectSpacesField from "./ProjectSpacesField";
 import { matchesBranchQuery } from "./BranchSelector";
 import type { NavigationGuard } from "../navigation-guard";
 
@@ -69,7 +71,7 @@ function AddRowButton({ onClick, disabled, children }: { onClick: () => void; di
 function WarningNote({ children }: { children: ReactNode }) {
 	return (
 		<div className="flex items-start gap-2.5 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2.5">
-			<span className="mt-0.5 flex-shrink-0 text-warning text-base">&#9888;</span>
+			<span className="mt-0.5 flex-shrink-0 text-warning-strong text-base">&#9888;</span>
 			<p className="text-fg-2 text-xs leading-relaxed">{children}</p>
 		</div>
 	);
@@ -783,6 +785,26 @@ function ConfigForm({ config, onChange, inherited, projectId, projectPath, envSt
 		onChange({ ...config, [field]: value });
 	}
 
+	// Both path lists are stored relative to the repo root, so the picker is
+	// locked inside it and hands back relative paths. Without a known root there
+	// is nothing to be relative to, so the buttons stay away.
+	const repoBrowse: ListEditorBrowse | undefined = projectPath
+		? {
+			label: t("folderPicker.browse"),
+			rowLabel: t("folderPicker.browseInProject"),
+			pickOne: () => openFolderPicker({
+				confineTo: projectPath,
+				confineLabel: t("folderPicker.projectRoot"),
+				title: t("folderPicker.titleInProject"),
+			}),
+			pickMany: () => openFolderPickerMulti({
+				confineTo: projectPath,
+				confineLabel: t("folderPicker.projectRoot"),
+				title: t("folderPicker.titleInProject"),
+			}),
+		}
+		: undefined;
+
 	async function runAutoDetect() {
 		setDetecting(true);
 		setDetectFeedback(null);
@@ -956,6 +978,7 @@ function ConfigForm({ config, onChange, inherited, projectId, projectPath, envSt
 					placeholder={inheritedHint("clonePaths") || "node_modules"}
 					addLabel={t("projectSettings.addClonePath")}
 					removeLabel={t("listEditor.removeItem")}
+					browse={repoBrowse}
 				/>
 			</div>
 
@@ -1000,6 +1023,7 @@ function ConfigForm({ config, onChange, inherited, projectId, projectPath, envSt
 						placeholder={t("projectSettings.sparseCheckoutPlaceholder")}
 						addLabel={t("projectSettings.sparseCheckoutAddPath")}
 						removeLabel={t("listEditor.removeItem")}
+						browse={repoBrowse}
 					/>
 				)}
 			</div>
@@ -1045,7 +1069,7 @@ function ConfigForm({ config, onChange, inherited, projectId, projectPath, envSt
 					projectId={projectId}
 					value={config.defaultCompareRef ?? ""}
 					onChange={(value) => update("defaultCompareRef", value)}
-					placeholder={inheritedHint("defaultCompareRef") || `origin/${config.defaultBaseBranch ?? inherited?.defaultBaseBranch ?? "main"}`}
+					placeholder={inheritedHint("defaultCompareRef") || config.defaultBaseBranch || inherited?.defaultBaseBranch || "main"}
 					label={t("projectSettings.compareRef")}
 					includeRemote={true}
 				/>
@@ -1088,6 +1112,78 @@ function ConfigForm({ config, onChange, inherited, projectId, projectPath, envSt
 				{(config.autoReviewEnabled ?? false) && <WarningNote>{t("projectSettings.autoReviewWarning")}</WarningNote>}
 			</div>
 			</SettingsSection>
+		</div>
+	);
+}
+
+/**
+ * The project's display name. Commits on blur / Enter like the label rows — the
+ * Board tab has no Save button. Escape restores the stored name, and the path
+ * underneath says out loud that nothing on disk moves.
+ */
+function ProjectNameField({ project, onRename }: { project: Project; onRename: (name: string) => Promise<boolean> }) {
+	const t = useT();
+	const [draft, setDraft] = useState(project.name);
+	const [saving, setSaving] = useState(false);
+	// A rename arriving from elsewhere (CLI, another window) refreshes the field,
+	// but never while the user is typing in it.
+	const focused = useRef(false);
+	useEffect(() => {
+		if (!focused.current) setDraft(project.name);
+	}, [project.name]);
+
+	const normalized = normalizeProjectName(draft);
+	const invalid = normalized === null;
+
+	async function commit() {
+		if (!normalized) {
+			setDraft(project.name);
+			return;
+		}
+		if (normalized === project.name) {
+			setDraft(normalized);
+			return;
+		}
+		setSaving(true);
+		const ok = await onRename(normalized);
+		setDraft(ok ? normalized : project.name);
+		setSaving(false);
+	}
+
+	return (
+		<div>
+			<input
+				id="project-name"
+				type="text"
+				value={draft}
+				maxLength={PROJECT_NAME_MAX_LENGTH}
+				onChange={(e) => setDraft(e.target.value)}
+				onFocus={() => { focused.current = true; }}
+				onBlur={() => {
+					focused.current = false;
+					void commit();
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") e.currentTarget.blur();
+					if (e.key === "Escape") {
+						setDraft(project.name);
+						e.currentTarget.blur();
+					}
+				}}
+				disabled={saving}
+				aria-label={t("projectSettings.projectName")}
+				aria-invalid={invalid}
+				placeholder={t("projectSettings.projectNamePlaceholder")}
+				className={`w-full px-3 py-2 bg-base border rounded-lg text-fg text-sm outline-none placeholder-fg-muted transition-colors duration-150 ease-out disabled:opacity-60 ${
+					invalid ? "border-danger focus:border-danger" : "border-edge hover:border-edge-active focus:border-accent"
+				}`}
+			/>
+			{invalid && (
+				<p className="text-danger text-xs mt-2">{t("projectSettings.projectNameEmpty")}</p>
+			)}
+			<p className="text-fg-muted text-xs mt-2 font-mono truncate streamer-private" title={project.path}>
+				{project.path}
+			</p>
 		</div>
 	);
 }
@@ -1189,7 +1285,7 @@ function ProjectSettings({
 		defaultCompareRef: getEffectiveCompareRef(
 			p,
 			p.defaultBaseBranch,
-			p.defaultCompareRef ?? `origin/${p.defaultBaseBranch}`,
+			p.defaultCompareRef ?? p.defaultBaseBranch,
 		),
 		githubAuthHost: p.githubAuthHost ?? null,
 		githubAuthLogin: p.githubAuthLogin ?? null,
@@ -1263,13 +1359,20 @@ function ProjectSettings({
 	// to the localized built-in text).
 	const [reviewModePrompt, setReviewModePrompt] = useState(project?.reviewModePrompt ?? "");
 	const initialReviewModePromptRef = useRef(project?.reviewModePrompt ?? "");
+	const [coordinatorPrompt, setCoordinatorPrompt] = useState(project?.coordinatorPrompt ?? "");
+	const initialCoordinatorPromptRef = useRef(project?.coordinatorPrompt ?? "");
+	const [globalCoordinatorPrompt, setGlobalCoordinatorPrompt] = useState<string | undefined>(undefined);
 	const [globalReviewModePrompt, setGlobalReviewModePrompt] = useState<string | undefined>(undefined);
-	const inheritedReviewModePrompt = resolveReviewModePrompt(null, { reviewModePrompt: globalReviewModePrompt }, t("createTask.reviewPrompt"));
+	const inheritedReviewModePrompt = resolvePresetPrompt(undefined, globalReviewModePrompt, DEFAULT_PR_REVIEW_PROMPT);
+	const inheritedCoordinatorPrompt = resolvePresetPrompt(undefined, globalCoordinatorPrompt, COORDINATOR_PROMPT);
 
 	// Load available agents
 	useEffect(() => {
 		api.request.getAgents().then(setAvailableAgents).catch(() => {});
-		api.request.getGlobalSettings().then((s) => setGlobalReviewModePrompt(s.reviewModePrompt)).catch(() => {});
+		api.request.getGlobalSettings().then((s) => {
+			setGlobalReviewModePrompt(s.reviewModePrompt);
+			setGlobalCoordinatorPrompt(s.coordinatorPrompt);
+		}).catch(() => {});
 	}, []);
 
 	// Tasks with active worktrees
@@ -1364,8 +1467,9 @@ function ProjectSettings({
 	}, [configsEqual]);
 
 	const isReviewModePromptDirty = useCallback(
-		() => reviewModePrompt.trim() !== initialReviewModePromptRef.current.trim(),
-		[reviewModePrompt],
+		() => reviewModePrompt.trim() !== initialReviewModePromptRef.current.trim()
+			|| coordinatorPrompt.trim() !== initialCoordinatorPromptRef.current.trim(),
+		[reviewModePrompt, coordinatorPrompt],
 	);
 
 	const isAiReviewDirty = useCallback(() => {
@@ -1428,6 +1532,19 @@ function ProjectSettings({
 	// Saves on toggle — the Board tab has no Save button. The flag lives on the
 	// project record (not .dev3/config.json): it is this machine's privacy call,
 	// not something to commit into the repo.
+	// Display name only: the path stays put, so every worktree, data dir and
+	// slug derived from it survives the rename untouched.
+	async function handleRenameProject(name: string): Promise<boolean> {
+		try {
+			const updated = await api.request.updateProjectSettings({ projectId, name });
+			dispatch({ type: "updateProject", project: updated });
+			return true;
+		} catch (err) {
+			toast.error(t("projectSettings.failedSave", { error: String(err) }), { projectId });
+			return false;
+		}
+	}
+
 	async function handleToggleSensitive(next: boolean) {
 		if (!project) return;
 		try {
@@ -1625,12 +1742,14 @@ function ProjectSettings({
 				projectId,
 				...toSave,
 				reviewModePrompt: reviewModePrompt.trim() ? reviewModePrompt : "",
+				coordinatorPrompt: coordinatorPrompt.trim() ? coordinatorPrompt : "",
 			});
 			dispatch({ type: "updateProject", project: updated });
 			loadedProjectConfig.current = toSave;
 			setProjectConfig(toSave);
 			initialAiReviewRef.current = { agentId: aiReviewAgentId, configId: aiReviewConfigId, prompt: aiReviewPrompt };
 			initialReviewModePromptRef.current = reviewModePrompt;
+			initialCoordinatorPromptRef.current = coordinatorPrompt;
 		} catch (err) {
 			toast.error(t("projectSettings.failedSave", { error: String(err) }), { projectId });
 		}
@@ -1805,6 +1924,13 @@ function ProjectSettings({
 					{activeTab === "global" && (
 						<div data-help-id="project-settings.board">
 							<SettingsSection
+								title={t("projectSettings.projectName")}
+								description={t("projectSettings.projectNameDesc")}
+							>
+							<ProjectNameField project={project} onRename={handleRenameProject} />
+							</SettingsSection>
+
+							<SettingsSection
 								title={t("customColumns.settingsTitle")}
 								description={t("customColumns.settingsDesc")}
 							>
@@ -1874,6 +2000,13 @@ function ProjectSettings({
 									{t("labels.addLabel")}
 								</AddRowButton>
 							</div>
+							</SettingsSection>
+
+							<SettingsSection
+								title={t("spaces.sectionTitle")}
+								description={t("spaces.sectionDesc")}
+							>
+							<ProjectSpacesField projectId={project.id} />
 							</SettingsSection>
 
 							<SettingsSection
@@ -2076,6 +2209,47 @@ function ProjectSettings({
 											{reviewModePrompt.trim()
 												? t("projectSettings.reviewModePromptOverride")
 												: t("projectSettings.reviewModePromptInherited")}
+										</span>
+									</div>
+								</div>
+							</div>
+							{/* Coordinator task-type prompt (create-task popup) */}
+							<div className="space-y-4">
+								<div>
+									<span className="block text-fg text-sm font-semibold mb-1">
+										{t("projectSettings.coordinatorPrompt")}
+									</span>
+									<p className="text-fg-3 text-sm">
+										{t("projectSettings.coordinatorPromptDesc")}
+									</p>
+								</div>
+								<div className="space-y-3 pl-1">
+									<textarea
+										id="project-coordinator-prompt"
+										aria-label={t("projectSettings.coordinatorPrompt")}
+										value={coordinatorPrompt}
+										onChange={(e) => setCoordinatorPrompt(e.target.value)}
+										rows={8}
+										placeholder={inheritedCoordinatorPrompt}
+										autoCapitalize="off"
+										autoCorrect="off"
+										spellCheck={false}
+										className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm font-mono placeholder-fg-muted outline-none focus:border-accent/40 transition-colors resize-y"
+									/>
+									<div className="flex items-center gap-3">
+										<button
+											type="button"
+											onClick={() => setCoordinatorPrompt(coordinatorPrompt.trim() ? "" : inheritedCoordinatorPrompt)}
+											className="text-sm text-fg-3 hover:text-accent transition-colors px-3 py-1.5 rounded-lg border border-edge hover:border-accent/30"
+										>
+											{coordinatorPrompt.trim()
+												? t("projectSettings.coordinatorPromptReset")
+												: t("projectSettings.coordinatorPromptCopyInherited")}
+										</button>
+										<span className="text-fg-muted text-xs">
+											{coordinatorPrompt.trim()
+												? t("projectSettings.coordinatorPromptOverride")
+												: t("projectSettings.coordinatorPromptInherited")}
 										</span>
 									</div>
 								</div>

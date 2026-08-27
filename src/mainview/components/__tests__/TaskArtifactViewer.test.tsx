@@ -65,6 +65,73 @@ beforeEach(() => {
 	androidBridge.saveAndroidRemoteFile.mockResolvedValue(undefined);
 });
 
+function versioned(): SharedArtifact {
+	return {
+		...artifact("v"),
+		groupKey: "title:report",
+		version: 9,
+		name: "newest.html",
+		storedPath: "/wt/shared-artifacts/newest/newest.html",
+		createdAt: 3_000,
+		previousVersions: [
+			{ version: 7, name: "seven.html", storedPath: "/wt/shared-artifacts/seven/seven.html", originalPath: "/tmp/seven.html", bytes: 7, createdAt: 1_000, assets: [] },
+			{ version: 8, name: "eight.html", storedPath: "/wt/shared-artifacts/eight/eight.html", originalPath: "/tmp/eight.html", bytes: 8, createdAt: 2_000, assets: [] },
+		],
+	};
+}
+
+describe("TaskArtifactViewer versions", () => {
+	it("lands on the newest version and switches to an older one", async () => {
+		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		const picker = screen.getByTestId("artifact-version-picker");
+		expect(picker).toHaveTextContent("v9");
+		await waitFor(() => expect(mockedApi.request.readArtifactContent).toHaveBeenCalledWith({
+			artifact: expect.objectContaining({ storedPath: "/wt/shared-artifacts/newest/newest.html" }),
+		}));
+
+		await userEvent.click(picker);
+		const options = screen.getAllByTestId("artifact-version-option");
+		// Newest first, and the dropped versions are stated rather than hidden.
+		expect(options.map((option) => option.textContent?.slice(0, 2))).toEqual(["v9", "v8", "v7"]);
+		expect(screen.getByTestId("artifact-versions-dropped")).toHaveTextContent("6");
+
+		await userEvent.click(options[2]);
+		expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v7");
+		// The older version is loaded through the same path, with ITS stored file.
+		await waitFor(() => expect(mockedApi.request.readArtifactContent).toHaveBeenCalledWith({
+			artifact: expect.objectContaining({ storedPath: "/wt/shared-artifacts/seven/seven.html", previousVersions: undefined }),
+		}));
+	});
+
+	it("closes the version list on a click anywhere outside it", async () => {
+		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		await userEvent.click(screen.getByTestId("artifact-version-picker"));
+		expect(screen.getByTestId("artifact-version-list")).toBeInTheDocument();
+
+		// The scrim is what catches it: a click landing on the sandboxed iframe never
+		// reaches this document, so a window listener would leave the list open.
+		await userEvent.click(screen.getByTestId("artifact-version-scrim"));
+		expect(screen.queryByTestId("artifact-version-list")).not.toBeInTheDocument();
+	});
+
+	it("hides the picker for an artifact published once", () => {
+		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		expect(screen.queryByTestId("artifact-version-picker")).not.toBeInTheDocument();
+	});
+
+	it("moving to another artifact lands on ITS newest version", async () => {
+		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned(), artifact("plain")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		await userEvent.click(screen.getByTestId("artifact-version-picker"));
+		await userEvent.click(screen.getAllByTestId("artifact-version-option")[2]);
+		expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v7");
+
+		await userEvent.click(screen.getByLabelText("Next artifact"));
+		expect(screen.queryByTestId("artifact-version-picker")).not.toBeInTheDocument();
+		await userEvent.click(screen.getByLabelText("Previous artifact"));
+		expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v9");
+	});
+});
+
 describe("TaskArtifactViewer", () => {
 	it("loads the latest artifact into a sandboxed iframe", async () => {
 		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b", true)]} initialIndex={1} onClose={vi.fn()} /></I18nProvider>);

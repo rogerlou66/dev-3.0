@@ -64,6 +64,8 @@ decoration and disabled state only, never for text that has to be read.
 | Default | `--border-default` | `rgb(75, 84, 108)` | `rgb(183, 191, 207)` |
 | Active | `--border-active` | `rgb(95, 107, 135)` | `rgb(150, 163, 185)` |
 
+**A border must earn its place — depth is not a reason.** Borders carry *structure or state*: dividers, layout separators, input affordance, selection, focus, and the `STATUS_COLORS` identity edge. A border added only so a surface reads as raised is a defect — use a layered transparent `box-shadow` instead (`/better-ui` principle 3, adopted 2026-08-21; see `decisions/2026/08/21/split-ux-principal-from-the-better-skills.md`). Glass morphism is unaffected: the blur and the translucent fill stay, this is about the 1px edge on top of them. New surfaces follow the rule immediately; the 410 existing `border border-edge` call sites are migrated surface family by surface family, each one verified in both themes — never as a blanket find-and-replace.
+
 ### Semantic / Interactive
 
 `--accent-hover` is for accent **fills** — it deepens in both themes so white ink
@@ -79,7 +81,8 @@ when you point at it. Never swap the two.
 | Danger | `--danger` | `#ff8987` | `#d61133` |
 | Success | `--success` | `#3fdf7e` | `#0e8a47` |
 | Success hover (fills) | `--success-hover` | `#04be58` | `#0a7239` |
-| Warning | `--warning` | `#f0d24e` | `#91760d` |
+| Warning (paper/border) | `--warning` | `#f0d24e` | `#e3b914` |
+| Warning ink (`text-warning-strong`) | `--warning-strong` | `#f0d24e` | `#46390f` |
 | Favorite (saved star) | `--favorite` | `#f9b63d` | `#a2710f` |
 | Awake | `--awake` | `#f49456` | `#bd5e0f` |
 | Achievement gold | `--stat-gold` | `#e5aa41` | `#9d6e0c` |
@@ -87,6 +90,15 @@ when you point at it. Never swap the two.
 
 The four warm roles are separated by **hue**, not just lightness, so they never
 read as one colour: warning 96° → gold 78° → awake 52° → fire 42°.
+
+**Warning is the one role whose light-theme value is split in two.** sRGB cannot
+make a colour that is both dark enough to carry text on white and still yellow —
+at the ~0.575 lightness every other light token sits at, yellow's chroma ceiling
+is 0.114 against danger's 0.218, so a "yellow ink" renders as brown mud. So in
+the light theme `--warning` is the **paper** (fills, tints, borders, bar fills)
+and `--warning-strong` is the **ink** that goes on it. Always write text as
+`text-warning-strong`, never `text-warning`. In the dark theme the two are the
+same yellow, so the rule costs nothing there.
 
 ### Background Gradient
 
@@ -254,7 +266,7 @@ that shows **only** for keyboard / assistive-tech focus — never on a mouse cli
 
 ## 6. Depth & Elevation
 
-Four-level surface hierarchy, reinforced by glass morphism rather than heavy shadows.
+Four-level surface hierarchy: glass blur plus a **soft layered transparent shadow**, never a hard shadow and never a border standing in for one (see [Borders](#borders)).
 
 | Level | Surface | Shadow (Dark) | Shadow (Light) |
 |-------|---------|---------------|----------------|
@@ -290,7 +302,8 @@ Four-level surface hierarchy, reinforced by glass morphism rather than heavy sha
 
 **Don't:**
 - Don't use `opacity` for dimming surfaces — use the alpha channel in `rgb()` instead
-- Don't add heavy box-shadows on dark theme — glass blur provides depth
+- Don't add a border whose only job is to fake depth — that is a layered transparent `box-shadow` (see [Borders](#borders))
+- Don't add heavy box-shadows on dark theme — depth comes from glass blur plus a soft layered shadow, not from a hard one
 - Don't use colored backgrounds for buttons except the primary accent
 - Don't mix label colors with status colors — they are separate palettes
 - Don't use font weights above 700 — the system font doesn't need it

@@ -11,6 +11,8 @@ vi.mock("../../rpc", () => ({
 			getPtyUrl: vi.fn(),
 			resumeTask: vi.fn(),
 			restartTask: vi.fn(),
+			rerunSetupScript: vi.fn(),
+			dismissSetupFailure: vi.fn(),
 			moveTask: vi.fn(),
 			cancelTaskPreparation: vi.fn(),
 			checkWorktreeExists: vi.fn(),
@@ -126,6 +128,64 @@ describe("TaskTerminal", () => {
 		} else {
 			Object.defineProperty(navigator, "maxTouchPoints", { value: 0, configurable: true });
 		}
+	});
+
+	describe("Closed task", () => {
+		it("offers the way out instead of a recovery card once the task is completed", async () => {
+			const navigate = vi.fn();
+			const user = userEvent.setup();
+			// The optimistic completion drops the worktree, which is what used to
+			// classify the pane as a broken environment.
+			const closed = makeTask({ status: "completed", worktreePath: null, branchName: null });
+
+			await act(async () => {
+				renderTerminal({ tasks: [closed], navigate });
+			});
+
+			expect(screen.getByTestId("terminal-task-closed-screen")).toBeInTheDocument();
+			expect(screen.getByText("This task is completed")).toBeInTheDocument();
+			expect(screen.queryByText("Task environment error")).not.toBeInTheDocument();
+			expect(mockedApi.request.getPtyUrl).not.toHaveBeenCalled();
+
+			await user.click(screen.getByText("Back to Kanban"));
+			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1" });
+		});
+
+		it("names the cancellation when the task was cancelled", async () => {
+			await act(async () => {
+				renderTerminal({ tasks: [makeTask({ status: "cancelled", worktreePath: null })] });
+			});
+
+			expect(screen.getByText("This task is cancelled")).toBeInTheDocument();
+		});
+
+		it("replaces a live terminal with the closed screen when the task completes under it", async () => {
+			mockedApi.request.getPtyUrl.mockResolvedValue({ url: "ws://pty/1" });
+			const { rerender } = render(
+				<I18nProvider>
+					<TaskTerminal projectId="p1" taskId="t1" tasks={[makeTask()]} projects={[project]} navigate={vi.fn()} dispatch={vi.fn()} />
+				</I18nProvider>,
+			);
+			await waitFor(() => expect(screen.getByTestId("terminal-view")).toBeInTheDocument());
+
+			await act(async () => {
+				rerender(
+					<I18nProvider>
+						<TaskTerminal
+							projectId="p1"
+							taskId="t1"
+							tasks={[makeTask({ status: "completed", worktreePath: null })]}
+							projects={[project]}
+							navigate={vi.fn()}
+							dispatch={vi.fn()}
+						/>
+					</I18nProvider>,
+				);
+			});
+
+			expect(screen.getByTestId("terminal-task-closed-screen")).toBeInTheDocument();
+			expect(screen.queryByTestId("terminal-view")).not.toBeInTheDocument();
+		});
 	});
 
 	describe("handleMove sets movedAt", () => {
@@ -630,6 +690,120 @@ describe("TaskTerminal", () => {
 			await waitFor(() => {
 				expect(screen.getByTestId("extra-key-bar")).toBeInTheDocument();
 			});
+		});
+	});
+	// A failed setupScript leaves a live shell in the pane, so nothing else here
+	// reads as broken. Which offer the pane may make depends on whether the agent
+	// was already running when setup failed — see `setupFailedAgentRunning`.
+	describe("setup-failure notice", () => {
+		beforeEach(() => {
+			mockedApi.request.getPtyUrl.mockResolvedValue({ url: "ws://localhost:1234" });
+			mockedApi.request.dismissSetupFailure.mockResolvedValue(undefined);
+			mockedApi.request.rerunSetupScript.mockResolvedValue(undefined);
+		});
+
+		it("stays hidden while the setup script succeeded", async () => {
+			await act(async () => {
+				renderTerminal();
+			});
+
+			await waitFor(() => expect(screen.getByTestId("terminal-view")).toBeInTheDocument());
+			expect(screen.queryByTestId("terminal-setup-failed-card")).not.toBeInTheDocument();
+			expect(screen.queryByTestId("terminal-setup-failed-strip")).not.toBeInTheDocument();
+		});
+
+		describe("agent never started (blocking / native launch)", () => {
+			it("offers the exit code, a setup re-run and the agent as a fallback", async () => {
+				await act(async () => {
+					renderTerminal({ tasks: [makeTask({ setupFailedExitCode: 127 })] });
+				});
+
+				const card = await screen.findByTestId("terminal-setup-failed-card");
+				expect(card).toHaveTextContent("127");
+				expect(screen.getByRole("button", { name: /re-run setup/i })).toBeInTheDocument();
+				expect(screen.getByRole("button", { name: /start agent anyway/i })).toBeInTheDocument();
+				// The pane keeps running underneath — the card never replaces the log.
+				expect(screen.getByTestId("terminal-view")).toBeInTheDocument();
+			});
+
+			// The old card autofocused the session-destroying button, so the next Enter
+			// typed into a terminal landed on it.
+			it("never autofocuses the destructive button", async () => {
+				await act(async () => {
+					renderTerminal({ tasks: [makeTask({ setupFailedExitCode: 1 })] });
+				});
+
+				await screen.findByTestId("terminal-setup-failed-card");
+				expect(screen.getByRole("button", { name: /start agent anyway/i })).not.toHaveFocus();
+			});
+
+			it("relaunches the agent without re-running setup", async () => {
+				const user = userEvent.setup();
+				mockedApi.request.restartTask.mockResolvedValue("ws://localhost:4321?session=t1");
+
+				await act(async () => {
+					renderTerminal({ tasks: [makeTask({ setupFailedExitCode: 1 })] });
+				});
+
+				await screen.findByTestId("terminal-setup-failed-card");
+				await act(async () => {
+					await user.click(screen.getByRole("button", { name: /start agent anyway/i }));
+				});
+
+				expect(mockedApi.request.restartTask).toHaveBeenCalledWith({ taskId: "t1" });
+			});
+		});
+
+		describe("agent already running (parallel tmux launch)", () => {
+			const runningTask = () => makeTask({ setupFailedExitCode: 1, setupFailedAgentRunning: true });
+
+			// A dialog over a live agent covers the session and swallows keystrokes.
+			it("shows a strip instead of a dialog, with no restart offer", async () => {
+				await act(async () => {
+					renderTerminal({ tasks: [runningTask()] });
+				});
+
+				await screen.findByTestId("terminal-setup-failed-strip");
+				expect(screen.queryByTestId("terminal-setup-failed-card")).not.toBeInTheDocument();
+				expect(screen.queryByRole("button", { name: /start agent anyway/i })).not.toBeInTheDocument();
+				expect(screen.getByRole("button", { name: /re-run setup/i })).toBeInTheDocument();
+			});
+
+			it("re-runs setup without touching the session", async () => {
+				const user = userEvent.setup();
+
+				await act(async () => {
+					renderTerminal({ tasks: [runningTask()] });
+				});
+
+				await screen.findByTestId("terminal-setup-failed-strip");
+				await act(async () => {
+					await user.click(screen.getByRole("button", { name: /re-run setup/i }));
+				});
+
+				expect(mockedApi.request.rerunSetupScript).toHaveBeenCalledWith({ taskId: "t1" });
+				expect(mockedApi.request.restartTask).not.toHaveBeenCalled();
+			});
+		});
+
+		// A local-only dismissal came back every time this component was re-created
+		// (key={taskId} on task switch), which read as a popup that cannot be closed.
+		it("clears the verdict in the task when dismissed", async () => {
+			const user = userEvent.setup();
+
+			await act(async () => {
+				renderTerminal({ tasks: [makeTask({ setupFailedExitCode: 1 })] });
+			});
+
+			await screen.findByTestId("terminal-setup-failed-card");
+			await act(async () => {
+				await user.click(screen.getByRole("button", { name: /dismiss/i }));
+			});
+
+			expect(screen.queryByTestId("terminal-setup-failed-card")).not.toBeInTheDocument();
+			expect(mockedApi.request.dismissSetupFailure).toHaveBeenCalledWith({ taskId: "t1" });
+			expect(mockedApi.request.restartTask).not.toHaveBeenCalled();
+			expect(screen.getByTestId("terminal-view")).toBeInTheDocument();
 		});
 	});
 });

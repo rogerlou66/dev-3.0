@@ -51,6 +51,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "../spawn";
 import { DEV3_HOME } from "../paths";
+import { _resetUserShellCacheForTests } from "../shell-env";
 import { TmuxSpawnError, TMUX_CONF_DARK_PATH } from "../tmux";
 import {
 	cwdExists,
@@ -70,7 +71,20 @@ import {
 	setOnBell,
 	setOnOsc52Copy,
 	_resetTmuxBinaryLoggedForTests,
+	noteHumanTerminalInput,
 } from "../pty-server";
+import { readFileSync } from "node:fs";
+import {
+	agentMessageHoldKey,
+	holdAgentMessage,
+	pendingAgentMessageHoldCount,
+	resetAgentMessageHolds,
+} from "../agent-message-hold";
+import {
+	AGENT_MESSAGE_HOLD_CEILING_MS,
+	AGENT_MESSAGE_HOLD_HUMAN_IDLE_MS,
+	AGENT_MESSAGE_HOLD_IDLE_MS,
+} from "../../shared/agent-message-hold-timing";
 
 // ---- Typed mock handles ----
 
@@ -223,6 +237,9 @@ describe("pty-server", () => {
 
 		it("uses the user shell when tmuxCommand is empty", () => {
 			process.env.SHELL = "/bin/zsh";
+			// The shell is resolved once and cached for an hour — including at the
+			// import that wrote the tmux config, long before this line.
+			_resetUserShellCacheForTests();
 			const id = track("task-defcmd-01");
 			createSession(id, "proj-1", "/tmp/cwd", "", {});
 
@@ -1330,5 +1347,84 @@ describe("pty-server", () => {
 		it("returns false for a path that does not exist", async () => {
 			expect(await cwdExists(join(tmpdir(), "dev3-cwd-nope-zzzzzzzz"))).toBe(false);
 		});
+	});
+});
+
+// ================================================================
+// Held `dev3 message` vs the human at the keyboard
+// ================================================================
+
+describe("noteHumanTerminalInput", () => {
+	const TASK = "task-typing";
+	const session = { taskId: TASK } as any;
+
+	function heldMessage() {
+		const item = { deliver: vi.fn<() => boolean>(() => true), submit: vi.fn<() => void>() };
+		holdAgentMessage(agentMessageHoldKey("tmux", TASK, "%1"), item, {});
+		return item;
+	}
+
+	beforeEach(() => {
+		resetAgentMessageHolds();
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		resetAgentMessageHolds();
+		vi.useRealTimers();
+	});
+
+	it("holds a message back while the user types, with no ceiling", async () => {
+		const item = heldMessage();
+		const ws: any = {};
+		let elapsed = 0;
+		while (elapsed < AGENT_MESSAGE_HOLD_CEILING_MS * 2) {
+			await vi.advanceTimersByTimeAsync(1_000);
+			elapsed += 1_000;
+			noteHumanTerminalInput(session, ws, "a");
+		}
+		expect(item.deliver).not.toHaveBeenCalled();
+	});
+
+	it("lands it at once when he submits his own line", async () => {
+		const item = heldMessage();
+		noteHumanTerminalInput(session, {}, "ship it\r");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(item.deliver).toHaveBeenCalledTimes(1);
+		expect(item.submit).toHaveBeenCalledTimes(1);
+		expect(pendingAgentMessageHoldCount()).toBe(0);
+	});
+
+	it("keeps holding through a Shift+Enter, which is a newline he is still writing", async () => {
+		const item = heldMessage();
+		noteHumanTerminalInput(session, {}, "first line\x1b\r");
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_HUMAN_IDLE_MS - 1);
+		expect(item.deliver).not.toHaveBeenCalled();
+	});
+
+	it("gives him the longer human window, not the message one, once he has typed", async () => {
+		const item = heldMessage();
+		noteHumanTerminalInput(session, {}, "thinking");
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS * 3);
+		expect(item.deliver).not.toHaveBeenCalled();
+	});
+
+	it("reads a CR inside a paste split across frames as content, not a submit", async () => {
+		const item = heldMessage();
+		const ws: any = {};
+		noteHumanTerminalInput(session, ws, "\x1b[200~line one\r");
+		noteHumanTerminalInput(session, ws, "line two\r\x1b[201~");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(item.deliver).not.toHaveBeenCalled();
+	});
+
+	it("is wired into EVERY keystroke path of the WS message handler", () => {
+		// The behaviour above is worthless if a path writes to the shell without
+		// reporting the keystrokes, so the wiring itself is asserted here.
+		const source = readFileSync(new URL("../pty-server.ts", import.meta.url), "utf8");
+		const writes = [...source.matchAll(/shell\.write\(data\);\n(.*)\n/g)];
+		expect(writes.length).toBeGreaterThanOrEqual(2);
+		for (const write of writes) {
+			expect(write[1]).toContain("noteHumanTerminalInput(session, ws, data)");
+		}
 	});
 });

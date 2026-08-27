@@ -4,6 +4,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Project, Task } from "../../../shared/types";
 import { I18nProvider } from "../../i18n";
 import { RPC_STATUS_EVENT } from "../../diagnostics";
+import type { Route } from "../../state";
+import { RouteHost } from "../../test-utils/route-host";
 import ProjectView from "../ProjectView";
 
 // Mutable so a test can flip to remote/browser mode; a getter proves the layout
@@ -57,17 +59,31 @@ const project: Project = {
 
 function renderView(props: Partial<React.ComponentProps<typeof ProjectView>>) {
 	const tasks: Task[] = props.tasks ?? [];
+	// The inline diff lives on the route, so drive the view with the real reducer.
+	const route: Route = props.route ?? {
+		screen: "project",
+		projectId: "p1",
+		activeTaskId: props.activeTaskId,
+		taskView: props.taskView,
+	};
 	return render(
 		<I18nProvider>
-			<ProjectView
-				projectId="p1"
-				projects={[project]}
-				tasks={tasks}
-				dispatch={vi.fn()}
-				navigate={vi.fn()}
-				bellCounts={new Map()}
-				taskPorts={new Map()}
-				{...props}
+			<RouteHost
+				route={route}
+				element={
+					<ProjectView
+						projectId="p1"
+						projects={[project]}
+						tasks={tasks}
+						dispatch={vi.fn()}
+						route={route}
+						navigate={vi.fn()}
+						bellCounts={new Map()}
+						taskPorts={new Map()}
+						taskDevServers={new Map()}
+						{...props}
+					/>
+				}
 			/>
 		</I18nProvider>,
 	);
@@ -99,6 +115,49 @@ describe("ProjectView task-view layout", () => {
 
 		await Promise.resolve();
 		expect(dispatch).not.toHaveBeenCalledWith({ type: "setTasks", projectId: "p1", tasks: [] });
+		await waitFor(() =>
+			expect(dispatch).toHaveBeenCalledWith({
+				type: "setTasks",
+				projectId: "p1",
+				tasks: [{ id: "scheduled-task", projectId: "p1" }],
+			}),
+		);
+	});
+
+	// A push landing mid-fetch used to discard the entire snapshot, leaving the
+	// board with only the pushed card until the view remounted (dashboard round trip).
+	it("keeps the full snapshot when a task update lands mid-fetch", async () => {
+		let resolveTasks: (tasks: Task[]) => void;
+		const pendingTasks = new Promise<Task[]>((resolve) => {
+			resolveTasks = resolve;
+		});
+		const { api } = await import("../../rpc");
+		vi.mocked(api.request.getTasks).mockReturnValueOnce(pendingTasks);
+		const dispatch = vi.fn();
+
+		renderView({ dispatch });
+		await waitFor(() => expect(api.request.getTasks).toHaveBeenCalledWith({ projectId: "p1" }));
+
+		window.dispatchEvent(new CustomEvent("rpc:taskUpdated", {
+			detail: { task: { id: "b", projectId: "p1", status: "in-progress" } },
+		}));
+		resolveTasks!([
+			{ id: "a", projectId: "p1" } as Task,
+			{ id: "b", projectId: "p1", status: "todo" } as Task,
+			{ id: "c", projectId: "p1" } as Task,
+		]);
+
+		await waitFor(() =>
+			expect(dispatch).toHaveBeenCalledWith({
+				type: "setTasks",
+				projectId: "p1",
+				tasks: [
+					{ id: "a", projectId: "p1" },
+					{ id: "b", projectId: "p1", status: "in-progress" },
+					{ id: "c", projectId: "p1" },
+				],
+			}),
+		);
 	});
 
 	it("shows the empty-terminal placeholder when taskView is set but no task is selected", async () => {

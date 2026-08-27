@@ -100,7 +100,7 @@ describe("hourly tasks backup I/O", () => {
 					vi.setSystemTime(new Date("2026-08-04T11:00:00.100Z"));
 				}
 				const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-				return actual.readFile(path as never, options as never);
+					return String(await actual.readFile(path as never, options as never));
 			});
 
 			await updateTask(project, fixture[0].id, { overview: "boundary" });

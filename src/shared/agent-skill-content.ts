@@ -11,6 +11,10 @@
  * body constants must be reachable from the shared layer.
  */
 
+import {
+	AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS,
+	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
+} from "./agent-message-hold-timing";
 import { deepLinkSchemeRegistered } from "./deep-link";
 
 /**
@@ -97,6 +101,12 @@ In the same session-start pass, also assign task labels:
 Each task has a priority \`P0\` (highest) … \`P4\` (lowest), default \`P3\`; the board and sidebar sort by it. \`dev3 task show\` prints it, and \`dev3 task update --priority P0..P4\` sets it (applies to the whole variant group).
 
 **Do NOT set or change a task's priority on your own initiative** — only when the user explicitly asks you to (re)prioritize. Priority is the user's judgment of importance, in the same protected class as user-edited titles. Never re-prioritize during triage, cleanup, or "helpfully."
+
+## Task type
+
+A task may be the board's **coordinator**: it manages other tasks instead of doing their work. \`dev3 task show\` prints it as \`Type:\`, its card is dashed green, it sorts above every priority band, and it never auto-completes. A task may also be a **pr-review**, which is only named on the card and changes nothing else. \`dev3 task update --type coordinator|pr-review|standard\` sets or clears the type; either way dev3 rewrites the role preamble in the description and tells the running agent, so the badge and the agent behind it always agree.
+
+**Never promote or demote a task on your own initiative — least of all yourself.** Who coordinates is the user's call, in the same protected class as priority.
 `;
 
 const SKILL_CUSTOM_COLUMNS = `
@@ -174,7 +184,7 @@ const SKILL_DEV_SERVER_CONTROL = `
 
 \`dev3 dev-server status\` is low-risk and may be used when relevant. \`start\`, \`restart\`, and \`stop\` have visible side effects. Do not use them by default. Use them only when the user explicitly asked for dev-server control, the task is about \`devScript\`/ports/dev-server behavior, or you need the server running to verify the change. Before doing so, briefly tell the user what you are about to do. Prefer \`status\` before \`start\`. If you started the dev server only for verification, stop it afterwards unless the user asked to keep it running.
 
-When you need the server actually serving before testing (curl, browser QA), use \`dev3 dev-server start --wait\` / \`restart --wait\` — it blocks until the dev server's process tree is listening on a port (\`--timeout <sec>\`, default 120). Do NOT probe the port yourself after a plain restart. \`stop\`/\`restart\` verify teardown before returning; \`status\` reports \`Dev Ports\` plus WARNING lines when an assigned port is squatted by a foreign process.
+When you need the server actually serving before testing (curl, browser QA), use \`dev3 dev-server start --wait\` / \`restart --wait\` — it blocks until the dev server is listening on one of the task's assigned \`DEV3_PORT*\` ports (\`--timeout <sec>\`, default 120), bound by its own process tree or published for it by something else, so a containerised \`devScript\` whose ports the container runtime publishes counts as ready too. Auxiliary ports (an HMR socket, a sidecar) no longer end the wait on their own: once one is up it waits 10s more for an assigned port, then reports ready on what it has and says the assigned port never came up — a project whose \`devScript\` binds a fixed port instead of \`$DEV3_PORT0\` still returns instead of hanging. Do NOT probe the port yourself after a plain restart. \`stop\`/\`restart\` verify teardown before returning; \`status\` reports \`Dev Ports\`, a \`Published Ports\` line for ports opened on the server's behalf, and WARNING lines only when an assigned port was already squatted by a foreign process.
 `;
 
 const SKILL_ARTIFACTS = `
@@ -191,7 +201,9 @@ The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORIN
 3. Keep the report's content and data local. External chart/UI libraries and live \`fetch\`/WebSocket integrations are allowed as documented in \`AUTHORING.md\`.
 4. Present the starter with \`dev3 show-artifact ./dev3-artifact-report/index.html --assets ./dev3-artifact-report/app.css ./dev3-artifact-report/report.js ./dev3-artifact-report/app.js ./dev3-artifact-report/dev3-icon.png --title "Report title"\`. Insert any report-specific local assets in the \`--assets\` list before \`--title\`.
 
-If the environment variable is unexpectedly missing, report that dev3 could not provision the starter instead of inventing a different template.
+If that variable is missing, run \`dev3 artifact-template\` — it copies the starter in for you. Never invent a different template.
+
+Asked to share the report **outside** the app — a link, a phone, a GitHub comment, someone else's inbox? That is a different job: load \`/dev3-share-artifact\`, which folds the multi-file report into one self-contained HTML with \`dev3 inline-html\` and publishes it as a gist with a verified preview URL.
 `;
 
 const SKILL_GET_ATTENTION = `
@@ -203,7 +215,7 @@ Pull the user back to this task deliberately — enough that they never miss som
 - \`dev3 notify "message" [--level info|success|error] [--duration <seconds>]\` — clickable in-app toast (ephemeral; duration is 2s–30s, the \`s\` suffix is optional). \`--duration\` applies only to in-app toasts.
 - \`dev3 notify "message" [--level info|success|error] --desktop\` — sends a native OS notification that shows even when the app is backgrounded; do not combine \`--desktop\` with \`--duration\`.
 - \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show the user actual images** (screenshots, \`agent-browser\` captures, rendered charts) in an in-app viewer; files are copied into the worktree, and **each \`--caption\` annotates the image it immediately follows** (e.g. \`dev3 show-image before.png --caption "current bug" after.png --caption "after my fix"\`). If pixels exist and are relevant, put them in front of the user — never just describe a picture or leave a path they must open themselves.
-- \`dev3 show-artifact <file.html> [--assets <file...>] [--title "..."]\` — **show the user an interactive HTML artifact** in a sandboxed task workspace. Local CSS, classic JS, and raster files must be explicitly listed after \`--assets\`, live beside or below the HTML file, and keep their relative paths in the ZIP. Artifacts with local assets download as a ZIP; standalone artifacts download as HTML.
+- \`dev3 show-artifact <file.html> [--assets <file...>] [--title "..."]\` — **show the user an interactive HTML artifact** in a sandboxed task workspace. Local CSS, classic JS, and raster files must be explicitly listed after \`--assets\`, live beside or below the HTML file, and keep their relative paths in the ZIP. Artifacts with local assets download as a ZIP; standalone artifacts download as HTML. Re-running the same command **updates** the artifact: same \`--title\` (or an explicit \`--artifact-id <slug>\`, which survives re-wording the title) adds a new VERSION to the one row the user already has, switchable in the viewer — so revise a report by publishing it again rather than inventing \`report-v2.html\`. Pass \`--new\` only when it is genuinely a different report that happens to share a title.
 - \`dev3 ui state\` — focused task/project, app foreground, user idle time (\`userActivity\`), plus the pane layout on a tmux task only (\`--json\`); use \`dev3 pane list\` for a layout that works on either backend. Check this BEFORE pinging to choose the channel.
 
 MUST ping — one per logical event, not per step: **blocked** or waiting on a question → \`dev3 attention "the question"\`; **finished** something important → \`dev3 notify "..." --level success\`; something **broke** → \`dev3 notify "..." --level error\`; produced an **image worth seeing** → proactive \`dev3 show-image ... --caption "..."\`; produced an interactive report worth exploring → proactive \`dev3 show-artifact ...\`. SHOULD (only on long runs when the user likely stepped away): a major milestone; a go/no-go before a risky action. Never ping per-step progress, routine tool calls, or anything already visible in the terminal.
@@ -276,11 +288,15 @@ You may ask the user to set another task running. You never launch anything your
 - **An existing To Do task** → \`dev3 task move --task seq:<N> --status in-progress\`. Same command as a normal board move; because the task is not yours, it turns into an approval request instead.
 - **A throwaway peer agent** → \`dev3 task create --scratch --run\`. A scratch task has **no prompt by design** — it starts idle, and you drive it with messages.
 
+A launched task **inherits your priority** unless it already has one of its own, so a P0 investigation's helpers do not start at the bottom of the board — and the approval dialog lets the user change that band before it starts. You do not pass a priority yourself.
+
 On approval you get the new task's \`seq\` and the command to talk to it; it is told you started it and replies to you. **Declined** → exit code 10, nothing was launched: ask the user what to change instead of retrying the same request. **Timeout** → the dialog may still be open, so the task may start without you hearing back.
+
+An unanswered launch dialog **approves itself after a few minutes** (5 by default, configurable, and the user can switch it off) — so a user who stepped away costs you a delay, not a dead end. Wait for the answer instead of retrying: a second request for the same task joins the first one and does NOT restart its clock.
 
 Use this when work genuinely belongs in its own session (a parallel investigation, a long build, an isolated experiment). Do NOT use it to escape your own task's scope, and do not fan out several launches at once — every request costs the user an interruption.
 
-**Talking to another task's agent** — \`dev3 message --task seq:<N> "text"\` types straight into any live task's agent, not only one you started; sent from a worktree it arrives labeled as agent traffic carrying the command to answer you, and \`--in 30m\` / \`--at 14:00\` queues it instead (aim it at yourself for a wake-up). Use it for real dependencies — hand over an interface, ask for a result, report back when yours is ready — never for chatter, and never to nag a peer that is already working. One task is one inbox: it lands in that task's agent pane, never a shell split, so a task running several agents cannot be addressed pane by pane.
+**Talking to another task's agent** — \`dev3 message --task seq:<N> "text"\` types straight into any live task's agent, not only one you started; sent from a worktree it arrives labeled as agent traffic carrying the command to answer you, and \`--in 30m\` / \`--at 14:00\` queues it instead (aim it at yourself for a wake-up). Use it for real dependencies — hand over an interface, ask for a result, report back when yours is ready — never for chatter, and never to nag a peer that is already working. One task is one inbox: it lands in that task's agent pane, never a shell split, so a task running several agents cannot be addressed pane by pane. A peer on ANOTHER project needs \`--project <id>\` — the command carries your own board by default, so a bare \`--task seq:<N>\` is looked up there and reported as "task not found"; the reply command inside an incoming message already includes it when it is needed. Nothing goes in on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing there, and lands at once when they press Enter — so several messages arriving together become ONE turn for the receiver and none of them corrupts a line the user is writing. Send your three thoughts as three messages rather than cramming them into one, and expect a peer's reply about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds after it writes.
 `;
 
 // Full manual status management — for agents without hooks (Cursor, Gemini, etc.)

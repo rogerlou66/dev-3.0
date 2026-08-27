@@ -6,6 +6,7 @@ import type {
 	Task,
 	TaskPRStatusCache,
 } from "../../shared/types";
+import { taskCompletesManually } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
@@ -93,7 +94,7 @@ export async function prepareMergeCompletionPrompt(params: { taskId: string; pro
 		suggestCompletion,
 		force: params.force === true,
 	});
-	const manualCompletion = updated.manualCompletion === true;
+	const manualCompletion = taskCompletesManually(updated);
 	const noticeOnly = manualCompletion || !suggestCompletion;
 	if (noticeOnly) {
 		const reservation = lifecycleActorRuntime(task.id).mergePromptReservation;
@@ -204,7 +205,10 @@ async function checkMergedBranches(): Promise<void> {
 			...dueTasks.map((t) => t.baseBranch || project.defaultBaseBranch || "main"),
 		])];
 		try {
-			await Promise.all(uniqueBaseBranches.map((b) => git.fetchCompareRef(project.path, b)));
+			// A local-only project has nothing to fetch from; the calls only ever failed.
+			if (await git.hasOriginRemote(project.path)) {
+				await Promise.all(uniqueBaseBranches.map((b) => git.fetchCompareRef(project.path, b)));
+			}
 		} catch {
 			continue;
 		}
@@ -225,14 +229,14 @@ async function checkMergedBranches(): Promise<void> {
 					baseBranch = project.defaultBaseBranch || "main";
 					if (baseBranch === branchName) continue;
 				}
-				const ref = `origin/${baseBranch}`;
+				const ref = await git.resolveCompareRef(project.path, baseBranch);
 
 				// Cheap suppression first: a prompt already reserved/dismissed for
 				// this exact head must not burn merge-tree/patch-id/gh calls on
 				// every 60s tick.
 				const fingerprint = await getMergeCompletionFingerprint(task, branchName);
 				const nowMs = Date.now();
-				const noticeOnly = task.manualCompletion === true || !suggestCompletion;
+				const noticeOnly = taskCompletesManually(task) || !suggestCompletion;
 				if (isPromptReserved(task.id, fingerprint.fingerprint, nowMs)) continue;
 				if (!noticeOnly && shouldSuppressMergePrompt(task.mergeCompletionPrompt, fingerprint, nowMs)) continue;
 
@@ -241,7 +245,13 @@ async function checkMergedBranches(): Promise<void> {
 				// later clean tick prompts normally.
 				if (await git.isWorktreeDirty(task.worktreePath!)) continue;
 
-				const unpushed = await git.getUnpushedCount(task.worktreePath!, branchName);
+				// `unpushed === -1` means "no origin/<branch>", which only carries
+				// information when there IS a remote. In a local-only repo the local
+				// base is the thing to be merged into, so go straight to the content
+				// check — otherwise a real local merge was never detected at all.
+				const unpushed = ref.startsWith("origin/")
+					? await git.getUnpushedCount(task.worktreePath!, branchName)
+					: 0;
 				let merged: boolean;
 				if (unpushed === -1) {
 					// origin/<branch> is gone: either never pushed, or pruned after

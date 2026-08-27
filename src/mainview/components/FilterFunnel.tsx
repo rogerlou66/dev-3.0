@@ -11,6 +11,7 @@ import Tooltip from "./Tooltip";
 const GROUP_TITLE_KEY: Record<FilterGroupId, TranslationKey> = {
 	priority: "filter.group.priority",
 	status: "filter.group.status",
+	spaces: "filter.group.spaces",
 	labels: "filter.group.labels",
 	agents: "filter.group.agents",
 	flags: "filter.group.flags",

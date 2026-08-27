@@ -1,9 +1,10 @@
-import type { LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskStatus, TaskTerminalBackendInfo } from "../../shared/types";
+import type { AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
-import { ACTIVE_STATUSES, DRAFT_TASK_ACTIVATION_ERROR, titleFromDescription } from "../../shared/types";
+import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, reviewTaskTitle, titleFromDescription } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
-import { resolveAgentRequest, type AgentLaunchChoice } from "../agent-requests";
+import * as github from "../github";
+import { resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
 import { loadSettingsSync, recordFavoriteUsages } from "../settings";
 import { emitTaskSound } from "../lifecycle/executor";
 import { getPushMessage, isActive, log } from "./shared";
@@ -36,6 +37,35 @@ function isScratchPlaceholderDescription(description: string): boolean {
  * this never enters `description`: a draft's description must stay empty so
  * "Save" remains unavailable until the user actually writes the prompt.
  */
+/**
+ * A DRAFT name for a PR-review task, at creation, from what dev3 already knows
+ * about the branch. The reviewing agent owns the final title — the preset prompt
+ * tells it to replace this one once it has read the diff, which dev3 never does.
+ * This exists because the card must not be anonymous in the meantime, and because
+ * the prompt is overridable per project and app-wide: a naming rule that lived
+ * only there would silently skip every user who customised it.
+ * Best-effort; "" means "keep the description-derived title".
+ */
+async function reviewTitleForBranch(project: Project, existingBranch: string): Promise<string> {
+	try {
+		const branch = await git.localBranchNameForRef(project.path, existingBranch);
+		const probe = await github.findOpenPullRequest(project, project.path, branch, { timeoutMs: 15_000 });
+		let author = probe.pr?.author ?? null;
+		let topic = probe.pr?.title ?? null;
+		// No pull request, or one gh could not fully describe: the branch tip still
+		// knows who wrote it and what they called it.
+		if (!author || !topic) {
+			const tip = await git.refAuthorAndSubject(project.path, existingBranch);
+			author ??= tip.author;
+			topic ??= tip.subject;
+		}
+		return reviewTaskTitle({ prNumber: probe.pr?.number ?? null, branch, author, topic });
+	} catch (err) {
+		log.warn("reviewTitleForBranch failed, keeping the derived title", { error: String(err) });
+		return "";
+	}
+}
+
 function draftPlaceholderTitle(now: Date = new Date()): string {
 	const hh = String(now.getHours()).padStart(2, "0");
 	const mm = String(now.getMinutes()).padStart(2, "0");
@@ -84,7 +114,7 @@ async function getTasks(params: { projectId: string }): Promise<Task[]> {
 	return tasks;
 }
 
-async function getAllProjectTasks(): Promise<{ projectId: string; tasks: Task[] }[]> {
+async function getAllProjectTasks(): Promise<{ projectId: string; tasks: Task[]; todoCount: number }[]> {
 	log.info("→ getAllProjectTasks");
 	// Include virtual ("Operations") boards — otherwise the dashboard shows no
 	// active operations and the working-folder conflict check (which compares
@@ -94,7 +124,10 @@ async function getAllProjectTasks(): Promise<{ projectId: string; tasks: Task[] 
 		projects.map(async (project) => {
 			const tasks = await data.loadTasks(project);
 			const active = tasks.filter((task) => ACTIVE_STATUSES.includes(task.status));
-			return { projectId: project.id, tasks: active };
+			// Free: the full list is already in hand. Only `todo` counts — completed
+			// and cancelled are archive, not work the caller is failing to show.
+			const todoCount = tasks.filter((task) => task.status === "todo").length;
+			return { projectId: project.id, tasks: active, todoCount };
 		}),
 	);
 	const totalActive = results.reduce((sum, result) => sum + result.tasks.length, 0);
@@ -120,7 +153,7 @@ async function getWorkspaceBoardTasks(): Promise<{ projectId: string; tasks: Tas
 	return results;
 }
 
-async function createTask(params: { projectId: string; description: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority }): Promise<Task> {
+async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType }): Promise<Task> {
 	log.info("→ createTask", {
 		projectId: params.projectId,
 		requestedStatus: params.status ?? "todo",
@@ -130,6 +163,7 @@ async function createTask(params: { projectId: string; description: string; stat
 		hasExistingBranch: Boolean(params.existingBranch),
 		hasOpsWorkDir: Boolean(params.opsWorkDir),
 		priority: params.priority,
+		taskType: params.taskType,
 	});
 	const project = await data.getProject(params.projectId);
 	const isScratch = params.scratch === true;
@@ -155,14 +189,28 @@ async function createTask(params: { projectId: string; description: string; stat
 	const foreignCode = project.kind === "virtual"
 		? false
 		: await git.isForeignBranchRef(project.path, params.existingBranch);
+	// A review task's draft identity beats a title derived from the description: the
+	// description leads with the review preamble, so every review card otherwise
+	// reads the same. A title the USER typed still wins — the modal sends that as
+	// `customTitle` after creation, which getTaskTitle prefers over this one.
+	const reviewTitle = params.taskType === "pr-review" && params.existingBranch && project.kind !== "virtual" && !isScratch
+		? await reviewTitleForBranch(project, params.existingBranch)
+		: "";
 	const extras: Parameters<typeof data.addTask>[3] = {
 		...(params.existingBranch ? { existingBranch: params.existingBranch } : {}),
 		...(foreignCode ? { foreignCode: true } : {}),
 		...(isScratch ? { scratch: true } : {}),
 		...(isDraft ? { draft: true } : {}),
 		...(isDraft && !params.description.trim() ? { title: draftPlaceholderTitle() } : {}),
+		// A preset preamble leads the description, so the caller supplies the title
+		// derived from the user's own text. Never for a scratch task, whose
+		// description is a placeholder.
+		...(reviewTitle
+			? { title: reviewTitle }
+			: !isScratch && params.title?.trim() ? { title: params.title.trim() } : {}),
 		...(params.opsWorkDir ? { opsWorkDir: params.opsWorkDir } : {}),
 		...(params.priority ? { priority: params.priority } : {}),
+		...(params.taskType ? { taskType: params.taskType } : {}),
 	};
 	const initialStatus = isActive(status) ? "todo" : status;
 	const createdTask = await data.addTask(project, description, initialStatus, Object.keys(extras).length ? extras : undefined);
@@ -264,26 +312,62 @@ async function debugEmitTaskSound(params: { status: "completed" | "cancelled" })
 }
 
 /**
- * Activate a task with an explicitly picked agent/config/account, the way the
- * launch modal does — but for a single task, with no variant group. Used by the
- * approved agent-initiated launch (see the `task.move` approval branch in
- * cli-socket-server.ts): a bare `moveTask` would fall back to the user's default
- * agent and silently ignore what they chose in the dialog.
+ * Activate a task with the variants the user composed in the agent-request
+ * dialog, the way the launch modal does. Used by the approved agent-initiated
+ * launch (see the `task.move` approval branch in cli-socket-server.ts): a bare
+ * `moveTask` would fall back to the user's default agent and silently ignore
+ * what they chose in the dialog.
+ *
+ * One variant takes the single-task path (no group, works from any column the
+ * lifecycle machine allows); two or more delegate to {@link spawnVariants},
+ * which is the one implementation of a variant group in the app.
  *
  * Returns as soon as preparation is dispatched; the worktree + agent come up
- * asynchronously, exactly like a launch from the board.
+ * asynchronously, exactly like a launch from the board. The returned array is
+ * in variant order and always holds at least one task.
  */
 export async function launchTaskWithAgentChoice(params: {
 	taskId: string;
 	projectId: string;
 	targetStatus: TaskStatus;
 	choice: AgentLaunchChoice;
-}): Promise<Task> {
-	log.info("→ launchTaskWithAgentChoice", { taskId: params.taskId.slice(0, 8), status: params.targetStatus });
+}): Promise<Task[]> {
+	log.info("→ launchTaskWithAgentChoice", {
+		taskId: params.taskId.slice(0, 8),
+		status: params.targetStatus,
+		variants: params.choice.variants.length,
+	});
 	const project = await data.getProject(params.projectId);
-	const task = await data.getTask(project, params.taskId);
+	const stored = await data.getTask(project, params.taskId);
+	const { variants, priority } = params.choice;
+	const first = variants[0];
+	if (!first) throw new Error("At least one variant is required");
+	const { agentId, configId, accountId } = first;
+
+	// Priority lands before the move so the card never appears in the wrong sort
+	// band, and goes through the group-wide setter rather than `taskPatch`.
+	// spawnVariants copies the source's priority onto every sibling, so setting it
+	// here is also what keeps a whole agent-requested group out of the P3 band.
+	if (priority !== undefined && priority !== stored.priority) {
+		for (const changed of await data.setTaskPriority(project, stored.id, priority)) {
+			getPushMessage()?.("taskUpdated", { projectId: project.id, task: changed });
+		}
+	}
+	// Re-read so the lifecycle event carries the task it will actually patch.
+	const task = priority !== undefined ? await data.getTask(project, params.taskId) : stored;
+
+	if (variants.length > 1) {
+		const spawned = await spawnVariants({
+			taskId: task.id,
+			projectId: project.id,
+			targetStatus: params.targetStatus,
+			variants,
+		});
+		log.info("← launchTaskWithAgentChoice spawned variants", { taskId: task.id.slice(0, 8), count: spawned.length });
+		return spawned;
+	}
+
 	const existingBranch = getSourceTaskBranch(task, project);
-	const { agentId, configId, accountId } = params.choice;
 
 	const launched = await dispatchLifecycleEvent(project.id, task.id, {
 		type: "moveRequested",
@@ -308,7 +392,7 @@ export async function launchTaskWithAgentChoice(params: {
 	}, { project, task });
 
 	log.info("← launchTaskWithAgentChoice dispatched", { taskId: task.id.slice(0, 8) });
-	return launched;
+	return [launched];
 }
 
 async function cancelTaskPreparation(params: { taskId: string; projectId: string }): Promise<Task> {
@@ -861,6 +945,18 @@ async function respondToAgentLaunchRequest(params: {
 }
 
 /**
+ * The dialog reports its current agent pick so a launch that approves itself on
+ * the timeout uses it. Silent no-op on an unknown id: the request may have just
+ * been answered on another client.
+ */
+async function updateAgentLaunchChoice(params: {
+	requestId: string;
+	launch: AgentLaunchChoice;
+}): Promise<void> {
+	setAgentRequestLaunchChoice(params.requestId, params.launch);
+}
+
+/**
  * Quick shell (⇧⌘`): spawns a FRESH scratch operation in the built-in Operations
  * board on every press — exactly like clicking "Scratch Task" there. The task
  * gets the normal `Scratch — HH:mm` title and a managed work dir, and is launched
@@ -890,7 +986,7 @@ async function openQuickShell(_params: {}): Promise<Task> {
 }
 
 async function openQuickShellInner(): Promise<Task> {
-	const project = await data.ensureBuiltinOperationsBoard("Operations");
+	const project = await data.ensureBuiltinOperationsBoard(BUILTIN_OPS_BOARD_NAME);
 	// Always a brand-new scratch op (no reuse): normal `Scratch — HH:mm` title and
 	// a managed work dir (no opsWorkDir → git.virtualWorkDir). Leaving
 	// agentId/configId unset makes launchTaskPty resolve the project/global default
@@ -1100,6 +1196,7 @@ export const taskLifecycleHandlers = {
 	startScheduledLaunchNow,
 	respondToAgentCompletionRequest,
 	respondToAgentLaunchRequest,
+	updateAgentLaunchChoice,
 	getTaskTerminalBackend,
 	setTaskTerminalBackend,
 	getNativeTerminalAvailability,

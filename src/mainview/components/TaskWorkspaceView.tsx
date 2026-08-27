@@ -13,12 +13,15 @@ interface TaskWorkspaceViewProps {
 	taskId: string;
 	tasks: Task[];
 	projects: Project[];
+	/** The live route — the inline diff's open/closed state rides on it. */
+	route?: Route;
 	navigate: (route: Route) => void;
 	dispatch: Dispatch<AppAction>;
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
 	artifactViewer?: { taskId: string; artifacts: SharedArtifact[]; index: number } | null;
 	onCloseArtifactViewer?: () => void;
 	presentation?: "full-page" | "overlay" | "immersive";
+	immersive?: boolean;
 	isTerminalFullscreen?: boolean;
 	onToggleTerminalFullscreen?: () => void;
 	skipCopyModeReset?: boolean;
@@ -31,21 +34,24 @@ function TaskWorkspaceView({
 	taskId,
 	tasks,
 	projects,
+	route,
 	navigate,
 	dispatch,
 	navigationGuardRef,
 	artifactViewer,
 	onCloseArtifactViewer,
 	presentation = "full-page",
+	immersive: immersiveProp = false,
 	isTerminalFullscreen,
 	onToggleTerminalFullscreen,
 	skipCopyModeReset,
 	openUnresolvedComments,
 	loadTasks = true,
 }: TaskWorkspaceViewProps) {
+	const immersive = immersiveProp || presentation === "immersive";
 	const task = tasks.find((item) => item.id === taskId);
 	const project = projects.find((item) => item.id === projectId);
-	const inlineDiff = useTaskInlineDiffState(taskId);
+	const inlineDiff = useTaskInlineDiffState(route ?? taskId, dispatch);
 	const unresolvedRouteKeyRef = useRef<string | null>(null);
 
 	// The fullscreen task view can be entered for a task whose project's tasks
@@ -86,7 +92,7 @@ function TaskWorkspaceView({
 
 	return (
 		<div className="flex-1 min-h-0 flex flex-col">
-			{presentation !== "immersive" && task && project && (
+			{!immersive && task && project && (
 				<TaskInfoPanel
 					task={task}
 					project={project}
@@ -101,6 +107,7 @@ function TaskWorkspaceView({
 			)}
 			<div className="flex-1 min-h-0 overflow-hidden">
 				<TaskWorkspacePane
+					immersive={immersive}
 					projectId={projectId}
 					taskId={taskId}
 					tasks={tasks}

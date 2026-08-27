@@ -71,7 +71,9 @@ vi.mock("../socket-backpressure", () => ({
 }));
 
 vi.mock("../settings", () => ({
-	loadSettings: vi.fn(() => ({ updateChannel: "stable", taskSortOrder: "oldest-first" })),
+	// Auto-approval off by default here: these cases assert the ask/answer
+	// contract, and a live 5-minute timer would outlive the test process.
+	loadSettings: vi.fn(() => ({ updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0 })),
 	saveSettings: vi.fn(),
 	recordFavoriteUsages: vi.fn(),
 }));
@@ -94,6 +96,7 @@ import * as data from "../data";
 import { moveTask, launchTaskWithAgentChoice, createScratchTask, deleteTask, getPushMessage } from "../rpc-handlers";
 import { deliverLaunchHandoff } from "../agent-launch-handoff";
 import { resolveAgentRequest, _resetAgentRequestsForTests } from "../agent-requests";
+import { loadSettings } from "../settings";
 
 const { handleRequest } = await import("../cli-socket-server");
 
@@ -217,7 +220,7 @@ describe("task.move — agent-initiated launch approval", () => {
 		const pushFn = vi.fn();
 		vi.mocked(getPushMessage).mockReturnValue(pushFn);
 		const launched = { ...target, status: "in-progress" as const };
-		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue(launched);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([launched]);
 
 		const respPromise = handleRequest(moveRequest({
 			taskId: TARGET_ID,
@@ -237,19 +240,20 @@ describe("task.move — agent-initiated launch approval", () => {
 		expect(payload.requesterSeq).toBe(3);
 		expect(payload.requesterTitle).toBe("Asking task");
 
-		const launch = { agentId: "builtin-claude", configId: "claude-auto", accountId: null };
+		const launch = { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] };
 		resolveAgentRequest(payload.requestId as string, { approved: true, launch });
 
 		const resp = await respPromise;
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ approved: true, seq: 7, title: "Target task" });
-		expect((resp.data as { replyCommand: string }).replyCommand).toContain("dev3 message --task seq:7");
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toContain("dev3 message --task seq:7");
 		// The user's pick reaches the launch — NOT the default agent.
 		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith({
 			taskId: TARGET_ID,
 			projectId: "proj-1",
 			targetStatus: "in-progress",
-			choice: launch,
+			// P3 both sides: neither task set one, so nothing is inherited.
+			choice: { ...launch, priority: "P3" },
 		});
 		// A plain move would have ignored the picked agent entirely.
 		expect(moveTask).not.toHaveBeenCalled();
@@ -257,6 +261,183 @@ describe("task.move — agent-initiated launch approval", () => {
 			childTaskId: TARGET_ID,
 			source: expect.objectContaining({ seq: 3 }),
 		}));
+	});
+
+	it("defaults the launch to the requester's priority when the target has none", async () => {
+		// Issue #1496: a P0 agent's helper used to start at P3 and sink to the
+		// bottom of the board.
+		const target = makeTask();
+		const project = makeProject();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([target, { ...requester, priority: "P0" as const }]);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		expect(payload.defaultPriority).toBe("P0");
+
+		// Auto-approval with nobody watching carries no choice at all; the
+		// inherited priority must still be applied.
+		resolveAgentRequest(payload.requestId as string, { approved: true });
+		await respPromise;
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({
+			choice: expect.objectContaining({ priority: "P0" }),
+		}));
+	});
+
+	it("keeps the target's own priority — an explicit band is not overwritten", async () => {
+		const target = makeTask({ priority: "P4" });
+		const project = makeProject();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([target, { ...requester, priority: "P0" as const }]);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		expect(payload.defaultPriority).toBe("P4");
+
+		resolveAgentRequest(payload.requestId as string, { approved: true });
+		await respPromise;
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({
+			choice: expect.objectContaining({ priority: "P4" }),
+		}));
+	});
+
+	it("launches with the priority the user picked in the dialog", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: null, configId: null }], priority: "P1" },
+		});
+		await respPromise;
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({
+			choice: expect.objectContaining({ priority: "P1" }),
+		}));
+	});
+
+	it("addresses variants by task id — a live variant group shares one seq", async () => {
+		const target = makeTask();
+		// A real variant launch mints siblings: two tasks answering to seq 7 is what
+		// makes `--task seq:7` ambiguous and forces the id form.
+		const targetSibling = makeTask({ id: "task-tgt33333-1111-2222-3333-444444444444", variantIndex: 2 });
+		const variantRequester = { ...requester, variantIndex: 1 };
+		const project = makeProject();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([target, targetSibling, variantRequester]);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress", variantIndex: 2 }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] },
+		});
+
+		const resp = await respPromise;
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe(`dev3 message --task ${TARGET_ID} "your message"`);
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			source: expect.objectContaining({ seq: 3, variantIndex: 1 }),
+		}));
+	});
+
+	it("keeps the seq address for a lone variant survivor", async () => {
+		// variantIndex outlives the siblings it was minted with, so it says nothing
+		// about whether seq:7 still resolves. Nobody shares it here — issue from Seq 490.
+		const target = makeTask({ variantIndex: 3 });
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] },
+		});
+
+		const resp = await respPromise;
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe('dev3 message --task seq:7 "your message"');
+	});
+
+	it("scopes the reply command with --project when the requester is on another board", async () => {
+		const target = makeTask();
+		const otherProject = makeProject({ id: "proj-2-fedcba98", name: "Other Project" });
+		const foreignRequester = { ...requester, projectId: otherProject.id };
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject(), otherProject]);
+		vi.mocked(data.loadTasks).mockImplementation(async (p: Project) =>
+			(p.id === otherProject.id ? [foreignRequester] : [target]) as never,
+		);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] },
+		});
+
+		const resp = await respPromise;
+		// Without the scope the requester would look seq:7 up on its OWN board.
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe(
+			'dev3 message --task seq:7 --project proj-1 "your message"',
+		);
 	});
 
 	it("launches nothing when the user declines", async () => {
@@ -341,7 +522,7 @@ describe("task.createScratchAndRun", () => {
 		const scratch = makeTask({ title: "Scratch — 14:32", description: "Scratch — 14:32", scratch: true, seq: 9 });
 		setupBoard(scratch);
 		vi.mocked(createScratchTask).mockResolvedValue(scratch);
-		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue({ ...scratch, status: "in-progress" });
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...scratch, status: "in-progress" }]);
 		const pushFn = vi.fn();
 		vi.mocked(getPushMessage).mockReturnValue(pushFn);
 
@@ -354,7 +535,7 @@ describe("task.createScratchAndRun", () => {
 
 		resolveAgentRequest(payload.requestId as string, {
 			approved: true,
-			launch: { agentId: "codex", configId: "codex-default" },
+			launch: { variants: [{ agentId: "codex", configId: "codex-default" }] },
 		});
 
 		const resp = await respPromise;
@@ -381,5 +562,170 @@ describe("task.createScratchAndRun", () => {
 		// An empty scratch card must not be left littering To Do.
 		expect(deleteTask).toHaveBeenCalledWith({ taskId: scratch.id, projectId: "proj-1" });
 		expect(launchTaskWithAgentChoice).not.toHaveBeenCalled();
+	});
+});
+
+describe("task.move — unanswered launch auto-approves", () => {
+	it("pushes the deadline and launches itself when nobody answers", async () => {
+		vi.mocked(loadSettings).mockReturnValue({
+			updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 5,
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		} as any);
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" }]);
+
+		// Installed BEFORE the request: the timer is created inside it, and a clock
+		// swapped in afterwards would never own it.
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		try {
+			const respPromise = handleRequest(moveRequest({
+				taskId: TARGET_ID,
+				newStatus: "in-progress",
+				projectId: "proj-1",
+				sourceTaskId: REQUESTER_ID,
+			}));
+			await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+
+			const payload = pushFn.mock.calls[0][1] as { autoApproveAt: number | null };
+			// The dialog needs the deadline to render a countdown that matches the timer.
+			expect(payload.autoApproveAt).toBeGreaterThan(Date.now());
+
+			await vi.advanceTimersByTimeAsync(5 * 60_000);
+			const resp = await respPromise;
+
+			expect(resp.ok).toBe(true);
+			expect(resp.data).toMatchObject({ approved: true });
+			expect(launchTaskWithAgentChoice).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("carries no deadline when the setting is off", async () => {
+		vi.mocked(loadSettings).mockReturnValue({
+			updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0,
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		} as any);
+		setupBoard(makeTask());
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+
+		const payload = pushFn.mock.calls[0][1] as { requestId: string; autoApproveAt: number | null };
+		expect(payload.autoApproveAt).toBeNull();
+		resolveAgentRequest(payload.requestId, { approved: false });
+		await respPromise;
+	});
+});
+
+describe("task.move — agent-initiated launch with variants", () => {
+	const SIBLING_ID = "task-sib33333-1111-2222-3333-444444444444";
+
+	/**
+	 * Drive the approval dialog to a decision and return the CLI response.
+	 * `boardAfter` replaces the task list the reply addresses are computed from —
+	 * the launch is what mints the siblings, so it is read after approval.
+	 */
+	async function approveWith(launch: unknown, boardAfter?: Task[]) {
+		setupBoard(makeTask());
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		if (boardAfter) vi.mocked(data.loadTasks).mockResolvedValue(boardAfter);
+		resolveAgentRequest(payload.requestId as string, { approved: true, launch } as never);
+		return { resp: await respPromise, payload };
+	}
+
+	it("tells the dialog whether the target can be spawned as a group", async () => {
+		const pushFn = vi.fn();
+		setupBoard(makeTask());
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([makeTask({ status: "in-progress" })]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		expect(payload.canAddVariants).toBe(true);
+		resolveAgentRequest(payload.requestId as string, { approved: true });
+		await respPromise;
+	});
+
+	it("refuses variants for a target that is already in a group", async () => {
+		// spawnVariants mints a FRESH group off a todo source; a member of an
+		// existing group has nothing to branch from.
+		const pushFn = vi.fn();
+		setupBoard(makeTask({ groupId: "grp-1", variantIndex: 2 }));
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([makeTask({ status: "in-progress" })]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		expect(payload.canAddVariants).toBe(false);
+
+		// A client that asks for three anyway is clamped, not allowed to blow up
+		// inside spawnVariants and strand the blocked requester.
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "a", configId: "x" }, { agentId: "b", configId: "y" }, { agentId: "c", configId: "z" }] },
+		});
+		await respPromise;
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({
+			choice: expect.objectContaining({ variants: [{ agentId: "a", configId: "x" }] }),
+		}));
+	});
+
+	it("launches every picked variant, hands off to each, and addresses them by id", async () => {
+		const head = makeTask({ status: "in-progress", groupId: "grp-9", variantIndex: 1 });
+		const sibling = makeTask({ id: SIBLING_ID, status: "in-progress", groupId: "grp-9", variantIndex: 2 });
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([head, sibling]);
+
+		const variants = [
+			{ agentId: "builtin-claude", configId: "claude-auto" },
+			{ agentId: "builtin-codex", configId: "codex-default" },
+		];
+		// The board AFTER the launch — this is what makes seq:7 ambiguous.
+		const { resp } = await approveWith({ variants }, [head, sibling, requester]);
+
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({
+			choice: expect.objectContaining({ variants }),
+		}));
+		// Every variant is a separate agent and has to be told who started it.
+		expect(deliverLaunchHandoff).toHaveBeenCalledTimes(2);
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({ childTaskId: TARGET_ID }));
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({ childTaskId: SIBLING_ID }));
+
+		// seq:7 now matches two live tasks, so the requester gets one address per
+		// variant and neither of them is the shared seq.
+		expect(resp.data).toMatchObject({
+			approved: true,
+			seq: 7,
+			launched: [
+				{ variantIndex: 1, replyCommand: `dev3 message --task ${TARGET_ID} "your message"` },
+				{ variantIndex: 2, replyCommand: `dev3 message --task ${SIBLING_ID} "your message"` },
+			],
+		});
 	});
 });

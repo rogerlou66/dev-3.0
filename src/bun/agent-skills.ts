@@ -3,6 +3,10 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { createLogger } from "./logger";
 import { ensureCodexConfigFile } from "./codex-config";
+import {
+	AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS,
+	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
+} from "../shared/agent-message-hold-timing";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
 import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
 
@@ -183,7 +187,7 @@ is genuinely ambiguous (e.g., multiple possible dev servers, unclear base branch
    | \`$DEV3_PROJECT_PATH\` | Project root directory (the original repo checkout) |
    | \`$DEV3_PROJECT_NAME\` | Project name |
    | \`$DEV3_TASK_ID\` | Task UUID |
-   | \`$DEV3_TASK_SEQ\` | The task's human number, variant suffix included (\`1383\`, \`1383-1\`) — the \`seq:\` address every \`dev3 --task seq:<N>\` flag takes |
+   | \`$DEV3_TASK_SEQ\` | The task's human number, variant suffix included (\`1383\`, \`1383-1\`) — plain numbers work as \`--task seq:<N>\`; a variant shares its seq with its siblings, so address it by \`$DEV3_TASK_ID\` |
    | \`$DEV3_TASK_TITLE\` | Task title |
    | \`$DEV3_WORKTREE_PATH\` | This task's worktree directory |
    | \`$DEV3_BRANCH_NAME\` | The task's git branch |
@@ -715,14 +719,17 @@ A starting situation that generates work, then merges onto the main flow.
 
 - **A bug report arrived** → make it a task with the repro as the description; the fix then flows through review and PR like any feature. Don't know where the bug lives? → **bug-hunter swarm**: a multi-variant task where each agent runs \`/dev3-bug-hunter\` with a seeded strategy, so different agents start from different corners of the codebase.
 - **"Review this PR"** → create a **PR review task**: paste the GitHub PR URL straight into the Create Task modal — dev3 fetches the branch into a worktree and the agent reviews the actual diff — runnable code, not a GitHub-tab skim. Such a task is marked **someone else's code** (eye glyph on the card, \`Code\` row in the inspector): dev3 will not run that branch's own \`.dev3\` setup/dev/cleanup scripts, env vars, MCP servers or agent hooks, using the project's own config instead. Nothing is read-only — edit, commit and push as usual — and one click in the inspector hands the branch its trust back if you deliberately want its scripts. In the diff, a file dev3 executes by itself wears a **RUNS** badge; read its commands rather than skimming.
+- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
 - **"Continue what we did in that other task"** → past conversations are searchable: the agent runs \`dev3 conversations search\` and reads the old task's notes and transcript. This is *why* notes matter — they are weighted highest in that search.
 - **A new codebase** → add the project from a folder or clone it from a URL, then run \`/dev3-project-config\` to auto-detect its setup / dev / cleanup scripts, ports, and clone paths.
+- **"I don't want to try this on my own repo yet"** → **Try a sandbox repo** on the dashboard's first-run strip. dev3 creates a tiny throwaway repository of its own under \`~/.dev3.0/sandbox\` and opens its board, so the branch / worktree / diff loop is visible on something nobody cares about. Its README suggests three first prompts. Remove it like any project when done — nothing on disk is deleted.
 
 ## Away from the keyboard
 
 - **Work from an Android tablet → the dev3 Android app + dev3 remote.** Run \`dev3 remote\` on the computer, scan its QR in the tablet app, then use the same boards, tasks and host actions. Task/project prompts are composed natively outside the WebView, drafts survive task switches, and only confirmed task delivery clears them; prefer HTTPS, SSH or Tailscale, while plain private-LAN HTTP requires an explicit warning step.
 - **Work from any other phone/browser → dev3 remote.** The full app is served through a secure tunnel; mobile has its own pane pager and browser composer, and notifications keep the agent's pings reaching you.
 - **Expose task ports** — share a task's running dev server through a public tunnel URL and click through it from any device. Agents keep working while you are away, and dev3 can keep the machine awake while tasks run.
+- **A remote box keeps itself up to date — you never SSH in to upgrade it.** It checks every 30 minutes and installs the update by itself once nothing is in progress, no terminal is printing and nobody is connected; the restart hands the port and the live tunnel to the new build, so the public link and your open browser session survive it and running agents are untouched. \`dev3 update\` does the same on demand from any shell (\`--check\` / \`--dry-run\` report without changing anything, and detect whether this install came from brew or a CLI tarball). Turn the automatic half off in **Settings → System** to hold a box on one build while you chase a bug. Under systemd the update still happens but the tunnel URL changes — re-run \`dev3 remote url\`.
 
 ## Verifying work
 
@@ -731,6 +738,7 @@ A starting situation that generates work, then merges onto the main flow.
 - **Slice features small enough for a 30-second check.** The dev server pays off most when a feature is small enough that pressing the button and clicking around for ~30 seconds tells you whether it's done: the new button is there and works, nothing that should exist has vanished, it looks right. If you can't verify a feature that fast, the task was probably too big — split it.
 - **Screenshots → the agent takes them and shows them to you.** With the dev server up (or any page the agent can reach) and a browser tool at hand (agent-browser, Puppeteer, a browser MCP), just say *"take a screenshot and show it to me in dev3"* — the agent will understand: it drives the browser, captures the pixels, and pushes them into the app (\`dev3 show-image\` under the hood). Prefer pixels over prose when the change is visual.
 - **Reports and richer results → dev3 artifacts.** An artifact is an HTML page shown right inside dev3's UI — it can embed screenshots, tables from CSVs, charts, anything dynamic. Perfect for reports and for validating what the agent did: often you don't even need to launch the dev server yourself — the agent has already screenshotted everything and presents the finished result as one page. To activate it, just tell the agent to *"use a dev3 artifact"*.
+- **Send a report to someone outside dev3 → ask for a link.** An artifact lives inside the app, so *"share this report"* / *"give me a link"* / *"I want to look at it on my phone"* means the agent folds it into one self-contained HTML file (\`dev3 inline-html\`), publishes it as a GitHub gist — secret by default — and hands back a preview URL it has actually opened and screenshotted. That is \`/dev3-share-artifact\`; re-sharing a regenerated report updates the same gist, so a URL already pasted into an issue keeps working. It refuses to publish a page with an embedded credential and names home paths, emails and tunnel URLs before they go public.
 - **Artifacts travel well — the ZIP → PDF trick.** Downloading an artifact gives you the HTML page, and when it references images or other files — a ZIP with everything bundled. A proven workflow for analytics-style reports: view the report in dev3, download it, open the HTML in a browser, print → save as PDF — and send that PDF to people.
 
 ## Talk to the terminal in panes
@@ -744,12 +752,17 @@ Every agent running in dev3 knows it lives in a terminal with panes the user can
 
 Under the hood the agent uses \`dev3 pane run\` / \`dev3 pane logs\` (either backend); \`/dev3-tmux\` holds the tmux-only layout reference and it reaches for either on its own.
 
+## Bring your own models
+
+- **Model catalog → any provider, any mix.** In **Settings → API models** you register the providers you pay for (OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint), then build **catalog models**: your own name for one provider's model — \`fast-gremlin\` is DeepSeek Flash at OpenRouter. Keys stay on your machine; a local proxy that ships inside the app does the routing, and the agent only ever sees a local proxy key.
+- **Model roles → different models inside one agent.** In a preset's editor, each of that agent's own roles gets a catalog model: Claude Code's Opus/Sonnet/Haiku slots, Codex's main / subagent / review models. So one session can think on OpenAI and let its subagents run cheap through OpenRouter. Leave a role empty and it behaves exactly as before. A preset with roles appears in the launch picker as its own Model group.
+
 ## More than one agent
 
 Several agents at once is the normal case here. Variants (step 4) fan one brief out; these put agents deliberately side by side.
 
 - **More hands on the same task → spawn an extra agent.** Another agent in the *same* worktree, opened in a new pane with a fresh session — zero extra setup. Two agents, one branch, side by side.
-- **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N "text"\` types a message straight into another task's live agent (\`seq:N\` is the small number on its card). Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel.
+- **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N "text"\` types a message straight into another task's live agent (\`seq:N\` is the small number on its card). Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. A task on a different project needs \`--project <id>\` too: the command defaults to the sender's own board. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel. Nothing is typed on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing into that pane, and lands instantly when they press Enter — so a burst of messages from several peers lands as ONE turn instead of interrupting the receiver three times, nothing is ever mixed into a half-written human line, and a reply takes about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds to start.
 - **A message can also wait.** The same command with \`--in 30m\` / \`--at 14:00\` queues the text (the **Send later** button on the task's composer does it from the UI), and an agent can aim it at itself as a wake-up — *"check the deploy in an hour."*
 
 ## Vocabulary underneath
@@ -760,6 +773,7 @@ Reach for these when the *word*, not the process, is the confusion.
 - **Variant** — one of N parallel attempts at the same task; each has its own agent, branch, and worktree; you keep one and discard the rest.
 - **Worktree** — the task's isolated git checkout under \`~/.dev3.0/worktrees/\`; created on launch, destroyed when the task completes or is cancelled.
 - **Description vs overview vs notes** — the classic mix-up. *Description* = the original brief you wrote: the agent's prompt, fixed. *Overview* = the agent-maintained sticky note: the current state in one glance. *Notes* = durable findings that outlive the task and feed future agents.
+- **Space** — a named, many-to-many grouping of projects; a global tag, not a container. It owns nothing: every project keeps its own board, git never moves, and a space carries a name and its membership, nothing else. **Home** is the computed group of projects with no space — never stored on disk.
 - **Statuses & columns** — Todo → In progress → User questions → AI review → User review → Completed. Hooks move tasks automatically as the agent works; you normally drag a card by hand only to start, review, or complete it. Built-in columns can be renamed, custom columns added — and a custom column can even run its own agent when a task lands in it.
 
 ## When something is broken
@@ -785,6 +799,9 @@ Off the main flow entirely.
 - **Huge monorepo → check out less.** Toggle off "Include All Files" in Project Settings so every worktree checks out only the directories you actually need.
 - **Machine running out of RAM → hibernate a task.** The header shows how many gigabytes are still free; hover it for the breakdown of who ate the rest, dev3's own tasks included. **Hibernate**, on the open task's session bar, stops that task's agent, terminal, and dev server and frees its ports, while the worktree, your uncommitted changes, notes, and PR state stay untouched. It asks for confirmation first, and spells out the one thing that does not survive: the terminal scrollback. The card greys out and sinks below the live tasks; waking is explicit — open its terminal and pick a plain shell or a resume of the agent's conversation.
 - **Rate limit closing in → hot-swap the account.** The header carries live Claude/Codex rate-limit usage and yellows near the cap; click it to land in **Settings → Agent Accounts**, where several logins per agent CLI sit side by side and the active one switches without a re-login (add one by running the login command dev3 hands you, then verify — or import the login you already have). The switch applies to every *new* agent session dev3 launches — new tasks, spawned agents, bug hunters, auto-review — while running sessions keep theirs, and each launch can pick a non-default account. An **API profile** replaces the subscription login entirely: the Anthropic API, an Anthropic-compatible gateway (OpenRouter, a LiteLLM proxy), or Bedrock, with per-model overrides.
+- **Too many projects to scan → group them into Spaces.** Once the project list stops being scannable, a **Space** groups projects: a rail on the dashboard lists every space with its project count, and picking one filters the overview to it — it never navigates away, so nothing gains a second board. Membership is **many-to-many** (a shared service can sit in both \`infra\` and \`client-x\`), and a project that belongs to several renders under each of them, carrying a chip for its other spaces. Create one from **+ New space**, the last entry of the rail's space list — the overview header offers the same button only while the rail is off screen (a narrow window, or your very first space, when there is no rail yet); edit which projects belong from **Edit projects…** in a space's **…** menu — every project is listed with the members ticked, so one dialog both adds and removes (it searches, and can start a brand-new project already linked); change one project's memberships from the row's **Spaces…** action or Project Settings → Spaces. Rename, delete and reorder live in the same **…** menu, which every space carries twice over: on its rail row and on its dashboard group header — deleting only removes the grouping, never a project. Projects in no space collect under a computed **Home** group; **Home is not a real space** — it is not stored, cannot be renamed, and never appears in a membership picker. The rail appears when the dashboard's own column is at least 1024px wide — not the window, so app chrome and a browser tab count against it; below that width the same filter opens as a sheet from the control beside the dashboard's search field, and whatever you had filtered stays filtered. The overview row above the spaces is **Everything** — it covers the whole list, spaces included. A space can also be marked **Hide on camera** from its **…** menu: in streamer mode its name blurs everywhere it appears (rail, filter sheet, group header, row chips, pickers) — independent of whether any member project is marked sensitive. **Space order:** drag a row in the rail, or use **Move up** / **Move down** in the space header's **…** menu (the path that works by touch and keyboard, where drag does not). Projects reorder by drag within their space — while you drag, every row in that space collapses to its name so the whole list fits on one screen. Neither ever changes membership. With zero spaces the dashboard is exactly the screen it always was.
+- **Filter and search by space.** ⌘K matches space names as well as project names, the dashboard has its own field over projects + spaces, and the task funnel grows a **Spaces** group — \`space:"Client X"\` filters tasks anywhere task search runs, and \`is:home\` catches the projects in no space. The active-tasks sidebar gains a **space** scope (every project sharing a space with the current one). It lives in the task workspace, not on the dashboard — the dashboard's project rows already list every task waiting on you, so a panel beside them was showing the same rows twice; for cross-project task search, open any project and switch that sidebar to the globe scope.
+- **Terminals start in the wrong shell, or not at all → Settings → Terminal → Shell.** dev3 follows your login shell by default and falls back to whichever of zsh, bash or sh is installed, which is what makes a minimal Linux box (no zsh, sometimes no bash) work at all. Pin it to \`zsh\`, \`bash\` or \`sh\` when the detected one is not the one you want; a shell that is not installed says so under the picker and names the one actually running. Windows runs PowerShell and ignores the setting.
 - **Stats** — productivity and token-cost dashboards across projects.
 - **Automations** — recurring scheduled agent runs on a cron.
 - **Multi-window** — a second window (⇧⌘N) for a second project on another monitor.
@@ -795,6 +812,7 @@ Off the main flow entirely.
 - **\`/dev3-project-config\`** — analyze a repo and write its \`.dev3/config.json\`.
 - **\`/dev3-tmux\`** — full tmux reference: panes, windows, capturing output.
 - **\`/dev3-bug-hunter\`** — seeded, review-only bug hunting; shines in multi-variant swarms.
+- **\`/dev3-share-artifact\`** — publish an HTML report as a gist and hand back a verified preview URL.
 
 ## When the map is not enough — read the source
 
@@ -813,6 +831,202 @@ const ASK_DEV3_OPENAI_YAML = `interface:
   short_description: "Ask which dev3 feature or flow fits your situation"
   default_prompt: "Use $ask-dev3 to learn how something is done in dev3 and which flow fits the situation."
 `;
+
+// ---- dev3-share-artifact skill (publish an artifact as a link) ----
+
+const SHARE_ARTIFACT_SKILL_DESCRIPTION =
+	"Publish a local HTML report or dev3 artifact to a GitHub gist and hand back a working, browser-verified preview URL. Folds CSS, JS and images into one self-contained file first, because gists cannot serve multi-file HTML or binaries. Use this whenever the user wants to look at a generated report outside the app — \\\"share this report\\\", \\\"give me a link\\\", \\\"I want to open it in a browser / on my phone\\\", \\\"make a gist\\\", \\\"html preview\\\", \\\"put it online\\\" — and also when they ask to send a report to someone, attach it to a GitHub issue, or re-share an artifact they just regenerated. Reach for it even when the user does not say the word \\\"gist\\\": if the deliverable is a local HTML file and they want it on the web, this is the path.";
+
+const SHARE_ARTIFACT_SKILL_CONTENT = `---
+name: dev3-share-artifact
+description: "${SHARE_ARTIFACT_SKILL_DESCRIPTION}"
+user-invocable: true
+---
+
+# Share an HTML artifact as a link
+
+\`dev3 show-artifact\` shows a report *inside* the app. This skill is the other half: one URL
+the user can open anywhere — phone, another machine, a comment thread — rendering the report
+exactly as it looks locally.
+
+Three facts drive the whole workflow:
+
+- **A gist is flat and text-only.** It cannot store a PNG, and a relative \`href="app.css"\`
+  does not resolve inside a preview service. So the artifact has to become one file with
+  everything embedded before it can be published.
+- **GitHub does not render gist HTML.** A third-party previewer does the rendering, and they
+  are not equally reliable — see [Preview URLs](#preview-urls).
+- **A link you have not opened is a guess.** Publishing is outward-facing; a stale or
+  rate-limited preview wastes the user's turn. Look at the rendered page before handing the
+  URL over.
+
+**Requires the GitHub CLI** (\`gh\`), authenticated. If \`gh auth status\` fails, stop and say so
+— do not invent another host or upload the report somewhere the user did not ask for.
+
+## Workflow
+
+### 1. Find the artifact, then look for \`.gist-id\`
+
+A dev3 artifact is usually a directory next to the work: \`dev3-artifact-*/index.html\`, with
+\`app.css\`, \`app.js\`, \`report.js\` and an icon beside it. Any directory containing an
+\`index.html\` works the same way, as does a lone HTML file. If several candidates exist, name
+them and ask which one — the user often has an old iteration lying around.
+
+Then, before anything else:
+
+\`\`\`bash
+cat <artifact-dir>/.gist-id 2>/dev/null
+\`\`\`
+
+This one check decides the rest of the run, which is why it comes first. Re-sharing a
+regenerated report is the common case, and **an existing gist should be updated, not
+duplicated** — the old URL may already be pasted into an issue, and a pile of near-identical
+gists is its own mess.
+
+| \`.gist-id\` | Branch |
+|---|---|
+| Found | **Update.** The gist's owner and visibility are already fixed — skip those decisions and go to [3b](#3b-update-an-existing-gist) |
+| Absent | **Create.** Account and visibility have to be decided — [3a](#3a-create-a-new-gist) |
+
+### 2. Fold it into one file
+
+\`\`\`bash
+dev3 inline-html <artifact-dir-or-index.html> -o /tmp/<name>.html
+\`\`\`
+
+Build **outside the repo** — \`/tmp\` or the session scratchpad — so the generated file cannot
+end up staged by accident.
+
+It embeds local stylesheets, scripts, images, SVGs and fonts (including \`url()\` references
+inside CSS), leaves CDN links alone because they resolve fine from a browser, and prints what
+it inlined, what stayed external, and whether the secret scan found anything. \`--json\` gives
+the same report machine-readably.
+
+It refuses to write in two cases, both worth stopping for:
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| \`13\` | A referenced local file is missing | The artifact is incomplete — the page would render broken. Report which file and stop |
+| \`14\` | A credential-shaped string is embedded (\`ghp_…\`, \`sk-…\`, \`AKIA…\`, a private key) | Never publish. Tell the user exactly what was found |
+
+**Possible leaks** — home paths, email addresses, tunnel URLs — are not blockers, but a public
+gist is public forever: surface them in one line before publishing rather than after.
+
+### 3a. Create a new gist
+
+**Pick the account.** If \`gh auth status\` lists more than one account, the wrong one silently
+publishes under the wrong identity — ask the user which account this report belongs under
+unless their own instructions already answer it (many people keep a work account and a
+personal one). Pin the token per command rather than running \`gh auth switch\`: parallel
+agents flip the active account out from under each other, and the failure looks like a
+permissions bug.
+
+**Default to secret.** Secret still means "anyone with the link can open it"; it is only
+absent from the profile listing. That is the right default because artifacts routinely carry
+internal paths, screenshots and half-formed opinions. Go public when the user asks, or when
+the link is heading into a public issue thread — and say which you chose.
+
+The gist filename must be \`index.html\`; previewers default to it.
+
+\`\`\`bash
+GH_TOKEN="\$(gh auth token --user <acct>)" \\
+  gh gist create /tmp/<name>.html --desc "<what this report is>"
+# add --public only on request
+\`\`\`
+
+Record the id so the next share updates instead of duplicating:
+
+\`\`\`bash
+echo "<gist-id>" > <artifact-dir>/.gist-id
+\`\`\`
+
+### 3b. Update an existing gist
+
+Take the account from the gist itself, not from the repo path — if the artifact moved between
+projects a path heuristic points at the wrong token and \`gh gist edit\` fails with a confusing
+permission error:
+
+\`\`\`bash
+OWNER=\$(gh api gists/<gist-id> --jq .owner.login)
+GH_TOKEN="\$(gh auth token --user "\$OWNER")" \\
+  gh gist edit <gist-id> --filename index.html /tmp/<name>.html
+\`\`\`
+
+Silent on success. Two things worth knowing: visibility cannot be flipped after creation
+(secret → public means a new gist and a new URL), and the old \`--desc\` survives the edit —
+refresh it with \`-d\` if the report is now about something else.
+
+### 4. Verify, then hand over the link
+
+Raw gist content is cached for a few minutes, so a just-updated gist can still serve the old
+file. Settle that with a hash rather than by eye — on a re-share you have no memory of what
+the previous version looked like, so "does it look stale" is unanswerable:
+
+\`\`\`bash
+curl -sL "<raw-url>" | shasum -a 256    # certutil -hashfile <file> SHA256 on Windows
+shasum -a 256 /tmp/<name>.html
+\`\`\`
+
+Then look at the rendered page — the previewer can fail even when the content is correct. Use
+whatever browser tool you have (agent-browser, Puppeteer, a browser MCP): open the preview
+URL, wait a moment (previewers fetch the gist after load), screenshot it, and read the
+screenshot. The page must render rather than show a previewer error, and the styling must have
+survived the inlining. With no browser tool at all, say plainly that only the raw content was
+verified, not the rendering.
+
+**If the user mentioned a phone**, check a 390×844 viewport too — a report that overflows
+horizontally on mobile is a common and very visible failure.
+
+## Preview URLs
+
+Both take the same gist and render it; they differ in how they fetch it.
+
+| Purpose | URL |
+|---|---|
+| **Hand this to the user** | \`https://htmlpreview.github.io/?https://gist.githubusercontent.com/<user>/<id>/raw/index.html\` |
+| Raw file, for the hash check | \`https://gist.githubusercontent.com/<user>/<id>/raw/index.html\` |
+| Exact revision, if the hashes disagree | \`…/raw/<sha>/index.html\` — sha from \`gh api gists/<id> --jq '.history[0].version'\` |
+| Source, for editing | \`https://gist.github.com/<user>/<id>\` |
+
+\`gistpreview.github.io/?<id>\` exists and is shorter, but it fetches through the
+unauthenticated GitHub API and returns \`API rate limit exceeded\` from busy IPs.
+\`htmlpreview\` pulls the raw file directly and has no such limit, so lead with it and mention
+\`gistpreview\` only as a fallback.
+
+## Guardrails
+
+- **Never commit the artifact or the generated single file.** Generated deliverables are
+  throwaway output, not source. If \`git status\` shows them, add a local pattern to
+  \`\$(git rev-parse --git-common-dir)/info/exclude\` — \`dev3-artifact-*/\` and \`.gist-id\` —
+  rather than touching the committed \`.gitignore\`.
+- **Deleting or overwriting is the user's call.** Updating an existing gist is fine — that is
+  the point of \`.gist-id\`. Deleting one, or converting secret to public, is not something to
+  do unprompted.
+
+## Reporting back
+
+Lead with the clickable preview URL, then the gist page. Keep the rest to what the user would
+act on:
+
+- which account it went under, and secret versus public;
+- on an update, that the URL is unchanged;
+- anything the leak scan flagged;
+- anything left external — CDN assets still need the network to render;
+- what you actually verified, including the mobile viewport if that was the ask.
+
+If a previewer failed and you fell back to another, say which one you handed over and why —
+otherwise the user hits the broken one next time from memory.
+`;
+
+const SHARE_ARTIFACT_OPENAI_YAML = `interface:
+  display_name: "dev3 Share Artifact"
+  short_description: "Publish an HTML report as a verified preview link"
+  default_prompt: "Use \$dev3-share-artifact to publish a local HTML report as a gist and verify its preview URL."
+`;
+
+export function getShareArtifactSkillContent(): string {
+	return SHARE_ARTIFACT_SKILL_CONTENT;
+}
 
 export function getProjectConfigSkillContent(): string {
 	return PROJECT_CONFIG_SKILL_BODY;
@@ -892,6 +1106,33 @@ const ASK_DEV3_SKILL_DIRS = [
 	".config/opencode/skills/ask-dev3",
 ];
 
+const SHARE_ARTIFACT_SKILL_DIRS = [
+	".claude/skills/dev3-share-artifact",
+	".cursor/skills/dev3-share-artifact",
+	".agents/skills/dev3-share-artifact",
+	".codex/skills/dev3-share-artifact",
+	".opencode/skills/dev3-share-artifact",
+	".config/opencode/skills/dev3-share-artifact",
+];
+
+/**
+ * Every managed skill file this installer writes, relative to the home directory.
+ * `dev3 install-skills` prints this list, so it must stay derived from the dirs
+ * above rather than re-listed by hand.
+ */
+export const MANAGED_SKILL_FILES = [
+	CLAUDE_SKILL_DIR,
+	CODEX_SKILL_DIR,
+	...GENERIC_SKILL_DIRS,
+	CLAUDE_PROJECT_CONFIG_DIR,
+	...GENERIC_PROJECT_CONFIG_DIRS,
+	CLAUDE_TMUX_DIR,
+	...GENERIC_TMUX_DIRS,
+	...BUG_HUNTER_SKILL_DIRS,
+	...ASK_DEV3_SKILL_DIRS,
+	...SHARE_ARTIFACT_SKILL_DIRS,
+].map((dir) => `${dir}/SKILL.md`);
+
 const SHARED_SKILL_OPENAI_CONFIGS = [
 	{
 		dir: ".agents/skills/dev3",
@@ -912,6 +1153,10 @@ const SHARED_SKILL_OPENAI_CONFIGS = [
 	{
 		dir: ".agents/skills/ask-dev3",
 		content: ASK_DEV3_OPENAI_YAML,
+	},
+	{
+		dir: ".agents/skills/dev3-share-artifact",
+		content: SHARE_ARTIFACT_OPENAI_YAML,
 	},
 ];
 
@@ -1264,6 +1509,21 @@ export function installAgentSkills(options: InstallAgentSkillsOptions = {}): voi
 			log.info("ask-dev3 skill installed", { path: skillFile });
 		} catch (err) {
 			log.warn("Failed to install ask-dev3 skill (non-fatal)", {
+				path: skillFile,
+				error: String(err),
+			});
+		}
+	}
+
+	for (const dir of SHARE_ARTIFACT_SKILL_DIRS) {
+		const skillDir = `${home}/${dir}`;
+		const skillFile = `${skillDir}/SKILL.md`;
+		try {
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(skillFile, SHARE_ARTIFACT_SKILL_CONTENT, "utf-8");
+			log.info("share-artifact skill installed", { path: skillFile });
+		} catch (err) {
+			log.warn("Failed to install share-artifact skill (non-fatal)", {
 				path: skillFile,
 				error: String(err),
 			});

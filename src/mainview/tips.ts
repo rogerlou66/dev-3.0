@@ -1,3 +1,4 @@
+import { getAgentTrafficEnabled } from "./agent-traffic-flag";
 import type { TranslationKey } from "./i18n/translations/en";
 import type { TipState } from "../shared/types";
 import type { SettingsRouteSectionId } from "./settings-registry";
@@ -937,6 +938,51 @@ const ALL_TIPS: Tip[] = [
 		score: 4,
 		contexts: ["board", "settings"],
 	},
+	{
+		id: "share-artifact-link",
+		titleKey: "tip.shareArtifactLink.title",
+		bodyKey: "tip.shareArtifactLink.body",
+		icon: "\u{F0337}", // nf-md-link_variant
+		score: 3,
+		contexts: ["board", "terminal"],
+	},
+	{
+		id: "model-catalog-roles",
+		titleKey: "tip.modelCatalogRoles.title",
+		bodyKey: "tip.modelCatalogRoles.body",
+		icon: "\u{F0BC5}", // nf-md-swap_horizontal_variant
+		score: 4,
+		contexts: ["settings", "board"],
+		settingsSection: "models",
+	},
+	{
+		id: "spaceSearch",
+		titleKey: "tip.spaceSearch.title",
+		bodyKey: "tip.spaceSearch.body",
+		icon: "\u{F0E76}", // nf-md-shape_outline
+		score: 3,
+		contexts: ["board", "terminal"],
+	},
+	{
+		id: "remote-self-update",
+		titleKey: "tip.remoteSelfUpdate.title",
+		bodyKey: "tip.remoteSelfUpdate.body",
+		icon: "\u{F06B0}", // nf-md-cloud_sync
+		score: 3,
+		contexts: ["board", "settings"],
+		settingsSection: "system",
+	},
+	// Score 3: the log is real hidden value (30 days of agent-to-agent history that
+	// used to exist only as a 30-second toast), reachable by a shortcut nothing on
+	// screen advertises — but only a board running several agents ever needs it.
+	{
+		id: "agent-traffic-log",
+		titleKey: "tip.agentTrafficLog.title",
+		bodyKey: "tip.agentTrafficLog.body",
+		icon: "\u{F01D9}", // nf-md-swap_horizontal
+		score: 3,
+		contexts: ["board", "terminal"],
+	},
 ];
 
 const COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
@@ -952,6 +998,9 @@ function seededUnit(seed: number): number {
 /** Tips that are not snoozed and either unseen or past their cooldown. */
 function availableTips(state: TipState, now: number): Tip[] {
 	return ALL_TIPS.filter((t) => {
+		// Never advertise a feature the user has switched off — the tip would tell
+		// them to press a shortcut that does nothing.
+		if (t.id === "agent-traffic-log" && !getAgentTrafficEnabled()) return false;
 		const lastSeen = state.seen[t.id];
 		if (!lastSeen) return true;
 		return now - lastSeen > COOLDOWN_MS;

@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useState } from "react";
 import type { SystemMemorySnapshot } from "../../shared/types";
 import type { Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
 import { formatBytes, formatBytesCompact } from "../utils/formatBytes";
-import { computeAnchoredPosition } from "../utils/popoverPosition";
+import { useHeaderFlyout } from "../hooks/useHeaderFlyout";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import BottomSheet from "./BottomSheet";
+import HeaderFlyoutPanel from "./HeaderFlyoutPanel";
 import MemoryBreakdownPanel, { PRESSURE_BAR_CLASS, PRESSURE_TEXT_CLASS } from "./MemoryBreakdownPanel";
 
 /**
@@ -35,32 +35,28 @@ import MemoryBreakdownPanel, { PRESSURE_BAR_CLASS, PRESSURE_TEXT_CLASS } from ".
  * On narrow it folds into the header kebab sheet alongside prevent-sleep and the
  * rate limits (PRODUCT_UX_BIBLE §12.6), and its breakdown opens as a BottomSheet:
  * there is no hover on touch and a floating popover would overflow a phone.
+ *
+ * The open/pin/position behaviour is `useHeaderFlyout`, shared with the remote
+ * connection-quality readout.
  */
 
-/** Hover-out grace so the pointer can travel from pill to popover. */
-const CLOSE_DELAY_MS = 120;
 const POPOVER_WIDTH = 26 * 16;
 
 interface MemoryHeadroomIndicatorProps {
 	navigate: (route: Route) => void;
+	/**
+	 * `bar` is the header pill — it renders ONLY while the OS reports pressure, so a
+	 * machine that is fine carries no readout at all. `menu` is the labelled row in
+	 * the header's overflow menu, where the number is always available on demand.
+	 */
+	variant?: "bar" | "menu";
 }
 
-export default function MemoryHeadroomIndicator({ navigate }: MemoryHeadroomIndicatorProps) {
+export default function MemoryHeadroomIndicator({ navigate, variant = "bar" }: MemoryHeadroomIndicatorProps) {
 	const t = useT();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const [snapshot, setSnapshot] = useState<SystemMemorySnapshot | null>(null);
-	const [open, setOpen] = useState(false);
-	/**
-	 * Hover opens; a click PINS it open. Without the distinction a click on a
-	 * pointer device closes the popover the same gesture's hover just opened
-	 * (the pointer-over fires first), so the panel could never be clicked into.
-	 * Pinned means hover-out no longer closes it, and the next click does.
-	 */
-	const [pinned, setPinned] = useState(false);
-	const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-	const anchorRef = useRef<HTMLButtonElement | null>(null);
-	const popRef = useRef<HTMLDivElement | null>(null);
-	const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const flyout = useHeaderFlyout({ variant, isNarrow, repositionKey: snapshot });
 
 	useEffect(() => {
 		let cancelled = false;
@@ -83,114 +79,87 @@ export default function MemoryHeadroomIndicator({ navigate }: MemoryHeadroomIndi
 		};
 	}, []);
 
-	const cancelClose = useCallback(() => {
-		if (closeTimer.current !== null) {
-			clearTimeout(closeTimer.current);
-			closeTimer.current = null;
-		}
-	}, []);
-
-	const close = useCallback(() => {
-		cancelClose();
-		setOpen(false);
-		setPinned(false);
-		setPos(null);
-	}, [cancelClose]);
-
-	const scheduleClose = useCallback(() => {
-		cancelClose();
-		closeTimer.current = setTimeout(() => {
-			closeTimer.current = null;
-			setOpen((wasOpen) => (pinned ? wasOpen : false));
-			if (!pinned) setPos(null);
-		}, CLOSE_DELAY_MS);
-	}, [cancelClose, pinned]);
-
-	useEffect(() => cancelClose, [cancelClose]);
-
-	// Position the popover once it has a measurable size.
-	useLayoutEffect(() => {
-		if (isNarrow || !open || !anchorRef.current || !popRef.current) return;
-		const anchor = anchorRef.current.getBoundingClientRect();
-		const rect = popRef.current.getBoundingClientRect();
-		const { top, left } = computeAnchoredPosition(
-			anchor,
-			{ width: rect.width, height: rect.height },
-			{ placement: "bottom", align: "end" },
-		);
-		setPos({ top, left });
-	}, [open, isNarrow, snapshot]);
-
-	// Escape closes and hands focus back to the trigger.
-	useEffect(() => {
-		if (!open || isNarrow) return;
-		function onKey(e: KeyboardEvent) {
-			if (e.key !== "Escape") return;
-			close();
-			anchorRef.current?.focus();
-		}
-		window.addEventListener("keydown", onKey, true);
-		return () => window.removeEventListener("keydown", onKey, true);
-	}, [open, isNarrow, close]);
-
-	// A pinned popover no longer closes on hover-out, so it needs the usual
-	// outside-click dismissal (same pattern as SiblingPopover).
-	useEffect(() => {
-		if (!pinned || isNarrow) return;
-		function onMouseDown(e: MouseEvent) {
-			const target = e.target as Node;
-			if (anchorRef.current?.contains(target) || popRef.current?.contains(target)) return;
-			close();
-		}
-		document.addEventListener("mousedown", onMouseDown);
-		return () => document.removeEventListener("mousedown", onMouseDown);
-	}, [pinned, isNarrow, close]);
-
 	const selectTask = useCallback(
 		(taskId: string, projectId: string) => {
-			close();
+			flyout.close();
 			navigate({ screen: "project", projectId, activeTaskId: taskId });
 		},
-		[close, navigate],
+		[flyout, navigate],
 	);
 
 	// Render nothing until the first snapshot lands: a placeholder pill would
 	// cause exactly the header layout shift the UX manifest warns about.
 	if (!snapshot) return null;
 
+	// A machine with headroom is not news. The header bar earns the readout only once
+	// the OS itself says the memory is tight (yellow); until then it lives in the
+	// menu. Narrow is exempt: there the same `bar` markup IS the sheet row (the phone
+	// header never carries it), and a sheet the user opened should not be empty.
+	if (variant === "bar" && !isNarrow && snapshot.pressure === "normal") return null;
+
 	const usedRatio = snapshot.total > 0 ? snapshot.used / snapshot.total : 0;
 	const pressureClass = PRESSURE_TEXT_CLASS[snapshot.pressure];
 	const accessibleName = t("memory.ariaLabel", { free: formatBytes(snapshot.headroom) });
 
-	const breakdown = <MemoryBreakdownPanel snapshot={snapshot} onSelectTask={selectTask} onCloseOverlay={close} />;
+	const breakdown = (
+		<MemoryBreakdownPanel snapshot={snapshot} onSelectTask={selectTask} onCloseOverlay={flyout.close} />
+	);
+
+	const level = (
+		<span aria-hidden="true" className="h-0.5 w-full overflow-hidden rounded-full bg-edge">
+			<span
+				className={`hdr-mem-bar block h-full rounded-full ${PRESSURE_BAR_CLASS[snapshot.pressure]}`}
+				style={{ width: `${Math.round(Math.min(1, Math.max(0, usedRatio)) * 100)}%` }}
+			/>
+		</span>
+	);
+
+	// Menu row: hover opens the flyout after a dwell, a click pins it. Click-only
+	// made the row read as a label — nobody found the breakdown behind it.
+	if (variant === "menu") {
+		return (
+			<>
+				<button
+					ref={flyout.anchorRef}
+					type="button"
+					role="menuitem"
+					aria-label={accessibleName}
+					data-testid="memory-headroom-indicator"
+					className="header-anim w-full px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+					{...flyout.triggerProps}
+				>
+					<span className="flex w-[1.125rem] flex-col justify-center gap-[0.1875rem]">{level}</span>
+					<span className="text-sm flex-1 text-left">{t("memory.label")}</span>
+					<span className={`text-micro font-medium tabular-nums ${pressureClass}`}>
+						{formatBytesCompact(snapshot.headroom)}
+					</span>
+				</button>
+				{flyout.open && !isNarrow && (
+					<HeaderFlyoutPanel
+						flyout={flyout}
+						width={POPOVER_WIDTH}
+						ariaLabel={t("memory.label")}
+						testId="memory-breakdown-popover"
+					>
+						{breakdown}
+					</HeaderFlyoutPanel>
+				)}
+			</>
+		);
+	}
 
 	return (
 		<>
 			<button
-				ref={anchorRef}
+				ref={flyout.anchorRef}
 				type="button"
-				onClick={() => {
-					if (pinned) {
-						close();
-						return;
-					}
-					cancelClose();
-					setOpen(true);
-					setPinned(true);
-				}}
-				onMouseEnter={isNarrow ? undefined : () => { cancelClose(); setOpen(true); }}
-				onMouseLeave={isNarrow ? undefined : scheduleClose}
-				onFocus={(e) => {
-					if (!isNarrow && e.target.matches(":focus-visible")) setOpen(true);
-				}}
 				aria-label={accessibleName}
-				aria-expanded={open}
-				aria-haspopup="dialog"
 				data-help-id="header.memory"
 				data-testid="memory-headroom-indicator"
 				className={`header-anim flex shrink-0 flex-col justify-center gap-[0.1875rem] rounded-lg transition-colors hover:bg-elevated ${
 					isNarrow ? "h-11 px-2" : "px-1.5 py-1"
 				} ${pressureClass}`}
+				{...flyout.triggerProps}
 			>
 				<span className="text-micro font-medium leading-none tabular-nums">
 					{formatBytesCompact(snapshot.headroom)}
@@ -198,41 +167,28 @@ export default function MemoryHeadroomIndicator({ navigate }: MemoryHeadroomIndi
 				{/* The level lives in a bar under the number, not in a glyph: at header
 				    size a drawn memory module loses the detail that made it readable,
 				    while a bar the full width of the pill cannot lose anything. */}
-				<span aria-hidden="true" className="h-0.5 w-full overflow-hidden rounded-full bg-edge">
-					<span
-						className={`hdr-mem-bar block h-full rounded-full ${PRESSURE_BAR_CLASS[snapshot.pressure]}`}
-						style={{ width: `${Math.round(Math.min(1, Math.max(0, usedRatio)) * 100)}%` }}
-					/>
-				</span>
+				{level}
 			</button>
 
 			{isNarrow ? (
-				<BottomSheet open={open} onClose={close} title={t("memory.label")} testId="memory-breakdown-sheet">
+				<BottomSheet
+					open={flyout.open}
+					onClose={flyout.close}
+					title={t("memory.label")}
+					testId="memory-breakdown-sheet"
+				>
 					{breakdown}
 				</BottomSheet>
 			) : (
-				open &&
-				createPortal(
-					<div
-						ref={popRef}
-						role="dialog"
-						aria-label={t("memory.label")}
-						onMouseEnter={cancelClose}
-						onMouseLeave={scheduleClose}
-						data-testid="memory-breakdown-popover"
-						className="fixed z-[1200] overflow-y-auto overflow-x-hidden rounded-xl border border-edge-active bg-overlay shadow-2xl shadow-black/40"
-						style={{
-							top: pos?.top ?? 0,
-							left: pos?.left ?? 0,
-							width: POPOVER_WIDTH,
-							maxWidth: "calc(100vw - 2rem)",
-							maxHeight: "28rem",
-							visibility: pos ? "visible" : "hidden",
-						}}
+				flyout.open && (
+					<HeaderFlyoutPanel
+						flyout={flyout}
+						width={POPOVER_WIDTH}
+						ariaLabel={t("memory.label")}
+						testId="memory-breakdown-popover"
 					>
 						{breakdown}
-					</div>,
-					document.body,
+					</HeaderFlyoutPanel>
 				)
 			)}
 		</>

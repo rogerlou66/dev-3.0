@@ -40,12 +40,13 @@ export interface OrderedCustomColumn {
 }
 
 export interface TierGroupingContext {
-	scope: "project" | "global" | "attention";
+	/** `space` groups exactly like `global`; the caller pre-filters the pool. */
+	scope: "project" | "global" | "space";
 	/** Direction of the in-band activity sort (global setting). */
 	sortOrder: TaskSortOrder;
 	/** Custom columns in the order their tiers should render. For project scope
-	 *  this is the current project's columns; for global scope, every project's
-	 *  columns concatenated. Ignored in attention scope. */
+	 *  this is the current project's columns; for global/space scope, the
+	 *  in-scope projects' columns concatenated. */
 	orderedCustomColumns: OrderedCustomColumn[];
 }
 
@@ -53,23 +54,12 @@ export interface TierGroupingContext {
  * Group the sidebar's active tasks into ordered readiness tiers, each with its
  * tasks in final render order. Pure — no i18n, colors, or DOM — so the ordering
  * rules are unit-testable without rendering the component. The component maps the
- * returned structure to headers/labels/colors.
- *
- * Empty tiers are omitted. In `attention` scope the result is the `needs-you`
- * tier at global breadth only — a single flat tier of every task that needs the
- * user (same membership as the attention bell), priority-sorted; custom and
- * `waiting` tiers are never produced.
+ * returned structure to headers/labels/colors. Empty tiers are omitted.
  */
 export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): SidebarTier[] {
-	const { scope, orderedCustomColumns, sortOrder } = ctx;
+	const { orderedCustomColumns, sortOrder } = ctx;
 	// The board's in-band comparator verbatim, so the two surfaces can never disagree.
 	const byBand = (a: Task, b: Task) => compareTasksInBand(a, b, sortOrder);
-
-	if (scope === "attention") {
-		const filtered = tasks.filter(isAttentionTask);
-		if (filtered.length === 0) return [];
-		return [{ kind: "needs-you", key: "attention", tasks: filtered.slice().sort(byBand) }];
-	}
 
 	const needsYou: Task[] = [];
 	const waiting: Task[] = [];
@@ -84,8 +74,7 @@ export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): Si
 			continue;
 		}
 		// A non-custom task is "needs you" on exactly the same rule as the
-		// `is:attention` facet, so the sidebar's tier split and attention scope
-		// can never disagree.
+		// `is:attention` facet, so the two surfaces can never disagree.
 		if (isAttentionTask(task)) needsYou.push(task);
 		else waiting.push(task);
 	}

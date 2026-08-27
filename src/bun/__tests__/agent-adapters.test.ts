@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
 	getAgentAdapter,
-	getHooksAdapter,
-	autoHooksFamily,
+	autoAgentFamily,
 	isKnownAgentCommand,
 	KNOWN_AGENT_COMMANDS,
+	SELECTABLE_AGENT_FAMILIES,
 	hasAgentAdapter,
 	agentKey,
 	claudeAdapter,
@@ -90,37 +90,70 @@ describe("hook families (the renderer's copy of the registry)", () => {
 		expect(isKnownAgentCommand("")).toBe(false);
 	});
 
-	it("reports the same hook family each adapter's hooksSpec returns", () => {
+	it("offers every known command plus the explicit opt-out", () => {
+		expect([...SELECTABLE_AGENT_FAMILIES].sort()).toEqual([...ADAPTERS.map((a) => a.command), "none"].sort());
+	});
+
+	it("resolves each adapter's own command, and nothing else", () => {
 		for (const adapter of ADAPTERS) {
-			expect(autoHooksFamily(adapter.command)).toBe(adapter.hooksSpec()?.kind ?? "none");
-			expect(autoHooksFamily(`/opt/bin/${adapter.command}`)).toBe(adapter.hooksSpec()?.kind ?? "none");
+			expect(autoAgentFamily(adapter.command)).toBe(adapter.command);
+			expect(autoAgentFamily(`/opt/bin/${adapter.command}`)).toBe(adapter.command);
 		}
-		expect(autoHooksFamily("my-claude")).toBe("none");
+		expect(autoAgentFamily("my-claude")).toBe("none");
 	});
 });
 
-describe("getHooksAdapter", () => {
-	it("keeps the command-name guess when no integration is declared", () => {
-		expect(getHooksAdapter("claude").hooksSpec()).toEqual({ kind: "claude" });
-		expect(getHooksAdapter("/opt/homebrew/bin/codex").hooksSpec()).toEqual({ kind: "codex" });
-		expect(getHooksAdapter("my-claude").hooksSpec()).toBeNull();
+describe("a declared family overrides the command-name guess", () => {
+	it("keeps the name guess when nothing is declared", () => {
+		expect(getAgentAdapter("claude")).toBe(claudeAdapter);
+		expect(getAgentAdapter("/opt/homebrew/bin/codex")).toBe(codexAdapter);
+		expect(getAgentAdapter("my-claude")).toBe(genericAdapter);
 	});
 
-	it("installs the declared family for a command it cannot recognize", () => {
-		// The reported bug: a wrapper script or shell alias launching Claude Code
-		// silently got no hooks, so the task never moved between columns.
-		expect(getHooksAdapter("my-claude-wrapper", "claude").hooksSpec()).toEqual({ kind: "claude" });
-		expect(getHooksAdapter("claude --dangerously-skip-permissions", "claude").hooksSpec()?.kind).toBe("claude");
-		expect(getHooksAdapter("", "codex").hooksSpec()).toEqual({ kind: "codex" });
+	it("treats a renamed binary as the CLI it declares", () => {
+		// The reported bug: a custom executable for Claude Code was handled as an
+		// unknown CLI — no hooks, no dev3 protocol, and Resume Session re-ran the
+		// task description instead of continuing the conversation.
+		expect(getAgentAdapter("my-claude-wrapper", "claude")).toBe(claudeAdapter);
+		expect(getAgentAdapter("/Users/x/bin/cc", "claude")).toBe(claudeAdapter);
+		expect(getAgentAdapter("", "codex")).toBe(codexAdapter);
+		expect(hasAgentAdapter("my-claude-wrapper", "claude")).toBe(true);
+		expect(agentKey("/Users/x/bin/cc", "claude")).toBe("claude");
+	});
+
+	it("gives a declared wrapper the same resume support as the CLI itself", () => {
+		const adapter = getAgentAdapter("my-claude", "claude");
+		expect(adapter.supportsResume).toBe(true);
+		expect(adapter.supportsPreAssignedSessionId).toBe(true);
+		expect(adapter.buildResumeCommand("my-claude", "abc")).toBe("my-claude --resume abc");
+		expect(adapter.transcriptStore?.("/w", "/home")).toEqual(claudeAdapter.transcriptStore?.("/w", "/home"));
+	});
+
+	it("resumes rather than re-sending the prompt, unlike the generic fallback", () => {
+		const ctx: TemplateContext = {
+			taskTitle: "T",
+			taskDescription: "ORIGINAL PROMPT",
+			projectName: "p",
+			projectPath: "/p",
+			worktreePath: "/w",
+		};
+		const resume: AdapterLaunchOptions = { resume: true, sessionId: "sess-1" };
+		const declared = getAgentAdapter("my-claude", "claude").launchArgs("my-claude", undefined, ctx, resume).join(" ");
+		expect(declared).toContain("--resume sess-1");
+		expect(declared).not.toContain("ORIGINAL PROMPT");
+		// Without the declaration this is byte-identical to a fresh launch.
+		expect(getAgentAdapter("my-claude").launchArgs("my-claude", undefined, ctx, resume).join(" "))
+			.toContain("ORIGINAL PROMPT");
 	});
 
 	it("threads stopTarget / permissionMode through the declared family", () => {
-		expect(getHooksAdapter("wrapper", "claude").hooksSpec({ stopTarget: "review-by-ai", permissionMode: "plan" }))
+		expect(getAgentAdapter("wrapper", "claude").hooksSpec({ stopTarget: "review-by-ai", permissionMode: "plan" }))
 			.toEqual({ kind: "claude", stopTarget: "review-by-ai", permissionMode: "plan" });
 	});
 
 	it("honours an explicit opt-out even for a recognized command", () => {
-		expect(getHooksAdapter("claude", "none").hooksSpec()).toBeNull();
+		expect(getAgentAdapter("claude", "none")).toBe(genericAdapter);
+		expect(hasAgentAdapter("claude", "none")).toBe(false);
 	});
 });
 
@@ -245,13 +278,91 @@ describe("launchArgs — Claude", () => {
 describe("launchArgs — Codex", () => {
 	it("theme + developer_instructions + resume subcommand", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { resume: true, sessionId: "sid", codex: CODEX_RT }))
-			.toBe("codex resume sid --model gpt-5.6-sol -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR>");
+			.toBe("codex resume sid --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR>");
 	});
 	it("rewrites a dev3 profile to the themed profile", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol", additionalArgs: ["-p", "dev3"] }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'default_permissions=\"dev3\"' -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+	});
+
+	// A preset built by hand carries no flags at all. Codex's own default
+	// permissions do not include ~/.dev3.0, so without this the agent runs but
+	// `dev3 current` dies with EPERM and the task's status never moves.
+	describe("a preset that decides nothing still reaches dev3", () => {
+		it("adds the dev3 permissions preset", () => {
+			expect(launch("codex", cfg({}), { codex: CODEX_RT })).toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		it("adds the dev3 profile, which is where the hook trust lives", () => {
+			expect(launch("codex", cfg({}), { codex: CODEX_RT })).toContain("--profile dev3-dark");
+		});
+
+		it("adds it with the flag the installed codex actually accepts", () => {
+			expect(launch("codex", cfg({}), { codex: { ...CODEX_RT, profileLaunchFlag: "--profile-v2" } }))
+				.toContain("--profile-v2 dev3-dark");
+		});
+
+		it("adds them to a model-roles preset too, which has flags for the model and nothing else", () => {
+			const command = launch("codex", cfg({ model: "openrouter/ds-flash-0731" }), { codex: CODEX_RT });
+			expect(command).toContain(`-c 'default_permissions="dev3"'`);
+			expect(command).toContain("--profile dev3-dark");
+		});
+	});
+
+	// Deciding permissions is the user's call; only the absence of a decision is
+	// dev3's to fill. Each of these means "I chose", so nothing gets added.
+	describe("a preset that decided for itself is left alone", () => {
+		it.each([
+			["a full-access sandbox", ["--sandbox", "danger-full-access"]],
+			["a short-flag sandbox", ["-s", "read-only"]],
+			["the bypass flag", ["--dangerously-bypass-approvals-and-sandbox"]],
+			// Shorthand for a sandbox choice, so it is a choice.
+			["the full-auto shorthand", ["--full-auto"]],
+			["its own permissions preset", ["-c", 'default_permissions="myown"']],
+			["a raw sandbox_mode override", ["-c", 'sandbox_mode="read-only"']],
+		])("%s", (_name, additionalArgs) => {
+			expect(launch("codex", cfg({ additionalArgs }), { codex: CODEX_RT }))
+				.not.toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		// An approval flag says when Codex stops to ask, not what it may touch.
+		// Dropping the dev3 preset there would cost the agent `~/.dev3.0` for no
+		// reason, so this one still gets it.
+		it("still supplies permissions next to an approval-only flag", () => {
+			expect(launch("codex", cfg({ additionalArgs: ["--ask-for-approval", "on-failure"] }), { codex: CODEX_RT }))
+				.toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		it("keeps the user's own profile instead of forcing ours", () => {
+			const command = launch("codex", cfg({ additionalArgs: ["-p", "myprofile"] }), { codex: CODEX_RT });
+			expect(command).toContain("-p myprofile");
+			expect(command).not.toContain("dev3-dark");
+		});
+
+		// Codex takes `--flag=value` as readily as `--flag value`; a check that only
+		// knows the spaced form silently overrides a choice the user did make.
+		it.each([
+			["a sandbox written with =", ["--sandbox=danger-full-access"]],
+			["a short-flag sandbox written with =", ["-s=read-only"]],
+		])("%s", (_name, additionalArgs) => {
+			expect(launch("codex", cfg({ additionalArgs }), { codex: CODEX_RT }))
+				.not.toContain(`-c 'default_permissions="dev3"'`);
+		});
+
+		it("keeps a profile written with = instead of appending ours", () => {
+			const command = launch("codex", cfg({ additionalArgs: ["--profile=myprofile"] }), { codex: CODEX_RT });
+			expect(command).toContain("--profile=myprofile");
+			expect(command).not.toContain("dev3-dark");
+		});
+	});
+
+	it("rewrites a dev3 profile written with = to the themed profile", () => {
+		expect(launch("codex", cfg({ additionalArgs: ["--profile=dev3"] }), { codex: CODEX_RT }))
+			.toContain("--profile=dev3-dark");
+		expect(launch("codex", cfg({ additionalArgs: ["-p=dev3"] }), { codex: { ...CODEX_RT, profileLaunchFlag: "--profile-v2" } }))
+			.toContain("--profile-v2=dev3-dark");
 	});
 	it("profile-v2 codex rewrites -p to --profile-v2", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol", additionalArgs: ["-p", "dev3"] }), { codex: { ...CODEX_RT, profileLaunchFlag: "--profile-v2" } }))

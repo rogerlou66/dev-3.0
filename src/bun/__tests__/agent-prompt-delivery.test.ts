@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../agent-prompt", () => ({
 	sendPromptToAgentPane: vi.fn(async () => true),
 	sendPromptToPane: vi.fn(async () => true),
+	holdMessageForAgentPane: vi.fn(async () => true),
+	holdMessageForPane: vi.fn(async () => true),
 }));
 vi.mock("../agent-prompt-native", () => ({
 	sendPromptToNativeAgentPane: vi.fn(async () => true),
@@ -19,7 +21,7 @@ vi.mock("../agent-hooks-refresh", () => ({
 	refreshClaudeHooksForTask: vi.fn(async () => {}),
 }));
 
-import { sendPromptToAgentPane, sendPromptToPane } from "../agent-prompt";
+import { holdMessageForAgentPane, holdMessageForPane, sendPromptToAgentPane, sendPromptToPane } from "../agent-prompt";
 import { sendPromptToNativeAgentPane, sendPromptToNativePane } from "../agent-prompt-native";
 import { refreshClaudeHooksForTask } from "../agent-hooks-refresh";
 import { deliverAgentPrompt } from "../agent-prompt-delivery";
@@ -46,11 +48,16 @@ const TMUX_DELIVERED = { deliveryId: "d1", backend: "tmux", paneId: "%1", status
 /** The best a native write can ever report: the bytes went out, unacknowledged. */
 const NATIVE_UNCONFIRMED = { status: "unconfirmed", reason: "unacknowledged" } as const;
 
+/** A `dev3 message` accepted by dev3 with nothing typed yet. */
+const HELD = { status: "held", detail: "held until the pane goes quiet" } as const;
+
 beforeEach(() => {
 	vi.mocked(sendPromptToAgentPane).mockResolvedValue(TMUX_DELIVERED);
 	vi.mocked(sendPromptToPane).mockResolvedValue(TMUX_DELIVERED);
 	vi.mocked(sendPromptToNativeAgentPane).mockResolvedValue(NATIVE_UNCONFIRMED);
 	vi.mocked(sendPromptToNativePane).mockResolvedValue(NATIVE_UNCONFIRMED);
+	vi.mocked(holdMessageForAgentPane).mockResolvedValue(HELD);
+	vi.mocked(holdMessageForPane).mockResolvedValue(HELD);
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -120,7 +127,7 @@ describe("deliverAgentPrompt — native tasks", () => {
 
 	it("routes an agent target to the native agent pane", async () => {
 		await expect(deliverAgentPrompt(nativeTask(), "check CI")).resolves.toMatchObject({ status: "unconfirmed" });
-		expect(sendPromptToNativeAgentPane).toHaveBeenCalledWith(expect.objectContaining({ id: TASK_ID }), "check CI");
+		expect(sendPromptToNativeAgentPane).toHaveBeenCalledWith(expect.objectContaining({ id: TASK_ID }), "check CI", {});
 	});
 
 	it("routes a concrete pane target to the native pane path", async () => {
@@ -129,6 +136,7 @@ describe("deliverAgentPrompt — native tasks", () => {
 			expect.objectContaining({ id: TASK_ID }),
 			"pane-2",
 			"ls",
+			{},
 		);
 	});
 
@@ -167,5 +175,33 @@ describe("deliverAgentPrompt — hook re-assertion", () => {
 	it("re-asserts them for a concrete pane target too", async () => {
 		await deliverAgentPrompt(task(), "check CI", { kind: "pane", paneId: "%4" });
 		expect(refreshClaudeHooksForTask).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("deliverAgentPrompt — a held dev3 message", () => {
+	it("sends a tmux agent target down the hold path, never the typing one", async () => {
+		await expect(deliverAgentPrompt(task(), "check CI", { kind: "agent" }, { hold: true })).resolves.toMatchObject({
+			status: "held",
+		});
+		expect(holdMessageForAgentPane).toHaveBeenCalledWith(expect.objectContaining({ id: TASK_ID }), "check CI", PANES, undefined);
+		expect(sendPromptToAgentPane).not.toHaveBeenCalled();
+		expect(sendPromptToPane).not.toHaveBeenCalled();
+	});
+
+	it("sends a concrete tmux pane target down the hold path", async () => {
+		await deliverAgentPrompt(task(), "check CI", { kind: "pane", paneId: "%4" }, { hold: true });
+		expect(holdMessageForPane).toHaveBeenCalledWith(expect.objectContaining({ id: TASK_ID }), "%4", "check CI", undefined);
+		expect(sendPromptToPane).not.toHaveBeenCalled();
+	});
+
+	it("passes the hold on to the native arm, which owns its own holding", async () => {
+		vi.mocked(sendPromptToNativeAgentPane).mockResolvedValue(HELD);
+		await expect(
+			deliverAgentPrompt(task({ terminalBackend: "native" } as Partial<Task>), "check CI", { kind: "agent" }, { hold: true }),
+		).resolves.toMatchObject({ status: "held" });
+		expect(sendPromptToNativeAgentPane).toHaveBeenCalledWith(expect.objectContaining({ id: TASK_ID }), "check CI", {
+			hold: true,
+		});
+		expect(holdMessageForAgentPane).not.toHaveBeenCalled();
 	});
 });

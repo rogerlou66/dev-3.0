@@ -27,6 +27,9 @@ import {
 	stopNativeTaskPanes,
 } from "./native-task-panes";
 import { paneSessionKey, parsePaneSessionKey } from "../shared/pane-session-key";
+import { deferHeldAgentMessagesForTask, flushHeldAgentMessagesForTask } from "./agent-message-hold";
+import { scanHumanTerminalInput } from "../shared/human-terminal-input";
+import { forgetSession, noteBytesIn, noteFlush, noteQueued } from "./pty-throughput";
 import { PTY_WS_CLOSE } from "../shared/pty-ws-close-codes";
 import { nativeTaskSessionId, type TerminalLaunchSpec } from "./task-terminal-backend";
 import {
@@ -114,6 +117,10 @@ let ptyWsPort = 0;
 // rendering overhead in the frontend terminal emulator. Instead, we batch
 // data and flush at ~60fps (16ms intervals). This reduces WS message count
 // by 10-100x while maintaining perceptual smoothness.
+//
+// The window is a CEILING on the message rate, not a delay every chunk pays:
+// the chunk that opens it is sent at once (see enqueuePtyData), so an idle
+// terminal echoing one keystroke is never held back.
 const PTY_BATCH_INTERVAL_MS = 16;
 
 export type PtySessionType = "task" | "project";
@@ -265,6 +272,9 @@ function ingestPtyOutput(session: PtySession, data: string | Uint8Array): void {
 	const cleaned = handleOsc52(str, session);
 	checkForBell(cleaned, session.taskId);
 	if (!cleaned) return;
+	// Counted before the batcher can hide it: this is the only place that sees the
+	// shell's real production rate, which is what "are we behind" is measured against.
+	noteBytesIn(session.registryKey, cleaned.length);
 	// A native session always enqueues: the batch lands in its bounded journal even
 	// with no viewer attached, which is what lets a remote tab attach to a running
 	// shell and see the screen. tmux replays its own pane, so it stays as it was.
@@ -590,6 +600,7 @@ export function destroySession(taskId: string, fallbackSocket?: string): void {
 			}
 		}
 		session.clients.clear();
+		forgetSession(session.registryKey);
 		sessions.delete(taskId);
 	}
 
@@ -637,6 +648,7 @@ function releaseNativeSession(session: PtySession): void {
 		}
 	}
 	session.clients.clear();
+	forgetSession(session.registryKey);
 	sessions.delete(session.taskId);
 	// Release all composite-keyed PtySession entries for additional panes of this task.
 	sweepNativePaneSessions(session.taskId);
@@ -649,6 +661,7 @@ function sweepNativePaneSessions(taskId: string): void {
 		if (parsed?.taskId === taskId) {
 			if (s.batchTimer) clearTimeout(s.batchTimer);
 			s.pendingData = "";
+			forgetSession(s.registryKey);
 			s.native?.detach();
 			s.native = null;
 			for (const client of s.clients) {
@@ -1130,6 +1143,25 @@ function effectiveNativeRole(session: PtySession, ws: any): NativeStreamRole {
 }
 
 /**
+ * A human just typed into one of this task's terminals, and his keystrokes decide what
+ * happens to every `dev3 message` held for it.
+ *
+ * A plain Enter means he submitted his own line: the input box is his no longer, so the
+ * held messages land right away and he watches them arrive instead of wondering where
+ * they went. Anything else — including Shift+Enter, which is a newline he is still
+ * writing — only pushes the hold back, so nothing is ever typed mid-word.
+ *
+ * The bracketed-paste flag rides on the client, because a paste large enough to be
+ * split across frames would otherwise have its content read as keypresses.
+ */
+export function noteHumanTerminalInput(session: PtySession, ws: any, data: string): void {
+	const scan = scanHumanTerminalInput(data, ws.inBracketedPaste === true);
+	ws.inBracketedPaste = scan.inPaste;
+	if (scan.submitted) flushHeldAgentMessagesForTask(session.taskId);
+	else deferHeldAgentMessagesForTask(session.taskId);
+}
+
+/**
  * The PTY's current size, which an observer renders at instead of its own —
  * the bytes are laid out for the writer's width, so reflowing them locally
  * mangles every line that reaches the right edge.
@@ -1586,6 +1618,8 @@ function flushPendingData(session: PtySession): void {
 		if (session.clients.size === 0) return;
 		const data = session.pendingData;
 		session.pendingData = "";
+		noteQueued(session.registryKey, 0);
+		noteFlush(session.registryKey, data.length, session.clients.size);
 		for (const client of session.clients) {
 			try { client.sendText(data); } catch { /* dead client */ }
 		}
@@ -1593,11 +1627,13 @@ function flushPendingData(session: PtySession): void {
 	}
 	const data = session.pendingData;
 	session.pendingData = "";
+	noteQueued(session.registryKey, 0);
 	// Journal FIRST and unconditionally: with no viewer attached (remote-only use,
 	// or every tab closed) this tail is the entire screen the next one will get.
 	const seq = session.nativeStream?.push(data) ?? 0;
 	if (session.clients.size === 0) return;
 	const framed = outputMessage(seq, data);
+	noteFlush(session.registryKey, framed.length, session.clients.size);
 	for (const client of session.clients) {
 		try { client.sendText(framed); } catch { /* dead client */ }
 	}
@@ -2113,6 +2149,7 @@ const ptyServer = Bun.serve({
 						return;
 					}
 					shell.write(data);
+					noteHumanTerminalInput(session, ws, data);
 					return;
 				}
 
@@ -2129,7 +2166,10 @@ const ptyServer = Bun.serve({
 					return;
 				}
 
+				// Keystrokes from a viewer are the only human input that reaches a pane;
+				// our own `dev3 message` text goes in through tmux/the native writer.
 				shell.write(data);
+				noteHumanTerminalInput(session, ws, data);
 			} catch (err) {
 				log.error("WS message handler error", {
 					error: String(err),

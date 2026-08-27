@@ -154,6 +154,13 @@ describe("saveSettings", () => {
 		expect((await loadSettings()).keyboardShortcuts).toBeUndefined();
 	});
 
+	it("keeps a custom tunnel provider with a blank command — fail closed, no silent Cloudflare fallback", async () => {
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({
+			remoteTunnel: { provider: "custom", command: "" },
+		}), null, 2), "utf-8");
+		expect((await loadSettings()).remoteTunnel).toEqual({ provider: "custom", command: "", urlPattern: undefined });
+	});
+
 	it("preserves every GlobalSettings field across a save→load round-trip (drift guard + downgrade safety)", async () => {
 		// `Required<>` forces this object to enumerate EVERY field of the shared
 		// GlobalSettings type. Adding a field to the type without handling it in
@@ -165,6 +172,9 @@ describe("saveSettings", () => {
 			return 0;
 		});
 		const full: Required<GlobalSettings> = {
+			coordinatorPrompt: "Coordinate, do not code.",
+			remoteTunnel: { provider: "custom", command: "ngrok http {port} --log stdout", urlPattern: "https://\\S+" },
+			agentLaunchAutoApproveMinutes: 2,
 			defaultAgentId: "builtin-codex",
 			defaultConfigId: "codex-default",
 			taskSortOrder: "newest-first",
@@ -174,6 +184,7 @@ describe("saveSettings", () => {
 			// on platforms the canary feed publishes for.
 			updateChannel: "canary",
 			terminalPathOpenMode: "reveal",
+			terminalShell: "sh",
 			theme: "light",
 			analyticsDistinctId: "11111111-2222-3333-4444-555555555555",
 			resolvedTheme: "light",
@@ -183,12 +194,16 @@ describe("saveSettings", () => {
 			agentCustomBinaryPaths: { "builtin-codex": "/opt/wrappers/codex-wrapper" },
 			keyboardShortcuts: { "go-to-project": { primary: "Mod+KeyJ", alias: null } },
 			experimentalTerminalBidi: true,
+			experimentalAgentTraffic: true,
 			playSoundOnTaskComplete: false,
 			externalApps: [{ id: "x", name: "X", macAppName: "X" }],
 			tipsDisabled: true,
+			helpModeDiscovered: true,
+			completedTours: ["first-task"],
 			reviewModePrompt: "Review the diff and report only blockers.",
 			taskOpenMode: "fullscreen",
 			defaultDiffViewMode: "unified",
+			remoteSilentUpdate: false,
 			preventSleepWhileRunning: true,
 			skipQuitDialog: true,
 			importShellEnv: false,

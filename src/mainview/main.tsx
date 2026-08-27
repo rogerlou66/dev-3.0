@@ -4,7 +4,7 @@ import { init } from "ghostty-web";
 import "./index.css";
 import "./rpc";
 import App from "./App";
-import { I18nProvider } from "./i18n";
+import { I18nProvider, resolveInitialLocale } from "./i18n";
 import { MobileProvider, detectMobile } from "./hooks/useMobile";
 import { api, isElectrobun } from "./rpc";
 import { initAutoFullscreen } from "./fullscreen";
@@ -12,6 +12,7 @@ import { initKeyboardLock } from "./keyboard-lock";
 import { bootstrapZoom } from "./zoom";
 import { bootstrapScrollSpeed } from "./scroll-speed";
 import { startViewportDiagnostics } from "./viewport-diagnostics";
+import { startRendererHeartbeat } from "./renderer-heartbeat";
 import { getInitialThemeState, getWindowInjectedThemeState } from "./theme-bootstrap";
 import { initStreamerMode } from "./streamer-mode";
 import { buildChannelTitlePrefix } from "../shared/update-channel";
@@ -100,9 +101,14 @@ bootstrapScrollSpeed();
 // display-change diagnostic the backend writes (see viewport-diagnostics.ts).
 startViewportDiagnostics();
 
-// Apply saved locale before React mounts
-const savedLocale = localStorage.getItem("dev3-locale") || "en";
-document.documentElement.lang = savedLocale;
+// Beat into the backend log so a window that freezes leaves a record — the
+// backend outlives the freeze and names it (see bun/renderer-watchdog.ts).
+startRendererHeartbeat();
+
+// Apply the locale before React mounts, through the same resolver the provider
+// uses — an `<html lang>` that disagrees with the rendered language is what a
+// screen reader believes.
+document.documentElement.lang = resolveInitialLocale();
 
 async function bootstrap() {
 	console.log("[main] bootstrap() starting...");

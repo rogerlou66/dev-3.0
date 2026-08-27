@@ -37,6 +37,13 @@ export interface HelpTopic {
 	link?: { labelKey: TranslationKey; action: HelpLinkAction };
 }
 
+/**
+ * Dismissing the header's first-run callout. Handled in `App.tsx`, which owns the
+ * settings object — the same one-way flag entering help mode sets, so a user who
+ * closes the callout is never nagged again either.
+ */
+export const HELP_ATTRACTOR_DISMISS_EVENT = "help:dismiss-attractor";
+
 export const HELP_TOPICS: HelpTopic[] = [
 	// ── Board columns ──
 	{ id: "board.column.todo", titleKey: "help.board.column.todo.title", bodyKey: "help.board.column.todo.body" },
@@ -74,6 +81,16 @@ export const HELP_TOPICS: HelpTopic[] = [
 	{ id: "dashboard.projects", titleKey: "help.dashboard.projects.title", bodyKey: "help.dashboard.projects.body" },
 	{ id: "dashboard.stats-entry", titleKey: "help.dashboard.statsEntry.title", bodyKey: "help.dashboard.statsEntry.body" },
 	{ id: "dashboard.project-row", titleKey: "help.dashboard.projectRow.title", bodyKey: "help.dashboard.projectRow.body" },
+	{ id: "dashboard.spaces", titleKey: "help.dashboard.spaces.title", bodyKey: "help.dashboard.spaces.body" },
+	{ id: "dashboard.add-project", titleKey: "help.dashboard.addProject.title", bodyKey: "help.dashboard.addProject.body" },
+	// The one project every install starts with, explained by nothing but a
+	// four-word subtitle — so the first row a newcomer sees was the least
+	// understandable one.
+	{ id: "dashboard.ops-board", titleKey: "help.dashboard.opsBoard.title", bodyKey: "help.dashboard.opsBoard.body" },
+	// First-run panel, shown while no git repository has been added yet. Not a
+	// REQUIRED_HELP_SURFACES entry: it is conditional by design, like the memory
+	// pill — but help mode must still be able to explain it while it is there.
+	{ id: "dashboard.first-run", titleKey: "help.dashboard.firstRun.title", bodyKey: "help.dashboard.firstRun.body" },
 
 	// ── Task inspector ──
 	{
@@ -136,6 +153,10 @@ export const HELP_TOPICS: HelpTopic[] = [
 
 	// ── Terminal ──
 	{ id: "terminal.quick-shell", titleKey: "help.terminal.quickShell.title", bodyKey: "help.terminal.quickShell.body" },
+	// The biggest thing on the task screen and, until now, the only one help mode
+	// said nothing about. Mounted on the ordinary task screen only — the immersive
+	// fullscreen terminal stays chrome-free (§5).
+	{ id: "terminal.task", titleKey: "help.terminal.task.title", bodyKey: "help.terminal.task.body" },
 
 	// ── Form fields ──
 	{ id: "field.task-branch", titleKey: "help.field.taskBranch.title", bodyKey: "help.field.taskBranch.body" },
@@ -150,8 +171,35 @@ export const HELP_TOPICS: HelpTopic[] = [
 	},
 	{ id: "header.rateLimits", titleKey: "help.header.rateLimits.title", bodyKey: "help.header.rateLimits.body" },
 	{ id: "header.memory", titleKey: "help.header.memory.title", bodyKey: "help.header.memory.body" },
+	// Remote-only and conditional, like the memory pill: registered so help mode can
+	// explain it, deliberately not in REQUIRED_HELP_SURFACES, which covers surfaces
+	// that are always there.
+	{
+		id: "header.connectionQuality",
+		titleKey: "help.header.connectionQuality.title",
+		bodyKey: "help.header.connectionQuality.body",
+	},
 	{ id: "header.tmux-sessions", titleKey: "help.header.tmuxSessions.title", bodyKey: "help.header.tmuxSessions.body" },
+	// Both agent-traffic topics are conditional — the glyph exists only while agents
+	// are talking, and the log is an overlay the user opens — so they are registered
+	// for help mode but stay out of REQUIRED_HELP_SURFACES, same as the memory pill.
+	{
+		id: "header.agent-traffic",
+		titleKey: "help.header.agentTraffic.title",
+		bodyKey: "help.header.agentTraffic.body",
+		shortcutIds: ["agent-traffic-log"],
+	},
+	{ id: "traffic.log", titleKey: "help.traffic.log.title", bodyKey: "help.traffic.log.body" },
 	{ id: "sidebar.active-tasks", titleKey: "help.sidebar.activeTasks.title", bodyKey: "help.sidebar.activeTasks.body" },
+	// Three glyphs and no labels: the one control on the task screen that changes
+	// what the whole list means, and it explained itself only through tooltips.
+	{ id: "sidebar.scope", titleKey: "help.sidebar.scope.title", bodyKey: "help.sidebar.scope.body" },
+
+	// ── Tips ──
+	// Occupies prime real estate on an empty board, so a newcomer meets it before
+	// they meet a task. Conditional (tips can be switched off), hence registered
+	// but not a REQUIRED_HELP_SURFACES entry.
+	{ id: "tips.card", titleKey: "help.tips.card.title", bodyKey: "help.tips.card.body" },
 ];
 
 /**
@@ -171,9 +219,10 @@ export const HELP_TOPICS: HelpTopic[] = [
  *
  * Deliberately EXCLUDED (documented, not oversight): transient nav/help overlays
  * (command palette, keyboard-shortcuts reference, hint overlay, task switcher),
- * confirm/error/search modals, native/browser menu bars, the immersive terminal
- * (§5 forbids its chrome), and the Diagnostics surface (§5.5 — remote-only,
- * conditional, self-evident, earned entry).
+ * confirm/error/search modals, native/browser menu bars, the **immersive
+ * fullscreen** terminal (§5 forbids its chrome — the ordinary task screen's
+ * terminal is `terminal.task` and IS required), and the Diagnostics surface
+ * (§5.5 — remote-only, conditional, self-evident, earned entry).
  */
 export const REQUIRED_HELP_SURFACES: string[] = [
 	// Board
@@ -187,6 +236,9 @@ export const REQUIRED_HELP_SURFACES: string[] = [
 	"dashboard.projects",
 	"dashboard.stats-entry",
 	"dashboard.project-row",
+	"dashboard.spaces",
+	"dashboard.add-project",
+	"dashboard.ops-board",
 	// Task inspector
 	"inspector.panel",
 	"inspector.context-bar",
@@ -206,6 +258,7 @@ export const REQUIRED_HELP_SURFACES: string[] = [
 	"viewer.artifact",
 	// Terminal
 	"terminal.quick-shell",
+	"terminal.task",
 	// Global settings sections
 	"settings.agents",
 	"settings.appearance",
@@ -240,6 +293,7 @@ export const REQUIRED_HELP_SURFACES: string[] = [
 	"header.rateLimits",
 	"header.tmux-sessions",
 	"sidebar.active-tasks",
+	"sidebar.scope",
 	// Form fields (non-self-evident behavior)
 	"field.task-branch",
 	"field.streamer-mode",

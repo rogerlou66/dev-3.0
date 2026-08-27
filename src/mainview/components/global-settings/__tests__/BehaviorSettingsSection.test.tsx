@@ -2,14 +2,19 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { GlobalSettings } from "../../../../shared/types";
+import { DEFAULT_PR_REVIEW_PROMPT } from "../../../../shared/types";
 import { I18nProvider, type TFunction } from "../../../i18n";
 import BehaviorSettingsSection from "../BehaviorSettingsSection";
 
-// Stub translator: keys through, except the built-in prompt whose real text is
-// what "reset to default" has to restore.
-const BUILTIN_PROMPT = "Review the code changes on this branch.";
-const t = ((key: string) =>
-	key === "createTask.reviewPrompt" ? BUILTIN_PROMPT : key) as unknown as TFunction;
+// Stub translator: keys straight through. The built-in review prompt is no longer
+// a translation — one English constant serves both the create flow and the CLI —
+// so "reset to default" has to restore exactly that constant.
+const BUILTIN_PROMPT = DEFAULT_PR_REVIEW_PROMPT;
+// Identity stub, plus the `plural` member the auto-approve options call — a bare
+// arrow function has no properties, and the section renders through it.
+const t = Object.assign((key: string) => key, {
+	plural: (key: string, count: number) => `${key}|${count}`,
+}) as unknown as TFunction;
 
 function renderSection(
 	settings: Partial<GlobalSettings> = {},
@@ -28,6 +33,7 @@ function renderSection(
 				onWatchByDefaultToggle={vi.fn()}
 				onSuggestCompletingTasksAfterMergeToggle={vi.fn()}
 				onPrOriginTaskLinkToggle={onPrOriginTaskLinkToggle}
+				onAgentLaunchAutoApproveChange={vi.fn()}
 				prOriginTaskLinkSupported={prOriginTaskLinkSupported}
 				onFocusModeToggle={vi.fn()}
 				onTaskSortOrderChange={vi.fn()}
@@ -35,6 +41,7 @@ function renderSection(
 				onTipsDisabledToggle={vi.fn()}
 				onTipsReset={vi.fn()}
 				onReviewModePromptChange={onReviewModePromptChange}
+				onCoordinatorPromptChange={vi.fn()}
 			/>
 		</I18nProvider>,
 	);
@@ -67,10 +74,15 @@ describe("BehaviorSettingsSection — review prompt", () => {
 		expect(onReviewModePromptChange).toHaveBeenCalledWith("Only blockers.");
 	});
 
+	// Pasted, not typed: the built-in prompt is 649 characters and `type()` renders
+	// the whole section once per keystroke — 649 act() cycles for an assertion that
+	// only cares about the value at blur. The sibling test above still types
+	// character by character, so per-keystroke behaviour stays covered.
 	it("stores nothing when the field is left equal to the built-in prompt", async () => {
 		const { textarea, onReviewModePromptChange } = renderSection({ reviewModePrompt: "Only blockers." });
 		await userEvent.clear(textarea);
-		await userEvent.type(textarea, BUILTIN_PROMPT);
+		await userEvent.paste(BUILTIN_PROMPT);
+		expect(textarea.value).toBe(BUILTIN_PROMPT);
 		await userEvent.tab();
 		expect(onReviewModePromptChange).toHaveBeenCalledWith("");
 	});

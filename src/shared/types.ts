@@ -6,7 +6,9 @@ import type { TerminalBackendIdentity } from "./terminal-backend-identity";
 import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind } from "./task-panes";
 import type { DeepLinkNav } from "./deep-link";
 import type { UpdateChannel } from "./update-channel";
+import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
 import type { AgentPromptDelivery } from "./agent-prompt-delivery";
+import type { AgentMessageLogPage } from "./agent-message-log";
 
 // ---- Changelog ----
 
@@ -256,6 +258,44 @@ export function comparePriority(
 	return priorityRank(a) - priorityRank(b);
 }
 
+// ---- Task type ----
+
+/**
+ * Every task type dev3 stores. `coordinator` runs the other tasks; `pr-review`
+ * looks at someone's changes. They are not equally loud on purpose: a coordinator
+ * is marked with a border and lifted above every priority, while a PR review is
+ * only named on the card — it is an ordinary task with a job, not a task that
+ * outranks the board.
+ */
+export const TASK_TYPES = ["coordinator", "pr-review"] as const;
+
+export type TaskType = (typeof TASK_TYPES)[number];
+
+/** Narrows free-form input (CLI, older data file) to a known task type. */
+export function normalizeTaskType(input: string): TaskType | null {
+	const value = input.trim().toLowerCase();
+	return (TASK_TYPES as readonly string[]).includes(value) ? (value as TaskType) : null;
+}
+
+export function isCoordinatorTask(task: { taskType?: TaskType | null }): boolean {
+	return task.taskType === "coordinator";
+}
+
+/**
+ * Does the human own this task's completion? True for the explicit "I decide"
+ * flag and unconditionally for a coordinator, whose whole job outlives any
+ * single branch it happens to have merged.
+ *
+ * Derived rather than stored, so no writer — CLI, agent hook, or a future UI
+ * toggle — can leave a coordinator auto-completing. Every merge-detection path
+ * must ask this, never `task.manualCompletion` directly.
+ */
+export function taskCompletesManually(
+	task: { manualCompletion?: boolean; taskType?: TaskType | null },
+): boolean {
+	return task.manualCompletion === true || isCoordinatorTask(task);
+}
+
 /**
  * Rank offset added to a hibernated task so it sinks below every live P4 while
  * hibernated tasks stay internally ordered by their own priority. Any value
@@ -272,6 +312,18 @@ export const HIBERNATED_SORT_OFFSET = 10;
 export const DISCONNECTED_SORT_OFFSET = 5;
 
 /**
+ * Rank offset lifting a live coordinator above every live priority band: it is
+ * the task the user talks to in order to reach all the others, so it must never
+ * be scrolled to. Negative and wider than the P0–P4 spread, so the coordinator
+ * band (−10…−6) cannot collide with the live band (0…4).
+ *
+ * Deliberately applied ONLY while the coordinator is live — a hibernated or
+ * disconnected coordinator sinks like any other task, because a lift would
+ * advertise an agent that is not there.
+ */
+export const COORDINATOR_SORT_OFFSET = -10;
+
+/**
  * The subset of a task the shared sort comparator reads. Every field is
  * optional: a caller ranking a stub (a test, a CLI row) only has to supply what
  * it actually knows, and a missing field simply keeps the task in the live band.
@@ -279,7 +331,15 @@ export const DISCONNECTED_SORT_OFFSET = 5;
 export type TaskSortFields = Partial<
 	Pick<
 		Task,
-		"priority" | "hibernated" | "status" | "worktreePath" | "runtimeState" | "draft" | "preparing" | "shuttingDown"
+		| "priority"
+		| "hibernated"
+		| "status"
+		| "worktreePath"
+		| "runtimeState"
+		| "draft"
+		| "preparing"
+		| "shuttingDown"
+		| "taskType"
 	>
 >;
 
@@ -299,15 +359,20 @@ export function isTaskDisconnected(task: TaskSortFields): boolean {
 
 /**
  * Sort rank of a task: its {@link priorityRank}, plus {@link HIBERNATED_SORT_OFFSET}
- * when hibernated or {@link DISCONNECTED_SORT_OFFSET} when its session died.
- * Neither state writes `priority`, so a woken or resumed task returns to its
+ * when hibernated, {@link DISCONNECTED_SORT_OFFSET} when its session died, or
+ * {@link COORDINATOR_SORT_OFFSET} when it is a live coordinator. None of the
+ * three writes `priority`, so a woken, resumed or demoted task returns to its
  * rightful place in the queue.
+ *
+ * The sink bands are tested first on purpose: a parked coordinator is not the
+ * thing to look at, so it loses the lift for as long as it is parked.
  */
 export function taskSortRank(task: TaskSortFields): number {
-	const offset = task.hibernated
-		? HIBERNATED_SORT_OFFSET
-		: isTaskDisconnected(task) ? DISCONNECTED_SORT_OFFSET : 0;
-	return priorityRank(task.priority) + offset;
+	const rank = priorityRank(task.priority);
+	if (task.hibernated) return rank + HIBERNATED_SORT_OFFSET;
+	if (isTaskDisconnected(task)) return rank + DISCONNECTED_SORT_OFFSET;
+	if (isCoordinatorTask(task)) return rank + COORDINATOR_SORT_OFFSET;
+	return rank;
 }
 
 /**
@@ -368,6 +433,103 @@ As the very last step (after any commits), you MUST hand the task back to the us
 
 Do not skip this step. Move the task exactly once, at the end.`;
 
+/**
+ * Preamble the PR-review task-type preset injects into a new task's description.
+ * English-only for the same reason as {@link COORDINATOR_PROMPT}: an agent reads
+ * it, one copy has to serve both the create flow and `dev3 task update --type`,
+ * and the bun side cannot reach the renderer's translations. Overridable in
+ * Settings and per project for anyone who wants it in their own language.
+ */
+export const DEFAULT_PR_REVIEW_PROMPT = `Review the code changes on this branch.
+
+Your task is to perform a thorough code review — do NOT modify any code.
+
+Start by analyzing what was changed, then evaluate:
+- Correctness and potential bugs
+- Adherence to the repository's conventions and best practices
+- Code clarity, naming, and structure
+- Edge cases and error handling
+- Security considerations
+
+Provide a structured review with actionable feedback.
+
+BEFORE YOU FINISH, make this review readable on the board. Both steps are your
+job, and neither is optional — a board of review tasks that all look alike is
+useless to the person who has to pick one.
+
+1. Title — set it yourself with \`dev3 task update --title "..."\`, in this shape:
+
+       Review of #<PR number> from <the author, a readable name> about <what it changes, five words>
+
+   Example: Review of #493 from Arseny Pavlenko about pin tmux to a vendored keg
+
+   dev3 already put a DRAFT title of this shape on the task at creation, built from
+   the pull request's own title. Treat it as a draft and replace it: you have read
+   the diff and it has not, so the "about" clause should say what the change
+   actually does, not what its title claimed. Keep the number and the author unless
+   they are wrong. No pull request? Put the branch name where \`#<PR number>\` goes.
+2. Overview — \`dev3 overview set "<verdict>. <counts>"\`. Under 500 characters, a
+   sticky note and not the review itself. The verdict is one of "Safe to merge",
+   "Merge after fixes" or "Do not merge", and the counts are numbers, not prose.
+   Example: Safe to merge, nothing serious found. 0 blockers, 2 worth fixing,
+   3 nitpicks across 11 files.`;
+
+/**
+ * Preamble the Coordinator task-type preset injects into a new task's
+ * description. Deliberately NOT an i18n string: every rule here was written in
+ * English after a real coordinator got it wrong, an agent reads it rather than a
+ * human, and a translation that softens one clause changes behaviour. Users who
+ * want it in their own language override it in Settings. Kept generic on purpose
+ * — repo conventions belong in AGENTS.md, not here.
+ */
+export const COORDINATOR_PROMPT = `You are the COORDINATOR of this board. You manage other tasks; you do not do their work.
+
+WHAT YOU DO
+- Create, brief, sequence and unblock other dev3 tasks (\`dev3 task create\`, \`dev3 message\`, \`dev3 peek\`). Read their reports and check them for honesty.
+- Resolve overlaps between tasks: file contention, duplicated scope, who does which half.
+- Keep this task's notes and overview current. A child's worktree is destroyed when its task ends; your notes outlive it.
+
+NO CODE, and the line is precise — both halves matter.
+- Allowed, because a coordinator who cannot establish state is useless: a commit SHA, pull-request and CI state, run logs, machine load, process lists, what a child reported, what the user complained about.
+- Not allowed: forming an engineering judgement by reading source. That is the children's job.
+- Need a cheap re-check yourself? Use a sub-agent. Anything that touches the repository gets a real dev3 task.
+
+EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. This is the rule that matters most and the one nobody guesses.
+The user does not see or read your conversations with child tasks. A reply that only makes sense to someone who followed the thread is worthless to them. End every message with the state of the board: which tasks exist, where each one stands, what landed, what is waiting on the user.
+Self-contained is not the same as long. You speak for a whole group of agents, so you are the one place where a hundred tasks either become a clear picture or become noise. One line per task, then the decision waiting on the user. A line that changes neither what he knows nor what he decides does not go in.
+
+KEEP YOUR BOOKKEEPING IN YOUR REASONING, NEVER IN THE USER'S SPACE. Everything you must track to do this job — who reported what, which relay went where, hypotheses you ruled out, what a child's transcript said, your own second-guessing — belongs in your thinking. Weigh it there in full, out loud, then send the conclusion alone. Anything the user reads (messages, notes, overviews) is a finished statement, not your working notes. His attention is the scarcest thing on this board: a wall of internal accounting costs him the picture just as completely as telling him nothing.
+
+THE BOARD RIDES IN ON MESSAGES. Every message dev3 delivers to you — a child reporting, a peer asking, a scheduled wake-up — ends with a \`<dev3-board>\` block: every task not parked in To Do, every task finished in the last 24 hours, and how long each one has been sitting in the column it is in. It is built as the message is typed, so it is seconds old. Read it and use it; do not spend a turn on \`dev3 task list\` to learn what it just told you.
+
+KNOW EXACTLY WHAT IT DOES NOT COVER, because the gaps are where you will report a task as working after it is gone.
+- The user typing to you directly brings NO block. He may have spent the last hour moving tasks, answering children and completing work you never heard about. When he speaks to you after a silence, re-read the board before you answer him.
+- A block you received earlier in this turn is only as fresh as that moment. If the turn has run long, re-read.
+- \`dev3 peek\` is still the only way to see what a child is DOING. The block says how long a task has been in its column, which is not the same as whether its agent is working — a task can sit in Agent is Working for an hour having died in the first minute.
+- If messages arrive with no block at all, you are on a harness or a task type that does not get one: fall back to \`dev3 task list\` before every status.
+
+NAME EVERY TASK BY ITS NUMBER at every mention — "Seq NNNN" — in the body of the message, not only in a header. Never "it" or "that task": the user runs many in parallel. A task whose seq is shared by a live variant sibling shows as "seq:NNNN:index (id)" in the board block; name that one with its id too, and address it by that id.
+
+RELAY THE RULING, NOT YOUR READING OF IT. When the user decides in one line, tell HIM how you understood it before you tell the child. A misread two-word instruction cannot always be undone.
+
+NEVER ATTRIBUTE WORDS THE USER DID NOT SAY. An option he picked is his decision but not his words. Quote him verbatim, or label it as an option he chose.
+
+PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing anything outward, issues in other people's repositories: all need the user's OWN word in the CHILD's own session. Your relay does not authorise it, and a well-built child will refuse — correctly. Permission for one branch is not permission for the next.
+
+NEVER request completion for a task you do not own, or for work that exists only in a disposable worktree. NEVER change a task's priority unless the user asks — priority is his judgement of importance.
+
+FACTS MAY GO CHILD-TO-CHILD: a file, a line, a measurement. DECISIONS COME THROUGH YOU: scope, priority, who does which half, whether something ships.
+
+MARK YOUR RECOMMENDATION AS RECOMMENDED. When you put options in front of the user, say which one you recommend and why. Staying neutral hands your job back to him.
+
+ANNOUNCE A REVERSAL AS A REVERSAL, TO THE USER FIRST, in one line that says what no longer holds, what replaces it, and who was already told the old version. Then withdraw it from each of them by name. Anything less leaves a child carrying a cancelled instruction as if it were current.
+
+DO NOT TURN "NOT CHECKED" INTO "BROKEN" when relaying. They are different findings, and the second one sends someone to fix working code.
+
+MEASUREMENT HYGIENE. A timing number taken on a loaded machine is void; byte counts, counters and pass/fail are not. Require the machine's load next to any timing figure, and never ask two tasks to run heavy test suites at the same time.
+
+A GREEN TEST IS NOT PROOF. Ask every child what it did NOT verify. Anything that reports success while doing nothing is a product-level red flag, not noise.`;
+
 export function getPrimaryStopTarget(autoReviewEnabled?: boolean): TaskStatus {
 	return autoReviewEnabled ? "review-by-ai" : "review-by-user";
 }
@@ -424,6 +586,28 @@ export interface AgentConfiguration {
 	 *  but renders it disabled until the user opts in (clicking it deep-links to
 	 *  the Settings section). See PxpipeProxyStatus + decisions/112. */
 	requiresPxpipeProxy?: boolean;
+	/**
+	 * Model roles: this preset's binding of catalog models to the roles its own
+	 * agent CLI exposes (role id → catalog model id, see `src/shared/model-catalog.ts`).
+	 * Bound by id so renaming a catalog model does not break the preset. When set,
+	 * the launch goes through the proxy sidecar; when absent, nothing changes.
+	 */
+	modelRoles?: Record<string, string>;
+	/**
+	 * Which revision of dev3's curated recommendations this preset was seeded
+	 * from, and — after the user answered the "new models are out" prompt — the
+	 * newest revision they have already seen. Stamped on decline as well as on
+	 * accept: the question is "has this user been asked about revision N", and
+	 * asking twice is nagging.
+	 */
+	seededRevision?: number;
+	/**
+	 * Which curated tier this preset was seeded as (`practical`, `smart`). The
+	 * group label used to answer this, back when there was only one tier; a label
+	 * cannot, now that a user may hold several. Absent on a preset seeded before
+	 * tiers existed — that one is the practical tier, and `tierOfPreset` says so.
+	 */
+	seededTier?: string;
 }
 
 export interface CodingAgent {
@@ -454,19 +638,26 @@ export interface CodingAgent {
 	 * lets the user declare "that command is Claude Code"; `"none"` is the
 	 * explicit opt-out. Hooks only: launch flags stay keyed by the command.
 	 */
-	hooksIntegration?: AgentHooksIntegration;
+	agentFamily?: AgentFamily;
 }
 
-/** Hook family an agent's worktree gets: a CLI whose hooks dev3 knows, or none. */
-export type AgentHooksIntegration = "claude" | "codex" | "none";
+/**
+ * The agent CLI a command belongs to, keyed by that CLI's own command name (the
+ * agent-adapter registry's key), plus `"none"` for "an unknown CLI, handle it
+ * generically". Governs EVERYTHING dev3 does per agent — launch flags, session
+ * resume, transcripts, trust, lifecycle hooks, skill prefix — so a differently
+ * named binary runs through exactly the same code as the CLI it wraps.
+ */
+export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "none";
 
 /**
  * Prefix used to invoke an installed skill from an agent prompt. Codex reserves
  * `/` for built-in commands, while the other supported agent CLIs use `/` for
  * skills. Unknown commands keep the broadly compatible slash default.
  */
-export function skillInvocationPrefix(baseCommand: string): "$" | "/" {
-	return (baseCommand.split("/").pop() ?? "") === "codex" ? "$" : "/";
+export function skillInvocationPrefix(baseCommand: string, family?: AgentFamily): "$" | "/" {
+	const key = family ? family : (baseCommand.split("/").pop() ?? "");
+	return key === "codex" ? "$" : "/";
 }
 
 /** Fixed port of the optional local `pxpipe-proxy` (token-saving image proxy).
@@ -896,6 +1087,23 @@ export interface NativeTerminalAvailability {
 	diagnostics: string[];
 }
 
+/**
+ * Which tunnel exposes the remote-access server publicly.
+ *
+ * `provider: "custom"` runs the user's own CLI (ngrok, or any ngrok-like
+ * service) instead of the built-in Cloudflare quick tunnel. The command is a
+ * shell line with a `{port}` placeholder; the public URL is scraped from the
+ * command's output — by default the first `https://…` URL it prints,
+ * overridable with `urlPattern` for CLIs whose output contains other URLs.
+ */
+export interface RemoteTunnelSettings {
+	provider: "cloudflare" | "custom";
+	/** Shell command template, e.g. `ngrok http {port} --log stdout`. Required for `custom`. */
+	command?: string;
+	/** Optional regex matching the public URL in the command's output. */
+	urlPattern?: string;
+}
+
 export interface GlobalSettings {
 	defaultAgentId: string;
 	defaultConfigId: string;
@@ -930,9 +1138,28 @@ export interface GlobalSettings {
 	 * selection and link hover on those lines stay logical too. Default off.
 	 */
 	experimentalTerminalBidi?: boolean;
+	/**
+	 * Beta: the agent-traffic readout in the header and its 30-day log. Off by
+	 * default, and while off the feature leaves no trace — no header control, no
+	 * ⇧⌘M, no menu item, no palette command, no tip.
+	 */
+	experimentalAgentTraffic?: boolean;
 	playSoundOnTaskComplete?: boolean;
 	externalApps?: ExternalApp[]; // user-configured apps for "Open in..." menus
 	tipsDisabled?: boolean;
+	/**
+	 * Set the first time the user opens help mode. Until then the header's `?`
+	 * rests highlighted on the main screens — help mode is the product's only
+	 * teaching channel, so a user who never finds the button never learns
+	 * anything (bible §5.4). One-way: it is never set back to false.
+	 */
+	helpModeDiscovered?: boolean;
+	/**
+	 * Guided tours the user has finished or dismissed (ids from `mainview/tour.ts`).
+	 * A tour auto-starts once and never again; skipping counts, because a wizard
+	 * that returns after being waved off is worse than no wizard.
+	 */
+	completedTours?: string[];
 	taskOpenMode?: "split" | "fullscreen"; // how active tasks open when clicked
 	/**
 	 * What Cmd/Ctrl+Click on a file path in terminal output does:
@@ -941,6 +1168,14 @@ export interface GlobalSettings {
 	 */
 	terminalPathOpenMode?: TerminalPathOpenMode;
 	defaultDiffViewMode?: "split" | "unified" | "auto"; // default inline diff layout; "auto" picks based on screen size
+	/**
+	 * Let a headless `dev3 remote` box install updates on its own once it is quiet
+	 * (no task in progress, no terminal output, no browser connected). Default ON —
+	 * the whole point is that nobody ever goes back to a terminal to type
+	 * `brew upgrade`. Turn it off to hold a box on one build while investigating.
+	 * Has no effect on the desktop app, which has its own updater.
+	 */
+	remoteSilentUpdate?: boolean;
 	preventSleepWhileRunning?: boolean; // spawn caffeinate when agents are active
 	skipQuitDialog?: boolean; // suppress the "tmux keeps running" quit confirmation
 	/**
@@ -950,6 +1185,15 @@ export interface GlobalSettings {
 	 * vars (PATH/LANG/...) for an isolated environment.
 	 */
 	importShellEnv?: boolean;
+	/**
+	 * Which POSIX shell dev3 runs in its terminals and generated wrapper
+	 * scripts. Undefined ⇒ auto-detect (the user's login shell, else the first
+	 * of zsh → bash → sh that is installed). Set it when the detected shell is
+	 * not the one you want, or on a minimal Linux box that ships only `sh`.
+	 * A chosen shell that is not installed falls back down the same order.
+	 * Ignored on Windows, which runs PowerShell.
+	 */
+	terminalShell?: ShellFlavor;
 	focusMode?: boolean; // when true, queue agent-initiated attention UI and viewer events until Focus Mode ends
 	/**
 	 * Track agent rate-limit windows (Claude via an injected statusLine wrapper,
@@ -966,6 +1210,14 @@ export interface GlobalSettings {
 	watchByDefault?: boolean;
 	/** When false, merged branches show a notice instead of a completion prompt. */
 	suggestCompletingTasksAfterMerge?: boolean;
+	/**
+	 * Minutes the agent-launch dialog waits before approving itself, so a
+	 * requesting agent is not blocked on a user who stepped away. `0` disables
+	 * it and restores the answer-or-time-out behaviour. Undefined ⇒
+	 * {@link DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES}. Deliberately not
+	 * applied to the completion dialog: that one destroys a worktree.
+	 */
+	agentLaunchAutoApproveMinutes?: number;
 	/**
 	 * When false, the Create-PR handoff stops asking the agent to append the
 	 * deep link back to the originating task. Default on; the opt-out exists
@@ -987,11 +1239,22 @@ export interface GlobalSettings {
 	 */
 	pxpipeProxyEnabled?: boolean;
 	/**
-	 * Custom text the Review toggle in the create-task popup injects into the
+	 * Bring-your-own-tunnel for remote access. Absent ⇒ the built-in Cloudflare
+	 * quick tunnel. See RemoteTunnelSettings.
+	 */
+	remoteTunnel?: RemoteTunnelSettings;
+	/**
+	 * Custom text the PR review preset in the create-task popup injects into the
 	 * description. Absent/blank ⇒ the localized built-in prompt. A project can
-	 * override it; see resolveReviewModePrompt.
+	 * override it; see resolvePresetPrompt.
 	 */
 	reviewModePrompt?: string;
+	/**
+	 * Custom text the Coordinator preset in the create-task popup injects into
+	 * the description. Absent/blank ⇒ the built-in COORDINATOR_PROMPT. A project
+	 * can override it; see resolvePresetPrompt.
+	 */
+	coordinatorPrompt?: string;
 	/**
 	 * Cross-provider "favorite" agent configs shown as quick-pick chips on the
 	 * launch picker (Launch/Retry, Spawn, Bug Hunters). Thin pointers, capped at
@@ -1077,6 +1340,54 @@ export interface PxpipeProxyStatus {
 	holderName?: string;
 	/** The proxy dashboard URL (served by the proxy on the same port). */
 	dashboardUrl: string;
+}
+
+/**
+ * Live state of the model-catalog proxy sidecar (AGENTS.md § Model routing
+ * glossary). One process per app, on a dev3-chosen loopback port, started on
+ * demand. Everything here is computed on demand — nothing is cached.
+ */
+export interface ModelSidecarStatus {
+	/** The sidecar is up and answering its health endpoint. */
+	running: boolean;
+	/** A start is in flight (another launch is already waiting on it). */
+	starting: boolean;
+	port?: number;
+	baseUrl?: string;
+	/** The pinned binary shipped with this build was found on disk. */
+	binaryAvailable: boolean;
+	/** Pinned proxy version this build targets. */
+	version: string;
+	providerCount: number;
+	modelCount: number;
+	/** Why the last start failed, including the process's own last output. */
+	lastError?: string;
+}
+
+/** Why a preset's role bindings cannot be launched right now. */
+export interface ModelCatalogPreflight {
+	ok: boolean;
+	problems: {
+		/** The role that cannot be served; empty when the proxy itself is the problem. */
+		roleId: string;
+		code: "missing-model" | "model-unreachable" | "proxy-unreachable";
+		detail?: string;
+	}[];
+}
+
+/** The catalog as the renderer sees it: never any credential, only whether one
+ *  is stored for each provider. */
+export interface ModelCatalogView {
+	providers: {
+		id: string;
+		kind: "openai" | "anthropic" | "openrouter" | "custom";
+		label: string;
+		baseUrl?: string;
+		/** Wire protocol of a `custom` endpoint; absent means OpenAI-shaped. */
+		apiFormat?: "openai" | "anthropic";
+		hasKey: boolean;
+	}[];
+	models: { id: string; providerId: string; name: string; modelId: string; extendedContext?: boolean }[];
 }
 
 /**
@@ -1221,6 +1532,14 @@ export interface GitHubCliStatus {
 	accounts: GitHubAccount[];
 }
 
+/** What the Settings screen needs to explain the `terminalShell` choice. */
+export interface ShellAvailability {
+	/** The shell dev3 runs right now; null on Windows, which has no POSIX shell. */
+	resolved: PosixShellResolution | null;
+	/** Path of each installed flavor. A missing key means it is not on this machine. */
+	installed: Partial<Record<ShellFlavor, string>>;
+}
+
 /** Fields that can be stored in .dev3/config.json (repo-level, shareable). */
 export interface Dev3RepoConfig {
 	setupScript?: string;
@@ -1283,11 +1602,15 @@ export interface ConfigSourceEntry {
 export type ResolvedConfigSource = "local" | "repo" | "project" | "default" | "unset";
 
 export interface ProjectSettingsUpdate extends Dev3RepoConfig {
+	/** Display name only — the project's path (and every slug derived from it) never moves. */
+	name?: string;
 	githubAuthHost?: string | null;
 	githubAuthLogin?: string | null;
 	sensitive?: boolean;
 	/** Blank string clears the project override and falls back to global. */
 	reviewModePrompt?: string;
+	/** Blank string clears the project override and falls back to global. */
+	coordinatorPrompt?: string;
 }
 
 export interface Project {
@@ -1326,6 +1649,13 @@ export interface Project {
 	// Number of ports to allocate per task/worktree (injected as DEV3_PORT0..N)
 	portCount?: number;
 	/**
+	 * dev3's own throwaway repo, created by `createSandboxProject`. The guided tour
+	 * recognises its board by this flag, so a tour cut short by a restart resumes
+	 * instead of dropping the user back onto an empty board. Additive and ignored
+	 * by older versions.
+	 */
+	sandbox?: boolean;
+	/**
 	 * Project kind. `"git"` (default when absent) is a normal repo-backed project
 	 * with worktrees. `"virtual"` is an "Operations" board: tasks run in a managed
 	 * temp dir (or a chosen folder) with NO git worktree, branch, diff, PR, or
@@ -1334,9 +1664,10 @@ export interface Project {
 	 */
 	kind?: "git" | "virtual";
 	/**
-	 * Marks the single built-in "Operations" board. Its display name is rendered
-	 * from a localized `t()` key until the user renames it (which clears this flag
-	 * for naming purposes). Only ever set on virtual projects.
+	 * Marks the single built-in "Operations" board. Pinned first, owns the ⌘0
+	 * shortcut, and renders its name from a localized `t()` key while it still
+	 * carries {@link BUILTIN_OPS_BOARD_NAME} — see {@link projectDisplayName}.
+	 * Only ever set on virtual projects.
 	 */
 	builtin?: boolean;
 	/**
@@ -1346,24 +1677,71 @@ export interface Project {
 	 */
 	sensitive?: boolean;
 	/**
-	 * Project-level override of the Review toggle's prompt. Absent/blank ⇒ the
-	 * global setting, then the localized built-in. See resolveReviewModePrompt.
+	 * Project-level override of the PR review preset's prompt. Absent/blank ⇒ the
+	 * global setting, then the localized built-in. See resolvePresetPrompt.
 	 */
 	reviewModePrompt?: string;
+	/**
+	 * Project-level override of the Coordinator preset's prompt. Absent/blank ⇒
+	 * the global setting, then the built-in. See resolvePresetPrompt.
+	 */
+	coordinatorPrompt?: string;
 }
 
 /**
- * The Review toggle's prompt in effect: project override, then the global custom
- * one, then the localized built-in text. Blank at a layer means "not set", so a
- * cleared field falls through instead of injecting an empty prompt.
+ * A task-type preset's prompt in effect: project override, then the global custom
+ * one, then the built-in text. Blank at a layer means "not set", so a cleared
+ * field falls through instead of injecting an empty prompt.
  */
-export function resolveReviewModePrompt(
-	project: Pick<Project, "reviewModePrompt"> | null | undefined,
-	globalSettings: Pick<GlobalSettings, "reviewModePrompt"> | null | undefined,
+export function resolvePresetPrompt(
+	projectValue: string | undefined,
+	globalValue: string | undefined,
 	builtinDefault: string,
 ): string {
 	const set = (value: string | undefined) => (value && value.trim() ? value : undefined);
-	return set(project?.reviewModePrompt) ?? set(globalSettings?.reviewModePrompt) ?? builtinDefault;
+	return set(projectValue) ?? set(globalValue) ?? builtinDefault;
+}
+
+/**
+ * The preamble a task type puts above the user's own text: project override,
+ * then app-wide setting, then the built-in default. One function so the create
+ * flow and `dev3 task update --type` can never disagree about what a type means.
+ */
+export function presetPromptForTaskType(
+	type: TaskType,
+	project: Pick<Project, "coordinatorPrompt" | "reviewModePrompt">,
+	settings: Pick<GlobalSettings, "coordinatorPrompt" | "reviewModePrompt"> | null | undefined,
+): string {
+	return type === "coordinator"
+		? resolvePresetPrompt(project.coordinatorPrompt, settings?.coordinatorPrompt, COORDINATOR_PROMPT)
+		: resolvePresetPrompt(project.reviewModePrompt, settings?.reviewModePrompt, DEFAULT_PR_REVIEW_PROMPT);
+}
+
+/** Divider between a preset preamble and the user's own text in a description. */
+export const PRESET_PROMPT_SEPARATOR = "\n\n---\n\n";
+
+/** A description made of `prompt`, then the user's own text when there is any. */
+export function withPresetPrompt(userText: string, prompt: string): string {
+	const own = userText.trim();
+	return own ? prompt + PRESET_PROMPT_SEPARATOR + own : prompt;
+}
+
+/**
+ * Inverse of {@link withPresetPrompt}, and a no-op when the preamble is not
+ * there. It runs over a description a human has been editing freely, so it is
+ * written to never cost a character of their text:
+ *
+ * - The separator is matched at exactly `prompt.length`, never by first
+ *   occurrence, so a user's own `---` line cannot be taken for the boundary.
+ * - A preamble edited by hand no longer matches, so nothing is removed at all —
+ *   a stale copy left in place is recoverable, deleted words are not.
+ * - A missing separator returns everything after the preamble rather than
+ *   nothing, so deleting the `---` line and typing on does not erase the text.
+ */
+export function withoutPresetPrompt(description: string, prompt: string): string {
+	if (!description.startsWith(prompt)) return description;
+	const rest = description.slice(prompt.length);
+	return rest.startsWith(PRESET_PROMPT_SEPARATOR) ? rest.slice(PRESET_PROMPT_SEPARATOR.length) : rest;
 }
 
 /**
@@ -1376,6 +1754,33 @@ export function isBuiltinOpsProject(p: Pick<Project, "kind" | "builtin">): boole
 	return p.builtin === true && p.kind === "virtual";
 }
 
+/** The name the built-in Operations board is seeded with, in every locale. */
+export const BUILTIN_OPS_BOARD_NAME = "Operations";
+
+/** Longest project name accepted by a rename; long enough for any real name. */
+export const PROJECT_NAME_MAX_LENGTH = 120;
+
+/**
+ * A user-supplied project name, trimmed — or `null` when it is blank or over
+ * the length cap. The UI and the RPC boundary both go through this so they can
+ * never disagree about what a valid rename is.
+ */
+export function normalizeProjectName(raw: string): string | null {
+	const name = raw.trim();
+	if (!name || name.length > PROJECT_NAME_MAX_LENGTH) return null;
+	return name;
+}
+
+/**
+ * What to render as a project's name. The built-in Operations board shows the
+ * localized `[ Operations ]` chrome only while it still carries its seeded
+ * name; once renamed, the user's own name wins and the board keeps its pin,
+ * its ⌘0 shortcut and its SYSTEM identity.
+ */
+export function projectDisplayName(p: Pick<Project, "kind" | "builtin" | "name">, opsBoardName: string): string {
+	return isBuiltinOpsProject(p) && p.name === BUILTIN_OPS_BOARD_NAME ? opsBoardName : p.name;
+}
+
 /**
  * Display order for any project list (dashboard tiles, switcher dropdown): the
  * built-in Operations board is pinned first; all other projects keep their
@@ -1385,6 +1790,72 @@ export function orderProjectsForDisplay<T extends Pick<Project, "kind" | "builti
 	const builtin = projects.filter(isBuiltinOpsProject);
 	if (builtin.length === 0) return projects;
 	return [...builtin, ...projects.filter((p) => !isBuiltinOpsProject(p))];
+}
+
+// ---- Spaces (many-to-many project grouping; stored in ~/.dev3.0/spaces.json) ----
+
+/**
+ * A Space is a named group of projects — a global tag, not a container. It
+ * references projects by id and owns nothing; every project keeps its own
+ * board. See decisions/2026/08/14/spaces-group-projects-without-replacing-boards.md.
+ */
+export interface Space {
+	id: string;
+	name: string;
+	/** Reserved for nesting; always null in v1 so the format never changes later. */
+	parentId: string | null;
+	/** Membership AND this space's own project order. Dangling ids are normal. */
+	projectIds: string[];
+	createdAt: number;
+	deleted?: boolean;
+	/**
+	 * Marks a space the user must not show on camera — the client's own name is
+	 * the secret, whether or not any member project is marked. Inert unless
+	 * streamer mode is on, exactly like `Project.sensitive`.
+	 */
+	sensitive?: boolean;
+}
+
+/** The full on-disk shape of spaces.json. A missing file means the empty shape. */
+export interface SpacesFile {
+	version: 1;
+	spaces: Space[];
+	order: string[];
+}
+
+export const EMPTY_SPACES_FILE: SpacesFile = Object.freeze({
+	version: 1 as const,
+	spaces: [],
+	order: [],
+});
+
+/** Active spaces in display order: `order` first, unlisted actives appended. */
+export function orderSpaces(spaces: Space[], order: string[]): Space[] {
+	const active = spaces.filter((s) => !s.deleted);
+	const byId = new Map(active.map((s) => [s.id, s]));
+	const ordered: Space[] = [];
+	for (const id of order) {
+		const s = byId.get(id);
+		if (s) {
+			ordered.push(s);
+			byId.delete(id);
+		}
+	}
+	for (const s of active) if (byId.has(s.id)) ordered.push(s);
+	return ordered;
+}
+
+/** Every non-deleted space the project belongs to, in input order. */
+export function spacesOfProject(spaces: Space[], projectId: string): Space[] {
+	return spaces.filter((s) => !s.deleted && s.projectIds.includes(projectId));
+}
+
+/**
+ * Streamer masking is conservative: the space's own flag, or one sensitive
+ * member, mutes the whole space.
+ */
+export function isSpaceSensitive(space: Space, sensitiveProjectIds: ReadonlySet<string>): boolean {
+	return space.sensitive === true || space.projectIds.some((id) => sensitiveProjectIds.has(id));
 }
 
 // ---- Board columns (single source of truth for column ordering + visibility) ----
@@ -1627,6 +2098,21 @@ export interface Task {
 	 * so launch feedback survives a missed push/toast; cleared by the next launch.
 	 */
 	preparationError?: string | null;
+	/**
+	 * Exit code of a `setupScript` that failed during launch, reported by the
+	 * setup wrapper itself (the script runs inside the pane, so bun cannot see
+	 * its result). Cleared by the next launch, by re-running setup, and by the
+	 * user dismissing the notice.
+	 */
+	setupFailedExitCode?: number | null;
+	/**
+	 * Whether the agent was already running when that setup failed. A `parallel`
+	 * tmux launch splits the agent pane BEFORE setup, so the failure finds a live
+	 * agent; `blocking` and native launches gate the agent behind setup, so it
+	 * never started. The two need opposite offers — restarting the session is
+	 * recovery in one case and destruction of a working agent in the other.
+	 */
+	setupFailedAgentRunning?: boolean | null;
 	/** Additive lifecycle runtime hint; older app versions ignore this field. */
 	runtimeState?: TaskRuntimeState;
 	/**
@@ -1699,6 +2185,22 @@ export interface Task {
 	 * every pre-existing task, so older app versions see an ordinary task.
 	 */
 	foreignCode?: boolean;
+	/**
+	 * What kind of task this is, when the kind carries behaviour. A property of
+	 * the task, not a column and not a runtime phase. Only `"coordinator"` exists:
+	 * a task whose job is to run other tasks. It forbids nothing at the data
+	 * layer, and gates exactly three things — the card is marked, a live one sorts
+	 * above every priority band ({@link COORDINATOR_SORT_OFFSET}), and its
+	 * completion always belongs to the human ({@link taskCompletesManually}),
+	 * because a coordinator outlives any branch it merged.
+	 *
+	 * Set at creation from the task-type picker, and flipped either way afterwards
+	 * with `dev3 task update --type`. The CLI keeps the preamble in the
+	 * description in step with the field, so the badge never claims a role the
+	 * agent behind it was never told about. Absent on every pre-existing task, so
+	 * older app versions see an ordinary task.
+	 */
+	taskType?: TaskType | null;
 	/**
 	 * For tasks in a virtual ("Operations") project only: the user-chosen fixed
 	 * working folder picked at creation (e.g. `~/Downloads`). When absent, the
@@ -1882,6 +2384,18 @@ export interface LaunchVariant {
 	accountId?: string | null;
 }
 
+/**
+ * What the agent-requested launch dialog hands back on approval: the variant
+ * rows the user composed (always at least one — index 0 is variant #1) plus the
+ * priority the launch applies. One variant takes the plain single-task launch
+ * path; more mint a variant group exactly like the Launch modal does.
+ */
+export interface AgentLaunchChoice {
+	variants: LaunchVariant[];
+	/** undefined → the request's `defaultPriority`; otherwise the user's pick. */
+	priority?: TaskPriority;
+}
+
 /** A one-shot deferred launch persisted on a `todo` task. See {@link Task.scheduledLaunch}. */
 export interface ScheduledLaunch {
 	/** ISO timestamp when the launch should fire. */
@@ -1920,6 +2434,12 @@ export interface ScheduledMessage {
 	target: ScheduledMessageTarget;
 	/** Set when another task's agent sent it — wraps the text at fire time. */
 	source?: AgentMessageSource;
+	/**
+	 * The file the real body was written to when it was too large to type, leaving
+	 * {@link text} a pointer to it. Carried so the message log can say a row holds a
+	 * pointer rather than a body, instead of guessing from the wording.
+	 */
+	spilledPath?: string;
 }
 
 /**
@@ -1931,14 +2451,24 @@ export interface ScheduledMessage {
 export interface AgentMessageSource {
 	/** Sender task id (used to skip wrapping when a task messages itself). */
 	taskId: string;
-	/** Sender's stable `seq` — the reply address (`--task seq:<N>`). */
+	/** Sender's stable `seq` — the reply address (`--task seq:<N>`) unless it is a variant. */
 	seq: number;
+	/** Sender's variant index, when it is one attempt of a variant group. */
+	variantIndex?: number | null;
+	/**
+	 * Another live task on the sender's board still answers to the same `seq`, so
+	 * `--task seq:<N>` would be rejected as ambiguous and the reply address has to
+	 * be the raw id. Counted at resolve time — see `seqIsShared`. Absent on a
+	 * record queued before this field existed.
+	 */
+	seqShared?: boolean;
 	/** Sender's title, for human-readable context in the envelope. */
 	title?: string;
 	/**
 	 * Sender's project. Carried so the delivery notification can be dropped when
 	 * EITHER side belongs to a sensitive project — the toast names both tasks, so
-	 * gating on the receiver alone would leak the sender's title on camera.
+	 * gating on the receiver alone would leak the sender's title on camera — and so
+	 * a cross-project reply command can carry `--project` (`agentReplyCommand`).
 	 */
 	projectId?: string;
 }
@@ -2112,6 +2642,12 @@ export interface PaneSessionEntry {
 	/** Managed agent account used at launch time — re-injected on resume so a
 	 *  recovered session keeps running under the same account (absent → default). */
 	accountId?: string | null;
+	/** The agent CLI this pane runs, snapshotted at launch. Resume paths hold only
+	 *  a pane, and `agentCmd` alone cannot identify a differently named binary —
+	 *  without this a wrapper resumed as an unknown CLI, i.e. as a fresh launch
+	 *  carrying the task description. Absent on panes stored by older versions,
+	 *  which fall back to the command-name guess. */
+	agentFamily?: AgentFamily | null;
 }
 
 /** Captured session state for agent recovery after tmux death / app restart. */
@@ -2183,6 +2719,38 @@ export interface AgentLaunchRequest {
 	requesterSeq: number;
 	requesterTitle: string;
 	subject: TaskDialogSubject;
+	/**
+	 * Priority the launch applies unless the user picks another in the dialog:
+	 * the target's own explicit priority, or the requester's when the target
+	 * never had one set (a scratch peer, or a task created without `--priority`).
+	 * An urgent agent's helpers inherit its urgency instead of sinking to P3.
+	 */
+	defaultPriority: TaskPriority;
+	/**
+	 * May the user turn this launch into a variant group? Only a plain `todo`
+	 * task that is not already in a group can be spawned as variants; anything
+	 * else renders the single picker with no add affordance rather than offering
+	 * a control that would fail on approval.
+	 */
+	canAddVariants: boolean;
+	/**
+	 * Epoch ms at which the request approves itself, or null when auto-approval
+	 * is off. The countdown is only a mirror — the timer that actually fires
+	 * lives in the bun process, so closing the window cannot stall the agent.
+	 */
+	autoApproveAt: number | null;
+}
+
+/** Minutes the launch dialog waits before approving itself when unconfigured. */
+export const DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES = 5;
+
+/** Choices offered for {@link GlobalSettings.agentLaunchAutoApproveMinutes}; `0` = off. */
+export const AGENT_LAUNCH_AUTO_APPROVE_CHOICES = [0, 1, 2, 5, 10, 15] as const;
+
+/** Resolve the configured auto-approve delay in ms; `0` means "never auto-approve". */
+export function agentLaunchAutoApproveMs(settings: Pick<GlobalSettings, "agentLaunchAutoApproveMinutes">): number {
+	const minutes = settings.agentLaunchAutoApproveMinutes ?? DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES;
+	return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60_000) : 0;
 }
 
 /**
@@ -2404,14 +2972,50 @@ export interface SharedArtifactAsset {
 }
 
 /**
+ * One published revision of an artifact. Holds every field that a publish
+ * produces; the newest revision is the {@link SharedArtifact} record itself,
+ * so this type only ever describes an older one.
+ */
+export interface SharedArtifactVersion {
+	/** 1-based publish number, contiguous and renumbered when records collapse. */
+	version: number;
+	name: string;
+	storedPath: string;
+	originalPath: string;
+	bytes: number;
+	createdAt: number;
+	assets: SharedArtifactAsset[];
+	bundlePath?: string;
+	bundleBytes?: number;
+}
+
+/**
  * A task-bound HTML artifact surfaced via `dev3 show-artifact`.
  *
  * The stored HTML contains the stable dev3 artifact theme contract. When
  * `assets` is non-empty, `bundlePath` points at a portable ZIP containing the
  * HTML and every copied local asset at its relative path.
+ *
+ * Re-publishing the same artifact adds a VERSION instead of a new record: the
+ * top-level fields above always describe the newest version, while
+ * `previousVersions` keeps the older ones. Records written before versioning
+ * carry none of the three optional fields and read as a single version 1.
+ * See `src/shared/artifact-versions.ts` for the helpers that project a version.
  */
 export interface SharedArtifact {
 	id: string;
+	/**
+	 * Identity a re-publish groups on: `id:<slug>` from `--artifact-id`, else
+	 * `title:<normalized title>`. `--new` mints a unique key so nothing attaches.
+	 */
+	groupKey?: string;
+	/** Version number of THIS record — the newest one. Absent means 1. */
+	version?: number;
+	/**
+	 * Older versions, oldest→newest. Trimmed to `MAX_ARTIFACT_VERSIONS`; what the
+	 * cap dropped is derived from `version` minus the retained count.
+	 */
+	previousVersions?: SharedArtifactVersion[];
 	/** True until the user opens a viewer containing this artifact. Absent means read for legacy records. */
 	isUnread?: boolean;
 	kind: "html";
@@ -2441,6 +3045,61 @@ export function titleFromDescription(
 	return truncated + "\u2026";
 }
 
+/** Words of the "about" clause in a review title \u2014 five, as the board asks for. */
+const REVIEW_TITLE_TOPIC_WORDS = 5;
+
+/**
+ * The "about \u2026" clause of a review title, condensed from a pull-request title or
+ * a commit subject. Drops the conventional-commit prefix and GitHub's squash
+ * `(#123)` suffix, both of which would spend words on things the card already
+ * shows, then keeps the first {@link REVIEW_TITLE_TOPIC_WORDS} words. No
+ * ellipsis on purpose: a trailing `\u2026` is this project's marker for a title
+ * nobody has written yet (see `titleFromDescription`).
+ */
+export function reviewTitleTopic(source: string | null | undefined): string {
+	const text = (source ?? "")
+		.replace(/\s+/g, " ")
+		.replace(/\s*\(#\d+\)\s*$/, "")
+		.replace(/^\s*\w+(\([^)]*\))?!?:\s*/, "")
+		.trim();
+	if (!text) return "";
+	// Cutting at five words lands mid-sentence, so the join often ends on the comma
+	// or dash that led into the words we dropped.
+	return text.split(" ").slice(0, REVIEW_TITLE_TOPIC_WORDS).join(" ").replace(/[,;:—–-]+$/, "");
+}
+
+/**
+ * Board identity for a PR-review task. Every review card used to read "Review the
+ * code changes on this branch. Your task is to perform a thorough\u2026" \u2014 the preset
+ * preamble run through {@link titleFromDescription} \u2014 so N reviews produced N
+ * indistinguishable cards. Each clause is dropped rather than filled with a
+ * placeholder when its part is unknown, so a branch with no pull request and no
+ * readable author still gets a shorter honest title instead of "from unknown".
+ * Returns "" when even the subject is unknown, which means "keep the old title".
+ */
+export function reviewTaskTitle(parts: {
+	prNumber?: number | null;
+	branch?: string | null;
+	author?: string | null;
+	topic?: string | null;
+}): string {
+	const branch = parts.branch?.trim();
+	const subject = parts.prNumber != null ? `#${parts.prNumber}` : branch;
+	if (!subject) return "";
+	const author = parts.author?.trim();
+	const topic = reviewTitleTopic(parts.topic);
+	return `Review of ${subject}${author ? ` from ${author}` : ""}${topic ? ` about ${topic}` : ""}`;
+}
+
+/**
+ * The two things "Merge" can mean. An open pull request for the branch makes it
+ * `pull-request` (GitHub merges it, so review and CI still gate the landing);
+ * anything else is the local squash into the base branch. The renderer sends the
+ * route it promised the user so the backend can refuse a mismatch instead of
+ * running the other one.
+ */
+export type MergeRoute = "pull-request" | "local-squash";
+
 export interface BranchStatus {
 	ahead: number;
 	behind: number;
@@ -2456,6 +3115,19 @@ export interface BranchStatus {
 	prNumber: number | null; // associated PR number for this branch, null if none was detected
 	prUrl: string | null; // full GitHub PR URL, null if no associated PR was detected
 	mergeCompletionFingerprint: string | null; // stable key for deduping the merged-branch completion prompt
+	// Whether the project repo has an `origin` remote at all. A repo added from a
+	// local folder has none, and then Push / Create PR / PR + auto-merge cannot
+	// work — they must read as unavailable instead of failing on click.
+	hasRemote: boolean;
+	// Whether `origin` is a GitHub host. `gh` is the only forge client dev3 speaks,
+	// so a GitLab/Gitea remote must not be offered Create PR — the handoff prompt
+	// would hand the agent a `gh pr create` it cannot run.
+	remoteIsGitHub: boolean;
+	// Commits on `origin/<branch>` that HEAD does not have. Non-zero means a plain
+	// push is refused as non-fast-forward — almost always because the branch was
+	// rebased after being pushed — so Push has to become a leased force push.
+	// 0 when never pushed, when up to date, or when there is no remote.
+	remoteAhead: number;
 }
 
 /**
@@ -2485,7 +3157,14 @@ export type TaskDiffFileStatus =
 	| "untracked"
 	| "unknown";
 
-export type TaskDiffFallbackReason = "no-upstream";
+/**
+ * Why a diff answers a different question than the one asked.
+ * `no-upstream` — the branch was never pushed, so "unpushed" fell back to the base.
+ * `missing-compare-ref` — the compare ref does not exist in this repo (typically
+ * `origin/<base>` in a repo with no remote); the diff is empty because nothing
+ * could be compared, which must never read as "no changes".
+ */
+export type TaskDiffFallbackReason = "no-upstream" | "missing-compare-ref";
 
 export interface TaskDiffFile {
 	id: string;
@@ -2855,14 +3534,24 @@ export interface DevServerStatus {
 	/**
 	 * Listening ports bound by processes inside the dev-server tmux session's
 	 * own process tree (empty when stopped). Unlike `ports` (whole task session,
-	 * cached), this is a live scan scoped to the dev server — a non-empty list
-	 * is the readiness signal `dev3 dev-server start --wait` polls for.
+	 * cached), this is a live scan scoped to the dev server — the readiness
+	 * signal `dev3 dev-server start --wait` polls for, which prefers an entry on
+	 * an `assignedPorts` port and only falls back to the others after a grace
+	 * window.
 	 */
 	devPorts: PortInfo[];
 	/**
-	 * Assigned pool ports currently bound by a process OUTSIDE the dev-server
-	 * tree — a conflicting owner that will make the devScript crash-loop on
-	 * bind. Surfaced so a squatted port is visible at start/status instead of
+	 * Assigned pool ports that started LISTENing after this dev server launched,
+	 * bound by a process outside its tree — i.e. published on its behalf. Every
+	 * containerised devScript lands here: the container runtime's daemon owns
+	 * the published socket, never the pane. Counts as ready for `--wait`.
+	 */
+	publishedPorts: PortInfo[];
+	/**
+	 * Assigned pool ports bound by a process OUTSIDE the dev-server tree that
+	 * was ALREADY listening before this dev server started (or is listening
+	 * while it is stopped) — a real squatter that will make the devScript
+	 * crash-loop on bind. Surfaced so it is visible at start/status instead of
 	 * only as a downstream 502.
 	 */
 	portConflicts: PortInfo[];
@@ -2876,6 +3565,26 @@ export interface DevServerStatus {
 	 * older CLIs ignore it, so it doesn't affect the frozen on-disk layout.
 	 */
 	tmuxError?: string;
+}
+
+/**
+ * The board's view of a dev server — the few facts a Kanban card can act on,
+ * broadcast for every active task. Deliberately NOT {@link DevServerStatus}:
+ * that one is a per-task on-demand read (tmux + lsof + process tree) sized for
+ * the inspector, far too heavy to push for a whole board every poll cycle.
+ */
+export interface DevServerSummary {
+	taskId: string;
+	/** No dev script resolved for this task's branch → the card shows no control. */
+	hasDevScript: boolean;
+	running: boolean;
+	/** Ports the dev server itself is serving on, ascending. Empty while it boots. */
+	ports: number[];
+	/**
+	 * Assigned pool ports held by a foreign process while the dev server is down
+	 * — the devScript will crash-loop on bind if started. Ascending.
+	 */
+	conflictPorts: number[];
 }
 
 // ---- Remote (headless `dev3 remote`) lifecycle ----
@@ -2905,6 +3614,76 @@ export interface RemoteServerState {
 	startedAt: string;
 	/** dev3 build version that wrote this record. */
 	version: string;
+	/**
+	 * Written by a server that is exiting to be replaced by a newer build, read
+	 * once by its successor. Absent on an ordinary start.
+	 *
+	 * THIS IS WHAT KEEPS THE PUBLIC LINK ALIVE ACROSS A SELF-UPDATE. The quick
+	 * tunnel's hostname is random per `cloudflared` process and the session cookie
+	 * is host-bound, so a stop-then-start hands the user a dead URL and a re-auth
+	 * on the very device they are holding. The successor binds the same port and
+	 * adopts the same still-running cloudflared instead.
+	 */
+	handoff?: RemoteHandoff | null;
+	/**
+	 * What the last self-update did, kept AFTER the restart. The renderer shows no
+	 * "updating…" state, so this record is the only thing that explains an
+	 * otherwise unexplained restart in `dev3 remote status`.
+	 */
+	lastUpdate?: RemoteUpdateRecord | null;
+	/**
+	 * Failed attempts at one offered version, DELIBERATELY ON DISK rather than in
+	 * the watch's memory.
+	 *
+	 * The failure that matters most destroys the memory holding the counter: an
+	 * update that applies and then does not boot leaves the old build restarted by
+	 * the supervisor, with a fresh in-process counter at zero. Without this the box
+	 * re-downloads and re-applies the same broken release every quiet window,
+	 * forever, each round costing a full download and about a minute unreachable.
+	 */
+	updateAttempts?: RemoteUpdateAttempts | null;
+}
+
+/** The port + live tunnel one server hands to its replacement. */
+export interface RemoteHandoff {
+	/** Port to re-bind. Survives a restart nobody passed `--port` to. */
+	port: number;
+	/** PID of the dying server, so the successor can tell a stale record apart. */
+	fromPid: number;
+	/**
+	 * The `cloudflared` process left running on purpose. Null when the box had no
+	 * tunnel. The successor has no exit promise for an adopted process, so its
+	 * liveness comes from `metricsReadyUrl` — the same endpoint the tunnel health
+	 * monitor already polls.
+	 */
+	tunnel: { pid: number; url: string; metricsReadyUrl: string | null } | null;
+	/**
+	 * The URL the successor is expected to come back on, set when a custom
+	 * provider's hostname is known to be stable and its tunnel was therefore
+	 * STOPPED rather than leaked. The successor spawns its own tunnel and compares:
+	 * an equal URL means the browser session survived, a different one means the
+	 * stability observation was wrong and the QR has to be re-scanned.
+	 */
+	stableTunnelUrl?: string | null;
+}
+
+/** From-version, to-version and when, for `dev3 remote status` after the fact. */
+export interface RemoteUpdateRecord {
+	fromVersion: string;
+	toVersion: string;
+	/** ISO timestamp of when the update started (before the restart). */
+	startedAt: string;
+}
+
+/** Failed attempts at one version, surviving the restart that lost the counter. */
+export interface RemoteUpdateAttempts {
+	/** The offered version these failures belong to. A new version resets them. */
+	version: string;
+	failures: number;
+	/** Epoch ms of the most recent failure, driving the backoff. */
+	lastFailureMs: number;
+	/** Why the last one failed, so the journal is not the only record. */
+	lastError?: string;
 }
 
 /**
@@ -2954,6 +3733,25 @@ export interface TmuxSessionInfo {
 	resourceUsage?: ResourceUsage;
 }
 
+/**
+ * One PTY session's read-vs-sent counters, as the Debug → Terminal Performance
+ * overlay reads them. Rates are per second over the last closed window; the
+ * gauges are instantaneous. `bytesIn` outrunning `bytesOut` means a backlog, and
+ * the two gauges say whether it is here or further downstream.
+ */
+export interface PtyThroughputStats {
+	bytesIn: number;
+	bytesOut: number;
+	messages: number;
+	drops: number;
+	droppedBytes: number;
+	queued: number;
+	socketBuffered: number;
+	windowMs: number;
+	queuedPeak: number;
+	socketPeak: number;
+}
+
 // ---- System requirements ----
 
 export interface RequirementCheckResult {
@@ -2991,6 +3789,29 @@ export interface AgentCheckResult {
 	installCommand?: string;
 	installUrl?: string;
 	customPathError?: boolean;
+}
+
+/**
+ * Evidence that an installed agent CLI has credentials. Three-valued on purpose:
+ * `unknown` means dev3 has no probe for that CLI, and must never be treated as
+ * "logged out". See `bun/harness-readiness.ts`.
+ */
+export type HarnessSignIn = "signed-in" | "not-signed-in" | "unknown";
+
+export interface HarnessReadiness {
+	agentId: string;
+	name: string;
+	baseCommand: string;
+	installed: boolean;
+	signIn: HarnessSignIn;
+}
+
+export interface HarnessReadinessReport {
+	harnesses: HarnessReadiness[];
+	/** Agent ids that are installed and not provably signed out — what the UI gates on. */
+	usable: string[];
+	/** No agent CLI is installed at all: a different, more basic problem. */
+	noneInstalled: boolean;
 }
 
 // ---- CLI socket protocol ----
@@ -3155,6 +3976,38 @@ export type AppRPCSchema = {
 				params: { projectIds: string[] };
 				response: Project[];
 			};
+			getSpaces: {
+				params: Record<string, never>;
+				response: SpacesFile;
+			};
+			createSpace: {
+				params: { name: string; projectIds: string[] };
+				response: Space;
+			};
+			renameSpace: {
+				params: { spaceId: string; name: string };
+				response: Space;
+			};
+			deleteSpace: {
+				params: { spaceId: string };
+				response: void;
+			};
+			setProjectSpaces: {
+				params: { projectId: string; spaceIds: string[] };
+				response: { file: SpacesFile; autoDeleted: Space[] };
+			};
+			setSpaceSensitive: {
+				params: { spaceId: string; sensitive: boolean };
+				response: Space;
+			};
+			reorderSpaces: {
+				params: { order: string[] };
+				response: SpacesFile;
+			};
+			reorderSpaceProjects: {
+				params: { spaceId: string; projectIds: string[] };
+				response: Space;
+			};
 			listDirectory: {
 				params: { path?: string | null; includeFiles?: boolean; showHidden?: boolean };
 				response: FolderListing;
@@ -3207,6 +4060,11 @@ export type AppRPCSchema = {
 			};
 			initAndAddProject: {
 				params: { path: string; name?: string };
+				response: { ok: true; project: Project } | { ok: false; error: string };
+			};
+			/** Create (or re-open) the throwaway sandbox repo dev3 owns, under `~/.dev3.0/sandbox`. */
+			createSandboxProject: {
+				params: void;
 				response: { ok: true; project: Project } | { ok: false; error: string };
 			};
 			/** Create a virtual "Operations" board (no git repo). Stored in virtual-projects.json. */
@@ -3265,6 +4123,11 @@ export type AppRPCSchema = {
 				params: void;
 				response: GitHubCliStatus;
 			};
+			/** Which shells this machine has, and which one dev3 actually runs. */
+			getShellAvailability: {
+				params: void;
+				response: ShellAvailability;
+			};
 			saveGlobalSettings: {
 				params: GlobalSettings;
 				response: void;
@@ -3295,10 +4158,55 @@ export type AppRPCSchema = {
 				params: void;
 				response: PxpipeProxyStatus;
 			};
-			/** Symlink the bundled dev3 CLI to ~/.dev3.0/bin/dev3 (for dev/debug). */
+			/** The model catalog as the renderer may see it (no credential values). */
+			modelCatalogGet: {
+				params: void;
+				response: ModelCatalogView;
+			};
+			/** Replace the catalog's providers and models. A key travels only in
+			 *  `providerKeys` (provider id → new key; omitted = keep, empty = drop).
+			 *  Restarts the sidecar, because its config is read once at startup. */
+			modelCatalogSave: {
+				params: { catalog: ModelCatalogView; providerKeys?: Record<string, string> };
+				response: ModelCatalogView;
+			};
+			/** One provider's stored key in plain text, for the settings field's reveal
+			 *  control. Asked for per provider and only on an explicit click: a
+			 *  credential crosses to the renderer when the user looks at it, never
+			 *  because a screen happened to load. */
+			modelCatalogRevealKey: {
+				params: { providerId: string };
+				response: { key: string };
+			};
+			/** Live state of the model-catalog proxy sidecar. */
+			modelSidecarStatus: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Start the sidecar on demand (no-op when it is already up). */
+			modelSidecarStart: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Stop the sidecar; running agent sessions lose their route. */
+			modelSidecarStop: {
+				params: void;
+				response: ModelSidecarStatus;
+			};
+			/** Model ids the sidecar can actually serve, for the model-id combobox.
+			 *  Throws when the sidecar cannot be reached — an empty list must never
+			 *  be mistaken for "this provider has no models". */
+			modelCatalogListModels: {
+				params: { providerKey?: string };
+				response: { models: string[] };
+			};
+			/** Symlink the bundled dev3 CLI to ~/.dev3.0/bin/dev3 (for dev/debug), and
+			 *  arm a sibling `dev3-self` aimed at THIS instance (`selfInstance` is the
+			 *  baked-in `--instance` value). `bin/dev3` stays instance-neutral so agent
+			 *  hooks keep resolving as they do today. */
 			installDev3Cli: {
 				params: void;
-				response: { installedFrom: string };
+				response: { installedFrom: string; selfShimPath: string; selfInstance: string };
 			};
 			getAgents: {
 				params: void;
@@ -3314,7 +4222,10 @@ export type AppRPCSchema = {
 			};
 			getAllProjectTasks: {
 				params: void;
-				response: { projectId: string; tasks: Task[] }[];
+				/** `tasks` is the ACTIVE set only. `todoCount` is the work sitting on
+				 *  the board that this list therefore never shows, so a caller can say
+				 *  what it is hiding instead of implying the project holds nothing else. */
+				response: { projectId: string; tasks: Task[]; todoCount: number }[];
 			};
 			/** All lifecycle states for the workspace Kanban; active-only callers use getAllProjectTasks. */
 			getWorkspaceBoardTasks: {
@@ -3403,7 +4314,14 @@ export type AppRPCSchema = {
 				response: ConversationMatch[];
 			};
 			createTask: {
-				params: { projectId: string; description: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority };
+				/**
+				 * Optional board title. Set when the description leads with a built-in
+				 * prompt preamble, so the card is named after the user's own text
+				 * instead of the first 80 characters of the preamble. Distinct from
+				 * `renameTask`'s customTitle: this does NOT mark the title user-edited,
+				 * so an agent may still rename it.
+				 */
+				params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType };
 				response: Task;
 			};
 			hibernateTask: {
@@ -3562,6 +4480,20 @@ export type AppRPCSchema = {
 				params: { taskId: string };
 				response: string;
 			};
+			/**
+			 * Re-run the project's `setupScript` in its own auxiliary pane, leaving the
+			 * agent and every other pane untouched. Clears the previous setup verdict and
+			 * arms a fresh watch, so a second failure raises the notice again.
+			 */
+			rerunSetupScript: {
+				params: { taskId: string };
+				response: void;
+			};
+			/** Drop a setup-failure verdict the user has acknowledged. */
+			dismissSetupFailure: {
+				params: { taskId: string };
+				response: void;
+			};
 			getProjectPtyUrl: {
 				params: { projectId: string };
 				response: string;
@@ -3656,7 +4588,7 @@ export type AppRPCSchema = {
 				response: { delivery: AgentPromptDelivery };
 			};
 			mergeTask: {
-				params: { taskId: string; projectId: string };
+				params: { taskId: string; projectId: string; expectRoute?: MergeRoute; compareRef?: string };
 				response: void;
 			};
 			pushTask: {
@@ -3689,7 +4621,17 @@ export type AppRPCSchema = {
 			};
 			applyUpdate: {
 				params: void;
-				response: void;
+				/**
+				 * `restarting: false` means the update is INSTALLED but this process is not
+				 * going to be replaced — a headless server with nothing out there to relaunch
+				 * it. The button has to stop spinning and say so, or it reads "Restarting…"
+				 * forever for an update that already succeeded.
+				 */
+				response: { restarting: boolean; message?: string };
+			};
+			getUpdateRestartContext: {
+				params: void;
+				response: { headless: boolean; remoteActive: boolean; tasksInProgress: number };
 			};
 			saveLastRoute: {
 				params: { route: string };
@@ -3722,6 +4664,11 @@ export type AppRPCSchema = {
 			checkAgentAvailability: {
 				params: void;
 				response: AgentCheckResult[];
+			};
+			/** Installed AND holding credentials — what the first-run sandbox is gated on. */
+			checkHarnessReadiness: {
+				params: void;
+				response: HarnessReadinessReport;
 			};
 			setAgentBinaryPath: {
 				params: { agentId: string; path: string };
@@ -3783,6 +4730,11 @@ export type AppRPCSchema = {
 			listTmuxSessions: {
 				params: void;
 				response: TmuxSessionInfo[];
+			};
+			/** PTY read-vs-sent counters for the Debug → Terminal Performance overlay. */
+			terminalPtyStats: {
+				params: void;
+				response: { sessions: Record<string, PtyThroughputStats> };
 			};
 			killTmuxSession: {
 				params: { sessionName: string };
@@ -3891,6 +4843,11 @@ export type AppRPCSchema = {
 			deleteTaskNote: {
 				params: { taskId: string; projectId: string; noteId: string };
 				response: Task;
+			};
+			/** Read the project's append-only message log, newest first. */
+			readAgentMessageLog: {
+				params: { projectId: string; limit?: number };
+				response: AgentMessageLogPage;
 			};
 			taskPaneState: {
 				params: { taskId: string };
@@ -4044,6 +5001,23 @@ export type AppRPCSchema = {
 				};
 				response: void;
 			};
+			/**
+			 * Liveness beat from a renderer, every ~2s. A wedged renderer cannot report
+			 * on itself — every timer and error handler in it is dead too — so the
+			 * backend judges the silence instead. See bun/renderer-watchdog.ts.
+			 */
+			rendererHeartbeat: {
+				params: {
+					clientId: string;
+					sinceLastBeatMs: number;
+					visible: boolean;
+					/** The gap spans a hidden stretch, where throttling explains it. */
+					hiddenSinceLastBeat: boolean;
+					terminals: number;
+					frameErrorPanes: number;
+				};
+				response: void;
+			};
 			listBranches: {
 				params: { projectId: string };
 				response: Array<{ name: string; isRemote: boolean }>;
@@ -4144,11 +5118,7 @@ export type AppRPCSchema = {
 			};
 			getRemoteAccessQR: {
 				params: { tunnel?: boolean; host?: string };
-				response: { qrDataUrl: string; accessUrl: string; tunnelState: string; cloudflaredInstalled: boolean; interfaces: RemoteNetInterface[]; selectedHost: string };
-			};
-			checkCloudflared: {
-				params: void;
-				response: { installed: boolean };
+				response: { qrDataUrl: string; accessUrl: string; tunnelState: string; tunnelBinaryInstalled: boolean; tunnelProvider: "cloudflare" | "custom" | "misconfigured"; tunnelFailureReason: string | null; interfaces: RemoteNetInterface[]; selectedHost: string };
 			};
 			startTunnel: {
 				params: void;
@@ -4230,14 +5200,26 @@ export type AppRPCSchema = {
 			};
 			/**
 			 * Renderer answers an `agentLaunchRequested` dialog. Approval hands back
-			 * the agent/config/account the user picked, and the blocked CLI request
-			 * launches the task with it; decline releases it with a refusal.
+			 * the variants + priority the user composed, and the blocked CLI request
+			 * launches the task with them; decline releases it with a refusal.
 			 */
 			respondToAgentLaunchRequest: {
 				params: {
 					requestId: string;
 					approved: boolean;
-					launch?: { agentId: string | null; configId: string | null; accountId?: string | null };
+					launch?: AgentLaunchChoice;
+				};
+				response: void;
+			};
+			/**
+			 * Mirror the dialog's current variants/priority pick into the pending
+			 * request, so an auto-approval that fires while nobody is watching still
+			 * launches with what the user last selected rather than the defaults.
+			 */
+			updateAgentLaunchChoice: {
+				params: {
+					requestId: string;
+					launch: AgentLaunchChoice;
 				};
 				response: void;
 			};
@@ -4275,6 +5257,7 @@ export type AppRPCSchema = {
 		messages: {
 			taskUpdated: { projectId: string; task: Task };
 			projectUpdated: { project: Project };
+			spacesUpdated: { file: SpacesFile };
 			taskSound: { status: "completed" | "cancelled"; taskId: string };
 			ptyDied: { taskId: string };
 			projectPtyDied: { projectId: string };
@@ -4318,6 +5301,12 @@ export type AppRPCSchema = {
 			 */
 			agentRequestResolved: { requestId: string; kind: "complete" | "launch"; taskId: string; projectId: string };
 			portsUpdated: { taskId: string; ports: PortInfo[] };
+			/**
+			 * Dev-server state for one task, pushed only when it changes. Feeds the
+			 * dev control on the Kanban card, which is why it is a broadcast and not
+			 * the per-task `getDevServerStatus` read the inspector uses.
+			 */
+			devServerUpdated: DevServerSummary;
 			exposedPortsChanged: { taskId: string; ports: ExposedPort[] };
 			resourceUsageUpdated: { taskId: string; usage: ResourceUsage };
 			/**
@@ -4362,6 +5351,10 @@ export type AppRPCSchema = {
 			taskPreparationFailed: { taskId: string; projectId: string; taskTitle: string; error: string };
 			/** Emitted after a global preference is saved. */
 			globalSettingsUpdated: GlobalSettings;
+			/** Emitted after the agent presets are saved, carrying the merged list.
+			 *  Surfaces that hold a long-lived snapshot (boards, launch pickers) would
+			 *  otherwise keep offering presets the user just renamed or deleted. */
+			agentsUpdated: CodingAgent[];
 			/**
 			 * Emitted when the main window gains focus shortly after a watched-task notification fired.
 			 * The renderer navigates to the referenced task â implements click-to-open for native notifications.
@@ -4512,7 +5505,7 @@ export type AppRPCSchema = {
 			zoomReset: {};
 			osc52Clipboard: { taskId: string; text: string; len: number };
 			qrTokenConsumed: {};
-			showRemoteAccessQR: { qrDataUrl: string; accessUrl: string; tunnelState: string; cloudflaredInstalled: boolean; autoStartTunnel?: boolean };
+			showRemoteAccessQR: { qrDataUrl: string; accessUrl: string; tunnelState: string; tunnelBinaryInstalled: boolean; tunnelProvider: "cloudflare" | "custom" | "misconfigured"; tunnelFailureReason?: string | null; autoStartTunnel?: boolean };
 			/**
 			 * Universal menu-action dispatch. The bun side fires this whenever the
 			 * native menu emits an `application-menu-clicked` event whose action is

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AgentSettingsSection from "../AgentSettingsSection";
 import { I18nProvider } from "../../../i18n";
@@ -20,6 +20,9 @@ vi.mock("../../../rpc", () => ({
 			setActiveAgentAccount: vi.fn(),
 			toggleFavoriteAgent: vi.fn(() => Promise.resolve({})),
 			checkCodexBedrockConfig: vi.fn(() => Promise.resolve({ configured: true })),
+			// The preset editor asks for the model catalog; an empty one keeps the
+			// roles block hidden, which is this suite's subject.
+			modelCatalogGet: vi.fn(() => Promise.resolve({ providers: [], models: [] })),
 		},
 	},
 }));
@@ -415,9 +418,10 @@ describe("AgentSettingsSection — preset library", () => {
 });
 
 // The reported bug: dev3 recognizes only the five literal CLI names, so an agent
-// pointed at a wrapper script or a shell alias got no lifecycle hooks and its
-// task never moved between columns — with nothing on screen saying so.
-describe("AgentSettingsSection — lifecycle hooks", () => {
+// pointed at a custom executable — a wrapper, an alias, a renamed build — was
+// handled as an unknown CLI: no hooks, no session resume, no dev3 protocol, and
+// nothing on screen saying so.
+describe("AgentSettingsSection — which CLI is this", () => {
 	/** The wrapper tests rename baseCommand, so find the agent by its id. */
 	function patchedAgent(onAgentsChange: ReturnType<typeof vi.fn>): CodingAgent {
 		const calls = onAgentsChange.mock.calls;
@@ -425,10 +429,10 @@ describe("AgentSettingsSection — lifecycle hooks", () => {
 		return updated.find((a) => a.id === "builtin-claude")!;
 	}
 
-	async function openHooksSelect(user: ReturnType<typeof userEvent.setup>) {
+	async function openFamilySelect(user: ReturnType<typeof userEvent.setup>) {
 		await expandAgent(user, "Claude");
-		const trigger = document.getElementById("agent-hooks-builtin-claude");
-		if (!trigger) throw new Error("hooks select is missing");
+		const trigger = document.getElementById("agent-family-builtin-claude");
+		if (!trigger) throw new Error("agent family select is missing");
 		await user.click(trigger);
 	}
 
@@ -436,37 +440,46 @@ describe("AgentSettingsSection — lifecycle hooks", () => {
 		const user = userEvent.setup();
 		renderSection();
 		await expandAgent(user, "Claude");
-		expect(screen.queryByText("settings.hooksMissingTitle")).toBeNull();
+		expect(screen.queryByText("settings.familyMissingTitle")).toBeNull();
 	});
 
-	it("warns that an unrecognized command gets no hooks", async () => {
+	it("warns that an unrecognized command is handled as an unknown CLI", async () => {
 		const user = userEvent.setup();
 		renderSection({ baseCommand: "my-claude" });
 		await expandAgent(user, "Claude");
-		expect(screen.getByText("settings.hooksMissingTitle")).toBeInTheDocument();
+		expect(screen.getByText("settings.familyMissingTitle")).toBeInTheDocument();
 	});
 
-	it("stops warning once the agent declares a hook family", async () => {
+	it("stops warning once the agent declares its CLI", async () => {
 		const user = userEvent.setup();
-		renderSection({ baseCommand: "my-claude", hooksIntegration: "claude" });
+		renderSection({ baseCommand: "my-claude", agentFamily: "claude" });
 		await expandAgent(user, "Claude");
-		expect(screen.queryByText("settings.hooksMissingTitle")).toBeNull();
+		expect(screen.queryByText("settings.familyMissingTitle")).toBeNull();
 	});
 
 	it("persists the declared family", async () => {
 		const user = userEvent.setup();
 		const onAgentsChange = renderSection({ baseCommand: "my-claude" });
-		await openHooksSelect(user);
-		await user.click(screen.getByRole("option", { name: "settings.hooksClaude" }));
-		expect(patchedAgent(onAgentsChange).hooksIntegration).toBe("claude");
+		await openFamilySelect(user);
+		await user.click(screen.getByRole("option", { name: "settings.family.claude" }));
+		expect(patchedAgent(onAgentsChange).agentFamily).toBe("claude");
+	});
+
+	it("offers every supported CLI, not just the two with hooks", async () => {
+		const user = userEvent.setup();
+		renderSection({ baseCommand: "my-claude" });
+		await openFamilySelect(user);
+		for (const key of ["claude", "codex", "gemini", "agent", "opencode"]) {
+			expect(screen.getByRole("option", { name: `settings.family.${key}` })).toBeInTheDocument();
+		}
 	});
 
 	it("clears the field back to auto-detection", async () => {
 		const user = userEvent.setup();
-		const onAgentsChange = renderSection({ baseCommand: "my-claude", hooksIntegration: "codex" });
-		await openHooksSelect(user);
-		await user.click(screen.getByRole("option", { name: "settings.hooksAuto" }));
-		expect(patchedAgent(onAgentsChange).hooksIntegration).toBeUndefined();
+		const onAgentsChange = renderSection({ baseCommand: "my-claude", agentFamily: "codex" });
+		await openFamilySelect(user);
+		await user.click(screen.getByRole("option", { name: "settings.familyAuto" }));
+		expect(patchedAgent(onAgentsChange).agentFamily).toBeUndefined();
 	});
 });
 
@@ -532,5 +545,85 @@ describe("AgentSettingsSection — preset fields", () => {
 		expect(override).toHaveAttribute("autocapitalize", "off");
 		expect(override).toHaveAttribute("autocorrect", "off");
 		expect(override.getAttribute("spellcheck")).toBe("false");
+	});
+});
+
+/** The row the list renders for one preset — the same hook the section's own
+ *  scroll-into-view uses. */
+function presetRow(configId: string): HTMLElement | null {
+	return document.querySelector(`[data-preset-row="${configId}"]`);
+}
+
+describe("a deep-link that names one preset", () => {
+	const claude = DEFAULT_AGENTS.find((a) => a.baseCommand === "claude")!;
+	const target = claude.configurations[claude.configurations.length - 1];
+
+	function renderWithFocus(agents: CodingAgent[], onHandled = vi.fn()) {
+		const { rerender } = render(
+			<I18nProvider>
+				<AgentSettingsSection
+					t={identityT as never}
+					agents={agents}
+					globalSettings={baseSettings}
+					onAgentsChange={vi.fn()}
+					onDefaultAgentChange={vi.fn()}
+					onDefaultConfigChange={vi.fn()}
+					onGlobalSettingsChange={vi.fn()}
+					focusPreset={{ agentId: claude.id, configId: target.id }}
+					onFocusPresetHandled={onHandled}
+				/>
+			</I18nProvider>,
+		);
+		return { rerender, onHandled };
+	}
+
+	it("selects that preset instead of leaving the user to find it", async () => {
+		renderWithFocus(DEFAULT_AGENTS);
+		await waitFor(() => expect(presetRow(target.id)).not.toBeNull());
+		expect(presetRow(target.id)!.getAttribute("aria-selected")).toBe("true");
+	});
+
+	it("waits for the agents to load — an empty list is 'not yet', not 'gone'", async () => {
+		const onHandled = vi.fn();
+		const { rerender } = renderWithFocus([], onHandled);
+		expect(onHandled).not.toHaveBeenCalled();
+
+		rerender(
+			<I18nProvider>
+				<AgentSettingsSection
+					t={identityT as never}
+					agents={DEFAULT_AGENTS}
+					globalSettings={baseSettings}
+					onAgentsChange={vi.fn()}
+					onDefaultAgentChange={vi.fn()}
+					onDefaultConfigChange={vi.fn()}
+					onGlobalSettingsChange={vi.fn()}
+					focusPreset={{ agentId: claude.id, configId: target.id }}
+					onFocusPresetHandled={onHandled}
+				/>
+			</I18nProvider>,
+		);
+		await waitFor(() => expect(presetRow(target.id)).not.toBeNull());
+		expect(onHandled).toHaveBeenCalled();
+	});
+
+	it("spends the jump on a preset that no longer exists, rather than retrying forever", async () => {
+		const onHandled = vi.fn();
+		render(
+			<I18nProvider>
+				<AgentSettingsSection
+					t={identityT as never}
+					agents={DEFAULT_AGENTS}
+					globalSettings={baseSettings}
+					onAgentsChange={vi.fn()}
+					onDefaultAgentChange={vi.fn()}
+					onDefaultConfigChange={vi.fn()}
+					onGlobalSettingsChange={vi.fn()}
+					focusPreset={{ agentId: claude.id, configId: "deleted-long-ago" }}
+					onFocusPresetHandled={onHandled}
+				/>
+			</I18nProvider>,
+		);
+		expect(onHandled).toHaveBeenCalled();
 	});
 });

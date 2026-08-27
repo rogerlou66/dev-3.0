@@ -9,6 +9,7 @@ const help = {
 	"help.ui.aboutSection": "About this section",
 	"help.ui.modeBanner": "Help mode — click any highlighted zone to learn what it does",
 	"help.ui.exitHint": "Esc to exit",
+	"help.ui.runTour": "Walk me through the first task",
 	"help.ui.whatYouCanDo": "What you can do here",
 	"help.ui.explainScreen": "Explain this screen…",
 	"help.ui.openShortcuts": "Open keyboard shortcuts",
@@ -42,13 +43,13 @@ const help = {
 	// ── Board chrome ──
 	"help.board.filterBar.title": "Search & filters",
 	"help.board.filterBar.body":
-		"One box searches and filters the board. Type free text to fuzzy-match titles/descriptions, or filter with tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review is:attention has:port. The P0–P4 priority chips, the label chips and the funnel dropdown all edit these same tokens, so typing and clicking never disagree. The × clears everything. Manage labels in Project Settings → Labels.",
+		"One box searches and filters the board. Type free text to fuzzy-match titles/descriptions, or filter with tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:home has:port. The P0–P4 priority chips, the label chips and the funnel dropdown all edit these same tokens, so typing and clicking never disagree. The × clears everything. Manage labels in Project Settings → Labels.",
 	"help.board.priorityFilter.title": "Priority filter",
 	"help.board.priorityFilter.body":
 		"Every task has a priority P0 (highest) … P4 (lowest, default P3). Columns always sort by it, so the most important work stays on top. Click a chip to show only that priority; drag a card into another band to re-prioritize it.",
 	"help.filters.dsl.title": "Search & filters",
 	"help.filters.dsl.body":
-		"Type to fuzzy-match titles and descriptions, or filter with tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review is:attention has:port. Quote multi-word values. Combine facets (AND); repeat one facet to broaden (OR). The P0–P4 chips, label chips and the funnel all edit these same tokens. Manage labels in Project Settings → Labels.",
+		"Type to fuzzy-match titles and descriptions, or filter with tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:home has:port. Quote multi-word values. Combine facets (AND); repeat one facet to broaden (OR). The P0–P4 chips, label chips and the funnel all edit these same tokens. Manage labels in Project Settings → Labels.",
 	"help.board.taskCard.title": "Task card",
 	"help.board.taskCard.body":
 		"The colored dots are parallel agent variants (each in its own worktree), the bell means the agent is calling you, and the #123 badge is the task's PR with its CI and review state. Right-click the card for every task action.",
@@ -67,6 +68,18 @@ const help = {
 	"help.dashboard.projectRow.title": "Project row",
 	"help.dashboard.projectRow.body":
 		"The count on the right is agents running now. Colored rows underneath are tasks waiting for you — questions and reviews. Click one to jump straight to that task.",
+	"help.dashboard.spaces.title": "Spaces",
+	"help.dashboard.spaces.body":
+		"A space groups projects on this dashboard and nothing more: it never moves files, never touches a board, and one project can sit in several. Click a space to filter the list. The count beside a space is how many projects are in it; the group header in the list adds how many of their tasks are waiting on you. Drag a row to reorder; its ⋯ menu edits which projects belong, renames it, or deletes the grouping — the projects themselves stay.",
+	"help.dashboard.addProject.title": "Add project",
+	"help.dashboard.addProject.body":
+		"Points dev-3.0 at a git repository on this machine — pick a folder you already have, clone a URL, or create an empty repo. Nothing in it is modified by adding it. Every task on the resulting board gets its own branch, folder and terminal. The Operations option makes a board with no git at all, for work that is not code.",
+	"help.dashboard.opsBoard.title": "The Operations board",
+	"help.dashboard.opsBoard.body":
+		"A board for work that is not about a repository: research, one-off scripts, notes to an agent, anything you would otherwise not know where to file. Its tasks get a managed folder instead of a git worktree, so there is no branch, no diff and no pull request — everything else, including the agent and the terminal, works exactly as on a git board. Every install starts with this one, and you can add more.",
+	"help.dashboard.firstRun.title": "Getting started",
+	"help.dashboard.firstRun.body":
+		"Shown until you add your first repository, then it is replaced by the Productivity Stats card. The shortest path is: add a project, open its board, write one task in plain words, and press Save & Start — that launches an agent on it straight away.",
 
 	// ── Task inspector ──
 	"help.inspector.panel.title": "Task inspector",
@@ -196,7 +209,7 @@ const help = {
 	// ── Viewers & workspace ──
 	"help.viewer.images.title": "Shared images",
 	"help.viewer.images.body":
-		"Screenshots and renders an agent surfaced with `dev3 show-image`, newest first. Step through the history, copy an image, or reveal the original file on disk.",
+		"Screenshots and renders an agent surfaced with `dev3 show-image`, newest first. Step through the history, download an image (also on right-click), copy its path, or reveal the original file on disk.",
 	"help.viewer.artifact.title": "Artifact",
 	"help.viewer.artifact.body":
 		"An interactive HTML report an agent built with `dev3 show-artifact`, sandboxed beside the terminal. Resize it, go fullscreen, step through past artifacts, or download it as HTML (or a ZIP when it bundles images).",
@@ -205,6 +218,9 @@ const help = {
 	"help.terminal.quickShell.title": "Project shell",
 	"help.terminal.quickShell.body":
 		"A project-level terminal with no git worktree — for quick commands that aren't a task. Nothing here is tracked on the board or tied to a branch, unlike a task terminal.",
+	"help.terminal.task.title": "The agent's terminal",
+	"help.terminal.task.body":
+		"This is a real shell inside a tmux session, running in this task's own worktree — so what the agent types here cannot reach your other branches. The bar along the bottom is tmux: each numbered entry is a window, and the one on the right is this task's session name. The agent keeps running when you leave this screen or close the app; it is the session that owns it, not the window you are looking at. Select text to copy it — no ⌘C needed.",
 
 	// ── Header / sidebar ──
 	"help.header.utilities.title": "App utilities",
@@ -227,8 +243,21 @@ const help = {
 	"help.field.streamerMode.title": "Hide private info on stream",
 	"help.field.streamerMode.body":
 		"When on, identity-bearing values — account emails and names, organizations, home-folder paths, tunnel URLs, and the remote-access QR code — are blurred across the UI. Terminal content is NOT masked: panes print whatever agents output. Toggle it quickly from the ⇧⌘P command palette.",
+	"help.header.agentTraffic.title": "Agent traffic: who is talking, and who owes an answer",
+	"help.header.agentTraffic.body": "The glyph appears only while your agents have written to each other in the last hour. The number counts live pairs; open it to see each pair, and the task that received the last message is the one that has not answered yet.",
+	"help.traffic.log.title": "Every message your agents typed into each other",
+	"help.traffic.log.body": "The full history dev3 kept, newest first — a toast lasts 30 seconds, this lasts 30 days. Pick a pair on the left to read just that conversation, and \u201cUnproven only\u201d shows the messages dev3 could not prove reached the other pane.",
 	"help.header.memory.title": "The memory pill shows what is LEFT",
 	"help.header.memory.body": "The number is free memory, not used — hover it to see who actually took the rest. dev-3.0 itself holds a few hundred megabytes; the gigabytes belong to the agents you launched, and to whatever else is running.",
+	"help.header.connectionQuality.title": "How slow this connection is",
+	"help.header.connectionQuality.body":
+		"Only when you view dev3 from another device: the round trip of a real request over the same connection the app uses. It appears here once the link stops being quick, and otherwise waits in this menu. Hover it to see how much of the wait was spent on your computer versus on the network.",
+	"help.sidebar.scope.title": "Which project the list covers",
+	"help.sidebar.scope.body":
+		"Three glyphs, three sizes of list. The folder shows only this project's tasks. The ring shows every project in the same space, and is struck through when this project is in none of them. The globe shows every task on the machine, which is how you find work you left running somewhere else.",
+	"help.tips.card.title": "Did you know?",
+	"help.tips.card.body":
+		"One short pointer at a time towards something dev3 does that no button on screen announces — a shortcut, a drag, a CLI command. Dismiss it and it never returns; there is a switch in Settings if you would rather have none of them.",
 } as const;
 
 export default help;

@@ -32,7 +32,20 @@ Do not read or edit `app.css` or `app.js` unless the artifact format itself must
 
 `.card` already carries its own padding, so a bare `<section class="card">` looks right with plain content inside it. `.section` and `.kpi` set a roomier padding, and `.table-card` intentionally drops it so a table can run edge to edge. Never re-pad a card from report markup.
 
+`.dashboard-grid` is a 12-column grid. A panel inside it takes the whole row unless you give it a width, so a card you drop in never collapses into a sliver. To put panels side by side add `span-3` … `span-9` (`<article class="card section span-6">`); the widths apply above 900px and every panel goes full width below that and in print.
+
 The container grows with the viewport up to 1840px, so dense tables and dashboards use a wide monitor instead of leaving it empty. Because the panels are wide, put running prose in `<p class="prose">` (or any `.prose` block) to hold a readable line length; short `.muted` and `.section-copy` lines are capped for you. `.kpis` fits as many cards per row as the width allows, so a report may ship three or six KPI cards without a layout override.
+
+## Text size
+
+The topbar carries an `A− / 100% / A+` group beside the theme button. It steps the whole report between 80% and 150% in ten-point stops, the percentage doubles as the reset button, and the choice is remembered per browser (silently skipped in the sandboxed viewer, whose opaque origin has no storage). Keep the control in `.actions`.
+
+Everything in `app.css` is sized in `rem`, or in `em` for a glyph that belongs to its own label, so one root scale carries text, chart heights, checkboxes, switches, sliders, and the Choices dropdowns with it. Print follows the same scale — an enlarged report prints enlarged.
+
+Two rules for report code:
+
+- Never write a px font size in `index.html` or `report.js`. Use the shell's classes, or `rem` if a one-off is unavoidable.
+- Chart options are exempt: the shell rescales every `fontSize` number in an option tree before ECharts sees it, so `fontSize: 12` in `report.js` stays correct at every scale. Use `dev3Artifact.scaleFont(px)` for a px number ECharts does not read from `fontSize` (an `itemHeight`, a `grid.left` sized for labels), and `dev3Artifact.fontScale()` for the raw multiplier.
 
 ## Preview and share
 
@@ -60,7 +73,7 @@ The starter already pins ECharts 6.1.0, Choices.js 11.2.3, and noUiSlider 15.8.1
 
 `index.html` loads Apache ECharts 6.1.0 through a versioned cdnjs tag. Keep that tag intact when the report has charts. Offline, chart hosts show a notice while the rest of the report remains usable.
 
-The stable bridge lives in `app.js` and exposes `window.dev3Artifact.chart()`, `.color()`, `.enhance()`, `.setControl()`, and `.toast()`. Keep chart options, values, labels, filters, and interactions in `report.js`; use the exposed helpers there without editing the shell. The chart helper applies dev3 tokens, uses the SVG renderer for crisp print/PDF output, adds aria descriptions, re-renders on theme changes, and resizes with its container.
+The stable bridge lives in `app.js` and exposes `window.dev3Artifact.chart()`, `.color()`, `.enhance()`, `.fontScale()`, `.popover()`, `.scaleFont()`, `.setControl()`, and `.toast()`. Keep chart options, values, labels, filters, and interactions in `report.js`; use the exposed helpers there without editing the shell. The chart helper applies dev3 tokens, uses the SVG renderer for crisp print/PDF output, adds aria descriptions, re-renders on theme changes, and resizes with its container.
 
 The shell declares the card surface as each chart's `backgroundColor`, because ECharts derives value-label contrast from it — without that, every label renders dark grey inside a white halo, which is illegible on the dark theme. Keep report code out of that decision: do not set `backgroundColor` or hand-color value labels unless the chart sits on a surface other than `--dev3-surface-raised`.
 
@@ -85,6 +98,29 @@ Keep form markup native and opt into the polished CDN controls with one attribut
 
 Use native checkbox, radio, and switch markup from `index.html`; `app.css` supplies the shared skin without report JavaScript.
 When report code changes an enhanced select or range, call `dev3Artifact.setControl(element, value)` so the native value, visual control, events, and output stay synchronized.
+
+## Menus, dropdowns, and anything that opens over the report
+
+**Never hand-roll `position: absolute` + `z-index` for a panel that opens.** It is the most common broken artifact: the card, the horizontal scroller, or the sticky table header around it clips the panel, and no z-index can win because the clip happens before stacking. Use the shell's popover — it puts the panel in the browser top layer, where no ancestor can clip it or paint over it:
+
+```html
+<div class="popover-anchor">
+  <button type="button" data-popover-trigger="branchMenu">refactor/…header-controls <span class="popover-caret" aria-hidden="true">▾</span></button>
+  <div class="popover" id="branchMenu">
+    <div class="popover-title">Branch</div>
+    <button type="button" data-action="copy-path">Copy worktree path</button>
+    <button type="button" data-action="checkout">Copy checkout command</button>
+    <hr>
+    <a href="https://example.com/pr/1412">Open pull request</a>
+  </div>
+</div>
+```
+
+The shell owns opening, `aria-expanded`, `aria-haspopup`, placement against the trigger, flipping above it when the viewport is short, clamping inside the viewport, repositioning on scroll and resize, arrow-key movement, Escape, outside-click dismissal, focus return, and hiding in print. Report code only listens for clicks on its own items. A menu closes on the item that was clicked; add `data-popover-keep-open` to an item that must not close it (a filter panel rather than a menu).
+
+For a panel built after load, register it with `dev3Artifact.popover(panel, triggerElement)` and drive it through the returned `open()`, `close()`, `toggle()`, and `isOpen`. Enhanced selects need nothing: the shell already lifts the Choices list into the top layer, so a filter inside `.table-card` or `.evidence-group` keeps every option reachable.
+
+Style overlays only through `.popover`, `.popover-title`, and plain `button`/`a`/`hr` children. Do not set `position`, `top`, `left`, `inset`, or `z-index` on a popover — the shell writes those. When something genuinely needs its own stacking order, use the `--dev3-z-nav`, `--dev3-z-overlay`, and `--dev3-z-toast` tokens instead of a new number.
 
 ## Tables
 
@@ -115,8 +151,9 @@ Choose Auto, Light, or Dark in the report, then print with Cmd/Ctrl+P. The style
 - Keep `data-dev3-artifact-template="v1"` on `<html>`.
 - Keep the dev3 icon and a `DEV3 ARTIFACT · <CATEGORY>` eyebrow.
 - Keep `Built with dev3 Artifacts` in the footer.
-- Keep the Auto → Light → Dark theme control.
+- Keep the Auto → Light → Dark theme control and the `A− / 100% / A+` text-size control.
 - Keep local navigation functional: a click must scroll, focus the section heading, and expose `aria-current`.
-- Use only the bundled `--dev3-*` semantic tokens for color.
+- Use only the bundled `--dev3-*` semantic tokens for color, and the `--dev3-z-*` tokens for stacking.
+- Route every panel that opens over the report through `.popover` / `dev3Artifact.popover()`; never hand-roll an absolutely positioned menu.
 - Keep the page responsive and keyboard-accessible.
 - Keep report content/data local; external libraries and live integrations are allowed.

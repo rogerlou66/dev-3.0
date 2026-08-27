@@ -1,5 +1,6 @@
 import {
 	type BranchStatus,
+	type MergeRoute,
 	type PRInfo,
 	type Project,
 	type Task,
@@ -7,6 +8,7 @@ import {
 	type TaskDiffResponse,
 	type ScheduledMessageTarget,
 	type UnsavedWork,
+	getTaskTitle,
 	resolveTaskCompareBaseBranch,
 } from "../../shared/types";
 import * as data from "../data";
@@ -30,6 +32,7 @@ import { getPushMessage, log } from "./shared";
 import { generatedScriptLaunch, generatedScriptName, writeLaunchScript } from "./shared-pure";
 import {
 	buildGitOpScript,
+	buildMergeCommitMessage,
 	mergeGitOpSpec,
 	pushGitOpSpec,
 	rebaseGitOpSpec,
@@ -59,6 +62,23 @@ function assertGitTask(project: Project, task: Task): asserts task is Task & { w
 	}
 	if (!task.worktreePath) {
 		throw new Error("Task has no worktree");
+	}
+}
+
+/**
+ * Refuse the operations that WRITE to someone else's branch. A foreign-code task
+ * exists to read commits the local user did not author — a PR review, a
+ * colleague's branch — so pushing it, opening a PR for it, or squashing it into
+ * the local base is never the intent, and every one of those is one mis-click away
+ * in a bar that looks identical to a normal task's. The UI hides them too; this is
+ * the seam that also covers the CLI and any programmatic caller.
+ *
+ * Read-only git stays available on purpose: diff, branch status, and rebase all
+ * serve the review.
+ */
+function assertOwnBranch(task: Task, operation: string): void {
+	if (task.foreignCode) {
+		throw new Error(`${operation} is not available for a foreign-code task — this branch is not yours`);
 	}
 }
 
@@ -147,6 +167,20 @@ function monitorGitPane(paneId: string | null, task: Task, projectId: string, op
 }
 
 /**
+ * The ONE server-side answer to "which ref", for reading a status and for running
+ * an action. Mirrors the renderer's `getDefaultTaskCompareRef` cascade so the ref
+ * a button runs against is the ref the git bar named.
+ */
+function resolveCompareRef(project: Project, baseBranch: string, explicit?: string): Promise<string> {
+	if (explicit) return Promise.resolve(explicit);
+	// A task-specific base branch is local by definition — it was forked from a
+	// branch in this repo, and origin/<it> usually does not exist at all.
+	const projectBase = project.defaultBaseBranch || "main";
+	if (baseBranch !== projectBase) return Promise.resolve(baseBranch);
+	return git.resolveCompareRef(project.path, baseBranch);
+}
+
+/**
  * Retire a comparison base that has stopped being a base. A review-branch or
  * variant-source base is a moment in time: once that branch is merged into the
  * project base — or deleted outright — every number computed against it answers
@@ -161,7 +195,7 @@ async function healDeadCompareBase(project: Project, task: Task, baseBranch: str
 
 	const reason = !await git.refExists(project.path, baseBranch)
 		? "gone"
-		: await git.isRefMergedInto(project.path, baseBranch, `origin/${projectBase}`)
+		: await git.isRefMergedInto(project.path, baseBranch, await resolveCompareRef(project, projectBase))
 			? "merged"
 			: null;
 	if (!reason) return baseBranch;
@@ -184,7 +218,7 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 	// polls this every 15s for any active task with a worktreePath, so return an
 	// inert status instead of spawning a doomed `git` in a non-repo directory.
 	if (project.kind === "virtual" || !task.worktreePath) {
-		return { ahead: 0, behind: 0, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null };
+		return { ahead: 0, behind: 0, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 };
 	}
 
 	const resolvedBase = resolveTaskCompareBaseBranch(task, project);
@@ -195,48 +229,57 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 		await syncTaskBranchName(project, task);
 	}
 
-	log.debug("getBranchStatus: fetching origin", { worktreePath: task.worktreePath, baseBranch: resolvedBase, branchName: branchForPush });
-	await git.fetchCompareRef(project.path, resolvedBase);
+	// Nothing to fetch without a remote — the doomed `git fetch origin <base>` was
+	// spawned on every 15s poll of a local-only project and always failed.
+	const hasRemote = await git.hasOriginRemote(project.path);
+	if (hasRemote) {
+		log.debug("getBranchStatus: fetching origin", { worktreePath: task.worktreePath, baseBranch: resolvedBase, branchName: branchForPush });
+		await git.fetchCompareRef(project.path, resolvedBase);
+	}
 	const baseBranch = await healDeadCompareBase(project, task, resolvedBase);
-	const ref = params.compareRef || `origin/${baseBranch}`;
+	const ref = await resolveCompareRef(project, baseBranch, params.compareRef);
 	const compareRefBranch = params.compareRef?.startsWith("origin/") ? params.compareRef.slice("origin/".length) : null;
 	if (compareRefBranch && compareRefBranch !== baseBranch) {
 		await git.fetchCompareRef(project.path, compareRefBranch);
 	}
 	// Also refresh origin/<task-branch> so getUnpushedCount reflects out-of-band remote pushes.
-	if (branchForPush && branchForPush !== baseBranch && branchForPush !== compareRefBranch) {
+	if (hasRemote && branchForPush && branchForPush !== baseBranch && branchForPush !== compareRefBranch) {
 		await git.fetchOrigin(project.path, branchForPush);
 	}
-	const prDetection: Promise<{ number: number; url: string } | null> = (async () => {
+	/**
+	 * PR detection, which doubles as the "can `gh` work here at all" probe. gh's
+	 * refusal on a non-GitHub remote is definitive and free — this call already
+	 * runs every poll — so no separate round trip is needed. Anything else (a
+	 * timeout, no auth, no gh) leaves `isGitHub` true; see
+	 * `github.isNotAGitHubRepoError` for why that polarity is the safe one.
+	 */
+	const prDetection: Promise<github.OpenPullRequestProbe> = (async () => {
 		try {
-			const ghResult = await github.runGitHub(
-				project,
-				task.worktreePath!,
-				["pr", "list", "--head", branchForPush, "--state", "open", "--json", "number,url", "--limit", "1"],
-				{ timeoutMs: PR_DETECTION_TIMEOUT_MS },
-			);
-			if (ghResult.ok && ghResult.stdout) {
-				const prs = JSON.parse(ghResult.stdout);
-				if (Array.isArray(prs) && prs.length > 0 && typeof prs[0].number === "number") {
-					const pr = { number: prs[0].number, url: typeof prs[0].url === "string" ? prs[0].url : "" };
-					if (pr.url) await persistTaskPrIdentity(project, task, pr.number, pr.url);
-					return pr;
-				}
-			}
+			const probe = await github.findOpenPullRequest(project, task.worktreePath!, branchForPush, {
+				timeoutMs: PR_DETECTION_TIMEOUT_MS,
+			});
+			if (probe.pr?.url) await persistTaskPrIdentity(project, task, probe.pr.number, probe.pr.url);
+			return probe;
 		} catch (err) {
 			log.warn("PR detection failed (non-fatal)", { error: String(err) });
 		}
-		return null;
+		return { pr: null, isGitHub: true };
 	})();
 
-	const [status, uncommitted, unpushed, branchDiff, detectedPr] = await Promise.all([
+	const [status, uncommitted, unpushed, remoteAhead, branchDiff, detected] = await Promise.all([
 		git.getBranchStatus(task.worktreePath, ref),
 		git.getUncommittedChanges(task.worktreePath),
 		git.getUnpushedCount(task.worktreePath, branchForPush),
+		// origin/<branch> was refreshed above, so this is the live answer to "would a
+		// plain push be refused as non-fast-forward".
+		hasRemote ? git.getBehindOriginCount(task.worktreePath, branchForPush) : Promise.resolve(0),
 		git.getBranchDiffStats(task.worktreePath, ref),
 		prDetection,
 	]);
-	let prInfo = detectedPr;
+	const remoteIsGitHub = hasRemote && detected.isGitHub;
+	// Only the identity travels on from here; the probe's title/author exist for
+	// naming a review task, not for the branch-status payload.
+	let prInfo: { number: number; url: string } | null = detected.pr;
 	if (!prInfo && task.prNumber != null && task.prUrl) {
 		// The sticky number outlives the branch it was opened from: rename the
 		// branch, or inherit the number from the review task this one grew out of,
@@ -275,6 +318,7 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 		diffFiles: branchDiff.files, diffInsertions: branchDiff.insertions, diffDeletions: branchDiff.deletions, diffFileStats: branchDiff.fileStats,
 		prNumber, prUrl,
 		mergeCompletionFingerprint,
+		hasRemote, remoteIsGitHub, remoteAhead,
 	};
 	log.debug("← getBranchStatus", result);
 
@@ -300,7 +344,7 @@ async function getUnsavedWork(params: { taskId: string; projectId: string }): Pr
 
 	const liveBranch = await git.getCurrentBranch(task.worktreePath);
 	const branchForPush = liveBranch ?? task.branchName ?? "";
-	const ref = `origin/${resolveTaskCompareBaseBranch(task, project)}`;
+	const ref = await resolveCompareRef(project, resolveTaskCompareBaseBranch(task, project));
 	const [uncommitted, unpushed, counts] = await Promise.all([
 		git.getUncommittedChanges(task.worktreePath),
 		git.getUnpushedCount(task.worktreePath, branchForPush),
@@ -350,7 +394,7 @@ async function getTaskDiff(params: {
 	// `uncommitted` needs no remote ref; `recent` is purely local — it diffs
 	// `HEAD~N..HEAD` and clamps against the already on-disk `origin/<base>`
 	// merge-base — so neither pays for a network fetch.
-	if (params.mode !== "uncommitted" && params.mode !== "recent") {
+	if (params.mode !== "uncommitted" && params.mode !== "recent" && await git.hasOriginRemote(project.path)) {
 		await git.fetchCompareRef(project.path, baseBranch);
 		const compareRefBranch = params.compareRef?.startsWith("origin/") ? params.compareRef.slice("origin/".length) : null;
 		if (compareRefBranch && compareRefBranch !== baseBranch) {
@@ -358,9 +402,15 @@ async function getTaskDiff(params: {
 		}
 	}
 
+	// `uncommitted` never touches the compare ref and `recent` only clamps against
+	// it, so neither pays for resolving one.
+	const compareRef = params.mode === "uncommitted" || params.mode === "recent"
+		? params.compareRef
+		: await resolveCompareRef(project, baseBranch, params.compareRef);
+
 	const result = await git.getTaskDiff(task.worktreePath, params.mode, {
 		baseBranch,
-		compareRef: params.compareRef,
+		compareRef,
 		compareLabel: params.compareLabel,
 		count: params.count,
 	});
@@ -384,15 +434,30 @@ async function rebaseTask(params: { taskId: string; projectId: string; compareRe
 	assertGitTask(project, task);
 
 	const baseBranch = resolveTaskCompareBaseBranch(task, project);
-	const rebaseTarget = params.compareRef || `origin/${baseBranch}`;
-	const { scriptPath, exitFilePath } = gitOpPaths(task.id, "rebase");
-	const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
+	// The ref the UI promised, resolved the same way the status readout resolves
+	// it. `origin/${baseBranch}` here is what rebased a remoteless repo onto a ref
+	// that does not exist.
+	const rebaseTarget = await resolveCompareRef(project, baseBranch, params.compareRef);
 
-	// Fetch the ref we will actually rebase onto, not just baseBranch.
-	// rebaseTarget may be a custom compareRef (e.g. origin/develop) that differs from baseBranch.
+	// Fetch exactly the ref we rebase onto, and only when it is a remote one. A
+	// local base branch is already current, and a repo with no remote must not be
+	// made to fetch at all.
 	const fetchBranch = rebaseTarget.startsWith("origin/")
 		? rebaseTarget.slice("origin/".length)
-		: baseBranch;
+		: null;
+
+	// `exit 128 — invalid upstream` opened a pane only to die, then told the user
+	// to resolve conflicts that do not exist. Refuse before the pane opens — but
+	// give a remote ref its fetch first, since that is what would create it.
+	if (!await git.refExists(task.worktreePath, rebaseTarget)) {
+		if (fetchBranch) await git.fetchCompareRef(project.path, fetchBranch);
+		if (!await git.refExists(task.worktreePath, rebaseTarget)) {
+			throw new Error(`Cannot rebase: ${rebaseTarget} does not exist in this repository`);
+		}
+	}
+
+	const { scriptPath, exitFilePath } = gitOpPaths(task.id, "rebase");
+	const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
 
 	await writeLaunchScript(scriptPath, buildGitOpScript(rebaseGitOpSpec({ exitFilePath, fetchBranch, rebaseTarget })));
 
@@ -402,23 +467,103 @@ async function rebaseTask(params: { taskId: string; projectId: string; compareRe
 	log.info("← rebaseTask (pane opened)", { paneId });
 }
 
-async function mergeTask(params: { taskId: string; projectId: string }): Promise<void> {
+/** How long `gh pr merge` may take before we stop waiting on it. */
+const PR_MERGE_TIMEOUT_MS = 60_000;
+
+/**
+ * Merge the branch's open PR through GitHub. This is what "Merge" means whenever
+ * a PR exists, and it is deliberately NOT a pane script:
+ *
+ *  - `gh pr merge` is one API call whose entire output is a line or two, so there
+ *    is nothing to watch live — the reason the local git operations get a pane.
+ *  - a pane cannot carry the project's gh credential without the bash-only
+ *    `getGitHubShellExports` prelude, which is exactly what keeps
+ *    `openPullRequest` unavailable on Windows.
+ *
+ * Branch protection, required reviews and CI gates stay GitHub's to enforce —
+ * that is the whole point of merging the PR instead of squashing locally.
+ *
+ * No `--delete-branch`: the head branch is checked out in the task's worktree, so
+ * gh's local delete would fail AFTER the merge already happened and report the
+ * whole operation as failed. dev3 removes worktree and branch on task completion.
+ */
+async function mergeViaPullRequest(
+	project: Project,
+	task: Task & { worktreePath: string },
+	prNumber: number,
+	baseBranch: string,
+): Promise<void> {
+	const method = await github.resolveMergeMethod(project, task.worktreePath);
+	log.info("mergeTask: merging the pull request via gh", { taskId: task.id.slice(0, 8), prNumber, method });
+	const result = await github.runGitHub(
+		project,
+		task.worktreePath,
+		["pr", "merge", String(prNumber), `--${method}`],
+		{ timeoutMs: PR_MERGE_TIMEOUT_MS },
+	);
+	if (!result.ok) {
+		// gh's own message is the useful one — "not mergeable", "review required",
+		// "checks are pending" — so it reaches the user's toast verbatim.
+		throw new Error(result.stderr || result.stdout || `gh pr merge #${prNumber} failed (exit ${result.code})`);
+	}
+	// The local clone still points at the pre-merge base, and both the branch-status
+	// poll and the "task done?" offer read origin/<base>.
+	await git.fetchOrigin(project.path, baseBranch);
+	getPushMessage()?.("gitOpCompleted", { taskId: task.id, projectId: project.id, operation: "merge", ok: true });
+	log.info("← mergeTask (pull request merged)", { prNumber, method });
+}
+
+/**
+ * Merge takes one of two routes, and which one is a property of the repo, not a
+ * setting: an open PR for this branch means merge THAT (the user's expectation,
+ * and the only route that respects review and CI), and no PR means the local
+ * squash into the base branch.
+ *
+ * `expectRoute` is the renderer's belief, sent along like the push lease's sha:
+ * the button already told the user which of the two it would do, so a mismatch is
+ * refused instead of silently running the other one — a local squash-and-push
+ * behind a confirm that said "merge the PR" is the worst outcome available here.
+ */
+async function mergeTask(params: { taskId: string; projectId: string; expectRoute?: MergeRoute; compareRef?: string }): Promise<void> {
 	log.info("→ mergeTask", params);
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
 
 	assertGitTask(project, task);
+	assertOwnBranch(task, "Merge");
 
 	const liveBranch = await git.getCurrentBranch(task.worktreePath);
 	const branchForMerge = liveBranch ?? task.branchName;
 	if (!branchForMerge) throw new Error("Task has no branch");
 
 	const baseBranch = resolveTaskCompareBaseBranch(task, project);
-	await git.fetchOrigin(project.path, baseBranch);
-	// For task-specific base branches (not the project default), compare against the local branch —
-	// consistent with what the UI displays. For the project default, check against the remote.
-	const projectBaseBranch = project.defaultBaseBranch || "main";
-	const rebaseCheckRef = baseBranch !== projectBaseBranch ? baseBranch : `origin/${baseBranch}`;
+
+	let openPr: { number: number; url: string } | null = null;
+	try {
+		openPr = (await github.findOpenPullRequest(project, task.worktreePath, branchForMerge, {
+			timeoutMs: PR_DETECTION_TIMEOUT_MS,
+		})).pr;
+	} catch (err) {
+		// No gh, no auth, no network: fall through to the local route, which is what
+		// this button did for its whole life.
+		log.warn("mergeTask: PR lookup failed, falling back to the local squash", { error: String(err) });
+	}
+	if (params.expectRoute === "pull-request" && !openPr) {
+		throw new Error("No open pull request for this branch any more — refresh the branch status");
+	}
+	if (params.expectRoute === "local-squash" && openPr) {
+		throw new Error(`Pull request #${openPr.number} is open for this branch — refresh the branch status, Merge will merge the PR`);
+	}
+	if (openPr) {
+		await mergeViaPullRequest(project, task, openPr.number, baseBranch);
+		return;
+	}
+
+	if (await git.hasOriginRemote(project.path)) await git.fetchOrigin(project.path, baseBranch);
+	// The ref the UI measured "N behind" against — passed in by the caller, resolved
+	// here when it owns the choice. Spelled `origin/<base>` this guard measured
+	// against a ref that does not exist in a remoteless repo, so it never fired.
+	const rebaseCheckRef = await resolveCompareRef(project, baseBranch, params.compareRef);
 	const status = await git.getBranchStatus(task.worktreePath, rebaseCheckRef);
 	if (status.behind > 0) throw new Error("Branch is not rebased — rebase first");
 
@@ -432,6 +577,9 @@ async function mergeTask(params: { taskId: string; projectId: string }): Promise
 	const currentBranch = await git.getCurrentBranch(project.path);
 	let checkoutCommand: string[] | null = null;
 	if (currentBranch !== baseBranch) {
+		// remote-base-ok: not a comparison ref — the local base is missing, so this
+		// asks whether a tracking branch can be created from the remote one, and
+		// `refExists` answers no when there is no remote.
 		checkoutCommand = await git.refExists(project.path, baseBranch)
 			? ["git", "checkout", baseBranch]
 			: await git.refExists(project.path, `origin/${baseBranch}`)
@@ -442,8 +590,25 @@ async function mergeTask(params: { taskId: string; projectId: string }): Promise
 		if (!checkoutCommand) throw new Error(`Base branch ${baseBranch} does not exist locally or on origin`);
 	}
 
+	// The subject comes from the branch's own commits or the task title — never
+	// from `task.title` alone, which is the first 80 characters of the DESCRIPTION
+	// whenever nobody renamed the task, ellipsis included.
 	const messagePath = dev3TaskTempPath(task.id, "git-merge-message.txt");
-	await writeMergeCommitMessage(messagePath, task.title);
+	const commits = await git.listBranchCommitMessages(task.worktreePath, rebaseCheckRef);
+	await writeMergeCommitMessage(messagePath, buildMergeCommitMessage({
+		commits,
+		taskTitle: getTaskTitle(task),
+		branchName: branchForMerge,
+	}));
+
+	// With a remote, "merge" that stops at the local base branch is a half-landing:
+	// the squash commit sits in the main clone, origin/<base> never hears about it,
+	// and nothing in the UI says the local base is ahead. The renderer confirms the
+	// click first, naming the review/CI bypass.
+	// remote-base-ok: the question here IS "does the remote base exist", asked
+	// behind hasOriginRemote — not a comparison ref invented for a local repo.
+	const pushBase = await git.hasOriginRemote(project.path)
+		&& await git.refExists(project.path, `origin/${baseBranch}`);
 
 	await writeLaunchScript(scriptPath, buildGitOpScript(mergeGitOpSpec({
 		exitFilePath,
@@ -451,30 +616,62 @@ async function mergeTask(params: { taskId: string; projectId: string }): Promise
 		baseBranch,
 		branchForMerge,
 		messagePath,
+		pushBase,
 	})));
 
 	const paneId = await openGitOpPane(task, project.path, scriptPath, socket);
 	monitorGitPane(paneId, task, params.projectId, "merge", socket);
 
-	log.info("← mergeTask (pane opened)", { paneId });
+	log.info("← mergeTask (pane opened)", { paneId, pushBase });
 }
 
+/**
+ * Push, escalating to a leased force push when the branch has diverged from
+ * `origin/<branch>` — which it has after every rebase-then-push, the single most
+ * common git failure in the app. A plain push there is refused as non-fast-forward
+ * and the pane could only print `✗ Push failed (exit 1)`.
+ *
+ * The decision is made HERE, not in the renderer: the caller cannot ask for a
+ * force. The renderer reads the same `remoteAhead` to label the button, so what it
+ * promises and what runs come from one number.
+ *
+ * The lease value is a sha resolved after a fresh fetch, so git compares it
+ * against origin's real value during the handshake and refuses if anyone moved the
+ * branch in between. Divergence with nothing to fetch (no `origin/<branch>` at
+ * all) cannot happen — that is the never-pushed case, and a plain push is right.
+ */
 async function pushTask(params: { taskId: string; projectId: string }): Promise<void> {
 	log.info("→ pushTask", params);
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
 
 	assertGitTask(project, task);
+	assertOwnBranch(task, "Push");
 
 	const { scriptPath, exitFilePath } = gitOpPaths(task.id, "push");
 	const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
 
-	await writeLaunchScript(scriptPath, buildGitOpScript(pushGitOpSpec({ exitFilePath })));
+	const branch = (await git.getCurrentBranch(task.worktreePath)) ?? task.branchName ?? "";
+	let lease: { branch: string; expectSha: string } | null = null;
+	if (branch && await git.hasOriginRemote(project.path)) {
+		await git.fetchOrigin(project.path, branch);
+		const diverged = await git.getBehindOriginCount(task.worktreePath, branch);
+		if (diverged > 0) {
+			const expectSha = await git.resolveRef(task.worktreePath, `origin/${branch}`);
+			if (!expectSha) throw new Error(`Cannot lease a force push: origin/${branch} could not be resolved`);
+			lease = { branch, expectSha };
+			log.info("pushTask: branch diverged from origin, leasing a force push", {
+				taskId: task.id.slice(0, 8), branch, diverged, expectSha: expectSha.slice(0, 8),
+			});
+		}
+	}
+
+	await writeLaunchScript(scriptPath, buildGitOpScript(pushGitOpSpec({ exitFilePath, lease })));
 
 	const paneId = await openGitOpPane(task, task.worktreePath, scriptPath, socket);
 	monitorGitPane(paneId, task, params.projectId, "push", socket);
 
-	log.info("← pushTask (pane opened)", { paneId });
+	log.info("← pushTask (pane opened)", { paneId, forced: lease !== null });
 }
 
 /**
@@ -505,7 +702,10 @@ const COMMIT_AGENT_PROMPT =
 	"Please commit the current changes in this worktree. Review what changed (git status, git diff), stage everything that belongs to the work in this conversation, and create one or more commits with clear English messages describing the change. Do not push.";
 
 function rebaseConflictAgentPrompt(rebaseTarget: string): string {
-	return `This branch cannot be rebased automatically onto ${rebaseTarget} because of merge conflicts. Please rebase it and resolve the conflicts: run \`git fetch origin\`, then \`git rebase ${rebaseTarget}\`, resolve each conflict carefully preserving the intent of both sides, \`git add\` the resolved files, and \`git rebase --continue\` until the rebase finishes. If it becomes unsafe, abort with \`git rebase --abort\` and explain what happened.`;
+	// The fetch belongs to a remote target only — telling an agent in a repo with
+	// no remote to `git fetch origin` sends it chasing a failure of our making.
+	const fetch = rebaseTarget.startsWith("origin/") ? "run `git fetch origin`, then " : "";
+	return `This branch cannot be rebased automatically onto ${rebaseTarget} because of merge conflicts. Please rebase it and resolve the conflicts: ${fetch}\`git rebase ${rebaseTarget}\`, resolve each conflict carefully preserving the intent of both sides, \`git add\` the resolved files, and \`git rebase --continue\` until the rebase finishes. If it becomes unsafe, abort with \`git rebase --abort\` and explain what happened.`;
 }
 
 /**
@@ -520,6 +720,11 @@ async function createPullRequest(params: { taskId: string; projectId: string; au
 	const task = await data.getTask(project, params.taskId);
 
 	assertGitTask(project, task);
+	assertOwnBranch(task, "Create pull request");
+
+	if (!await github.isGitHubRepo(project, task.worktreePath)) {
+		throw new Error("Create pull request needs a GitHub remote — `gh` is the only forge client dev3 speaks");
+	}
 
 	// Only macOS registers a `dev3://` handler, so anywhere else the footer would
 	// publish a dead link into a public PR — the host decides before the preference does.
@@ -549,7 +754,7 @@ async function rebaseTaskViaAgent(params: { taskId: string; projectId: string; c
 	assertGitTask(project, task);
 
 	const baseBranch = resolveTaskCompareBaseBranch(task, project);
-	const rebaseTarget = params.compareRef || `origin/${baseBranch}`;
+	const rebaseTarget = await resolveCompareRef(project, baseBranch, params.compareRef);
 	const delivery = await deliverAgentPrompt(task, rebaseConflictAgentPrompt(rebaseTarget));
 	log.info("← rebaseTaskViaAgent", { taskId: task.id.slice(0, 8), status: delivery.status, reason: delivery.reason });
 	return { delivery };

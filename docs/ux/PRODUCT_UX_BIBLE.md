@@ -1,15 +1,19 @@
 # Product UX Bible — dev-3.0
 
-Status: Draft (initial)
-Source: Derived from repository audit
-Last updated: 2026-07-19
+Status: Live — hand-authored, edited alongside the code it governs
+Source: Hand-authored decisions, originally seeded from a repository audit
 Owner: Product UX Architecture
+Last updated: see `git log -- docs/ux/PRODUCT_UX_BIBLE.md` — a date written by hand here went stale within weeks
 
-Evidence notation: `Observed` (backed by code/docs), `Inferred` (likely rule from repeated patterns), `Proposed` (recommended, not yet consistent), `Unknown` (insufficient evidence).
+**Evidence notation says where a claim came from, never whether it matters.** `Observed` (backed by code/docs), `Inferred` (likely rule from repeated patterns), `Proposed` (recommended, not yet consistent), `Unknown` (insufficient evidence).
+
+`Observed` does **not** mean "restates the code, safe to delete". A section can be marked `Observed` because its rule is visible in the code *and still be a decision that exists only here* — §5's surface admission rules and §10's rejected placements are the clearest cases. Judge a section by whether the code could be rewritten from it, not by its marker. This is the exact misreading that a 2026-08-21 audit made, and it nearly deleted `ux-architecture.yaml`; see `decisions/2026/08/21/split-ux-principal-from-the-better-skills.md`.
 
 ## 1. Purpose
 
-Canonical UX architecture reference for dev-3.0. It defines how the app organizes navigation, screens, surfaces, actions, and design-token roles, and where new features should live. Agents must consult this (via the `ux-principal` skill) before adding UI.
+Canonical UX architecture reference for dev-3.0. It defines how the app organizes navigation, screens, surfaces, actions, and design-token roles, and **where** new features should live. Agents must consult this (via the `ux-principal` skill) before adding a destination, surface, or action.
+
+It is deliberately **not** the craft rulebook. Colour, contrast, typography, copy, motion, layout grammar and accessibility belong to the `better-*` skills; §9a keeps only this project's deltas and its documented overrides of them. Changing how an existing control looks or feels does not need this file at all — see the skill table in `AGENTS.md`.
 
 ### 1.0 North-star principle — the user is the star; optimize for the lazy human — `Observed`
 
@@ -77,8 +81,6 @@ Task lifecycle states (`ALL_STATUSES`): `todo`, `in-progress`, `user-questions`,
 
 **Project sensitivity (`Proposed`, 2026-08-05):** `Project.sensitive` is a **property of the project**, in the same class as `Task.draft` / `Task.hibernated` — never a column, a kind, or an action. It is inert on its own: it changes nothing until streamer mode is on, and then it changes three things at once — the project's name and its tasks are masked wherever they render, the project cannot be entered, and no notification from it reaches the user. It is the only property that is allowed to refuse a route (§10 privacy-sensitive object row).
 
-**Paired host (`Observed`, 2026-08-23):** an Android-local record naming one computer endpoint whose authenticated WebView cookie owns the trusted session. It is not a Project, a workspace destination, or a copy of computer state. The computer remains the sole authority for projects, tasks, terminals, lifecycle and mutations; Android owns only connection metadata, device-local drafts and device integrations.
-
 ## 4. Navigation model — `Observed`
 
 The app uses a **screen router** (`Route` union + `useReducer` with a 15-entry back/forward history), not URLs.
@@ -91,11 +93,11 @@ Mechanism: `GlobalHeader` breadcrumbs (`Dashboard > Project > Task`) + back/forw
 
 - **Allowed:** stable destinations, workspaces, major product areas.
 - **Forbidden:** one-off actions, filters, temporary state, object-specific controls.
-- **Budget:** ≤ 7 top-level destinations, max depth 2. Debug screens stay menu-only.
+- **Budget:** ≤ 8 top-level destinations, max depth 2. Debug screens stay menu-only. The eight above **are** the budget — spent, so a ninth replaces one. Was 7 while `main` shipped 8: a violated budget teaches arguing past the number, not consolidating.
 
 ### Breadcrumbs — `Observed`
 
-Show location only. Text click navigates; the project chevron opens a **project-switcher dropdown**. No commands in breadcrumbs. The task segment also carries the passive **native-backend marker** (§5.6) — identity, not an action.
+Show location only. Text click navigates; a segment's chevron opens a **switcher over that segment's own object** — project name → project switcher, task `#seq-N` badge → variant menu (`SiblingPopover`, chevron only with ≥2 live variants, so it is never a dead control). Switching is not a command; no commands in breadcrumbs. The task segment also carries the passive **native-backend marker** (§5.6) — identity, not an action.
 
 Evidence: `GlobalHeader.tsx`.
 
@@ -111,17 +113,18 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 
 | Surface | Purpose | Allowed | Forbidden | Evidence |
 |---|---|---|---|---|
-| Global header | Location + switching + app utilities | breadcrumb, destination, project switcher, settings/changelog entry, tmux manager, prevent-sleep (awake) toggle, **≤1 ambient resource readout** (memory headroom) | task-scoped action, dense filters, destructive primary | `GlobalHeader.tsx` |
+| Global header | Location + switching + app utilities | breadcrumb, destination, project switcher, settings/changelog entry, tmux manager, prevent-sleep (awake) toggle, **≤1 ambient resource readout** (memory headroom), **≤1 unread-earned agent-traffic pill** (§5.9) | task-scoped action, dense filters, destructive primary | `GlobalHeader.tsx` |
 | Application menu (native) | Canonical home for the full action taxonomy | every action type | — | `application-menu.ts`, `menu-actions.ts` |
 | Workspace board | Cross-project daily work on the Dashboard Board tab | project swimlanes, aligned lifecycle columns, task open/move, search | cross-project task moves, project-specific column configuration | `WorkspaceBoard.tsx`, `Dashboard.tsx` |
 | Workspace task overlay | Focused, non-route coding workspace for one active task opened from Dashboard Board while the board stays mounted | existing task inspector + terminal/diff/artifact workspace, explicit full-page handoff, close/back/backdrop | new destination/breadcrumb, multiple windows, archived/todo terminal, native dialog | `WorkspaceTaskOverlay.tsx`, `App.tsx`, `TaskWorkspaceView.tsx` |
 | Kanban board | Primary single-project work surface | task cards, create-in-column, drag-move, column config, task filter (token-DSL search + funnel; label chips are a view of it) | durable global config | `KanbanBoard.tsx`, `KanbanColumn.tsx`, `LabelFilterBar.tsx`, `FilterFunnel.tsx` |
 | Task card | Compact task summary | status dot, labels, variant dots (≤3, clickable → sibling popover), open, context menu, git badge, native-backend marker (§5.6) | full settings, global destination, unbounded dot rows | `TaskCard.tsx` (large — watch density) |
 | Task info panel (inspector) | Active-task control: git, dev server, scripts, notes, tmux, open-in | object/git/dev-server actions, metadata, **capped** notes preview (§5.8) | global destination, cross-project action, an uncapped note list | `TaskInfoPanel.tsx` (densest surface) |
+| Agent traffic log | Every `dev3 message` the project's agents typed into each other (§5.9) | read history, filter to one pair, filter to unproven deliveries, open the receiving task | global destination, sending a message, task lifecycle action, an importance filter | `agent-traffic/AgentTrafficLog.tsx` |
 | Task notes log | The whole agent-written note log of one task | read every note, add, edit, delete | task lifecycle action, git mutation, global destination | `TaskNotesOverlay.tsx` (sheet on narrow, dialog on wide — see 5.8) |
 | Terminal immersive fullscreen | Ephemeral task-bound terminal workspace for focused tmux work | tmux terminal, existing tmux window/pane controls, `dev3` brand, one wide Exit full screen action | global/app header, task switching UI, inspector controls, route persistence, any tmux pane/layout mutation | `App.tsx`, `TaskInfoPanel.tsx` |
 | Diff review viewer | Full-screen read + inline-review of a task's diff | view-mode toggle, file-tree nav, search, mark-read, per-file copy-path, inline comments, review export/copy/reset | task lifecycle action, git mutation, global destination | `TaskDiffViewer.tsx` (see 5.3) |
-| Task image viewer | Task-bound lightbox for images an agent surfaced via `dev3 show-image` (history rail, newest first) | image display, history nav (thumbnails + prev/next + arrows), copy image, reveal path, clear (destructive) | global destination, task lifecycle/git mutation, persistent inspector button (badge is conditional), SVG render (v1) | `TaskImageViewer.tsx` (planned; see UX_DECISIONS 2026-07-02) |
+| Task image viewer | Task-bound lightbox for images an agent surfaced via `dev3 show-image` (history rail, newest first) | image display, history nav (thumbnails + prev/next + arrows), copy image, download image (header icon + own right-click menu), reveal path, clear (destructive) | global destination, task lifecycle/git mutation, persistent inspector button (badge is conditional), SVG render (v1) | `TaskImageViewer.tsx` (planned; see UX_DECISIONS 2026-07-02) |
 | Task artifact workspace | Task-bound interactive HTML plus explicit local CSS/JS/raster assets surfaced via `dev3 show-artifact`; docked beside the terminal, resizable, fullscreen on demand | sandboxed display, history nav, theme sync, floating ⌘F find over the content (§10), network integrations, HTML/ZIP download, open in the OS web browser (§10) | global destination, task lifecycle/git mutation, parent DOM/RPC access, native dialog (trusted scripts can self-navigate their iframe) | `TaskArtifactViewer.tsx`, `TaskWorkspacePane.tsx`, `shared-artifacts.ts` |
 
 **Archived tasks reach their agent outputs through enumerated rows, not the Runtime bar (`Observed`, 2026-08-08).** A completed/cancelled task has no Runtime bar and no workspace pane, so `TaskDetailModal`'s archived view lists every `dev3 show-image` image and `dev3 show-artifact` artifact as its own clickable row (`SharedOutputsList.tsx`), above Notes: the deliverable outranks the commentary. Rows open the App-hosted viewers at their own index — the artifact viewer as a **standalone overlay** (fullscreen forced, no dock-back toggle) since there is no pane to dock into. Both viewers register in the overlay-layer stack, so Escape unwinds viewer → modal instead of closing the modal underneath.
@@ -135,13 +138,13 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 | Hint navigation overlay | Keyboard-only jump-to-target (Vimium-style) | per-target letter badge over any `[data-hint-id]` (task card, project row, sidebar task), type-to-jump | mutation/destructive target, visible chrome, durable config | `HintOverlay.tsx`, `utils/hintLabels.ts` |
 | Toast | Transient feedback for **every** origin (in-app action, agent/CLI push, background watcher) — one anatomy: optional source line → message → optional click target → swipe/X dismiss | status, error, success, warning, click-through to the surface the toast is about | persistent/primary action, multi-step flow, a fabricated source line | `toast.tsx` (see §5.7) |
 | Diagnostics (crash + error surface) | Make renderer faults visible in remote/mobile where there is no devtools | crash fallback (error boundary), bootstrap phase + timeout→retry, captured error list, copy/clear, conditional floating entry | navigation destination, mutation of app data, permanent chrome in the happy path | `RootErrorBoundary.tsx`, `BootstrapScreen.tsx`, `DiagnosticsPanel.tsx`, `DiagnosticsIndicator.tsx`, `diagnostics.ts` (see §5.5) |
-| Inline help (Tooltip / HelpSpot → HelpCard / help mode) | Explain what a section is, why it exists, what to do in it | fast control tooltip, section (i) in header-bearing surfaces, rich read-only HelpCard, screen-wide help-mode overlay | mutation, multi-step tour, permanent (i) in quickbars/cards/toolbars | `Tooltip.tsx`, `HelpSpot.tsx`, `HelpCard.tsx`, `HelpOverlay.tsx`, `help.ts` (see §5.4) |
+| Inline help (Tooltip / HelpSpot → HelpCard / help mode) | Explain what a section is, why it exists, what to do in it | fast control tooltip, section (i) in header-bearing surfaces, rich read-only HelpCard, screen-wide help-mode overlay | mutation inside a HelpCard, permanent (i) in quickbars/cards/toolbars | `Tooltip.tsx`, `HelpSpot.tsx`, `HelpCard.tsx`, `HelpOverlay.tsx`, `help.ts` (see §5.4) |
 | Productivity Stats (Velocity Cockpit) | Read-only showcase of shipping output over time | hero speedometer gauges, SVG bar/area charts, per-project gauge wall, counters, time-range switch + prev/next period navigation, per-project→board jump | mutation, lifecycle/config action, header button, data filter (new dimension beyond time) | `ProductivityStatsView.tsx`, `components/stats/*` |
 | Android client shell | Connection prerequisite + Android device integration around the shared connected route tree | QR/manual pairing, reconnect, native prompt dock, Back/IME, file picker, external intents, notifications | a second project/task IA, copied host state, wildcard JS bridge, inert desktop-only actions | `android/`, `android-client-bridge.ts` |
 
-**Board lifecycle presentation (`Observed`, 2026-08-21):** `user-questions` remains a persisted lifecycle status and hook target, but boards project it into **Agent is Working** with a full-card amber wash and a text `Needs input` badge. AI Review mounts only while occupied; PR Review remains visible for peer-reviewed git projects because it is a durable external waiting stage. Completed stays visible, while the workspace board omits Cancelled from its daily-work matrix; project boards retain Cancelled as reachable history. Desktop single-project columns share the available width as a compact grid instead of defaulting to horizontal scroll. The workspace board uses one canonical header plus project swimlanes, forbids cross-project task drag, rolls project-specific custom columns into a non-drop `Custom` column, and gives each project's To Do cell a project-scoped `New Task` action. Project priority is the persisted swimlane order shared with Dashboard → Projects: desktop exposes a dedicated drag handle plus keyboard step controls, narrow layouts expose 44px up/down controls, and the built-in Operations board remains pinned first. Each workspace Completed cell defaults to its two newest tasks and exposes the remaining history through a project-local Show more/less disclosure. Its remappable app-level shortcut opens Dashboard → Board directly and forces Board if the sibling Projects surface is active.
+**Workspace Board (`Observed`, 2026-08-21):** Dashboard → Board aligns projects as swimlanes under one lifecycle header. Questions render as amber `Needs input` cards inside Agent Working; AI Review appears only while occupied, PR Review stays visible where supported, Completed discloses two newest tasks per project, and Cancelled stays on project boards. Task drag never crosses projects; custom columns roll into non-drop `Custom`; each To Do cell owns `New Task`. Project order is shared with Projects: desktop drag/step controls and narrow 44px arrows move whole swimlanes while Operations stays pinned. The remappable shortcut opens this tab directly.
 
-**Workspace task overlay (`Observed`, 2026-08-26):** clicking an active, preparing, hibernated, or recoverable task on Dashboard → Board opens one focused `92vw × 88dvh` task workspace above the still-mounted board; narrow viewports use a full-bleed overlay. The board and global chrome are inert until close, so its search, scroll, carousel position, and Completed disclosures survive unchanged. Todo/draft/completed/cancelled cards keep the detail/edit flow; every non-workspace-board entry point keeps the configured split/fullscreen behavior. The overlay is ephemeral renderer state, never a route or saved preference; it traps focus without stealing Tab/Escape from the terminal, participates in Back-layer and dirty-review guards, and provides explicit Close + Open full page wrapper actions. Clicking the Kanban shadow/backdrop or using the existing Global Kanban action/shortcut also dismisses the overlay and returns to the board. No multiple windows, dragging, or resizing.
+**Workspace task overlay (`Observed`, 2026-08-26):** live/recoverable cards on Workspace Board open one ephemeral `92vw × 88dvh` workspace (full-bleed narrow) over the still-mounted inert board. It reuses inspector + terminal/diff/artifacts, preserves board state, routes terminal Tab/Escape to the TUI, and closes through Close/Back/backdrop/Global Kanban; Open full page uses normal guarded navigation. Non-live cards and every other entry point keep their existing flow. No route persistence, multiple windows, drag, or resize.
 
 Note: native menu is the **overflow/expert** surface; frequent actions are mirrored into DOM toolbars (inspector, board).
 
@@ -207,10 +210,13 @@ Full-screen surface (`TaskDiffViewer.tsx`) reached from the inspector `show_diff
 
 Layout = left **Files aside** (collapsible, `22rem`) + right **diff stream**.
 
+**A history step, not a destination (`Observed`, 2026-08-22):** because it fills the screen it reads as a page, so Back must return to the task and Forward to the diff. It earns that by riding the task route as a `diff` field (`routeWithDiff`, action `openTaskDiff`) — no new `screen`, no breadcrumb segment, no nav entry. **The bar is full-bleed replacement of the surface underneath**: an inspector, a popover, a bottom sheet or a docked pane must NOT become a history entry, or Back stops meaning anything. See `decisions/2026/08/22/diff-view-is-a-history-step.md`.
+
 - **Top toolbar (right of file tree):** diff-mode segmented control (`uncommitted | branch | unpushed | recent`, mode persisted), view-mode toggle (`split | unified`), include-tests toggle, search (`Cmd+F`, in-diff find with next/prev + highlight), close/back (`Esc`). The `recent` ("Recent commits") segment is a **split-button**: the body activates `HEAD~N..HEAD` (committed-only, clamped to the branch's own commits) at the current N; a `▾` caret opens a preset popover (1/2/3/5/10). N is **not** persisted — it resets to 1 on every diff open — while the mode selection follows the same localStorage preference as the other three. Body label reflects the selected N; the header sub-label reflects the *effective* (clamped) count honestly.
 - **Files aside** contains two cards: the **Review export card** (top) and the **Files card** (read-progress + expand/collapse-all + the file tree).
 - **Per-file header (diff stream):** status chip (A/M/D/R/C/T/?), path (click = expand/collapse), **copy-file-path** icon button (role `neutral`/icon), `+N/−N` stat pill, **mark-read** checkbox (success-tinted when read), expand/collapse caret. The path renders as **one truncating line at every width** (directory truncates, basename always survives) and the identity column carries a `basis-[15rem]` floor, so the trailing controls wrap onto a second row instead of squeezing the path into a one-character-per-line column.
 - **Inline comments:** drag across the gutter to select a line range (or use the hover `+` widget for a single line) → composer opens → comment is added to a per-file/per-side/per-line thread. Threads render inline and are editable/deletable in place.
+- **Inline comments in the markdown preview — selection-triggered:** the same action, reached the only way a rendered document allows. Select prose inside a file's md preview → a **floating `Add comment` button** appears over the selection (zero toolbar slots, same exemption class as the split-resize grip in §10) → the shared composer opens in a card anchored under the selection → the comment lands in the *same* per-file/per-side/per-line thread as a gutter comment, because the rendered blocks carry their source line range (`data-md-line-start/end`, from mdast positions). Side follows the rich-diff block the selection sits in: a `removed` block comments `oldFile`, `added`/`context` comment `newFile`. **Rules:** no gutter, no per-block hover `+`, and no "comment mode" toggle in the toolbar — a rendered document has no gutter to hover and the action must not cost a toolbar slot. A selection that resolves to no source line (mermaid SVG, an image, a caret-only click) shows **no** button rather than a disabled one. Preview mode must also **show the file's existing local threads** — otherwise adding a comment here is invisible and reads as a no-op. Two halves, and both are required: the commented **block itself is marked in place** (accent left border, via the same line-stamping component override — never by mutating the DOM under React), and the threads render **in full under the preview**, ordered by line, each row scrolling to and flashing its block. Bubbles are *not* interleaved between rendered blocks: the document is parsed as one unit, so splitting it to inject bubbles would break reference links and footnote definitions. GitHub threads on the file get one slim `N review threads → Source diff` link (same never-silently-dropped rule as the GitHub layer's "Outdated" group).
 - **Composer actions (budget: 3):** `Cancel` (`neutral`), **`Send now`** (`secondary`), `Add comment` (`primary`). `Send now` is the one-shot lane: the comment is parked in the review and shipped to the agent in one click instead of add → send. **No send ever deletes a comment** — a resolved send only proves the keys left dev3, so the text is marked `Sent` and kept; clearing stays the explicit, confirmed `Reset review` (decision `never-destroy-a-review-on-send`).
 - **Per-comment actions (budget: 3, no growth):** `Edit` (`neutral`), `Delete` (`destructive`), `Send to agent` (`secondary`) — the same pattern as the GitHub thread action, pushing that single comment into the task terminal. Sending is per comment and **sticky**: the comment is marked `Sent`, persisted with the review, and leaves the export payload, so `Copy review` and the batch `Send to Agent` cover **only unsent** comments. Sent comments stay visible and re-readable in the export card (greyed, `Sent` badge); editing one clears the mark so the edited text can be delivered again. The **batch** send marks its comments the same way rather than wiping the review — the pre-2026-08-10 auto-clear destroyed reviews whose delivery was never actually proven.
 
@@ -237,7 +243,7 @@ Rules specific to this surface:
 
 **Problem.** The app explains itself through ~227 native `title=` attributes: slow (OS hover delay), unstyled, control-scoped — they can name a button but never explain a *section* ("what is this toolbar, why does it exist, what do I do here"). No shared Tooltip primitive exists; each custom popover re-implements positioning.
 
-**Doctrine — help coverage is owed, not earned.** dev-3.0 ships no tutorials, no onboarding tour, and no manual users actually read: the UI is the product's **only** channel for conveying what the author meant by a surface, a field, or a smart default. Feature *tips* are earned (see the tips policy); **help is owed** — shipping a user-facing surface or a non-self-evident control without registered help means shipping it unexplained. The counterweight is unchanged: coverage lives in the registry + help mode (zero permanent chrome), while permanent (i) icons stay strictly budgeted.
+**Doctrine — help coverage is owed, not earned.** dev-3.0 ships no manual users actually read: the UI is the product's **only** channel for conveying what the author meant by a surface, a field, or a smart default. Feature *tips* are earned (see the tips policy); **help is owed** — shipping a user-facing surface or a non-self-evident control without registered help means shipping it unexplained. The counterweight is unchanged: coverage lives in the registry + help mode (zero permanent chrome), while permanent (i) icons stay strictly budgeted.
 
 **One registry, three layers:**
 
@@ -250,7 +256,7 @@ Rules specific to this surface:
 **Coverage law (hard rule):**
 - Every §5 surface/section, and every form field or control whose behavior is not fully evident from its label (smart default, contextual prefill, hidden fallback, side effect), MUST have a registry topic reachable in help mode. Inside a modal, help mode lights each registered field individually — that, not a permanent (i) per field, is how per-field intent reaches the user.
 - New user-facing UI ships its topic + zone **in the same commit** — the same lockstep discipline `keymap.ts` imposes on shortcuts.
-- **Coverage floor (positive manifest).** The dangling/orphan checks only police ids that are *already* referenced — a surface with **no** help id at all is invisible to them, so pre-doctrine surfaces silently read as "covered". `help.ts` exports `REQUIRED_HELP_SURFACES`, the curated list of canonical §5 surfaces/sections; `help.test.ts` asserts every entry resolves to a topic **and** mounts a reachable zone. Adding a §5 surface means adding it to that list in the same commit — you cannot then ship it uncovered. The list is surfaces/sections only (not every sub-zone); dynamic `board.column.*` ids stay guarded by the per-status test; transient nav/help overlays, confirm/error/search modals, native menus, the chrome-free immersive terminal, and the earned/remote-only Diagnostics surface (§5.5) are deliberately excluded (documented in the manifest, not oversight).
+- **Coverage floor (positive manifest).** The dangling/orphan checks only police ids that are *already* referenced — a surface with **no** help id at all is invisible to them, so pre-doctrine surfaces silently read as "covered". `help.ts` exports `REQUIRED_HELP_SURFACES`, the curated list of canonical §5 surfaces/sections; `help.test.ts` asserts every entry resolves to a topic **and** mounts a reachable zone. Adding a §5 surface means adding it to that list in the same commit — you cannot then ship it uncovered. The list is surfaces/sections only (not every sub-zone); dynamic `board.column.*` ids stay guarded by the per-status test; transient nav/help overlays, confirm/error/search modals, native menus, the chrome-free immersive **fullscreen** terminal, and the earned/remote-only Diagnostics surface (§5.5) are deliberately excluded (documented in the manifest, not oversight). The ordinary task terminal is NOT exempt, and a reachability check cannot tell which branch of a twice-rendered component mounted a zone: `decisions/2026/08/22/help-mode-was-blind-on-the-task-screen.md`.
 
 **Correlation invariant (hard rule):**
 - Help mode shows a **superset** of all inline help. A HelpSpot only renders registry topics (automatic via layer 2; the one exception is ad-hoc `content` for user-authored objects, e.g. custom-column descriptions). Prefer *also* tagging the section container with the same id — the help-mode scan keeps the first visible DOM match, so a container outline naturally wins over the tiny icon.
@@ -258,8 +264,49 @@ Rules specific to this surface:
 
 **Hard rules (chrome):**
 - A permanent (i) never sits inside quickbars, task cards, or action toolbars — those zones are covered by help mode only (creep protection; see §11).
-- HelpCard is **read-only**: navigation links allowed, mutations forbidden; no multi-step tours in v1.
+- HelpCard is **read-only**: navigation links allowed, mutations forbidden.
 - HelpCard clamps to the viewport (`max-w-[calc(100vw-2rem)]`), honours `prefers-reduced-motion`, is keyboard-reachable (HelpSpot is a focusable button, `Enter` pins, `Esc` closes) and announced via `aria-describedby`/`role="dialog"` when pinned.
+
+#### 5.4a First run — help mode advertises itself — `Observed`
+
+A new install is **never at zero projects** (first boot creates the Operations board), so the
+dashboard's zero-projects empty state is unreachable code. First run explains; it does not rescue.
+Evidence: [first-run-advertises-help-mode](../../decisions/2026/08/22/first-run-advertises-help-mode.md).
+
+- The `?` earns attention **next to itself** — a dismissible callout on the header button until
+  closed once (`helpModeDiscovered`, one-way; `HELP_ATTRACTOR_SCREENS`). A screen's centre belongs
+  to that screen's content, never to teaching.
+- Every substantial **modal carries its own help entry**: the header `?` is unreachable behind one,
+  and help mode already lights a modal's own zones.
+- An **empty state may not name a control its column lacks** — `kanban.noTasksHint` ("the button
+  below") belongs to To Do alone.
+- **No tips at zero tasks.** Tips are earned; one about hovering a task card spends the newcomer's
+  only screen on nothing.
+- A **first-run-only action** (the sandbox button) belongs **inside the first-run strip**, never beside the
+  screen's own primary action: `decisions/2026/08/22/the-sandbox-is-a-real-repo-dev3-owns.md`.
+
+#### 5.4b Guided tours — the sequence surface — `Observed`
+
+Help mode answers *what is this*; a tour answers *what do I press* — unanswerable per zone, because
+the answer spans four surfaces. One mechanism (`mainview/tour.ts` + `TourOverlay`), never a bespoke
+wizard. Evidence:
+[a-guided-tour-points-it-does-not-drive](../../decisions/2026/08/23/a-guided-tour-points-it-does-not-drive.md).
+
+- **A step owns the screen** — its control and card are the only live things. Pointing alone failed
+  live: the user pressed past the step and the tour lost the thread.
+- **The step's button presses that control**, never fakes progress; a step waiting on the user's
+  own choice has no button.
+- **Progress is observed, not reported.** A step ends when the DOM shows the next
+  `data-tour-anchor`; participating costs one attribute, never a callback.
+- **A lost anchor offers leaving**, never a silent end. Out is Skip or Esc, never a slip.
+- **The tour follows the app, never rewinds it.** No Back onto a step that pressed a control; a
+  step whose screen is gone resyncs to the furthest visible one; a step may declare that it waits
+  for an anchor the agent has yet to produce (`waitsForAnchor`), and the LAST step's anchor going
+  away is the ending, not a loss.
+- **One owned dead end starts it** (an empty sandbox board), every visit until walked to the end
+  (`completedTours`); help mode's banner restarts it after.
+- **Where the user will not type, dev3 types** (prefill from one shared constant), and a tour is
+  never the only route to a control — a shortcut through the product, not a gate in front.
 
 ### 5.5 Diagnostics — crash & error surface (remote/mobile) — `Observed`
 
@@ -293,6 +340,37 @@ One shared, non-interactive glyph (`NativeBackendMark`) — a bolt in a rounded 
 - **The board carries the glyph only because the property belongs to the task.** A branch-level marker was rejected for the card: the card never shows a branch name, so a glyph about the branch has no object there to qualify (board noise is the project's top anti-pattern, §11).
 
 Evidence: `NativeBackendMark.tsx`, `ForeignCodeMark.tsx`, `TaskCard.tsx`, `TaskInfoPanel.tsx`, `TaskDiffViewer.tsx`, `ActiveTasksSidebar.tsx`, `GlobalHeader.tsx`.
+
+### 5.9 Agent traffic — the readout and the log — `Proposed`
+
+Task-to-task messages had one surface, a 30-second toast (§5.7), while the rows were already on disk
+(`data/<slug>/messages/*.jsonl`, 30 days, `readAgentMessageLog`) with no UI reading them.
+
+- **Beta, off by default, and off means invisible.** Settings → System → Advanced Experience gates
+  the whole feature; while off there is no kebab row, no pill, no `⇧⌘M`, no menu row, no palette
+  command and no tip. A greyed row or a dead shortcut is a trace, and a trace is worse than absence.
+- **Home is the overflow kebab (labelled row, always there); the bar slot is EARNED.** The pill sits
+  immediately right of the three dots only while messages landed since the user's last look, and
+  retires when they look — an unread badge, not a counter, so it never spends the permanent ambient
+  slot (§12.6). Unread is measured against that last look, stored per browser; a first-ever look
+  stamps itself (no fresh install opening on 400), the badge caps at `9+`, and the pill outlives its
+  own badge while its panel is open — clearing mid-click took the panel down with it.
+- **Never on the bar at narrow width**, where the kebab row is the only entry — *labelled*, because
+  an unnamed glyph among the sheet's numbers ("28 GB", "5.8 ms") is unfindable.
+- **The panel lists pairs, unfiltered by recency.** The human's three questions — *must I step in*,
+  *did two tasks collide*, *who waits on whom* — are all pair-shaped; the receiver of the newest
+  message owes the answer, and a row navigates there, matching the toast's click target. Filtering
+  by recency would open a badge of 5 onto an empty panel after a three-hour absence.
+- **The log is an overlay, never a destination.** The nav budget is 8 and spent (§4), and this is
+  opened to answer one question and then left — the `task notes log` shape: dialog on wide,
+  BottomSheet on narrow. Reachable from the readout, `⇧⌘M`, the View menu and the palette.
+- **No invented importance axis.** A sender cannot mark a message important, so a chatter/blocker
+  split asserts a fact the UI does not have. The one real axis is the row's delivery verdict, and
+  `held` is never a problem — it is a promise dev3 made.
+- **Trimmed history reads as trimmed:** the footer names the retention window and the oldest day
+  still on disk, so a deleted day is never mistaken for silence.
+
+Evidence: `agent-traffic/`, `agent-traffic.ts`, `shared/agent-message-log.ts`.
 
 ### 5.7 Toast anatomy — one shape for every origin — `Observed`
 
@@ -393,10 +471,10 @@ Global Settings vocabulary is deliberate: a left-nav item is a **Settings catego
 
 | Surface | Budget | Overflow rule |
 |---|---:|---|
-| Global nav destinations | 7 | group / demote to menu |
+| Global nav destinations | 8 — **all spent**, see §4 | replace one / demote to menu |
 | Page header primary | 1 | demote to secondary |
 | Page header secondary | 2 | overflow |
-| Task card inline actions | 2 | push to context menu |
+| Task card inline actions | 4 (strip is **full**: Open-in, dev-server split, Watch, +Variant) | push to context menu; ≤1 split control on the card |
 | Toolbar visible actions | 4 | overflow after 4 |
 | Tabs | 6 | more-menu / subpage |
 | Task info panel | 4 bars (2×2), ≤ 4 visible per bar | assign new control to one domain bar; overflow after 4 ⇒ promote that domain to its own row (see §5.1) |
@@ -406,84 +484,106 @@ Global Settings vocabulary is deliberate: a left-nav item is a **Settings catego
 
 **Split lifecycle controls count as one.** The status control may carry a second half that commits the pipeline's own terminal move (the ✓ → Completed) without spending a second card slot, provided it is glued to the status trigger, shares its hover surface, is desktop-only (narrow keeps the BottomSheet's promoted Completed row at ≥ 44px), and disappears when `getAllowedTransitions` forbids the target. Any action that is not the control's own lifecycle move costs its own slot — this is not a general licence for a second button.
 
-## 9a. Quality floors — what every surface must clear
+## 9a. Quality floors — dev3's deltas from the `better-*` skills
 
-A gate, not a goal. Every surface passes these before shipping; a floor is not earned by meeting it once — a regression resets the clock. All six subsections are `Proposed` unless noted.
+**This section is not the craft rulebook.** The general rules for accessibility, colour, typography, copy, motion and layout live in the `better-*` skills, which are deeper and better maintained than any copy of them here would be. Load the owning skill and follow it.
+
+| Domain | Owner | This section adds |
+|---|---|---|
+| Accessibility | `better-accessibility` | §9a.1 |
+| Colour & contrast | `better-colors` | §9a.2 |
+| Typography | `better-typography` | §9a.3 |
+| Copy | `better-writing` | §9a.4 |
+| Motion | `better-ui` | §9a.5 |
+| Layout grammar | `better-layout` | §9a.6 |
+
+What follows is only what those skills **cannot** know: this repo's specific traps, its named constants, and its three documented overrides. Still a gate, not a goal — a floor is not earned by meeting it once, and a regression resets the clock. All six subsections are `Proposed` unless noted.
+
+### 9a.0 Overrides — where dev3 wins and where `better-ui` wins
+
+Settled on 2026-08-21; a `better-*` pass must not re-open them (`decisions/2026/08/21/split-ux-principal-from-the-better-skills.md`).
+
+| Subject | Ruling |
+|---|---|
+| Borders that exist only to fake depth | **`better-ui` wins.** Replace them with layered transparent `box-shadow`. Borders that carry structure or state stay: dividers, layout separators, selection, focus, and the `STATUS_COLORS` identity borders. Glass morphism keeps its blur and its translucency — this is about the border, not the surface |
+| Looping hover animation on the `tmx-` / `gtx-` / `hdr-` / `th-` icon families | **dev3 wins, deliberately.** `better-ui`'s motion-restraint rule does not reach them: the loop is the personality of those surfaces, it runs only while the cursor rests on one icon, and it never delays the interaction it decorates. Do not file it as a finding |
+| Motion primitives — press feedback, icon transitions, entrance animations | **`better-ui` wins.** Use its exact values, not locally invented ones. There is no motion library in `package.json`, so take its no-library CSS path; do not add `framer-motion` to satisfy the rule |
 
 ### 9a.1 Accessibility — `Proposed`
 
-**Focus ring.** Every interactive element shows the global `:focus-visible` ring from `index.css`. Two specificity traps:
-- **`focus:outline-none` is banned** — Tailwind compiles it to `.focus\:outline-none:focus` at specificity (0,2,0), beating the global `:focus-visible` rule at (0,1,0) regardless of source order and killing the keyboard ring.
-- Bare `outline-none` (0,1,0) is fine — it loses to the global rule by source order because the ring is authored after `@tailwind utilities`.
+Owner: `better-accessibility`. dev3-specific:
 
-| Constraint | Floor |
+**The focus-ring specificity trap.** Every interactive element shows the global `:focus-visible` ring from `index.css`, and there is exactly one way to lose it:
+- **`focus:outline-none` is banned** — Tailwind compiles it to `.focus\:outline-none:focus` at specificity (0,2,0), beating the global `:focus-visible` rule at (0,1,0) regardless of source order, and the keyboard ring dies.
+- Bare `outline-none` (0,1,0) is fine — it loses to the global rule by source order, because the ring is authored after `@tailwind utilities`.
+
+| Constraint | dev3 delta |
 |---|---|
-| Hit area | 24×24 CSS px (WCAG 2.5.8); 44×44 px on touch via `.touch-actions` in `index.css` — the sheet default, not opt-in |
-| Keyboard path | Every pointer interaction has a keyboard equivalent; Escape closes overlays; Arrow keys move inside composite widgets |
-| Icon controls | Every icon-only control has an accessible name; a tooltip is **not** an accessible name |
-| `role="tab"` | Is a promise of roving tabindex — if you will not implement it, ship plain buttons with `aria-pressed` |
-| `aria-modal` surface | Accessible name (`aria-labelledby` at its title), focus trap, focus restore; `useFocusTrap` is the one implementation |
-| Landmarks | One `sr-only` `<h1>` per route; `document.title` follows the route (the tab title is the only orientation cue in remote mode) |
-| Zoom | Must render and reflow at 200% browser zoom and at a 320px viewport. **Pinch-zoom is capped on purpose** on browser remote (`user-scalable=no, maximum-scale=1`) — the surface underneath is a live terminal that owns touch, so pinch fights the pane geometry instead of magnifying. Do not "fix" it; reflow is the accessibility path here |
-| Live regions | `polite` for routine updates; `assertive` / `role="alert"` reserved for urgent errors only |
+| Touch targets | `.touch-actions` in `index.css` is the **sheet default, not opt-in** — 44×44 px comes for free inside it |
+| `role="tab"` | Is a promise of roving tabindex. If you will not implement it, ship plain buttons with `aria-pressed` |
+| Focus trap | `useFocusTrap` is the one implementation; every `aria-modal` surface uses it, plus an accessible name and focus restore |
+| Landmarks | One `sr-only` `<h1>` per route, and `document.title` follows the route — the tab title is the only orientation cue in remote mode |
+| Live regions | `assertive` / `role="alert"` is reserved for urgent errors; routine updates are `polite` |
 
-**Documented exception — no skip link.** The keyboard jump layer (command palette ⇧⌘P, hint overlay `f`/⌘G, task switcher Option+Tab) replaces a skip link. Future audits must not re-flag this as missing.
+**Documented exception — no skip link.** The keyboard jump layer (command palette ⇧⌘P, hint overlay `f`/⌘G, task switcher Option+Tab) replaces it. `better-accessibility` triggers on "skip link"; this is not a finding here, and future audits must not re-flag it.
 
-### 9a.2 Contrast — `Proposed`
+**Documented exception — pinch-zoom is capped on purpose** on browser remote (`user-scalable=no, maximum-scale=1`): the surface underneath is a live terminal that owns touch, so pinch fights the pane geometry instead of magnifying. Do not "fix" it. Reflow is the accessibility path here — every surface must still render at 200% zoom and at a 320px viewport.
 
-APCA |Lc| ≥ 75 for body text, ≥ 60 for non-body text, ≥ 15 for non-text elements that must be discernible (borders, resize grips). WCAG 4.5:1 / 3:1 are acceptable fallback vocabulary.
+### 9a.2 Colour & contrast — `Proposed`
 
-**Measure the rendered pair in both themes** — not the token against its opaque fallback. Alpha-modified tokens (`bg-raised/65`, `border-danger/30`, `bg-fg-muted/40`) must be composited through the real layer stack before the pair is checked.
+Owner: `better-colors`, including the APCA thresholds (|Lc| ≥ 75 body, ≥ 60 non-body). dev3-specific:
 
-A token whose role is "text" is not a fill, and vice versa.
-
-The repo carries an automated contrast check over the design-token pairs; any new pair must be added to that fixture before shipping.
+- **Non-text floor:** |Lc| ≥ 15 for elements that must merely be discernible — borders, resize grips.
+- **Measure the rendered pair, in both themes** — never a token against its opaque fallback. Alpha-modified tokens (`bg-raised/65`, `border-danger/30`, `bg-fg-muted/40`) must be composited through the real layer stack before the pair is checked. This is the mistake that keeps recurring here, because almost every dev3 surface is translucent.
+- The repo carries an automated contrast check over the design-token pairs; **any new pair must be added to that fixture before shipping**.
+- Notation stays `rgb(var(--token) / alpha)`. Do not introduce OKLCH values into components; §7 owns the token list.
 
 ### 9a.3 Typography — `Proposed`
 
+Owner: `better-typography`. dev3-specific:
+
 | Rule | Detail |
 |---|---|
-| Closed type scale | Named rungs only; `text-[…]` arbitrary sizes banned (they silently inherit ancestor line-height) |
-| Dense chrome minimum | After `MOBILE_DENSE_FACTOR` (~0.67×) in `zoom.ts`, meaning-bearing text needs a px-pinned floor; one bounded dense tier (weight ≥ 500, non-essential or duplicated copy only) is legitimate rather than pretending a uniform 12px floor applies everywhere |
-| `tabular-nums` | Required on every value that changes in place: counters, diff stats, gauges, timers, LOC totals, percentages, chart axes — make it a property of the badge/stat primitive, not per callsite |
-| Truncation | An identifier (branch, path, URL, PR ref) or error message may only be clamped when the full value is reachable on the same surface (tooltip, expand, or copy) |
-| Heading levels | Map to scale rungs once, centrally |
+| Closed type scale | Named rungs only; `text-[…]` arbitrary sizes are **banned** — they silently inherit ancestor line-height |
+| Dense chrome minimum | After `MOBILE_DENSE_FACTOR` (~0.67×) in `zoom.ts`, meaning-bearing text needs a px-pinned floor. One bounded dense tier is legitimate (weight ≥ 500, non-essential or duplicated copy only) rather than pretending a uniform 12px floor applies everywhere |
+| `tabular-nums` | Make it a property of the badge/stat primitive, not a per-callsite decision — counters, diff stats, gauges, timers, LOC totals, percentages, chart axes |
+| Truncation | An identifier (branch, path, URL, PR ref) or an error message may only be clamped when the full value is reachable **on the same surface** — tooltip, expand, or copy |
 | `line-height` | `leading-none` for single-line non-wrapping chrome only; anything that can wrap is `leading-snug` minimum; `≥1.4` at three or more lines |
-| Long-form columns | Changelog and help prose: cap the text column at ~65ch, not just the page |
 | 16px inputs | Applies to **every** text-entry control in browser mode, not an allowlist of three types |
+| Long-form columns | Changelog and help prose cap the text column at ~65ch, not just the page |
 
-Litmus test: does the text stay readable on a 390px screen with the dense-factor applied?
+Litmus test: does the text stay readable on a 390px screen with the dense factor applied?
 
 ### 9a.4 Copy — `Proposed`
 
+Owner: `better-writing`, including sentence case as the default. dev3-specific:
+
 | Rule | Detail |
 |---|---|
-| Confirmation buttons | Repeat the consequence; `confirmLabel` is **required** — the confirm service must reject a generic default so "OK" cannot come back |
-| Error messages | Every error ends with an imperative next step; `{error}` is a parenthetical detail, never the whole message — see `en/kanban.ts` for the reference shape |
-| Button voice | Verb-first, speaks to the reader ("you"), never as the reader ("I") |
-| Capitalization | **Sentence case** for settings rows, buttons, tabs, menu items; Title Case only for frozen proper nouns (`To Do`, `AI Review`, `Your Review`, `PR Review`) |
-| Empty states | Three parts: what this is → why useful → one action. "No X" alone is incomplete. Search empty states name the query and offer an exit |
-| Toggle labels | Name what happens when the toggle is ON |
-| Placeholders | Format examples; every field keeps a visible label |
-| Settings paths in tips/help | Never spell a path in prose — declare the destination as data and let the carrier render the link. In tips: set `Tip.settingsSection` (`SettingsRouteSectionId`, `tips.ts`) and `TipCard` renders an "Open the setting" link via `OPEN_SETTINGS_SECTION_EVENT`. The same principle applies to help strings. |
-| `(s)` | Defect — use `t.plural`. `...` is a defect — use `…` |
+| Frozen Title Case nouns | Sentence case everywhere, except these proper nouns which stay as-is: `To Do`, `AI Review`, `Your Review`, `PR Review` |
+| Confirmation buttons | `confirmLabel` is **required** and repeats the consequence — the confirm service rejects a generic default so "OK" cannot come back |
+| Error messages | Every error ends with an imperative next step; `{error}` is a parenthetical detail, never the whole message. Reference shape: `en/kanban.ts` |
+| Empty states | Three parts: what this is → why useful → one action. "No X" alone is incomplete; search empty states name the query and offer an exit |
+| Settings paths in tips/help | Never spell a path in prose — declare the destination as data and let the carrier render the link. Tips set `Tip.settingsSection` (`SettingsRouteSectionId`, `tips.ts`) and `TipCard` renders "Open the setting" via `OPEN_SETTINGS_SECTION_EVENT` |
+| i18n defects | `(s)` is a defect — use `t.plural`. `...` is a defect — use `…` |
 
 ### 9a.5 Motion — `Proposed`
 
-- **No `transition: all`** — name the properties explicitly.
-- CSS transitions for interactive state changes (interruptible); keyframes for one-shot sequences only.
-- **Motion budget:** a hover animation on a repeated control stays under ~3s per cycle and never blocks or delays the interaction it decorates. Looping while hovered is **allowed and deliberate** for the icon families (`tmx-`, `gtx-`, `hdr-`, `th-`): the loop is the personality of the surface, and it runs only while the cursor rests on that one icon.
+Owner: `better-ui`, and per §9a.0 its exact values win: `scale(0.96)` on press, icon cross-fade `scale 0.25→1` / `opacity 0→1` / `blur 4px→0` on `cubic-bezier(0.2, 0, 0, 1)`, keyframes reserved for one-shot sequences. dev3-specific:
+
+- **No motion library.** `package.json` has neither `motion` nor `framer-motion`, so use `better-ui`'s CSS path: keep both icons in the DOM, one absolutely positioned, and cross-fade. Adding the dependency to satisfy a motion rule needs its own decision record.
+- **The looping icon families are exempt** (§9a.0). Budget for them: under ~3s per cycle, never blocking or delaying the interaction it decorates, and only while the cursor rests on that one icon.
 - Prefer compositable properties (`transform`, `opacity`); paint properties like `stroke-dashoffset` are for genuinely one-shot moments.
 - Motion is **never** the only feedback channel — every animated state change also has a static cue.
-- `prefers-reduced-motion` is honoured everywhere.
 
 ### 9a.6 Layout grammar — `Proposed`
 
-- Group with space, not lines; gap between groups ≥ 2× gap within a group.
-- A control must look interactive next to static text.
+Owner: `better-layout`. dev3-specific:
+
 - Every fixed-width overlay clamps: `max-w-[calc(100vw-2rem)]`. Absolutely-positioned portals clamp and flip against `innerWidth`.
-- Breakpoints come from content; a surface that shares the viewport with another uses `useContainerWidth` per §12.1's rule.
-- Plan for string growth: p90 expansion en → ru/es is ~1.9× on short labels (`Retry` → `Попробовать ещё раз` is 3.8×). No fixed heights on label-bearing controls — use `min-h` instead.
+- A surface that shares the viewport with another sizes itself with `useContainerWidth`, per §12.1 — not with viewport breakpoints.
+- **Plan for string growth:** p90 expansion en → ru/es is ~1.9× on short labels (`Retry` → `Попробовать ещё раз` is 3.8×). No fixed heights on label-bearing controls — use `min-h`.
+- A control must look interactive next to static text.
 
 ## 10. Placement rules — `Observed`/`Inferred`
 
@@ -502,11 +602,18 @@ Litmus test: does the text stay readable on a 390px screen with the dense-factor
 | unbounded object-scoped log (agent-appended notes, run history) | the object's surface keeps a **capped, per-entry-clamped preview** (newest 3 + count + one `Show all N` row); the full log lives in its own overlay — `BottomSheet` on narrow, dialog on wide (see §5.8) | rendering the whole log inline "because it usually fits", moving the whole section behind a tap, a nav destination for it, virtualization instead of a cap | the distribution is the argument: the median object holds one short entry and the tail holds hundreds, so both hiding everything and showing everything are wrong. Cap + clamp keeps the common case free and bounds the tail without a scroll wall (decision 2026-08-14) |
 | hint navigation (jump) | `HintOverlay` over any `[data-hint-id]` target; activate with bare `f` / `⌘G` | mutation or destructive targets, visible button | hints are destinations, not actions; keyboard-only avoids button-creep |
 | keyboard expert nav | bare-key + `g`-prefix sequences (`g d/p/t/s`), `/` focus search, `c` new task — declared in `keymap.ts`, matched on `e.code` | native menu accelerators (Electrobun can't bind chords/sequences) | layout-independent; reserve `g` for the go-to prefix |
+| project grouping (`Space`) | Dashboard-only filter: container-gated rail (`Everything`, computed `Home`, spaces, `New space`) plus narrow BottomSheet; selection survives resize. Rows group beneath space headers; membership chips live on project rows. One `…` per space owns edit-members, order, rename, delete and sensitivity. | any space route/board/breadcrumb/nav entry/colour/stored Home; membership drag; duplicated `+`; viewport-gated rail; activity dots | A Space groups projects without becoming a destination. The rail filters one overview and shows only name/count; many-to-many membership needs an explicit two-way editor. Container width—not viewport—decides rail availability. See the three Space decision records dated 2026-08-17/21. |
+| space **membership** | `Edit projects…` in the space's `…` menu: one dialog listing **every** project with the members ticked, searchable by name and path, `Save` inert until something changed, plus a `New project…` hand-off pre-linked to the space. The project's own side of it stays on the row's `Spaces…` action and Project Settings → Spaces, rendered as removable chips + a dashed `Add to space` pill | a `+` that can only add, removal only from the project's row, membership by drag, a management screen per space, auto-sorting members to the top of the dialog | the question a user asks at a space header is "what is in here", and that question has two answers — in and out. Ticks give both in one place; the previous `+` gave one and hid the other behind the project it had just grouped. Order stays the project order so a tick never makes the list jump under the pointer |
+| space **order** | the **rail** for pointers — drag a row, advertised by a resting grip glyph — plus `Move up` / `Move down` in the space header's own `…` menu for touch and the keyboard. One write either way (`reorderSpaces`) | a rail-local reorder mode, per-row ↑/↓ in the rail, a second grip on the dashboard's space group headers, a `Manage spaces` overlay | the rail already **is** the collapsed name-only list a reorder needs, so drag belongs there and nowhere else. The stepwise path exists because HTML5 drag has neither a touch nor a keyboard equivalent — but it belongs in an overflow, where it costs no resting pixels: 224px minus padding leaves 180px of row, and a second visible control in it starves the name the row exists to show. A modal reorder mode was built and removed — it spent that width on a duplicate of a gesture the grip already offered |
+| board entry from a project row | the row's **name** (accent + underline on row hover, chevron accent + nudge) plus one always-present **footer row** per project: `↗ Open board` and the counts it is not showing, including `N in To Do` from `getAllProjectTasks().todoCount` | a dedicated `Open board` icon in the row's action cluster, a per-space board, pointing the row's task rows at the board instead of the task | the board is the product's centre, and a dashboard that lists every waiting task turned it into a detour with no stated reason to take it. The footer answers "where is the rest of my work" with a number instead of an arrow; the old background-summary line carried the same counts and led nowhere. **Projects have boards; spaces never do** — expect the request and refuse it (§10 grouping row) |
+| **project order inside a space** | drag the row's grip; every row in that space collapses to a one-line name for the duration of the drag, and expands again on drop. Stepwise ↑/↓ stay beside the grip on desktop, and in the row's action sheet on touch | dragging across spaces (that would be a membership change), collapsing groups the drop cannot reach, a persistent compact mode | a resting row carrying tasks and a footer is ~300px tall, so a handful of them never fit one screen: the drop target was somewhere the user had to scroll to with the pointer held down. Collapsing exactly the rows that accept the drop keeps "compact" and "droppable" the same statement |
+| cross-project task list on the dashboard | **nowhere** — the dashboard's project rows already list every task waiting on the user. Cross-project task search lives in a project's `ActiveTasksSidebar` switched to global scope, and in the palette | a task panel beside the dashboard's project rows, a second dashboard-specific panel, a copy of the sidebar's row/tier logic | the panel and the project rows rendered **the same attention tasks at the same time** — five duplicates were visible without scrolling either list. §10's own row calls the dashboard the attention triage list and sanctions one action on those rows, so the rows are the surface and the panel was the newcomer. The component is untouched: in the project view the centre is a board, not a task list, so there it is not redundant |
 | countable/motivational metric (`data_visualization`) | emit into the stats engine first (`productivity-stats.ts` + `productivityStats.ts`), then a viz on the Velocity Cockpit (`stats`) | controls/config on the cockpit, a new top-level screen per metric, a header counter, diagnostic noise | the cockpit is the one home for shipping signal — keep it read-only and within the honesty/complexity budget (see §1.1) |
-| onboarding_help (inline help) | `help.ts` registry topic reachable in help mode (`data-help-id` zone; HelpSpot auto-registers as one); HelpSpot in a header-bearing section, or — earned — on a surprising form field's label; entries in menu `Help` / header (?) / `⇧⌘/` / palette. **Coverage owed:** new user-facing UI ships its topic + zone in the same commit | permanent (i) in quickbars/cards/toolbars or on every form field, a `data-help-id`/`topicId` without a registry topic (silent no-op), hardcoded help strings in components, multi-step tours (v1) | the UI is the product's only teaching channel — coverage is mandatory but chrome-free (help mode is the master surface); permanent (i) stays budgeted; content is data, not JSX (see §5.4) |
+| onboarding_help (inline help) | `help.ts` registry topic reachable in help mode (`data-help-id` zone; HelpSpot auto-registers as one); HelpSpot in a header-bearing section, or — earned — on a surprising form field's label; entries in menu `Help` / header (?) / `⇧⌘/` / palette. **Coverage owed:** new user-facing UI ships its topic + zone in the same commit | permanent (i) in quickbars/cards/toolbars or on every form field, a `data-help-id`/`topicId` without a registry topic (silent no-op), hardcoded help strings in components | the UI is the product's only teaching channel — coverage is mandatory but chrome-free (help mode is the master surface); permanent (i) stays budgeted; content is data, not JSX (see §5.4) |
+| onboarding_help **outside help mode** — two carve-outs | **(a) First-run callout:** anchored to the one control it advertises, dismissible, once, killed by the one-way flag entering help mode also sets (§5.4a). **(b) Blast-radius copy:** a standing quiet statement at the top of a dialog about to act on the user's own files or remotes — what dev3 writes and where. **Two lines, hard cap** — a wall of reassurance reads as a warning | a help destination, two callouts on one screen, a launch modal, an (i) standing in for (b), and — for (b) — hedged copy or an unverified claim about OS behaviour | a dialog pointed at someone's work monorepo has no second visit, and the user who cannot answer *what will this write* closes the app instead of filing an issue. Standing, not once-only. See `decisions/2026/08/22/blast-radius-copy-is-not-an-info-icon.md` |
 | feature-gated preset | keep visible in the launch picker but **disabled** (muted + lock) until the gating capability is on; disabled-click → clickable toast that deep-links to the enabling settings section (`OPEN_SETTINGS_SECTION_EVENT` → `Route.section`); the capability's manager is a normal settings section | hiding the preset until enabled, auto-starting the dependency on selection, a bespoke modal | discoverable without a hidden side effect; configuration lives in settings (decision 112) |
 | privacy-sensitive display value (identity/secret) | render through the streamer-mode masking pattern: `streamer-private` / `streamer-private-media` class (or the `Private` wrapper, `src/mainview/streamer-mode.tsx`) so `data-streamer="on"` blurs it; the toggle itself is `configuration` (Settings → Appearance, `local` storage) + a `⇧⌘P` palette command + a `?streamer=on\|off` URL param (machine entry point — agent QA screenshots are ALWAYS masked, per AGENTS.md) | an unmasked email/org/home-path/tunnel-URL/QR on a new surface, a header quick-toggle button (chrome creep), hover-to-reveal (leaks live on stream) | recordings/screenshots are a first-class use (the developer demos the app); masking is CSS-only so coverage is one class per value, and every new identity-bearing surface is OWED the class in the same commit (decision 161) |
-| privacy-sensitive **object** (a whole project the user must not show on camera) | one `Project.sensitive` toggle in Project Settings → **Board** tab, own `SettingsSection` (it is project-record state, so it must not live in the git-committed Project/Worktree config tabs). While `data-streamer="on"`: the project's **name** and **every task of it** carry `streamer-private` on the text container wherever they render outside the project (dashboard rows, breadcrumb, pickers, task switcher, tmux session manager); its dashboard row / picker option stays **visible but non-selectable** (`aria-disabled`, lock glyph, `cursor-not-allowed`), a blocked click fires one clickable toast that deep-links to Settings → Appearance; the single `navigate()` choke point in `App.tsx` refuses any route into it and turning streamer mode on while inside it redirects to `dashboard`; every notification path (native, web, toast, bell/attention) drops its events at the bun-side `deliverTaskNotification` gate plus the renderer-side toast gate. **Documented exception to CSS-only masking:** `document.title` cannot be blurred, so a sensitive project's title prefix is *replaced* with a neutral placeholder | hiding the project from the dashboard (a project that silently vanishes reads as data loss), a card-wide blur that also blurs the lock affordance, a header "sensitive projects" indicator or counter (chrome creep — the lock on the row is the indicator), an unlock-per-session escape hatch, making the flag act outside streamer mode | the flag exists for one moment — the camera is on — and the failure it prevents is a single accidental click, so the guard belongs at the routing choke point rather than in each of the ~10 entry points; keeping the row visible-but-locked preserves the demo's continuity (decision 161's reason for blur over text replacement) while making the block self-explaining |
+| privacy-sensitive **object** | `Project.sensitive` in Project Settings → Board. In streamer mode, mask its names/tasks outside the project, keep entries visible but locked, block routes at `App.navigate`, redirect if masking starts inside it, and suppress every notification path. Replace (not blur) its `document.title`. | hiding the object, blurring controls, header counters, session unlocks, behavior outside streamer mode | One routing choke point prevents the accidental click; visible locked rows preserve continuity and explain the block. Decision 161 owns the full rationale. |
 | find in content (`⌘F` search over what a viewer renders) | **Content toolbar exists** (diff viewer §5.3) → a toggle + inline box in that toolbar, beside the other content controls. **Full-bleed content, no content toolbar** (terminal canvas, artifact iframe) → the search UI is a **floating bar over the content**, top-right, gated on focus being inside that viewer; `⌘F` is the primary trigger and must be registered in `keymap.ts`. **One earned magnifier icon button** in the viewer header may toggle that bar (accent-tinted while open) — an explicit, user-requested exception to §11 button-creep, justified because a keyboard-only find is invisible on a mouse-driven viewer. It is a *trigger for content UI*, not a content control: it opens the floating bar and owns no state of its own | a search input living in the header, a second entry point per viewer beyond that one icon, a global find destination, a permanent always-visible search field over content | find is scoped to the *rendered document*, so the UI belongs where that document is, and `⌘F` is the universal muscle memory; gating on viewer focus leaves the browser's native find intact everywhere else in remote mode. The single icon buys discoverability for pointer users at the cost of one header slot — do not let unrelated controls inherit this exception |
 | hand-off of viewed content to the OS (open in web browser) | the **viewer's own header**, one neutral icon-only button (external-link glyph) placed **immediately beside download** — the two are the same class: take this document out of dev3. Desktop hands the stored file path to the OS default browser through an RPC; browser/remote opens a blob URL of the already-composed document in a new tab, and the `window.open` must fire **synchronously inside the click** or the popup blocker eats it. Failure → toast, never a native dialog | a second entry point (context menu + header + inspector) for the same hand-off, an accent tint (it owns no state), a keyboard shortcut, gating the button on transport (both transports get a working path — only the mechanism differs) | a viewer is a reduced browser: real find, print, zoom, devtools and a window that survives navigating dev3 all live in the actual browser, so the escape hatch belongs on the document being viewed. It costs one header slot and is only earned next to an existing export control — the viewer header is now full (search, theme, download, open-in-browser, fullscreen, close); the next control replaces one |
 | layout boundary manipulation (resize a split) | **on the boundary itself** — a `role="separator"` overlay strip centred on the split, hit target ≥ 9px, resting grip visible at rest (`bg-fg-muted/40`), accent on hover/focus/drag, `col-resize`/`row-resize` cursor, ghost line during drag and one commit on pointer-up. Zero toolbar slots, so it is exempt from §11 button-creep. Hidden when the split does not exist (single pane) or is not visible (zoomed pane, narrow one-at-a-time carousel) | a "Resize panes" toolbar/inspector button, a size dropdown, a numeric field, a renderer-only resize that is not persisted through the owning backend, live per-pointermove commits over a live TUI | a boundary is a direct-manipulation object: the affordance must sit where the hand already is, and a control for it elsewhere is pure chrome on a canvas that is otherwise chrome-free (§10 find-in-content row). A resting grip is the only thing that makes an invisible boundary discoverable; commit-on-release exists because every intermediate ratio would SIGWINCH every pane and repaint the whole TUI |
@@ -544,7 +651,7 @@ Three distinct widths exist in code; they are **not** the same thing and must no
 | **device-class** | `screen.width < 1024` | `useMobile()` | no (mount-once) | viewport-meta decision plus the **portrait-only device guard** — is this physically a small device. NOT a layout gate. |
 | **container width** | per-surface | `useContainerWidth(ref)` (ResizeObserver) | yes | a surface that shares the viewport with another one (the inspector beside the board) — its own box, not the window. Use it whenever a viewport breakpoint would lie. |
 
-Rules: **gate layout on `useNarrowViewport`** (reactive, viewport-width). Use `useMobile()` for the `<meta viewport>` choice and the portrait-only device guard. Never gate a layout on `isElectrobun` (transport ≠ width) — browser mode can be wide, desktop can be narrowed. `useViewport()` serves **device-width** to the browser so a phone reports its true width and the media queries fire (the old fixed `width=1024` is replaced). The earlier "sub-1024 / `useMobile`" wording was wrong for layout — the shipped layout gate is **768 / `useNarrowViewport`**.
+Rules: **gate layout on `useNarrowViewport`** (reactive, viewport-width) — unless the panel does not own the window, in which case measure its container (`useContainerWidth`) and treat width 0 as *not measured*, never *narrow*: the dashboard's spaces rail is gated this way, on the flex row holding both panels, because measuring its own sibling would make showing the rail shrink the number that decides it. Use `useMobile()` for the `<meta viewport>` choice and the portrait-only device guard. Never gate a layout on `isElectrobun` (transport ≠ width) — browser mode can be wide, desktop can be narrowed. `useViewport()` serves **device-width** to the browser so a phone reports its true width and the media queries fire (the old fixed `width=1024` is replaced). The earlier "sub-1024 / `useMobile`" wording was wrong for layout — the shipped layout gate is **768 / `useNarrowViewport`**.
 
 **Portrait-only phone-browser guard — `Observed`:** A physically small browser device is locked to portrait when the browser permits the Screen Orientation API. If the lock is unsupported or rejected outside fullscreen, `MobilePortraitGate` blocks the root shell in landscape with a localized rotate-to-portrait prompt and makes the underlying app inert. The Android tablet shell is explicitly exempt: tablets support landscape, portrait, split-screen and freeform resize, and layout follows window width rather than platform identity.
 
@@ -607,7 +714,7 @@ Evidence: `BottomSheet.tsx` — used by `GlobalHeader` narrow kebab, `ActivityOv
 
 | Surface | Narrow budget | Overflow rule |
 |---|---|---|
-| Global header utilities | logo + breadcrumb + **1** overflow kebab + **≤1 ambient resource readout** | everything else into the kebab/sheet |
+| Global header utilities | logo + breadcrumb + **1** overflow kebab + **≤1 ambient resource readout** (the agent-traffic pill is desktop-only — §5.9) | everything else into the kebab/sheet |
 | Page primary action | 1 (a FAB or header button) | rest into a bottom sheet |
 | Inspector | 1 summary bar (+ conditional output readouts) | all *actions* into the actions sheet |
 | Any toolbar/action row | **shed, never stack** — one row that drops its lowest-priority items in a declared order; wrapping to a second row is not an option | shed item moves to the bottom sheet |
@@ -615,9 +722,11 @@ Evidence: `BottomSheet.tsx` — used by `GlobalHeader` narrow kebab, `ActivityOv
 
 **A control row sheds; it never stacks.** A second row costs the phone a whole band of screen and moves every control the user was aiming at — worse than losing the least important one. So every narrow control row is `flex-nowrap`, carries a written priority order, and drops from the bottom of that order as width runs out. Two consequences are binding: **anything shed must already have a sheet path** (drop it only when that path exists, or add the sheet row in the same change), and **the last survivors must degrade by truncation, not by clipping** — the row's flexible text gets `min-w-0` + `truncate`, so an unusually long custom-column name shortens instead of pushing the kebab off-screen. Thresholds are container queries on the row itself (`[container-type:inline-size]`), not viewport breakpoints: the row, not the window, is what runs out of room.
 
-**Conditional agent-output readouts stay on the inspector summary bar — until the bar cannot hold them.** The diff badge, `Images` and `Artifacts` are not folded into the sheet by default: they exist only when the task actually produced that output, they carry an unread state, and their whole value is being *seen* without opening a menu — the same status-not-action logic as the header's ambient readout, and the sibling of the desktop Runtime-bar exception in §5.1. They sit next to priority, render at the 44px touch target, and are **also** kept as sheet rows, because the sheet is the phone's complete action inventory. That sheet row is what makes them sheddable: below the width where the bar fits, they drop in the order diff badge → artifacts → images, and the status label goes icon-only before anything is clipped. Only agent outputs inherit the resting-visible part; an ordinary action still folds unconditionally.
+**Conditional agent-output readouts stay on the inspector summary bar — until the bar cannot hold them.** The diff badge, `Images` and `Artifacts` are not folded into the sheet by default: they exist only when the task actually produced that output, they carry an unread state, and their whole value is being *seen* without opening a menu — the same status-not-action logic as the header's ambient readout, and the sibling of the desktop Runtime-bar exception in §5.1. They sit next to priority, render at the 44px touch target, and are **also** kept as sheet rows, because the sheet is the phone's complete action inventory. That sheet row is what makes them sheddable: below the width where the bar fits, they drop in the order diff badge → artifacts → images, and the status label goes icon-only before anything is clipped. Only agent outputs inherit the resting-visible part; an ordinary action still folds unconditionally. **The diff is the one exception to that drop:** it sheds its *width* — below 400px an icon-width chip takes the wide badge's place, and an uncommitted-only diff keeps that chip at every width.
 
 **The ambient readout is a desktop-width slot, and it is capped at one.** On roomy widths the header carries exactly one ambient resource readout (currently memory headroom), because a *status* earns its place by being seen without looking. On narrow it folds into the kebab sheet with `PreventSleepToggle` / `RateLimitIndicator`: a phone header has room for the breadcrumb and one kebab, and a number nobody acts on at a glance is the first thing that should give that room back. Inside the sheet it keeps the 44×44px touch target and opens its breakdown as a BottomSheet, not a floating popover.
+
+**A menu row that hides a panel opens on hover, and the panel opens beside the menu — never over it.** A row inside the header kebab that carries its own detail surface (memory breakdown, tmux session list) is indistinguishable from a label as long as only a click opens it: once those two readouts moved off the header bar into the menu, nobody found them again. So such a row opens its flyout on hover intent (~180 ms dwell, ~200 ms leave grace, a click pins it, `Escape` and outside-click dismiss), and the flyout is anchored on the **menu's** outboard edge — level with the row, clear of the list — so the pointer can keep travelling down the menu with the panel still on screen. Two consequences are binding: the flyout is portaled, so the menu's outside-click dismissal must exempt it (`data-header-flyout`) or the first click inside it kills both; and the hover path is desktop-only — on narrow the same content is a BottomSheet, where there is no hover to intend with. Shared geometry lives in `src/mainview/utils/menuFlyout.ts`; this is the only sanctioned hover-opened surface inside a menu, and it is earned by the row *containing data*, not by being crowded.
 
 **The breakdown carries destructive actions, and only over memory we are wasting.** Leftover processes still running inside task worktrees — an agent's detached headless browser, a watcher, a dev build that outlived its task — are the app's own leak, so the popover that already refuses to flatter our share also has to let the user reclaim it: a **conditional** fifth section at the bottom of the dev3 group, gated on `count > 0`. Three controls, no more: `Kill all` in the section header, a per-row kill revealed on hover/focus, and a rescan icon. All ghost-danger, never primary fill. **Confirmation is priced by blast radius, not by the word "kill":** `Kill all` sweeps tasks the user may have scrolled past, so it asks first (`confirm({ danger: true })`, popover closed before the dialog opens); a row is one named task whose count is already on screen, so it fires immediately and the row vanishing is the receipt. There is deliberately **no** reassuring empty state — a permanent "nothing leaking" line trains the eye to skip the region, and the section means something precisely because it only appears when it is true. The scan is on-demand (popover open, plus once at startup for the log), never in the memory poller: it costs an `lsof` snapshot of the whole process table. **Startup detects and never kills** — the app does not end a user's process without a click, and a worktree still claimed by a live task may legitimately hold a browser an agent is using right now, so tasks with a live session are excluded from the list entirely. This exception is narrow and does not generalise — it exists because the memory is *ours*; the top-consumer rows above it stay read-only forever.
 

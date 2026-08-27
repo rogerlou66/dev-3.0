@@ -57,6 +57,28 @@ That's it. `DEV3_REMOTE_PORT=${DEV3_PORT0:-0}` is wired into the repo's `dev` sc
 `portCount: 1` is committed in `.dev3/config.json`, so the dev app binds the exact port shown
 above (see [decision 093](../../../decisions/2026/06/30/dev-remote-port-from-pool.md)).
 
+## Scoped QA: a throwaway board instead of the real one
+
+`dev3 dev-server start` boots a full dev3 instance on **your real board** — another task's
+"Branch Merged — mark completed?" dialog is live and clickable in your browser, and another task's
+terminal is reachable by navigation. For anything that does not specifically need real data, run the
+scoped instance instead:
+
+```bash
+dev3 pane run "cd $PWD && bun run dev --qa"     # throwaway board: one fixture project, zero tasks
+dev3 pane run "cd $PWD && bun run dev --qa=virgin"   # completely empty home — first-run state
+dev3 pane logs <run-id>                          # it prints the scoped DEV3_HOME and a reset line
+```
+
+It binds the same `DEV3_PORT0` and prints the port, so steps 3–4 of the flow above are unchanged.
+The scoped root is stable per worktree, so a restart reuses the same board; `rm -rf` the printed
+root to start over.
+
+**What it does NOT isolate** — name these rather than assuming a clean room: the tmux socket
+directory (only `TMUX_TMPDIR` moves it, and dev3 sets it nowhere), the PowerShell history file on
+Windows, the user's own `~/.codex` / `~/.claude` agent configs, and `dev3` CLI commands run from
+inside a REAL worktree (cwd-based task detection outranks `$DEV3_HOME` by design).
+
 ## Gotchas
 
 - **The browser is a machine-global singleton — isolate per task or agents stomp each other.**
@@ -96,10 +118,21 @@ above (see [decision 093](../../../decisions/2026/06/30/dev-remote-port-from-poo
   mobile from the *physical* `screen.width` (`< 1024` → mobile; `src/mainview/hooks/useMobile.tsx`,
   deliberately not `innerWidth`), and a mobile device held in landscape gets
   `MobilePortraitGate`: a "rotate your device" overlay plus `inert` on the whole app — screenshots
-  still work, clicks do nothing. Current `agent-browser` (0.6.0) emulates `screen.*` together with
-  the viewport, so a `set viewport 1440 900` before `open` reports `screen.width = 1440` and the
-  gate stays off; with no viewport set at all it defaults to 1280×720, also fine. You only hit the
-  gate by asking for a phone-sized landscape viewport — that is the app working as designed.
+  still work, clicks do nothing. `agent-browser` 0.6.0 emulated `screen.*` together with the
+  viewport, so `set viewport 1440 900` before `open` was enough. **0.34.0 does not** — `screen`
+  stays at the headless display's 800×600 no matter the viewport (`--window-size` in `--args`
+  does not move it either), so every desktop QA run lands in the gate. Override it with an init
+  script instead, registered before the first navigation:
+
+  ```bash
+  printf 'for (const k of ["width","availWidth"]) Object.defineProperty(screen, k, { get: () => 1600, configurable: true });\nfor (const k of ["height","availHeight"]) Object.defineProperty(screen, k, { get: () => 1000, configurable: true });\n' > /tmp/screen-desktop.js
+  agent-browser close                      # a running session keeps its old init scripts
+  agent-browser set viewport 1600 1000
+  agent-browser open "http://localhost:$PORT/?token=$CODE&streamer=on" --init-script /tmp/screen-desktop.js
+  ```
+
+  With that, `screen.width` reports 1600 and the gate stays off. You otherwise only hit the gate
+  by asking for a phone-sized landscape viewport — that is the app working as designed.
   Measured across the common sizes: `2560×1440`, `1920×1080`, `1600×900`, `1440×900`, `1366×768`,
   `1280×720`, `1024×768`, `768×1024` and phone portrait `390×844` all render and click fine
   (`screen.width` always equals the requested width); only landscape `844×390` shows the gate, goes

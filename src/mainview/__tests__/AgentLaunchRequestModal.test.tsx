@@ -33,6 +33,10 @@ vi.mock("../rpc", () => ({
 			// synchronously inside its effect and tears the whole tree down.
 			listAgentAccounts: vi.fn(() => Promise.resolve({ agents: [] })),
 			getAgentRateLimits: vi.fn(() => Promise.resolve(null)),
+			updateAgentLaunchChoice: vi.fn(() => Promise.resolve(undefined)),
+			// Reached by MemoryPressureBanner, which scales its forecast with the
+			// variant count; null = no pressure, so the banner renders nothing.
+			getSystemMemory: vi.fn(() => Promise.resolve(null)),
 		},
 	},
 }));
@@ -45,6 +49,7 @@ vi.mock("../components/AgentConfigPicker", () => ({
 }));
 
 import AgentLaunchRequestModal from "../components/AgentLaunchRequestModal";
+import { api } from "../rpc";
 
 function makeRequest(overrides?: Partial<AgentLaunchRequest>): AgentLaunchRequest {
 	return {
@@ -56,6 +61,9 @@ function makeRequest(overrides?: Partial<AgentLaunchRequest>): AgentLaunchReques
 		scratch: false,
 		requesterSeq: 3,
 		requesterTitle: "Asking task",
+		defaultPriority: "P2",
+		canAddVariants: true,
+		autoApproveAt: null,
 		subject: {
 			seqLabel: "7",
 			projectName: "dev-3.0",
@@ -108,9 +116,8 @@ describe("AgentLaunchRequestModal", () => {
 		await user.click(launch);
 
 		expect(onRespond).toHaveBeenCalledWith(true, {
-			agentId: "builtin-claude",
-			configId: "claude-auto",
-			accountId: undefined,
+			variants: [{ agentId: "builtin-claude", configId: "claude-auto" }],
+			priority: "P2",
 		});
 	});
 
@@ -123,10 +130,159 @@ describe("AgentLaunchRequestModal", () => {
 		expect(onRespond).toHaveBeenCalledWith(false);
 	});
 
+	it("seeds the priority picker with the priority the launch would use", async () => {
+		// The requester's band when the target never had one of its own (#1496).
+		renderModal(makeRequest({ defaultPriority: "P0", subject: { ...makeRequest().subject, priority: "P3" } }));
+
+		expect(await screen.findByRole("button", { name: /^Priority P0/ })).toBeInTheDocument();
+	});
+
+	it("launches with the priority the user picked instead of the default", async () => {
+		const user = userEvent.setup();
+		const { onRespond } = renderModal(makeRequest({ defaultPriority: "P3" }));
+
+		await user.click(await screen.findByRole("button", { name: /^Priority P3/ }));
+		await user.click(await screen.findByRole("menuitemradio", { name: /P1/ }));
+
+		expect(api.request.updateAgentLaunchChoice).not.toHaveBeenCalled(); // no auto-approve deadline
+
+		const launch = await screen.findByTestId("agent-launch-accept");
+		await waitFor(() => expect(launch).toBeEnabled());
+		await user.click(launch);
+
+		expect(onRespond).toHaveBeenCalledWith(true, expect.objectContaining({ priority: "P1" }));
+	});
+
+	it("mirrors a priority change to the pending request so an auto-approval uses it", async () => {
+		const user = userEvent.setup();
+		renderModal(makeRequest({ defaultPriority: "P3", autoApproveAt: Date.now() + 5 * 60_000 }));
+
+		await user.click(await screen.findByRole("button", { name: /^Priority P3/ }));
+		await user.click(await screen.findByRole("menuitemradio", { name: /P0/ }));
+
+		expect(api.request.updateAgentLaunchChoice).toHaveBeenCalledWith({
+			requestId: "req-1",
+			launch: expect.objectContaining({ priority: "P0" }),
+		});
+	});
+
+	it("closes the priority picker on Escape without declining the launch", async () => {
+		// The dialog's own Esc handler mounts first; only the overlay-layer stack
+		// keeps it from throwing away the whole request (utils/overlay-layers.ts).
+		const user = userEvent.setup();
+		const { onRespond } = renderModal();
+
+		await user.click(await screen.findByRole("button", { name: /^Priority P2/ }));
+		await screen.findByRole("menu");
+		await user.keyboard("{Escape}");
+
+		expect(screen.queryByRole("menu")).toBeNull();
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+
 	it("says a scratch task starts with no prompt", async () => {
 		renderModal(makeRequest({ scratch: true, taskTitle: "Scratch — 14:32" }));
 
 		expect(await screen.findByText(/Agent wants a scratch task/)).toBeInTheDocument();
 		expect(screen.getByText(/Starts with no prompt/)).toBeInTheDocument();
+	});
+});
+
+describe("AgentLaunchRequestModal — auto-approve countdown", () => {
+	it("says when the launch will happen on its own", async () => {
+		renderModal(makeRequest({ autoApproveAt: Date.now() + 5 * 60_000 }));
+
+		const countdown = await screen.findByTestId("agent-launch-countdown");
+		// Rendered from the deadline, so a backgrounded window cannot drift.
+		expect(countdown).toHaveTextContent(/Starts on its own in 5:00|Starts on its own in 4:59/);
+	});
+
+	it("shows nothing when auto-approval is off", async () => {
+		renderModal(makeRequest({ autoApproveAt: null }));
+
+		await screen.findByText(/Asked by task #3/);
+		expect(screen.queryByTestId("agent-launch-countdown")).toBeNull();
+	});
+});
+
+describe("AgentLaunchRequestModal — variants", () => {
+	it("approves ONE task when the user never touches the variant control", async () => {
+		// The whole point of the default: someone who just wants to say yes must
+		// not end up with three worktrees.
+		const user = userEvent.setup();
+		const { onRespond } = renderModal();
+
+		const launch = await screen.findByTestId("agent-launch-accept");
+		await waitFor(() => expect(launch).toBeEnabled());
+		expect(launch).toHaveTextContent("Launch");
+		expect(screen.queryByLabelText("Variant 1")).toBeNull();
+		await user.click(launch);
+
+		expect(onRespond).toHaveBeenCalledWith(true, expect.objectContaining({
+			variants: [{ agentId: "builtin-claude", configId: "claude-auto" }],
+		}));
+	});
+
+	it("hands back one variant per row the user added, and says so on the button", async () => {
+		const user = userEvent.setup();
+		const { onRespond } = renderModal();
+
+		const add = await screen.findByTestId("agent-launch-add-variant");
+		await user.click(add);
+		await user.click(add);
+
+		// Numbered rows only appear once there is more than one to tell apart.
+		expect(await screen.findByLabelText("Variant 1")).toBeInTheDocument();
+		expect(screen.getByLabelText("Variant 3")).toBeInTheDocument();
+
+		const launch = screen.getByTestId("agent-launch-accept");
+		expect(launch).toHaveTextContent("Launch 3 variants");
+		await user.click(launch);
+
+		expect(onRespond).toHaveBeenCalledWith(true, expect.objectContaining({
+			variants: [
+				{ agentId: "builtin-claude", configId: "claude-auto" },
+				{ agentId: "builtin-claude", configId: "claude-auto" },
+				{ agentId: "builtin-claude", configId: "claude-auto" },
+			],
+		}));
+	});
+
+	it("drops a row again on Remove, back to a single unnumbered launch", async () => {
+		const user = userEvent.setup();
+		const { onRespond } = renderModal();
+
+		await user.click(await screen.findByTestId("agent-launch-add-variant"));
+		const removes = await screen.findAllByRole("button", { name: "Remove" });
+		await user.click(removes[1]!);
+
+		expect(screen.queryByLabelText("Variant 1")).toBeNull();
+		await user.click(screen.getByTestId("agent-launch-accept"));
+
+		expect(onRespond).toHaveBeenCalledWith(true, expect.objectContaining({
+			variants: [{ agentId: "builtin-claude", configId: "claude-auto" }],
+		}));
+	});
+
+	it("offers no variant control when the target cannot be spawned as a group", async () => {
+		// A task that is already running, or already in a variant group, has
+		// nothing for spawnVariants to branch from — so the affordance is absent
+		// rather than failing on approval.
+		renderModal(makeRequest({ canAddVariants: false }));
+
+		await waitFor(() => expect(screen.getByTestId("agent-launch-accept")).toBeEnabled());
+		expect(screen.queryByTestId("agent-launch-add-variant")).toBeNull();
+	});
+
+	it("mirrors an added variant to the pending request so an auto-approval uses it", async () => {
+		const user = userEvent.setup();
+		renderModal(makeRequest({ autoApproveAt: Date.now() + 5 * 60_000 }));
+
+		await user.click(await screen.findByTestId("agent-launch-add-variant"));
+
+		expect(api.request.updateAgentLaunchChoice).toHaveBeenCalledWith({
+			requestId: "req-1",
+			launch: expect.objectContaining({ variants: [expect.anything(), expect.anything()] }),
+		});
 	});
 });

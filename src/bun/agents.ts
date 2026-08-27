@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentConfiguration, CodingAgent, LlmProvider, Project } from "../shared/types";
+import type { AgentConfiguration, AgentFamily, CodingAgent, LlmProvider, Project } from "../shared/types";
 import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
 export { skillInvocationPrefix } from "../shared/types";
 import { buildProviderEnv, getProviderDefinition, providerOmitsModelFlag, providerPinnedModel } from "../shared/llm-provider";
@@ -17,9 +17,15 @@ import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
-import { ENV_UNSET } from "../shared/agent-accounts";
+import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
+export { claudeModelFamily } from "../shared/agent-accounts";
+import { codexModelCatalogArgs, modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
+import { writeCodexModelCatalog } from "./codex-model-catalog";
+import { loadModelCatalog } from "./model-catalog-store";
+import { ensureModelSidecar, preflightModelRoles } from "./model-sidecar";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "./agent-skills";
 import { getAgentAdapter, agentKey } from "../shared/agent-adapters/registry";
+import { autoAgentFamily, isKnownAgentCommand } from "../shared/agent-adapters/families";
 import type { AdapterLaunchOptions, CodexLaunchRuntime } from "../shared/agent-adapters/types";
 import type { TemplateContext } from "../shared/agent-adapters/template";
 
@@ -250,7 +256,19 @@ export function migrateOldFormat(data: any[]): CodingAgent[] {
 			}));
 	}
 
-	return data as CodingAgent[];
+	return data.map(migrateHooksIntegrationField) as CodingAgent[];
+}
+
+/** `hooksIntegration` declared a wrapper's HOOK family only. It is now
+ *  `agentFamily` and governs the whole adapter, so a declared wrapper resumes
+ *  and gets the dev3 protocol too. Same three values, same meaning, wider reach —
+ *  carried over in place. An older app reading this file finds no
+ *  `hooksIntegration` and falls back to the command-name guess, i.e. exactly the
+ *  behaviour it had before the user ever declared anything. */
+function migrateHooksIntegrationField(agent: any): any {
+	if (!agent || typeof agent !== "object" || !("hooksIntegration" in agent)) return agent;
+	const { hooksIntegration, ...rest } = agent;
+	return { ...rest, ...(rest.agentFamily ? {} : { agentFamily: hooksIntegration }) };
 }
 
 async function loadStoredAgents(): Promise<CodingAgent[]> {
@@ -323,15 +341,17 @@ export const DEV3_SYSTEM_PROMPT_GENERIC = GENERIC_SKILL_BODY;
  */
 export const DEV3_SYSTEM_PROMPT_CODEX = CODEX_SKILL_BODY;
 
-/** Returns true when the resolved base command is the Claude CLI.
+/** Returns true when the agent is the Claude CLI — by its declared family when
+ *  it has one, otherwise by the command name. A renamed binary that declares
+ *  `claude` must reach every one of these paths, or it silently loses managed
+ *  accounts, default env and the model override while still launching fine.
  *  Retained for the Claude-only *feature* code that is orthogonal to the
  *  per-agent launch/trust/hooks seam (managed accounts, statusLine, provider/
  *  Bedrock, default env, MCP pre-approval). The codex/gemini/cursor/opencode
  *  predicates were removed — their logic lives in the agent adapters
  *  (src/shared/agent-adapters), selected via getAgentAdapter. */
-export function isClaudeCommand(baseCmd: string): boolean {
-	const name = baseCmd.split("/").pop() ?? "";
-	return name === "claude";
+export function isClaudeCommand(baseCmd: string, family?: AgentFamily): boolean {
+	return agentKey(baseCmd, family) === "claude";
 }
 
 let codexProfileLaunchFlagOverride: CodexProfileLaunchFlag | null = null;
@@ -421,6 +441,10 @@ export interface CommandOptions {
 	 *  Threaded into the account env resolution so each spawned session locks to
 	 *  its chosen account instead of a single global active one. */
 	accountId?: string | null;
+	/** Raw CLI args contributed by the preset's model roles (Codex's `-c` config
+	 *  overrides). Appended after the provider's own routing args; the adapter
+	 *  shell-escapes them. */
+	modelRoleArgs?: string[];
 }
 
 /**
@@ -428,20 +452,20 @@ export interface CommandOptions {
  * Used for resuming sessions after tmux death / app restart. Delegated to the
  * agent adapter (single source of truth for resume syntax + capability).
  */
-export function buildResumeCommand(agentCmd: string, sessionId?: string): string | null {
-	return getAgentAdapter(agentCmd).buildResumeCommand(agentCmd, sessionId);
+export function buildResumeCommand(agentCmd: string, sessionId?: string, family?: AgentFamily): string | null {
+	return getAgentAdapter(agentCmd, family).buildResumeCommand(agentCmd, sessionId);
 }
 
 /** Returns true when the agent CLI supports session resumption. */
-export function supportsResume(baseCmd: string): boolean {
-	return getAgentAdapter(baseCmd).supportsResume;
+export function supportsResume(baseCmd: string, family?: AgentFamily): boolean {
+	return getAgentAdapter(baseCmd, family).supportsResume;
 }
 
 /** Returns true when the agent supports pre-assigned session IDs at launch time
  *  (accept a UUID on first launch and resume it later by ID). See each adapter
  *  for the per-agent details (e.g. Codex/OpenCode cannot pre-assign). */
-export function supportsPreAssignedSessionId(baseCmd: string): boolean {
-	return getAgentAdapter(baseCmd).supportsPreAssignedSessionId;
+export function supportsPreAssignedSessionId(baseCmd: string, family?: AgentFamily): boolean {
+	return getAgentAdapter(baseCmd, family).supportsPreAssignedSessionId;
 }
 
 /**
@@ -457,7 +481,7 @@ export function resolveAgentCommand(
 	options?: CommandOptions,
 ): string {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
-	const adapter = getAgentAdapter(baseCmd);
+	const adapter = getAgentAdapter(baseCmd, agent.agentFamily);
 
 	const adapterOptions: AdapterLaunchOptions = {
 		resume: options?.resume,
@@ -467,14 +491,95 @@ export function resolveAgentCommand(
 		// Under an env-delivering backend (e.g. Bedrock for Claude) the model comes
 		// from injected env (ANTHROPIC_MODEL), so the adapter omits --model.
 		skipModelForProvider: providerOmitsModelFlag(options?.llmProvider),
-		// Backend routing args (e.g. Codex on Bedrock), shell-escaped by the adapter.
-		providerArgs: getProviderDefinition(options?.llmProvider)?.enableArgs,
+		// Backend routing args (e.g. Codex on Bedrock) plus the preset's model-role
+		// overrides, shell-escaped by the adapter.
+		providerArgs: launchExtraArgs(options),
 		// Codex-only: resolve the theme/profile runtime (impure) here so the pure
 		// adapter stays pure. Non-Codex agents skip it (avoids the codex --help probe).
 		codex: adapter.command === "codex" ? codexLaunchRuntime() : undefined,
 	};
 
 	return adapter.launchArgs(baseCmd, config, ctx, adapterOptions).join(" ");
+}
+
+/** Every raw arg a launch adds beyond the preset's own: the selected backend's
+ *  routing args, then the preset's model-role overrides. Undefined when neither
+ *  applies, so nothing changes for an ordinary launch. */
+function launchExtraArgs(options: CommandOptions | undefined): string[] | undefined {
+	const args = [
+		...(getProviderDefinition(options?.llmProvider)?.enableArgs ?? []),
+		...(options?.modelRoleArgs ?? []),
+	];
+	return args.length > 0 ? args : undefined;
+}
+
+/**
+ * Route this launch through the model catalog when its preset binds roles: start
+ * the sidecar, inject the agent's own role delivery, pin the launch model. An
+ * explicit `envVars` entry still wins. Throws rather than launching unrouted,
+ * which would silently hit the agent's native API under the wrong model.
+ */
+export async function applyModelRoleLaunch(
+	baseCmd: string,
+	config: AgentConfiguration | undefined,
+	extraEnv: Record<string, string>,
+	options: CommandOptions,
+	family?: AgentFamily,
+): Promise<{ config: AgentConfiguration | undefined; options: CommandOptions; pinnedModel: boolean }> {
+	const bindings = config?.modelRoles;
+	if (!bindings || Object.keys(bindings).length === 0) return { config, options, pinnedModel: false };
+	// Which CLI this is, not what the binary is called: a declared wrapper routes
+	// through the slots of the agent it actually is.
+	const cli = agentKey(baseCmd, family);
+	if (modelRolesForAgent(cli).length === 0) return { config, options, pinnedModel: false };
+
+	const catalog = loadModelCatalog();
+	// A role pointing at a deleted model would otherwise launch unrouted, on the
+	// agent's native API — the exact silent wrong-model case this feature exists
+	// to prevent. Name the roles instead.
+	const orphans = orphanedRoleBindings(bindings, catalog);
+	if (orphans.length > 0) {
+		throw new Error(
+			`These model roles point at catalog models that no longer exist: ${orphans.join(", ")}. Fix the preset in Settings.`,
+		);
+	}
+
+	const runtime = await ensureModelSidecar();
+	const verdict = await preflightModelRoles(cli, bindings, catalog);
+	if (!verdict.ok) {
+		const detail = verdict.problems
+			.map((p) => (p.roleId ? `${p.roleId}: ${p.code}${p.detail ? ` (${p.detail})` : ""}` : p.detail ?? p.code))
+			.join("; ");
+		throw new Error(`The model proxy cannot serve this preset's roles — ${detail}`);
+	}
+
+	const plan = resolveModelRoleLaunch(cli, bindings, catalog, runtime, config?.model);
+	if (!plan) {
+		// Roles are bound but nothing could be built from them — Codex without its
+		// main model is the only way here. Launching would quietly use the agent's
+		// own model instead of the one the preset promises.
+		throw new Error("This preset binds model roles but not the model the agent actually launches with. Fix the preset in Settings.");
+	}
+
+	for (const [key, value] of Object.entries({ ...plan.env, ...roleUnsetEnv(plan) })) {
+		if (config?.envVars && key in config.envVars) continue;
+		extraEnv[key] = value;
+	}
+
+	// Metadata for a model Codex has never heard of. Best-effort by design:
+	// without it the session still runs, on Codex's placeholder numbers.
+	const args = [...plan.args];
+	if (cli === "codex") {
+		const catalogPath = await writeCodexModelCatalog(baseCmd, catalog);
+		if (catalogPath) args.push(...codexModelCatalogArgs(catalogPath));
+	}
+
+	const pinnedModel = Boolean(plan.modelFlag && config);
+	return {
+		config: pinnedModel ? { ...(config as AgentConfiguration), model: plan.modelFlag } : config,
+		options: args.length > 0 ? { ...options, modelRoleArgs: args } : options,
+		pinnedModel,
+	};
 }
 
 export function findConfig(
@@ -500,10 +605,10 @@ export const CLAUDE_DEFAULT_ENV: Record<string, string> = {
 	CLAUDE_CODE_NO_FLICKER: "1",
 };
 
-/** Build default env vars for an agent based on its base command. */
+/** Build default env vars for an agent based on which CLI it is. */
 export function getDefaultEnvForAgent(agent: CodingAgent, config?: AgentConfiguration): Record<string, string> {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
-	if (isClaudeCommand(baseCmd)) {
+	if (isClaudeCommand(baseCmd, agent.agentFamily)) {
 		return { ...CLAUDE_DEFAULT_ENV };
 	}
 	return {};
@@ -534,8 +639,9 @@ async function applyClaudeAccountEnv(
 	baseCmd: string,
 	extraEnv: Record<string, string>,
 	accountId?: string | null,
+	family?: AgentFamily,
 ): Promise<void> {
-	if (!isClaudeCommand(baseCmd) || extraEnv.CLAUDE_CONFIG_DIR) return;
+	if (!isClaudeCommand(baseCmd, family) || extraEnv.CLAUDE_CONFIG_DIR) return;
 	try {
 		const accountEnv = await getActiveClaudeSessionEnv(accountId);
 		for (const [key, value] of Object.entries(accountEnv)) {
@@ -554,10 +660,11 @@ async function applyCodexAccountEnv(
 	baseCmd: string,
 	extraEnv: Record<string, string>,
 	accountId?: string | null,
+	family?: AgentFamily,
 ): Promise<void> {
 	// Codex account switcher is an orthogonal feature (kept in front of the
-	// adapter seam); a plain command-name gate suffices here.
-	if (agentKey(baseCmd) !== "codex" || extraEnv.CODEX_HOME) return;
+	// adapter seam), but it still keys on which CLI this is, not on the file name.
+	if (agentKey(baseCmd, family) !== "codex" || extraEnv.CODEX_HOME) return;
 	try {
 		const accountEnv = await getActiveCodexSessionEnv(accountId);
 		for (const [key, value] of Object.entries(accountEnv)) {
@@ -566,19 +673,6 @@ async function applyCodexAccountEnv(
 	} catch (err) {
 		log.warn("Failed to resolve active Codex account env", { error: String(err) });
 	}
-}
-
-/** Classify a concrete Claude model id into its alias family. dev3 presets pass
- *  concrete ids (`claude-opus-4-8[1m]`, `claude-sonnet-5`, `claude-fable-5`), not
- *  the `opus`/`sonnet`/… aliases, so alias-default env vars alone never bind —
- *  we map the id to a family and rewrite the `--model` flag (applyModelOverride). */
-export function claudeModelFamily(modelId: string): "opus" | "sonnet" | "haiku" | "fable" | null {
-	const m = modelId.toLowerCase();
-	if (m.includes("opus")) return "opus";
-	if (m.includes("sonnet")) return "sonnet";
-	if (m.includes("haiku")) return "haiku";
-	if (m.includes("fable")) return "fable";
-	return null;
 }
 
 /** Rewrite a Claude preset's `--model` flag to the active API profile's override.
@@ -591,9 +685,10 @@ export function applyModelOverride(
 	config: AgentConfiguration | undefined,
 	baseCmd: string,
 	extraEnv: Record<string, string>,
+	agentFamily?: AgentFamily,
 ): AgentConfiguration | undefined {
 	// No config → no --model flag is emitted, so any env var wins on its own.
-	if (!config?.model || !isClaudeCommand(baseCmd)) return config;
+	if (!config?.model || !isClaudeCommand(baseCmd, agentFamily)) return config;
 	// ENV_UNSET sentinels (cleared vars after an account switch) are "not set".
 	const pick = (v: string | undefined) => (v && v !== ENV_UNSET ? v : undefined);
 	const family = claudeModelFamily(config.model);
@@ -605,14 +700,40 @@ export function applyModelOverride(
 
 /** Apply the binary path override that still exists on disk: a user-chosen path
  *  always, an auto-cached one only while it still names the binary the agent's
- *  base command does — an edited base command must win over a stale cache. */
+ *  base command does — an edited base command must win over a stale cache.
+ *
+ *  Swapping in the path REPLACES the base command, so the agent's identity would
+ *  otherwise be re-guessed from the new file name: pointing built-in Claude at
+ *  `~/bin/my-claude` turned it into an unknown CLI and killed resume, hooks and
+ *  the dev3 protocol, even though the user only said where the binary lives.
+ *  Pin the family the original command resolved to (an explicit declaration
+ *  still wins) so a path override changes only how the agent is spawned. */
 export function applyBinaryPathOverride(
 	agent: CodingAgent,
 	cachedPaths: Record<string, string> | undefined,
 	customPaths?: Record<string, string>,
 ): CodingAgent {
 	const path = agentBinaryPathOverride(agent.id, agent.baseCommand, cachedPaths, customPaths);
-	return path && existsSync(path) ? { ...agent, baseCommand: path } : agent;
+	if (!path || !existsSync(path)) return agent;
+	// Only pin a family the ORIGINAL command actually resolved to. When it was
+	// unrecognized too, leave the field alone so the path's own name still gets
+	// its chance — pinning "none" there would be strictly worse than today.
+	const pinned = isKnownAgentCommand(agent.baseCommand) ? autoAgentFamily(agent.baseCommand) : undefined;
+	const agentFamily = agent.agentFamily ?? pinned;
+	return { ...agent, baseCommand: path, ...(agentFamily ? { agentFamily } : {}) };
+}
+
+/** A resolved launch: the command line, the records it came from, the env to
+ *  inject, and — separately from the agent record — which CLI this launch IS.
+ *  The family is what every downstream step (resume, trust, hooks, skill prefix)
+ *  must key on; deriving it again from the command name would re-open the very
+ *  hole that made a renamed Claude binary unresumable. */
+export interface ResolvedAgentCommand<A extends CodingAgent | null = CodingAgent> {
+	command: string;
+	agent: A;
+	config: AgentConfiguration | undefined;
+	extraEnv: Record<string, string>;
+	agentFamily: AgentFamily | undefined;
 }
 
 export async function resolveCommandForAgent(
@@ -620,7 +741,7 @@ export async function resolveCommandForAgent(
 	configId: string | null,
 	ctx: TemplateContext,
 	options?: CommandOptions,
-): Promise<{ command: string; agent: CodingAgent; config: AgentConfiguration | undefined; extraEnv: Record<string, string> }> {
+): Promise<ResolvedAgentCommand> {
 	const allAgents = await getAllAgents();
 	const agent = allAgents.find((a) => a.id === agentId);
 	if (!agent) {
@@ -645,15 +766,21 @@ export async function resolveCommandForAgent(
 	if (config?.envVars) {
 		Object.assign(extraEnv, config.envVars);
 	}
-	await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId);
-	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId);
+	await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+	const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
 	const command = resolveAgentCommand(
 		agentWithPath,
-		resolveLaunchConfig(config, agentWithPath, baseCmd, extraEnv),
+		resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
 		ctx,
-		providerOpts,
+		routed.options,
 	);
-	return { command, agent, config, extraEnv };
+	// `agent` stays the stored record — callers derive the base command from it,
+	// and swapping in the override path there would change what they persist.
+	// The family rides alongside instead: a path override can pin one the stored
+	// record does not carry, and every caller needs the same answer to resume,
+	// trust and hook this launch exactly the way it was built.
+	return { command, agent, config, extraEnv, agentFamily: agentWithPath.agentFamily };
 }
 
 /** The launch-time model pipeline shared by both resolveCommand* entry points:
@@ -665,8 +792,14 @@ export function resolveLaunchConfig(
 	agent: CodingAgent,
 	baseCmd: string,
 	extraEnv: Record<string, string>,
+	modelAlreadyPinned = false,
 ): AgentConfiguration | undefined {
-	return applyModelOverride(applyProviderModel(config, agent), baseCmd, extraEnv);
+	// A routed launch already names the catalog model the proxy will serve. Both
+	// rewrites below match on the model STRING, so a catalog model whose name
+	// happens to carry an alias word ("sonnet-cheap") would be swapped for another
+	// role's model — the silent wrong-model case routing exists to prevent.
+	if (modelAlreadyPinned) return config;
+	return applyModelOverride(applyProviderModel(config, agent), baseCmd, extraEnv, agent.agentFamily);
 }
 
 /** The provider selected on this agent, but only if it's a backend actually
@@ -674,8 +807,8 @@ export function resolveLaunchConfig(
 function agentProvider(agent: CodingAgent, config: AgentConfiguration | undefined): LlmProvider | undefined {
 	const def = getProviderDefinition(agent.llmProvider);
 	if (!def) return undefined;
-	const baseCmd = (config?.baseCommandOverride || agent.baseCommand).split("/").pop() ?? "";
-	return def.agentCommand === baseCmd ? agent.llmProvider : undefined;
+	const key = agentKey(config?.baseCommandOverride || agent.baseCommand, agent.agentFamily);
+	return def.agentCommand === key ? agent.llmProvider : undefined;
 }
 
 /** For backends that deliver the model via the --model flag (no `modelEnv`,
@@ -720,7 +853,7 @@ export async function resolveCommandForProject(
 	worktreePath: string,
 	configId?: string | null,
 	options?: CommandOptions,
-): Promise<{ command: string; agent: CodingAgent | null; config: AgentConfiguration | undefined; extraEnv: Record<string, string> }> {
+): Promise<ResolvedAgentCommand<CodingAgent | null>> {
 	const ctx: TemplateContext = {
 		taskTitle,
 		taskDescription,
@@ -749,15 +882,16 @@ export async function resolveCommandForProject(
 			...providerEnvForAgent(agentWithPath, config),
 			...buildTaskEnv(project, taskTitle, "", worktreePath, config),
 		};
-		await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId);
-		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId);
+		await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+		const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
 		const command = resolveAgentCommand(
 			agentWithPath,
-			resolveLaunchConfig(config, agentWithPath, baseCmd, extraEnv),
+			resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
 			ctx,
-			providerOpts,
+			routed.options,
 		);
-		return { command, agent, config, extraEnv };
+		return { command, agent, config, extraEnv, agentFamily: agentWithPath.agentFamily };
 	}
 
 	log.warn("Default agent not found, falling back to bash", {
@@ -769,6 +903,7 @@ export async function resolveCommandForProject(
 		agent: null,
 		config: undefined,
 		extraEnv: buildTaskEnv(project, taskTitle, "", worktreePath),
+		agentFamily: undefined,
 	};
 }
 

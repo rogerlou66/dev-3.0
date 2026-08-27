@@ -82,10 +82,19 @@ vi.mock("../git", () => ({
 	fetchCompareRef: vi.fn().mockResolvedValue(true),
 	fetchFork: vi.fn().mockResolvedValue(true),
 	listRemotes: vi.fn().mockResolvedValue(["origin"]),
+	hasOriginRemote: vi.fn().mockResolvedValue(true),
+	detectDefaultCompareRef: vi.fn(async (_path: string, baseBranch: string) => `origin/${baseBranch}`),
+	// The real cascade, so a test that stubs detectDefaultCompareRef still steers
+	// every caller: explicit ref wins, otherwise git decides.
+	resolveCompareRef: vi.fn(async (path: string, baseBranch: string, explicit?: string) =>
+		explicit || git.detectDefaultCompareRef(path, baseBranch)),
 	isForeignBranchRef: vi.fn().mockResolvedValue(false),
+	localBranchNameForRef: vi.fn(async (_path: string, ref: string) => ref.replace(/^origin\//, "")),
+	refAuthorAndSubject: vi.fn().mockResolvedValue({ author: null, subject: null }),
 	refExists: vi.fn().mockResolvedValue(true),
 	isRefMergedInto: vi.fn().mockResolvedValue(false),
 	getBranchStatus: vi.fn(),
+	listBranchCommitMessages: vi.fn().mockResolvedValue([]),
 	getTaskDiff: vi.fn(),
 	getUncommittedChanges: vi.fn(),
 	getUnpushedCount: vi.fn(),
@@ -106,10 +115,20 @@ vi.mock("../git", () => ({
 	virtualWorkDir: vi.fn((p: any, t: any) => `${p.path}/${String(t.id).slice(0, 8)}/work`),
 	run: vi.fn(),
 	getOriginUrl: vi.fn().mockResolvedValue("https://github.com/test/repo.git"),
+	resolveRef: vi.fn().mockResolvedValue("1111111111111111111111111111111111111111"),
 }));
 
 vi.mock("../github", () => ({
 	runGitHub: vi.fn(),
+	// Whether `gh` can operate here at all. Its own behaviour lives in
+	// github.test.ts; here it is a switch so a handler can be tested both ways.
+	isGitHubRepo: vi.fn().mockResolvedValue(true),
+	isNotAGitHubRepoError: vi.fn().mockReturnValue(false),
+	// The one gh query behind both PR detection and Merge's route choice. Its
+	// parsing lives in github.test.ts; here it is the switch that decides whether a
+	// task has an open PR. Default: none, so Merge takes the local squash route.
+	findOpenPullRequest: vi.fn().mockResolvedValue({ pr: null, isGitHub: true }),
+	resolveMergeMethod: vi.fn().mockResolvedValue("squash"),
 	isPullRequestMerged: vi.fn(),
 	getPullRequestSnapshot: vi.fn().mockResolvedValue(null),
 	getGitHubShellExports: vi.fn().mockResolvedValue([]),
@@ -276,6 +295,7 @@ vi.mock("../logger", () => ({
 vi.mock("../paths", () => ({
 	DEV3_HOME: "/tmp/test-dev3",
 	OPS_DIR: "/tmp/test-dev3/ops",
+	SANDBOX_DIR: "/tmp/test-dev3/sandbox",
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -304,6 +324,7 @@ vi.mock("node:fs", () => ({
 	readlinkSync: vi.fn(() => { throw new Error("EINVAL"); }),
 	realpathSync: vi.fn((p: string) => p),
 	unlinkSync: vi.fn(() => undefined),
+	rmSync: vi.fn(() => undefined),
 	symlinkSync: vi.fn(() => undefined),
 }));
 
@@ -332,6 +353,7 @@ import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
 import * as pty from "../pty-server";
+import { getUserShell } from "../shell-env";
 import { tmux } from "../tmux";
 import * as systemClipboard from "../system-clipboard";
 import * as agents from "../agents";
@@ -390,6 +412,7 @@ const {
 	emitTaskSound,
 	runCleanupScript,
 	portableReadKey,
+	launchTaskWithAgentChoice,
 } = await import("../rpc-handlers");
 const {
 	nativeHunterColumnRatios,
@@ -1332,6 +1355,108 @@ describe("handlers.reorderProjects", () => {
 	});
 });
 
+describe("launchTaskWithAgentChoice", () => {
+	beforeEach(() => vi.clearAllMocks());
+	// `clearAllMocks` keeps implementations, and these tests have to stub the whole
+	// lifecycle write path — so drop them explicitly or later suites inherit them.
+	afterEach(() => {
+		vi.mocked(data.updateTask).mockReset();
+		vi.mocked(data.getTask).mockReset();
+		vi.mocked(data.getProject).mockReset();
+		vi.mocked(data.setTaskPriority).mockReset();
+	});
+
+	it("applies the launch priority group-wide before the task moves", async () => {
+		// Issue #1496: the launch dialog's priority pick (or the inherited default)
+		// is not part of the single-task patch — priority belongs to the group.
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", status: "todo", priority: "P3" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.setTaskPriority).mockResolvedValue([{ ...task, priority: "P0" }]);
+		vi.mocked(data.updateTask).mockImplementation(async (_p, _id, patch) => ({ ...task, ...patch }));
+		const push = vi.fn();
+		setPushMessage(push);
+
+		await launchTaskWithAgentChoice({
+			taskId: "task-1",
+			projectId: "proj-1",
+			targetStatus: "in-progress",
+			choice: { variants: [{ agentId: null, configId: null }], priority: "P0" },
+		});
+
+		expect(data.setTaskPriority).toHaveBeenCalledWith(project, "task-1", "P0");
+		expect(push).toHaveBeenCalledWith("taskUpdated", {
+			projectId: "proj-1",
+			task: expect.objectContaining({ priority: "P0" }),
+		});
+	});
+
+	it("leaves the priority alone when the launch asks for the one already stored", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", status: "todo", priority: "P1" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.updateTask).mockImplementation(async (_p, _id, patch) => ({ ...task, ...patch }));
+		setPushMessage(vi.fn());
+
+		await launchTaskWithAgentChoice({
+			taskId: "task-1",
+			projectId: "proj-1",
+			targetStatus: "in-progress",
+			choice: { variants: [{ agentId: null, configId: null }], priority: "P1" },
+		});
+
+		expect(data.setTaskPriority).not.toHaveBeenCalled();
+	});
+
+	// The agent-request dialog's variant picker ends here. Asserting the control
+	// renders proves nothing — this is the seam where N tasks actually start.
+	it("mints a real variant group when the launch carries more than one variant", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", status: "todo", seq: 5, priority: "P2", worktreePath: null, branchName: null });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_p, taskId, mutator) => {
+			const { updates, result } = await mutator({ ...task, id: taskId });
+			return { task: { ...task, id: taskId, ...updates } as Task, result };
+		});
+		vi.mocked(data.addTask).mockImplementation(async (_p, description, status, extra) => (
+			{ ...task, id: "task-2", description, status, ...extra } as Task
+		));
+		vi.mocked(data.updateTask).mockImplementation(async (_p, id, patch) => ({ ...task, id, ...patch }));
+		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/vwt", branchName: "dev3/task-1" });
+		setPushMessage(vi.fn());
+
+		const launched = await launchTaskWithAgentChoice({
+			taskId: "task-1",
+			projectId: "proj-1",
+			targetStatus: "in-progress",
+			choice: {
+				variants: [
+					{ agentId: "agent-1", configId: "cfg-1" },
+					{ agentId: "agent-2", configId: "cfg-2" },
+				],
+				priority: "P2",
+			},
+		});
+
+		expect(launched).toHaveLength(2);
+		// The source keeps its id — only variants 2..N are new tasks.
+		expect(launched[0].id).toBe("task-1");
+		expect(launched[0].variantIndex).toBe(1);
+		expect(launched[1].variantIndex).toBe(2);
+		// One group, one seq, two different agents: a real variant group, not two
+		// unrelated launches.
+		expect(launched[0].groupId).toBeTruthy();
+		expect(launched[1].groupId).toBe(launched[0].groupId);
+		expect(launched[1].seq).toBe(launched[0].seq);
+		expect(launched[0].agentId).toBe("agent-1");
+		expect(launched[1].agentId).toBe("agent-2");
+		expect(data.addTask).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("handlers.setTaskPriority", () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -1422,6 +1547,38 @@ describe("handlers.addProject", () => {
 
 		const result = await handlers.addProject({ path: "/tmp/test", name: "Test" });
 		expect(result).toEqual({ ok: false, error: "Error: disk full" });
+	});
+
+	// The renderer keeps this exact object until the next getProjects, and
+	// getProjects is not polled. A raw record left `defaultCompareRef` unresolved,
+	// which the UI then rendered as `origin/<base>` in a repo with no remote.
+	it("returns the new project with its config already resolved", async () => {
+		const project = makeProject({ defaultBaseBranch: "main", defaultCompareRef: undefined });
+		vi.mocked(git.isGitRepo).mockResolvedValue(true);
+		vi.mocked(data.addProject).mockResolvedValue(project);
+		vi.mocked(git.getDefaultBranch).mockResolvedValue("main");
+		vi.mocked(data.updateProject).mockResolvedValue(project);
+		vi.mocked(repoConfig.resolveProjectConfig).mockImplementationOnce(
+			async (p: any) => ({ ...p, defaultCompareRef: "main" }),
+		);
+
+		const result = await handlers.addProject({ path: "/tmp/local-only", name: "Local Only" });
+
+		expect(result.ok).toBe(true);
+		expect((result as { ok: true; project: Project }).project.defaultCompareRef).toBe("main");
+	});
+
+	it("still returns the project when config resolution fails", async () => {
+		const project = makeProject();
+		vi.mocked(git.isGitRepo).mockResolvedValue(true);
+		vi.mocked(data.addProject).mockResolvedValue(project);
+		vi.mocked(git.getDefaultBranch).mockResolvedValue("main");
+		vi.mocked(data.updateProject).mockResolvedValue(project);
+		vi.mocked(repoConfig.resolveProjectConfig).mockRejectedValueOnce(new Error("bad config"));
+
+		const result = await handlers.addProject({ path: "/tmp/test-project", name: "Test Project" });
+
+		expect(result).toEqual({ ok: true, project });
 	});
 
 	it("rejects a git project inside the dev-3.0 data directory", async () => {
@@ -1815,6 +1972,31 @@ describe("handlers.saveGlobalSettings", () => {
 
 		expect(isNotificationSuppressed()).toBe(true);
 		_resetWatchedNotificationState();
+	});
+
+	// Changing the shell re-sources the tmux config, which goes through
+	// applyTmuxTheme — and that call also PINS the active themed config. Reading
+	// the theme off an absent `resolvedTheme` would darken a light-theme user's
+	// terminals on a change that has nothing to do with the theme.
+	it.skipIf(process.platform === "win32")(
+		"keeps the live theme when the shell changes and the snapshot carries no resolvedTheme",
+		async () => {
+			vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+			await handlers.setTmuxTheme({ theme: "light" });
+			vi.mocked(pty.applyTmuxTheme).mockClear();
+
+			await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+
+			expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("leaves tmux alone when the shell did not change", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+
+		await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+
+		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
 	});
 });
 
@@ -5172,7 +5354,12 @@ describe("handlers.getTaskDiff base branch resolution", () => {
 });
 
 describe("handlers.getBranchStatus", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		// Implementations survive clearAllMocks, so a PR mocked by an earlier test in
+		// this file would otherwise leak into every later one.
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
+	});
 
 	it("returns zeros when task has no worktree", async () => {
 		const project = makeProject();
@@ -5181,7 +5368,50 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
-		expect(result).toEqual({ ahead: 0, behind: 0, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null });
+		expect(result).toEqual({ ahead: 0, behind: 0, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 });
+	});
+
+	// A project added from a local folder has no `origin`. Comparing against
+	// `origin/<base>` there fails every 15s and reported "0 files changed".
+	it("compares against the local base branch when the repo has no remote", async () => {
+		const project = makeProject({ defaultBaseBranch: "main" });
+		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.hasOriginRemote).mockResolvedValueOnce(false);
+		vi.mocked(git.detectDefaultCompareRef).mockResolvedValueOnce("main");
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0 });
+		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
+		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 1, insertions: 5, deletions: 0, fileStats: [] });
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
+
+		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
+
+		expect(result.hasRemote).toBe(false);
+		expect(git.getBranchStatus).toHaveBeenCalledWith("/tmp/wt", "main");
+		expect(git.getBranchDiffStats).toHaveBeenCalledWith("/tmp/wt", "main");
+	});
+
+	it("reports hasRemote and keeps origin/<base> when the repo has a remote", async () => {
+		const project = makeProject({ defaultBaseBranch: "main" });
+		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.hasOriginRemote).mockResolvedValueOnce(true);
+		vi.mocked(git.detectDefaultCompareRef).mockResolvedValueOnce("origin/main");
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
+		vi.mocked(git.getUnpushedCount).mockResolvedValue(1);
+		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 1, insertions: 1, deletions: 0, fileStats: [] });
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
+
+		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
+
+		expect(result.hasRemote).toBe(true);
+		expect(git.getBranchStatus).toHaveBeenCalledWith("/tmp/wt", "origin/main");
 	});
 
 	it("returns branch status with canRebase=true when behind", async () => {
@@ -5433,7 +5663,10 @@ describe("handlers.getBranchStatus", () => {
 			await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 
 			expect(data.updateTask).not.toHaveBeenCalled();
-			expect(git.getBranchStatus).toHaveBeenCalledWith("/tmp/wt", "origin/feature/source");
+			// A task-specific base is LOCAL — the branch it forked from lives in this
+			// repo and may never have been pushed. Same rule the git bar labels with,
+			// and the same one merge's rebase guard uses.
+			expect(git.getBranchStatus).toHaveBeenCalledWith("/tmp/wt", "feature/source");
 		});
 
 		it("does not probe anything for a task on the project base", async () => {
@@ -5537,7 +5770,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: JSON.stringify([{ number: 42 }]), stderr: "", code: 0 });
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 42, url: "", title: null, author: null }, isGitHub: true });
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 		expect(result.prNumber).toBe(42);
@@ -5557,7 +5790,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: JSON.stringify([{ number: 42, url: prUrl }]), stderr: "", code: 0 });
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 42, url: prUrl, title: null, author: null }, isGitHub: true });
 		const push = vi.fn();
 		setPushMessage(push);
 
@@ -5567,7 +5800,10 @@ describe("handlers.getBranchStatus", () => {
 		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task: persisted });
 	});
 
-	it("returns prNumber=null when gh pr list returns empty array", async () => {
+	// One handler-level case now: an empty list, a gh failure and unparsable output
+	// all reach here as the same "no open PR" probe. Which gh answers produce it is
+	// findOpenPullRequest's own contract, pinned in github.test.ts.
+	it("returns prNumber=null when there is no open PR", async () => {
 		const project = makeProject();
 		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "feat/login" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
@@ -5578,7 +5814,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", code: 0 });
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 		expect(result.prNumber).toBeNull();
@@ -5608,39 +5844,7 @@ describe("handlers.getBranchStatus", () => {
 		expect(result.prUrl).toBe(task.prUrl);
 	});
 
-	it("returns prNumber=null when gh pr list fails", async () => {
-		const project = makeProject();
-		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "feat/login" });
-		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.getTask).mockResolvedValue(task);
-		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
-		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
-		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
-		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: false, stdout: "", stderr: "gh not found", code: 1 });
 
-		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
-		expect(result.prNumber).toBeNull();
-	});
-
-	it("returns prNumber=null when gh returns invalid JSON", async () => {
-		const project = makeProject();
-		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "feat/login" });
-		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.getTask).mockResolvedValue(task);
-		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
-		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
-		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
-		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "not json", stderr: "", code: 0 });
-
-		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
-		expect(result.prNumber).toBeNull();
-	});
 
 	it("returns prNumber for draft PRs (drafts are included)", async () => {
 		const project = makeProject();
@@ -5653,7 +5857,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
-		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: JSON.stringify([{ number: 10 }]), stderr: "", code: 0 });
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 10, url: "", title: null, author: null }, isGitHub: true });
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 		expect(result.prNumber).toBe(10);
@@ -7208,7 +7412,12 @@ describe("handlers.killTmuxSession", () => {
 // ================================================================
 
 describe("handlers.mergeTask", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		// Implementations survive clearAllMocks, so a PR mocked by an earlier test in
+		// this file would otherwise leak into every later one.
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
+	});
 
 	it("throws when task has no worktree", async () => {
 		const project = makeProject();
@@ -7219,6 +7428,159 @@ describe("handlers.mergeTask", () => {
 		await expect(
 			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" }),
 		).rejects.toThrow("Task has no worktree");
+	});
+
+	it("refuses to merge a foreign-code task's branch", async () => {
+		const project = makeProject();
+		const task = makeTask({ branchName: "pr/1234", worktreePath: "/tmp/wt", foreignCode: true });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await expect(
+			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" }),
+		).rejects.toThrow(/not yours/);
+	});
+
+	/**
+	 * Stopping at the local base branch is a half-landing: origin never hears about
+	 * the squash and nothing says the local base is ahead. The push step must be
+	 * last, so its exit code is the operation's verdict.
+	 */
+	it("pushes the base branch after the squash when there is a remote", async () => {
+		const project = makeProject({ path: "/tmp/project-root" });
+		const task = makeTask({ id: "task-1", title: "T", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		const writeSpy = vi.spyOn(Bun, "write").mockResolvedValue(undefined as never);
+		const intervalSpy = vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as any);
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockReturnValue(0 as any);
+
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 } as any);
+		vi.mocked(git.refExists).mockResolvedValue(true);
+		vi.mocked(git.hasOriginRemote).mockResolvedValue(true);
+		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
+
+		try {
+			await handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" });
+
+			const call = writeSpy.mock.calls.find(([p]) => String(p).endsWith("-git-merge.sh"));
+			const script = String(call?.[1] ?? "");
+			expect(script).toContain("'git' 'push' 'origin' 'main'");
+			expect(script.indexOf("'git' 'commit'")).toBeLessThan(script.indexOf("'git' 'push'"));
+		} finally {
+			writeSpy.mockRestore();
+			intervalSpy.mockRestore();
+			timeoutSpy.mockRestore();
+		}
+	});
+
+	/**
+	 * The defect this route fixes: with a PR open, Merge squashed into the LOCAL base
+	 * and pushed it — landing the work behind its own review and CI, and leaving a
+	 * commit on the user's `main` that origin refused. An open PR means `gh pr merge`.
+	 */
+	it("merges the open pull request via gh instead of squashing locally", async () => {
+		const project = makeProject({ path: "/tmp/project-root" });
+		const task = makeTask({ id: "task-1", title: "T", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		const writeSpy = vi.spyOn(Bun, "write").mockResolvedValue(undefined as never);
+		const push = vi.fn();
+		setPushMessage(push);
+
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 1475, url: "", title: null, author: null }, isGitHub: true });
+		vi.mocked(github.resolveMergeMethod).mockResolvedValue("squash");
+		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "", stderr: "", code: 0 });
+
+		try {
+			await handlers.mergeTask({ taskId: "task-1", projectId: "proj-1", expectRoute: "pull-request" });
+
+			expect(vi.mocked(github.runGitHub).mock.calls[0][2]).toEqual(["pr", "merge", "1475", "--squash"]);
+			// No pane, no squash script, and no `git push origin main` anywhere.
+			expect(writeSpy.mock.calls.find(([p]) => String(p).includes("git-merge"))).toBeUndefined();
+			// The verdict still reaches the renderer the same way a pane's would, so the
+			// status refresh and the "task done?" offer keep working.
+			expect(push).toHaveBeenCalledWith("gitOpCompleted", {
+				taskId: task.id, projectId: project.id, operation: "merge", ok: true,
+			});
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("surfaces gh's own refusal when the PR is not mergeable", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 7, url: "", title: null, author: null }, isGitHub: true });
+		vi.mocked(github.runGitHub).mockResolvedValue({
+			ok: false, stdout: "", stderr: "Pull request #7 is not mergeable: the base branch policy prohibits the merge", code: 1,
+		});
+
+		await expect(
+			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1", expectRoute: "pull-request" }),
+		).rejects.toThrow(/not mergeable/);
+	});
+
+	// The renderer's button already told the user which of the two routes it would
+	// take. Running the other one silently is the failure mode `expectRoute` exists
+	// to prevent — a local squash-and-push behind a "merge the PR" confirmation.
+	it("refuses a local-squash click once a PR has appeared", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 9, url: "", title: null, author: null }, isGitHub: true });
+
+		await expect(
+			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1", expectRoute: "local-squash" }),
+		).rejects.toThrow(/#9 is open/);
+		expect(github.runGitHub).not.toHaveBeenCalled();
+	});
+
+	it("refuses a PR click once the PR is gone", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
+
+		await expect(
+			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1", expectRoute: "pull-request" }),
+		).rejects.toThrow(/No open pull request/);
+	});
+
+	it("stays local when the project has no remote", async () => {
+		const project = makeProject({ path: "/tmp/project-root" });
+		const task = makeTask({ id: "task-1", title: "T", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		const writeSpy = vi.spyOn(Bun, "write").mockResolvedValue(undefined as never);
+		const intervalSpy = vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as any);
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockReturnValue(0 as any);
+
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 } as any);
+		vi.mocked(git.refExists).mockResolvedValue(true);
+		vi.mocked(git.hasOriginRemote).mockResolvedValue(false);
+		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
+
+		try {
+			await handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" });
+
+			const call = writeSpy.mock.calls.find(([p]) => String(p).endsWith("-git-merge.sh"));
+			expect(String(call?.[1] ?? "")).not.toContain("'push'");
+		} finally {
+			writeSpy.mockRestore();
+			intervalSpy.mockRestore();
+			timeoutSpy.mockRestore();
+		}
 	});
 
 	it("throws when task has no branch (both live and stored are null)", async () => {
@@ -7546,6 +7908,80 @@ describe("handlers.pushTask", () => {
 		await expect(
 			handlers.pushTask({ taskId: "task-1", projectId: "proj-1" }),
 		).rejects.toThrow("Task has no worktree");
+	});
+
+	/** A foreign-code task is looking at commits the user did not write. */
+	it("refuses to push a foreign-code task's branch", async () => {
+		const project = makeProject();
+		const task = makeTask({ branchName: "pr/1234", worktreePath: "/tmp/wt", foreignCode: true });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await expect(
+			handlers.pushTask({ taskId: "task-1", projectId: "proj-1" }),
+		).rejects.toThrow(/not yours/);
+	});
+
+	/**
+	 * The rebase-then-push case. A plain push is refused as non-fast-forward, so the
+	 * handler must escalate on its own — the renderer cannot ask for a force.
+	 */
+	it("leases a force push when the branch diverged from origin", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		const writeSpy = vi.spyOn(Bun, "write").mockResolvedValue(undefined as never);
+		const intervalSpy = vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as any);
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockReturnValue(0 as any);
+
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.hasOriginRemote).mockResolvedValue(true);
+		vi.mocked(git.getBehindOriginCount).mockResolvedValue(3);
+		vi.mocked(git.resolveRef).mockResolvedValue("abc123abc123abc123abc123abc123abc123abcd");
+		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
+
+		try {
+			await handlers.pushTask({ taskId: "task-1", projectId: "proj-1" });
+
+			const call = writeSpy.mock.calls.find(([p]) => String(p).endsWith("-git-push.sh"));
+			const script = String(call?.[1] ?? "");
+			expect(script).toContain("'--force-with-lease=dev3/t:abc123abc123abc123abc123abc123abc123abcd'");
+			// A fresh fetch is what makes the lease sha meaningful.
+			expect(git.fetchOrigin).toHaveBeenCalledWith(project.path, "dev3/t");
+		} finally {
+			writeSpy.mockRestore();
+			intervalSpy.mockRestore();
+			timeoutSpy.mockRestore();
+		}
+	});
+
+	it("pushes plainly when the branch has not diverged", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", branchName: "dev3/t", worktreePath: "/tmp/wt" });
+		const writeSpy = vi.spyOn(Bun, "write").mockResolvedValue(undefined as never);
+		const intervalSpy = vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as any);
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockReturnValue(0 as any);
+
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.hasOriginRemote).mockResolvedValue(true);
+		vi.mocked(git.getBehindOriginCount).mockResolvedValue(0);
+		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
+
+		try {
+			await handlers.pushTask({ taskId: "task-1", projectId: "proj-1" });
+
+			const call = writeSpy.mock.calls.find(([p]) => String(p).endsWith("-git-push.sh"));
+			const script = String(call?.[1] ?? "");
+			expect(script).not.toContain("force");
+			expect(script).toContain("'git' 'push' '-u' 'origin' 'HEAD'");
+		} finally {
+			writeSpy.mockRestore();
+			intervalSpy.mockRestore();
+			timeoutSpy.mockRestore();
+		}
 	});
 });
 
@@ -8560,7 +8996,9 @@ describe("handlers.getProjectPtyUrl", () => {
 			`project-${project.id}`,
 			project.id,
 			"/tmp/test-project",
-			process.env.SHELL || "/bin/zsh",
+			// The resolved shell, not a pinned path: this suite mocks node:fs, so
+			// the resolver finds no candidate installed and last-resorts to /bin/sh.
+			getUserShell(),
 			{ API_URLS: "https://api.example.com,http://api.example.com" },
 			"dev3",
 			"project",
@@ -12222,6 +12660,7 @@ describe("triggerColumnAgentIfNeeded", () => {
 			agent: { id: "builtin-claude", name: "Claude", baseCommand: "claude", configurations: [], defaultConfigId: "" } as any,
 			config: undefined,
 			extraEnv: {},
+			agentFamily: undefined,
 		});
 	});
 
@@ -12303,6 +12742,7 @@ describe("triggerColumnAgentIfNeeded", () => {
 			agent: { id: "builtin-codex", name: "Codex", baseCommand: "codex", configurations: [], defaultConfigId: "" } as any,
 			config: undefined,
 			extraEnv: {},
+			agentFamily: undefined,
 		});
 		vi.mocked(setupAgentHooks).mockResolvedValueOnce("--dangerously-bypass-hook-trust");
 
@@ -12951,6 +13391,143 @@ describe("createTask foreignCode", () => {
 	});
 });
 
+// ================================================================
+// createTask — a review task's identity on the board
+// ================================================================
+
+/**
+ * Every assertion here is about the TITLE A REVIEW TASK ENDS UP WITH, not about
+ * the string builder: the whole complaint was that N review cards read the same,
+ * and only the create path decides that.
+ */
+describe("createTask review title", () => {
+	function titleOf(): string | undefined {
+		return vi.mocked(data.addTask).mock.calls[0]?.[3]?.title;
+	}
+
+	beforeEach(() => {
+		vi.mocked(data.getProject).mockReset();
+		vi.mocked(data.addTask).mockReset();
+		vi.mocked(git.isForeignBranchRef).mockResolvedValue(false);
+		vi.mocked(git.localBranchNameForRef).mockImplementation(async (_p, ref) => ref.replace(/^origin\//, ""));
+		vi.mocked(git.refAuthorAndSubject).mockResolvedValue({ author: null, subject: null });
+		vi.mocked(github.findOpenPullRequest).mockReset();
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
+		const project = makeProject();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.addTask).mockResolvedValue(makeTask({ status: "todo", worktreePath: null }));
+	});
+
+	it("names the task after the pull request, its author and what it changes", async () => {
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({
+			pr: { number: 493, url: "u", title: "fix: pin tmux to a vendored keg (#493)", author: "Arseny Pavlenko" },
+			isGitHub: true,
+		});
+
+		await handlers.createTask({
+			projectId: "proj-1",
+			description: "Review the code changes on this branch. Your task is to perform a thorough review",
+			existingBranch: "origin/fix/tmux",
+			taskType: "pr-review",
+		});
+
+		expect(titleOf()).toBe("Review of #493 from Arseny Pavlenko about pin tmux to a vendored");
+	});
+
+	it("gives two review tasks on different branches two different titles", async () => {
+		vi.mocked(github.findOpenPullRequest)
+			.mockResolvedValueOnce({ pr: { number: 1, url: "u", title: "Add remote mode", author: "Ann" }, isGitHub: true })
+			.mockResolvedValueOnce({ pr: { number: 2, url: "u", title: "Drop the shim", author: "Bo" }, isGitHub: true });
+		const description = "Review the code changes on this branch.";
+
+		await handlers.createTask({ projectId: "proj-1", description, existingBranch: "origin/a", taskType: "pr-review" });
+		const first = titleOf();
+		vi.mocked(data.addTask).mockClear();
+		await handlers.createTask({ projectId: "proj-1", description, existingBranch: "origin/b", taskType: "pr-review" });
+
+		expect(first).toBe("Review of #1 from Ann about Add remote mode");
+		expect(titleOf()).toBe("Review of #2 from Bo about Drop the shim");
+		expect(titleOf()).not.toBe(first);
+	});
+
+	it("falls back to the branch and its commit tip when there is no pull request", async () => {
+		vi.mocked(git.refAuthorAndSubject).mockResolvedValue({ author: "Jane Doe", subject: "Rework the parser" });
+
+		await handlers.createTask({
+			projectId: "proj-1", description: "Review", existingBranch: "yanive/feat/x", taskType: "pr-review",
+		});
+
+		expect(titleOf()).toBe("Review of yanive/feat/x from Jane Doe about Rework the parser");
+	});
+
+	// The negative case that must not read as "from unknown": no PR, no readable
+	// author. A shorter honest title still tells the cards apart.
+	it("drops the author clause when nobody can be named", async () => {
+		await handlers.createTask({
+			projectId: "proj-1", description: "Review", existingBranch: "origin/feat/x", taskType: "pr-review",
+		});
+
+		expect(titleOf()).toBe("Review of feat/x");
+	});
+
+	it("keeps the review title even when the caller derived one from the description", async () => {
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({
+			pr: { number: 7, url: "u", title: "Speed up boot", author: "Ann" }, isGitHub: true,
+		});
+
+		await handlers.createTask({
+			projectId: "proj-1", description: "Review", title: "look at the migration path",
+			existingBranch: "origin/feat/x", taskType: "pr-review",
+		});
+
+		expect(titleOf()).toBe("Review of #7 from Ann about Speed up boot");
+	});
+
+	it("leaves a non-review task's title alone", async () => {
+		await handlers.createTask({
+			projectId: "proj-1", description: "My own work", title: "My own work", existingBranch: "origin/feat/x",
+		});
+
+		expect(titleOf()).toBe("My own work");
+		expect(github.findOpenPullRequest).not.toHaveBeenCalled();
+	});
+
+	it("keeps the derived title when gh and git both fail, instead of a broken one", async () => {
+		vi.mocked(github.findOpenPullRequest).mockRejectedValue(new Error("gh exploded"));
+
+		await handlers.createTask({
+			projectId: "proj-1", description: "Review", title: "derived", existingBranch: "origin/feat/x",
+			taskType: "pr-review",
+		});
+
+		expect(titleOf()).toBe("derived");
+	});
+
+	// The other half of the same invariant, guarded from this side: dev3 must write
+	// the draft into `title` only. Claiming a user edit here would make the CLI
+	// guard refuse the agent's rename, and the prompt's title step would be dead.
+	it("writes the draft as a plain title and never claims a user edit", async () => {
+		vi.mocked(github.findOpenPullRequest).mockResolvedValue({
+			pr: { number: 7, url: "u", title: "Speed up boot", author: "Ann" }, isGitHub: true,
+		});
+
+		await handlers.createTask({
+			projectId: "proj-1", description: "Review", existingBranch: "origin/feat/x", taskType: "pr-review",
+		});
+
+		const extras = vi.mocked(data.addTask).mock.calls[0]?.[3];
+		expect(extras?.title).toBe("Review of #7 from Ann about Speed up boot");
+		expect(extras?.titleEditedByUser).toBeUndefined();
+		expect(extras?.customTitle).toBeUndefined();
+	});
+
+	it("never asks GitHub for a review task with no branch to review", async () => {
+		await handlers.createTask({ projectId: "proj-1", description: "Review", taskType: "pr-review" });
+
+		expect(github.findOpenPullRequest).not.toHaveBeenCalled();
+	});
+});
+
 describe("toggleTaskWatch", () => {
 	const push = vi.fn();
 
@@ -13055,6 +13632,34 @@ describe("handlers.createPullRequest", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+	});
+
+	/**
+	 * `gh` is the only forge client dev3 speaks. Offering Create PR on a GitLab or
+	 * Gitea origin hands the agent a `gh pr create` it cannot run, and the failure
+	 * lands in the terminal minutes later looking like the agent's fault.
+	 */
+	it("refuses when origin is not a GitHub remote", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(github.isGitHubRepo).mockResolvedValueOnce(false);
+
+		await expect(
+			handlers.createPullRequest({ taskId: "task-1", projectId: project.id }),
+		).rejects.toThrow(/GitHub remote/);
+	});
+
+	it("refuses for a foreign-code task", async () => {
+		const project = makeProject();
+		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree", foreignCode: true });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await expect(
+			handlers.createPullRequest({ taskId: "task-1", projectId: project.id }),
+		).rejects.toThrow(/not yours/);
 	});
 
 	it("sends the PR prompt to the active pane of the task session", async () => {
@@ -13641,5 +14246,25 @@ describe("handlers.previewUpdatePopover", () => {
 		expect(res.available).toBe(false);
 		expect(res.changelog).toBeNull();
 		expect(res.diagnostics.includesUncommitted).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// handlers.saveAgents
+// ---------------------------------------------------------------------------
+
+describe("handlers.saveAgents", () => {
+	it("tells every open surface about the new presets, so no launch picker keeps the old ones", async () => {
+		const push = vi.fn();
+		setPushMessage(push);
+		const merged = [{ id: "builtin-claude", name: "Claude", baseCommand: "claude", configurations: [{ id: "c1", name: "OpenRouter" }] }];
+		vi.mocked(agents.getAllAgents).mockResolvedValue(merged as any);
+
+		await handlers.saveAgents({ agents: [] as any });
+
+		const call = push.mock.calls.find((c) => c[0] === "agentsUpdated");
+		expect(call).toBeTruthy();
+		// The merged list, not the caller's payload: overrides only exist merged.
+		expect(call?.[1]).toBe(merged);
 	});
 });

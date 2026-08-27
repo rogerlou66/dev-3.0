@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { load } from "js-toml";
-import { buildCodexHooks } from "../shared/agent-hooks";
+import { buildCodexHooks, CODEX_STATUS_HOOK_EVENTS, mentionsDev3Cli } from "../shared/agent-hooks";
 import type { HookCliDialect } from "../shared/dev3-cli-path";
 import { createLogger } from "./logger";
 import { spawnSync } from "./spawn";
@@ -36,6 +36,7 @@ interface CodexPermissionsProfile {
 
 interface CodexConfig {
 	default_permissions?: string;
+	hooks?: Record<string, unknown>;
 	features?: Record<string, unknown>;
 	projects?: Record<string, { trust_level?: string; sandbox_mode?: string }>;
 	profiles?: Record<string, Record<string, unknown>>;
@@ -44,6 +45,13 @@ interface CodexConfig {
 
 interface CodexConfigOptions {
 	codexVersion?: string | null;
+	/**
+	 * How the hook command is spelled. Same reason `joinLike` exists: reading the
+	 * host's dialect makes an assertion about the other platform's output
+	 * impossible to write, and the tests then only ever cover the runner they are
+	 * on. Production leaves it unset and gets the host's dialect.
+	 */
+	dialect?: HookCliDialect;
 }
 
 interface CodexVersion {
@@ -804,7 +812,7 @@ export function ensureCodexConfig(
 	}
 
 	// --- 6. Ensure dev3's status hooks are declared in the file ---
-	config = ensureDev3HooksBlock(config);
+	config = ensureDev3HooksBlock(config, options.dialect);
 
 	return config;
 }
@@ -851,10 +859,164 @@ export function buildDev3CodexHooksBlock(options?: { dialect?: HookCliDialect })
  * Replace the managed hooks block, or append it when absent. Delimited by marker
  * comments so the user's own `[[hooks.*]]` entries — which are legal beside ours,
  * TOML arrays of tables simply accumulate — are never touched.
+ *
+ * The markers alone are not enough to stay idempotent: a block whose opening
+ * marker is gone (this file is also edited by hand and by other tools) stops
+ * matching, and every launch would append one more copy — six live hooks become
+ * twelve, and a stranger's Codex session pays for all of them. So anything left
+ * that is unmistakably ours is collected by content too.
  */
-function ensureDev3HooksBlock(config: string): string {
-	const stripped = config.replace(DEV3_HOOKS_BLOCK, "\n");
-	return appendBlock(stripped, `\n${buildDev3CodexHooksBlock()}`);
+function ensureDev3HooksBlock(config: string, dialect?: HookCliDialect): string {
+	const stripped = stripOrphanedDev3HookTables(config.replace(DEV3_HOOKS_BLOCK, "\n"));
+	return appendBlock(stripped, `\n${buildDev3CodexHooksBlock({ dialect })}`);
+}
+
+/** `[[hooks.<Event>]]`, the head of one array-of-tables group. */
+const HOOKS_GROUP_HEADER = /^\[\[hooks\.([A-Za-z_][A-Za-z0-9_]*)\]\]$/;
+
+/** An event dev3 declares itself. A group on any other event is never ours. */
+function isDev3StatusEvent(event: string): boolean {
+	return (CODEX_STATUS_HOOK_EVENTS as readonly string[]).includes(event);
+}
+
+/**
+ * Our own status handler, in every spelling that can be left behind: guarded or
+ * bare, POSIX tilde or a quoted Windows path. Mentioning the CLI is NOT enough —
+ * a hook the user wrote themselves may call `dev3` for their own reasons (a
+ * `task move` on their own event), and collecting that would delete their work.
+ */
+function isDev3CodexHookCommand(command: string): boolean {
+	if (!mentionsDev3Cli(command)) return false;
+	return /(^|[\s'"])hook\s+codex(['"\s]|$)/.test(command);
+}
+
+/**
+ * Drop `[[hooks.*]]` groups whose every handler is a dev3 command — the copies a
+ * lost marker orphaned. A group holding anything else is left completely alone:
+ * the user may legally put their own handler next to ours.
+ *
+ * Same proof as `pruneCodexProjectEntries`: the edit is re-parsed and compared
+ * against the shape we intended, and anything unexpected means the file keeps
+ * its original text.
+ */
+function stripOrphanedDev3HookTables(config: string): string {
+	if (!config.includes("[[hooks.")) return config;
+
+	let parsed: CodexConfig;
+	try {
+		parsed = load(config) as CodexConfig;
+	} catch {
+		return config;
+	}
+	if (parsed.hooks == null) return config;
+
+	const lines = config.split("\n");
+	const keep: string[] = [];
+	const removedPerEvent = new Map<string, number>();
+	let index = 0;
+
+	while (index < lines.length) {
+		const match = lines[index].trim().match(HOOKS_GROUP_HEADER);
+		if (match == null) {
+			keep.push(lines[index]);
+			index += 1;
+			continue;
+		}
+
+		const event = match[1];
+		const subHeader = `[[hooks.${event}.hooks]]`;
+		let end = index + 1;
+		while (end < lines.length) {
+			const trimmed = lines[end].trim();
+			if (trimmed.startsWith("[") && trimmed !== subHeader) break;
+			end += 1;
+		}
+
+		const body = lines.slice(index, end);
+		const commands = body
+			.map((line) => line.trim().match(/^command\s*=\s*"(.*)"$/))
+			.filter((m): m is RegExpMatchArray => m != null)
+			.map((m) => m[1]);
+		if (
+			isDev3StatusEvent(event) && commands.length > 0
+			&& commands.every((command) => isDev3CodexHookCommand(unescapeTomlBasic(command)))
+		) {
+			removedPerEvent.set(event, (removedPerEvent.get(event) ?? 0) + 1);
+			// Trailing blanks and our own leftover marker comments belong to the block.
+			while (keep.length > 0 && isDroppableLead(keep[keep.length - 1])) keep.pop();
+			index = end;
+			continue;
+		}
+
+		keep.push(...body);
+		index = end;
+	}
+
+	if (removedPerEvent.size === 0) return config;
+
+	const stripped = keep.join("\n").replace(/\n{3,}/g, "\n\n");
+	const expected = expectedAfterHookRemoval(parsed, removedPerEvent);
+	let after: CodexConfig;
+	try {
+		after = load(stripped) as CodexConfig;
+	} catch {
+		log.warn("Collecting orphaned dev3 hook entries would break config.toml, leaving it alone");
+		return config;
+	}
+	if (expected == null || stableStringify(after) !== stableStringify(expected)) {
+		log.warn("Collecting orphaned dev3 hook entries changed unrelated config, leaving it alone");
+		return config;
+	}
+
+	log.info("Collected orphaned dev3 hook entries from Codex config.toml", {
+		groups: [...removedPerEvent.values()].reduce((sum, count) => sum + count, 0),
+	});
+	return stripped;
+}
+
+function isDroppableLead(line: string): boolean {
+	const trimmed = line.trim();
+	return trimmed === "" || trimmed === DEV3_HOOKS_BEGIN || trimmed === DEV3_HOOKS_END;
+}
+
+/** Undo the escaping `tomlBasicString` applies, so Windows commands still match. */
+function unescapeTomlBasic(value: string): string {
+	return value.replaceAll("\\\\", "\\").replaceAll('\\"', '"');
+}
+
+/**
+ * The config we expect after the removal: the parsed original with every
+ * all-dev3 group filtered out of the named events. Returns null when the text
+ * edit and the parsed view disagree on how many groups that is — the signal to
+ * leave the file untouched.
+ */
+function expectedAfterHookRemoval(
+	parsed: CodexConfig,
+	removedPerEvent: Map<string, number>,
+): CodexConfig | null {
+	const hooks: Record<string, unknown> = { ...(parsed.hooks ?? {}) };
+	for (const [event, count] of removedPerEvent) {
+		const groups = hooks[event];
+		if (!Array.isArray(groups)) return null;
+		const remaining = groups.filter((group) => !isAllDev3Group(group));
+		if (groups.length - remaining.length !== count) return null;
+		if (remaining.length === 0) delete hooks[event];
+		else hooks[event] = remaining;
+	}
+	const expected: CodexConfig = { ...parsed, hooks };
+	if (Object.keys(hooks).length === 0) delete expected.hooks;
+	return expected;
+}
+
+/** A parsed `[[hooks.<Event>]]` group whose every handler command is dev3's. */
+function isAllDev3Group(group: unknown): boolean {
+	if (group == null || typeof group !== "object") return false;
+	const handlers = (group as { hooks?: unknown }).hooks;
+	if (!Array.isArray(handlers) || handlers.length === 0) return false;
+	return handlers.every((handler) => {
+		const command = (handler as { command?: unknown } | null)?.command;
+		return typeof command === "string" && isDev3CodexHookCommand(command);
+	});
 }
 
 /**

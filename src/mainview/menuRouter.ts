@@ -1,6 +1,7 @@
 import { api } from "./rpc";
 import { startClosePanePicker } from "./close-pane-picker";
 import { toggleStreamerMode } from "./streamer-mode";
+import { openAgentTrafficLog } from "./agent-traffic-events";
 import { toast } from "./toast";
 import { playTaskCompletionSound, taskSoundDiagnostics } from "./task-sounds";
 import { moveTaskToStatus } from "./utils/moveTaskToStatus";
@@ -125,12 +126,17 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "debug-play-sound-completed":
 		case "debug-play-sound-cancelled": {
 			const status = action === "debug-play-sound-completed" ? "completed" : "cancelled";
-			const played = playTaskCompletionSound(status);
-			// Decoding is async on the first play, so a same-tick snapshot would
-			// always report zero buffers.
+			playTaskCompletionSound(status);
+			// `play()` resolves or rejects asynchronously, so a same-tick snapshot
+			// would report the previous attempt's verdict.
 			await new Promise((resolve) => setTimeout(resolve, 300));
 			const probe = taskSoundDiagnostics();
-			const line = `sound ${status}: ${played ? "play requested" : "skipped — setting off"} · context ${probe.context} · buffers ${probe.buffers} · queued ${probe.queued}`;
+			const outcome = !probe.enabled
+				? "skipped — setting off"
+				: probe.blocked
+					? "refused by autoplay policy — queued until the next click"
+					: "playing";
+			const line = `sound ${status}: ${outcome} · queued ${probe.queued}`;
 			console.info("[menu][sound-probe]", line);
 			toast.info(line, { source: "menu" });
 			return;
@@ -403,6 +409,9 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "term-cheat-sheet":
 			window.dispatchEvent(new CustomEvent("menu:show-tmux-cheat-sheet"));
 			return;
+		case "view-agent-traffic-log":
+			openAgentTrafficLog();
+			return;
 		case "help-keyboard-shortcuts":
 			window.dispatchEvent(new CustomEvent("menu:show-keyboard-shortcuts"));
 			return;
@@ -443,6 +452,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"about", "hard-refresh",
 	// View / navigation
 	"view-dashboard", "view-kanban", "view-changelog", "view-stats", "open-settings",
+	"view-agent-traffic-log",
 	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview",
 	"debug-play-sound-completed", "debug-play-sound-cancelled", "debug-push-sound-completed",
 	"open-new-task", "open-add-project", "open-project-switch", "open-command-palette",

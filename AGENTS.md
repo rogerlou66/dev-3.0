@@ -18,13 +18,29 @@ Key idea: each project is a git repo; each task gets its own **git worktree** + 
 - Design system (colors, typography, components, glass morphism, themes): [`DESIGN.md`](DESIGN.md) — follow it for any UI code
 - UX architecture manifest (object model, navigation, surfaces, action taxonomy, placement rules, complexity budgets): [`docs/ux/PRODUCT_UX_BIBLE.md`](docs/ux/PRODUCT_UX_BIBLE.md) + machine-readable [`docs/ux/ux-architecture.yaml`](docs/ux/ux-architecture.yaml) — the canonical UX reference for where features live and which surface owns which action
 
-## UI/UX work — always plan with `/ux-principal` (MANDATORY)
+## UI/UX work — which skill, and when (MANDATORY)
 
-Before designing or implementing **anything** UI/UX-related — a new screen, surface, button, modal, toolbar action, navigation change, any visible control — you MUST first invoke the `/ux-principal` skill. It reads the UX manifest, classifies the feature, decides placement, navigation, action hierarchy, token roles, and complexity budget, and produces an implementation brief. Never add UI controls ad hoc — that is exactly how toolbar/inspector button creep (the project's top UX anti-pattern) happens.
+Two different jobs, two different skills, and they are not interchangeable. `/ux-principal` decides **where a thing goes, before it exists**. The `better-*` family judges **how it is built**. Pick by what the change does, not by how big it is:
 
-If the manifest is stale or missing, regenerate it with `/ux-create-manifest`. Keep `docs/ux/` updated whenever surfaces or the action taxonomy change.
+| Your change | Skill | Why |
+|---|---|---|
+| Adds a **destination, surface, or action** — new screen, new panel/drawer/inspector, new button or menu item, a nav change, a modal, or anything that pushes a complexity budget | `/ux-principal` first, **MANDATORY** | It owns placement, action classification, navigation rules, and the budgets. Never add UI controls ad hoc — that is exactly how toolbar/inspector button creep (the project's top UX anti-pattern) happens |
+| Changes **how an existing control looks or feels** — radius, shadow, spacing, motion, icon, copy, colour, type, focus ring, ARIA | the owning `better-*` skill (`/better-ui`, `/better-layout`, `/better-writing`, `/better-typography`, `/better-colors`, `/better-accessibility`) | They are the craft authority and go deeper than the manifest ever did. Reading 300 KB of manifest to restyle a badge buys nothing |
+| A whole screen or flow, before a PR | `/better-interface` | Cross-discipline review pass over all six craft domains |
+
+`/ux-principal` no longer owns craft rules. Colour, contrast, typography, copy, motion, layout grammar, and accessibility belong to the `better-*` skills; the bible's §9a keeps only the **project deltas and documented overrides** those skills cannot know (see [Where dev3 overrides the better-family skills](#where-dev3-overrides-the-better-family-skills)). If the manifest is stale or missing, regenerate it with `/ux-create-manifest`. Keep `docs/ux/` updated whenever surfaces or the action taxonomy change — and note it is under a size budget enforced by `src/bun/__tests__/ux-docs-budget.test.ts`.
 
 **Screenshot the zone before you plan it.** Driving the current UI beats reasoning from memory about what is on screen — same tooling as the mandatory QA pass afterwards, see [Manual UI QA in a browser](#manual-ui-qa-in-a-browser-mandatory).
+
+## Where dev3 overrides the better-family skills
+
+Three points where this repo has already decided and a `better-*` pass must not re-open them. Full reasoning: `decisions/2026/08/21/split-ux-principal-from-the-better-skills.md`.
+
+| Subject | Ruling |
+|---|---|
+| Borders vs shadows | **`better-ui` wins.** A border that exists only to fake depth becomes a layered transparent `box-shadow`. Borders that carry structure or state stay: dividers, layout separators, selection, focus, and the status-colour identity borders |
+| Looping hover animation on the `tmx-` / `gtx-` / `hdr-` / `th-` icon families | **dev3 wins, deliberately.** `better-ui`'s motion-restraint rule does not apply to them — the loop is the personality of those surfaces and runs only while the cursor rests on one icon. Do not file it as a finding |
+| Motion primitives (press feedback, icon transitions, entrance animations) | **`better-ui` wins.** Use its exact values — `scale(0.96)` on press, icon cross-fade `scale 0.25→1` / `opacity 0→1` / `blur 4px→0`, `cubic-bezier(0.2, 0, 0, 1)`. There is no motion library here, so use `better-ui`'s no-library CSS path; do not add `framer-motion` to satisfy the rule |
 
 ## No native dialogs — ever (remote/browser mode) (MANDATORY)
 
@@ -41,6 +57,38 @@ The app runs as the **Electrobun desktop** shell **and** as a **headless remote 
 - Anything richer → a regular React modal (see existing `*Modal.tsx` components).
 
 **Exception — genuinely OS-level chrome, not dialogs:** `Utils.showNotification` (Notification Center) and the native macOS menu bar (`application-menu.ts`) are allowed (they no-op / are absent in browser mode). Any *dialog* triggered from a menu action must be routed to the renderer via a push message and shown as React UI.
+
+## Telemetry — anonymous always, opt-out always respected (MANDATORY)
+
+Two rules, and they are not negotiable. A change that cannot meet both does not ship.
+
+**1. Everything that leaves the machine is anonymous.** Project names, repo and worktree paths,
+task titles, branch names, prompts, diffs, file contents, terminal output, agent output, and the
+user's own name or email are **never** sent — not as an event property, not inside an error string,
+not as a URL, not harvested by a vendor SDK's automatic capture. What may be sent: a random
+per-install id, and coarse facts about the app itself (version, OS, which screen, which agent
+preset, a screen name, a duration).
+
+**2. An opt-out is respected everywhere, in a released binary.** One switch turns off every
+channel. No exception stays alive "just for crashes", "just for feature flags", or "just for the
+updater". A gate that only works when you rebuild from source is not an opt-out — that exact bug
+shipped once (`VITE_TELEMETRY` constant-folded to always-on in a release), which is why this
+section exists.
+
+What that means in code:
+
+| Rule | In practice |
+|---|---|
+| One gate, asked at send time | `telemetryEnabled()` (`src/mainview/telemetry.ts`) is the only authority. Never let a channel bypass it, and never cache its answer past a toggle |
+| The verdict arrives before page scripts | The host resolves it (`src/shared/telemetry-consent.ts`) and injects it into the HTML shell (`src/bun/analytics-identity.ts`) — posthog-js initializes at module import, so an RPC round trip is too late |
+| Free-form strings get redacted | Error messages and stack lines pass through `redactPaths()` before they go to a vendor. The local log file gets the untouched text |
+| Vendor auto-capture ships masked | `mask_all_text` and `mask_all_element_attributes` are on. Adding a channel that captures visible text or DOM attributes (session replay, copy capture, heatmaps, surveys) needs the same treatment or it stays off |
+| An opted-out install hands over no identity | No distinct id in the HTML shell — the remote server serves that same shell to an unauthenticated browser |
+| New env-level opt-outs are additive | `DEV3_TELEMETRY=off` and `DO_NOT_TRACK=1` each suffice on their own; none of them is allowed to be the *only* way out, because the in-app toggle must always work too |
+
+Adding a telemetry channel, a new event, or a new property? State plainly which of the two rules
+could be at risk and how the change satisfies it, and cover it with a test that fails when the
+protection is removed — a comment claiming a field is masked is not evidence.
 
 ## Language policy
 
@@ -179,6 +227,8 @@ Non-obvious architectural decisions, hacks, and workarounds go in `decisions/YYY
 
 **Create one when you:** relied on undocumented behavior or reverse-engineered internals; chose a non-obvious approach over a simpler one for a specific reason; worked around a dependency bug/limitation; made a decision with trade-offs or known risks.
 
+**Supersede, don't let records rot.** If your change makes an existing record's claims false, fix that record in the same commit: add a short supersede note at its top ("Superseded on YYYY-MM-DD by `decisions/YYYY/MM/DD/<new-slug>.md`: <one line on what changed>") and write the new record covering the new rationale. A record that confidently states something the code no longer does is worse than no record — the next agent will trust it.
+
 **Required sections:** 1. Context 2. Investigation (if applicable) 3. Decision (what + where in the code) 4. Risks 5. Alternatives considered. **Keep it short** — 2-4 sentences per section, fits on one screen; link relevant code paths (file + function names). Commit the record together with the code change.
 
 ## Agent skills
@@ -217,6 +267,8 @@ bun run build:prod   # Build (production channel)
 bun run lint         # TypeScript type-check — must pass before pushing
 ```
 
+**Pin every new dependency to an exact version** (no `^`, no `~`) in `package.json`. Builds here resolve packages through a mirror that can lag the public registry, so a range that silently floats onto a freshly published patch makes the branch uninstallable on the maintainer's machine with no signal that the version is the cause. Existing ranges stay as they are — this applies to what you add.
+
 **HMR / Vite watch is NOT used in this project.** Never run `bun run watch`, `bun run hmr`, or any `vite --watch` flow — the only supported dev loop is `bun run dev`. **Never run `bun run bump`** — versioning is owned by the user, not AI agents.
 
 ## CLI exit codes
@@ -240,11 +292,28 @@ Public `dev3` CLI exit codes are a documented contract:
 - **Compensating event** — the explicit event dispatched when an `abort` effect fails. The transition table declares the recovery path; the executor must not hide it in ad-hoc catch logic.
 - **Peek** — a read-only observation of another task's terminal (`dev3 peek`): pane summary plus a bounded text tail. It never focuses, writes, resizes, or takes ownership, and it never classifies the peer's state — the caller reads the tail. Invisible from inside the observed task, and the observed task does not have to cooperate. See [decision 199](decisions/2026/08/06/peek-read-only-coordination-glance.md).
 - **Freshness granularity** — whether a reported last-output time describes one pane or the whole window. Native reports `pane`; tmux reports `window`, because tmux has no per-pane activity variable. Always carried next to the time so a reader knows how precise it is, never smoothed over.
+- **Handoff** — the port plus the still-running `cloudflared` process that a headless server about to exit leaves to its replacement (`RemoteHandoff` in `~/.dev3.0/remote/state.json`). The one place a child process is deliberately leaked: the quick tunnel's hostname is random per cloudflared process and the session cookie is bound to it, so killing it would change the public URL and force a re-auth on the device the user is holding. The successor re-binds the same port and adopts the same process; a record whose writer is still alive, or whose tunnel pid is dead, is discarded rather than trusted. See [self-update-handoff-and-quiet-window](decisions/2026/08/20/self-update-handoff-and-quiet-window.md).
+- **Staged update** — the slow half of a self-update, done while the old server is still serving: `brew fetch`, or download-and-extract into the install dir. The apply step is then renames only, which is what keeps the unreachable window at a few seconds. An apply that fails leaves a fully working server with its tunnel still attached.
+- **Quiet window** — the condition a headless box must meet before it updates itself unattended: no task in progress, no terminal producing output, and no browser connected, all three held together for 10 minutes. Past 72 hours of waiting it collapses to the first condition alone, so an open browser tab cannot pin a box on an old build. A pure reducer (`evaluateQuietWindow`) that also owns the hold clock; an unreadable activity probe counts as busy, never as quiet.
 
 Two-process model:
 
 - **Main process** (`src/bun/index.ts`) — runs in Bun via Electrobun APIs (`BrowserWindow`, `Updater`, `Utils`); creates the app window, handles lifecycle.
 - **Renderer** (`src/mainview/`) — React app bundled by Vite; entry `main.tsx`, root component `App.tsx`.
+
+### Model routing glossary
+
+Vocabulary for running an agent CLI against arbitrary LLM providers through dev3's local proxy sidecar. Two layers, deliberately separate: one knows about providers and money and nothing about agents, the other knows about agents and nothing about credentials.
+
+**Three axes, and they are not interchangeable.** A launch picks a **harness**, then a **model**, then a **mode** — and a **provider** is a property of the model, never a fourth axis the user picks. `Provider` used to label the harness column in the launcher, which is how one word came to mean three things on one screen. It now means exactly one: who serves the model.
+
+- **Harness** — the agent CLI that runs: Claude Code, Codex, Gemini, Cursor Agent, Oh My OpenCode. It is the obvious first axis, because everything else is a property of it — which model slots exist, what a mode means, which config files it reads. Named `harness` in UI labels and in code (`launch.harness`, `${idPrefix}-harness`); "provider" for this is banned. `CodingAgent` remains the type name — one preset of one harness.
+- **Model catalog** — the app-wide list of models the user has made available, plus the providers and credentials behind them. One catalog per installation; it is not switchable and has no active/inactive state. dev3 owns the skeleton of the sidecar's config file; the user owns its contents.
+- **Catalog model** — one entry in the catalog: a user-chosen name bound to exactly one provider and one provider-native model id (`fast-gremlin` → OpenRouter, `deepseek-flash`). The name is what travels on the wire as `<provider>/<name>`, so it is limited to letters, digits, dot, dash and underscore; the sidecar resolves it. An entry belongs to a single provider — a name that could resolve to two providers is not a catalog model.
+- **Model roles** — the per-preset binding of catalog models to the roles an agent CLI actually exposes. Roles are that CLI's own, never a dev3-invented common vocabulary: Claude Code has its alias slots, Codex has its main / default-subagent / review models. A preset carrying roles is its own picker group (`groupLabel`), because its "model" is a set, not one model.
+- **Proxy sidecar** — the dev3-managed local process that realizes the catalog. Bound to loopback on one fixed port (`DEFAULT_SIDECAR_PORT`, below the ephemeral range), falling back to the last run's port and then to any free one; launched with an isolated app dir, credentials reaching it only through its child environment. One per app, brought up with the app whenever the catalog has a provider, dies with the app. The user never has to start it — the Start button exists for after a failure.
+- **Local session key** — the secret the agent CLI presents to the sidecar instead of any upstream API key. Remembered with the sidecar's port in its runtime dir and reused across restarts, because both are baked into a running agent's launch environment. Upstream keys never leave dev3's own storage and the sidecar's environment.
+- **Generated model metadata** — the model catalog dev3 hands Codex at launch so a routed model is a known model rather than an unknown slug on placeholder numbers. Cloned from Codex's own catalog, never authored by dev3, and it *replaces* the built-in catalog rather than extending it, so the built-ins are carried forward. Best-effort: if it cannot be generated the session launches on Codex's fallback metadata.
 
 ### RPC protocol
 
@@ -320,6 +389,8 @@ All user-facing renderer strings are localized via `src/mainview/i18n/`; locales
 
 **Adding a string:** add the key to the matching `en/` domain file (e.g., `kanban.ts` for `kanban.*` keys), add translations to the same domain file in `ru/` and `es/`, then use `t("your.key")`.
 
+**Search tokens have a help registry.** The in-app search help (`translations/*/help.ts`) spells out the full token vocabulary verbatim in more than one string (`priority:P0 label:"…" agent:… status:… space:"…" is:attention is:home has:port`), and `translations/*/tips.ts` carries a shorter list of the same tokens. Adding or renaming a search token means updating every one of those strings in all three locales in the same commit — an unlisted token is invisible to anyone who opens Help.
+
 **Interpolation:** `{variable}` placeholders — `t("dashboard.failedAdd", { error: String(err) })`.
 
 **Pluralization:** suffix convention `_one`, `_few`, `_many`, `_other`; call `t.plural("dashboard.projectCount", count)`. English needs only `_one`/`_other`; Russian needs all four (`"{count} проект"` / `"{count} проекта"` / `"{count} проектов"` / `"{count} проектов"`).
@@ -333,8 +404,8 @@ All user-facing renderer strings are localized via `src/mainview/i18n/`; locales
 **Framework: Vitest** with `happy-dom` and React Testing Library. Three configs run as three independent processes: `vitest.config.ts` (renderer), `vitest.config.bun.ts` (backend), `vitest.config.cli.ts` (CLI).
 
 ```bash
-bun run test          # renderer + backend + cli in parallel, minus 3 slow e2e files (~6s)
-bun run test:full     # everything incl. slow e2e (~42s) — CI/PR only, not local
+bun run test          # renderer + backend + cli in parallel, minus 6 slow e2e suites (~6s)
+bun run test:full     # everything incl. slow e2e (~42s) — what CI runs, required before a PR
 bun run test:bun      # backend only
 bun run test:cli      # CLI only
 bun run test:watch    # watch mode
@@ -347,7 +418,7 @@ bun run test:watch    # watch mode
 Two gates, escalating. Committing itself has no gate — commit freely, verify before the work leaves the machine.
 
 1. **Before `git push`** — `bun run lint` plus the tests covering what you touched. A push that breaks type-checking is unacceptable even if the tests pass.
-2. **Before `gh pr create`, before enabling auto-merge, and again after any rebase** — the **full** `bun run test`, green end-to-end. Only the file you edited is NOT sufficient: sibling test files assert against the same components (e.g. `TaskCard.tsx` is covered by both `TaskCard.test.tsx` AND `TaskCardSeq.test.tsx`), and a rebase pulls in code your run never saw. Fix and re-run until green BEFORE opening the PR — don't open it and watch CI go red.
+2. **Before `gh pr create`, before enabling auto-merge, and again after any rebase** — **`bun run test:full`**, green end-to-end. Not the plain `bun run test`: it excludes 6 slow e2e suites that CI does run, so a green fast run is not a green CI. Only the file you edited is NOT sufficient either: sibling test files assert against the same components (e.g. `TaskCard.tsx` is covered by both `TaskCard.test.tsx` AND `TaskCardSeq.test.tsx`), and a rebase pulls in code your run never saw. Fix and re-run until green BEFORE opening the PR — don't open it and watch CI go red.
 
 ### Manual UI QA in a browser (MANDATORY)
 

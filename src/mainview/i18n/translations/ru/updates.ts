@@ -19,6 +19,7 @@ const updates = {
 	"update.checkFailedDetail": "Не удалось проверить обновления: {error}",
 	"update.devBuildNotice": "Это dev-сборка — обновления отключены. Чтобы обновиться, пересоберите из исходников.",
 	"update.applyFailed": "Не удалось применить обновление: {error}",
+	"update.installedNoRestart": "Обновление установлено, но этот сервер нужно перезапустить вручную.",
 	"update.whatsNewVersion": "Что нового в v{version}",
 	"update.whatsNewSinceVersion": "Что нового после v{version}",
 	"update.canaryBadge": "Canary",
@@ -103,6 +104,11 @@ const updates = {
 	"changelog.clearSearch": "Очистить поиск",
 	"changelog.noResults": "Ничего не найдено по запросу или фильтрам.",
 	"changelog.resetFilters": "Сбросить фильтры",
+	"update.remoteLinkSurvives": "Публичная ссылка и эта сессия сохранятся — страница переподключится сама.",
+	"update.tasksInProgressWarning_one": "{count} задача в работе. Её агент переживёт перезапуск, но можно и подождать.",
+	"update.tasksInProgressWarning_few": "{count} задачи в работе. Их агенты переживут перезапуск, но можно и подождать.",
+	"update.tasksInProgressWarning_many": "{count} задач в работе. Их агенты переживут перезапуск, но можно и подождать.",
+	"update.tasksInProgressWarning_other": "{count} задач в работе. Их агенты переживут перезапуск, но можно и подождать.",
 	"changelog.showMore": "Показать ещё",
 };
 

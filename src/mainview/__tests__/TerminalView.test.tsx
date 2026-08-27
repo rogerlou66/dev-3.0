@@ -2,6 +2,8 @@ import { render, act, fireEvent, waitFor } from "@testing-library/react";
 import TerminalView, { type TerminalHandle, TERMINAL_SYNC_GATE_TIMEOUT_MS, buildResizeDance, buildCursorMoveSequence, clearStaleSelectionOnWrite, normalizePastedText } from "../TerminalView";
 import { I18nProvider } from "../i18n";
 import { api } from "../rpc";
+import { Terminal } from "ghostty-web";
+import { toast } from "../toast";
 import type { NativeStreamRole } from "../../shared/native-terminal-stream";
 import {
 	resetTerminalBidiForTests,
@@ -835,7 +837,7 @@ describe("TerminalView – mouse report pacing", () => {
 		}
 	});
 
-	it("drops sustained excess instead of queueing it", async () => {
+	it("holds sustained excess back instead of blasting it in one tick", async () => {
 		mockTermInstance.hasMouseTracking.mockReturnValue(true);
 		await renderAndSetup();
 		const wheelHandler = mockTermInstance.attachCustomWheelEventHandler.mock.calls[0]?.[0] as
@@ -850,8 +852,64 @@ describe("TerminalView – mouse report pacing", () => {
 		});
 
 		// 50 events × 5000px would be thousands of reports unpaced; the bucket
-		// only refills with elapsed time, and these all land in the same tick.
+		// only refills with elapsed time, and these all land in the same tick. The
+		// excess is queued, and the drain timer below is what lets it out.
 		expect(countReports()).toBeLessThanOrEqual(20);
+	});
+
+	it("keeps draining the backlog after the finger stops", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		await renderAndSetup();
+		const wheelHandler = mockTermInstance.attachCustomWheelEventHandler.mock.calls[0]?.[0] as
+			| ((event: WheelEvent) => boolean)
+			| undefined;
+
+		mockInput.mockClear();
+		act(() => {
+			wheelHandler?.({ deltaY: 100_000, clientX: 20, clientY: 20 } as WheelEvent);
+		});
+		const atRest = countReports();
+
+		// One event, no further wheel input: a hard flick has to keep arriving.
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)); });
+
+		expect(countReports()).toBeGreaterThan(atRest);
+		for (const [data] of mockInput.mock.calls) {
+			expect(String(data).length).toBeLessThan(1022);
+		}
+	});
+
+	/**
+	 * A timer has no caller to hand a throw to, and `term.input` throws the moment
+	 * ghostty is gone — the wheel handler that used to own this call caught exactly
+	 * that, so the drain has to as well.
+	 *
+	 * The failure mode is an escaped throw, which no `expect` inside the test can
+	 * see: it lands in the timer, not in this stack. Vitest reports it as an
+	 * unhandled error and exits non-zero even with every test green, so THAT is the
+	 * signal — verified by deleting the try/catch and watching this file exit 1.
+	 * The assertions below only pin the state the guard leaves behind.
+	 */
+	it("stops the drain instead of throwing when the terminal dies mid-flick", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		await renderAndSetup();
+		const wheelHandler = mockTermInstance.attachCustomWheelEventHandler.mock.calls[0]?.[0] as
+			| ((event: WheelEvent) => boolean)
+			| undefined;
+
+		act(() => {
+			wheelHandler?.({ deltaY: 100_000, clientX: 20, clientY: 20 } as WheelEvent);
+		});
+		mockInput.mockImplementation(() => { throw new Error("terminal disposed"); });
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+		const attemptsAfterDeath = mockInput.mock.calls.length;
+		mockInput.mockReset();
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+		// The backlog was forgotten, so nothing retries against a dead terminal.
+		expect(attemptsAfterDeath).toBeGreaterThan(0);
+		expect(mockInput).not.toHaveBeenCalled();
 	});
 
 	it("reports a drag once per cell, not once per pixel", async () => {
@@ -1349,12 +1407,14 @@ describe("buildCursorMoveSequence", () => {
 		expect(buildCursorMoveSequence(8, 5, 30, 6)).toBe("");
 	});
 
-	it("never emits Alt+Arrow (plain CSI only) so tmux pane-switch is untouched", () => {
+	it("emits plain CSI only — never word-motion or the pane-switch combo", () => {
 		const seq = buildCursorMoveSequence(1, 1, 4, 1);
-		// Plain CSI C/D, not the M-Left/Right \x1b\x1b[ or \x1b[1;3 forms.
+		// Plain CSI C/D: not \x1b\x1b[, not \x1b[1;3 (Alt = word motion in the
+		// shell), not \x1b[1;4 (Alt+Shift = tmux's prefix-free pane switch).
 		expect(seq).toBe(RIGHT.repeat(3));
 		expect(seq).not.toContain("\x1b\x1b");
 		expect(seq).not.toContain(";3");
+		expect(seq).not.toContain(";4");
 	});
 
 	it("scales the move by the exact column delta (one arrow per column)", () => {
@@ -1820,6 +1880,26 @@ describe("TerminalView – remote sync gate", () => {
 		expect(view.queryByTestId("terminal-sync-gate")).not.toBeNull();
 	});
 
+	it("resets the screen once per terminal, not on every reconnect", async () => {
+		// The regression this guards: RIS on every socket meant a full ghostty reset
+		// on each resume from background, which corrupted the shared WASM buffer and
+		// killed panes from 2026-08-15 on. Leftover pixels belong to constructing a
+		// Terminal — a reconnect reuses the same one and must not reset it.
+		await renderAndSetup();
+		const resetsAfterFirstConnect = mockTermInstance.write.mock.calls.filter((call) => call[0] === "\x1bc").length;
+		expect(resetsAfterFirstConnect).toBe(1);
+
+		await act(async () => {
+			Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+			document.dispatchEvent(new Event("visibilitychange"));
+			Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+
+		expect(mockTermInstance.write.mock.calls.filter((call) => call[0] === "\x1bc").length).toBe(1);
+	});
+
 	it("lifts when the app refuses the session instead of blurring a dead canvas", async () => {
 		const view = await renderAndSetup();
 		await act(async () => {
@@ -1827,5 +1907,209 @@ describe("TerminalView – remote sync gate", () => {
 			webSockets[0].onclose?.({ code: 4001, reason: "Unknown session", wasClean: false } as CloseEvent);
 		});
 		expect(view.queryByTestId("terminal-sync-gate")).toBeNull();
+	});
+});
+
+describe("TerminalView – PTY bytes are written without waiting for a frame", () => {
+	/**
+	 * The suite's global rAF stub runs callbacks inline, so a batched write and a
+	 * synchronous one look identical to every other test here — which is exactly
+	 * why the lost frame survived unnoticed. These tests hold rAF callbacks back so
+	 * the difference is visible: with batching restored, `write` would not have been
+	 * called by the time the assertion runs.
+	 */
+	let heldFrames: FrameRequestCallback[];
+
+	beforeEach(() => {
+		heldFrames = [];
+	});
+
+	function holdFrames() {
+		vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+			heldFrames.push(cb);
+			return heldFrames.length;
+		});
+	}
+
+	function releaseFrames() {
+		const pending = heldFrames.splice(0);
+		for (const cb of pending) cb(0);
+	}
+
+	afterEach(() => {
+		vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+			cb(0);
+			return 1;
+		});
+	});
+
+	it("writes socket output before any animation frame has run", async () => {
+		await renderAndSetup();
+		mockTermInstance.write.mockClear();
+		holdFrames();
+
+		await act(async () => {
+			lastWebSocket?.onmessage?.({ data: "echo me" } as MessageEvent);
+		});
+
+		expect(mockTermInstance.write).toHaveBeenCalledWith("echo me");
+		releaseFrames();
+	});
+
+	it("writes each socket message on arrival instead of coalescing them into one frame", async () => {
+		await renderAndSetup();
+		mockTermInstance.write.mockClear();
+		holdFrames();
+
+		await act(async () => {
+			lastWebSocket?.onmessage?.({ data: "one" } as MessageEvent);
+			lastWebSocket?.onmessage?.({ data: "two" } as MessageEvent);
+		});
+
+		expect(mockTermInstance.write.mock.calls.map((call) => call[0])).toEqual(["one", "two"]);
+		releaseFrames();
+	});
+});
+
+describe("TerminalView – renderer crash recovery", () => {
+	/**
+	 * ghostty-web's render loop reschedules only after a successful render and is
+	 * private, so one throw out of `term.resize` blanks the pane for good. These
+	 * cover the only cure available from outside: rebuild the terminal.
+	 */
+	const REFIT_DEBOUNCE_MS = 150;
+
+	/**
+	 * TerminalView replaces the addon's `proposeDimensions` with the real
+	 * scrollbar-free measurement, which needs live layout metrics and returns
+	 * undefined in happy-dom — so a refit would never reach `term.resize`. Put a
+	 * fixed geometry back on the very object TerminalView calls.
+	 */
+	function makeRefitsMeasurable() {
+		const addon = fitAddonHolder.current as unknown as { proposeDimensions: () => { cols: number; rows: number } };
+		addon.proposeDimensions = () => ({ cols: 80, rows: 24 });
+	}
+
+	async function settleObserver() {
+		makeRefitsMeasurable();
+		await act(async () => {
+			fireResize?.();
+			await new Promise((resolve) => setTimeout(resolve, REFIT_DEBOUNCE_MS));
+		});
+	}
+
+	async function crashOnNextRefit(error: Error) {
+		// A rebuilt terminal spends its first observer callback on the initial fit
+		// (fitAddon.fit(), which never reaches term.resize), so spend that one first.
+		await settleObserver();
+		mockTermInstance.resize.mockImplementationOnce(() => {
+			throw error;
+		});
+		await settleObserver();
+	}
+
+	it("rebuilds the terminal when a resize throws a WASM trap", async () => {
+		await renderAndSetup();
+		const builtBefore = vi.mocked(Terminal).mock.calls.length;
+
+		await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+
+		expect(vi.mocked(Terminal).mock.calls.length).toBeGreaterThan(builtBefore);
+	});
+
+	it("rebuilds it for the out-of-range codepoint crash too", async () => {
+		await renderAndSetup();
+		const builtBefore = vi.mocked(Terminal).mock.calls.length;
+
+		await crashOnNextRefit(new RangeError("Arguments contain a value that is out of range of code points"));
+
+		expect(vi.mocked(Terminal).mock.calls.length).toBeGreaterThan(builtBefore);
+	});
+
+	it("reports the crash to the backend log with the geometry it died on", async () => {
+		await renderAndSetup();
+		vi.mocked(api.request.logRendererDiagnostic).mockClear();
+
+		await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+
+		const tags = vi.mocked(api.request.logRendererDiagnostic).mock.calls.map((c) => (c[0] as { tag: string }).tag);
+		expect(tags).toContain("refit");
+		expect(tags).toContain("terminal-recover");
+	});
+
+	it("carries the run-up to the crash, so the trigger can be read off one log line", async () => {
+		await renderAndSetup();
+		vi.mocked(api.request.logRendererDiagnostic).mockClear();
+
+		await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+
+		const refit = vi
+			.mocked(api.request.logRendererDiagnostic)
+			.mock.calls.map((c) => c[0] as { tag: string; extra?: Record<string, unknown> })
+			.find((call) => call.tag === "refit");
+		// The successful resizes before the fatal one are the whole point: without them
+		// "did a resize trigger it?" cannot be answered from a log file.
+		expect(String(refit?.extra?.trail)).toMatch(/resize 80x24/);
+		expect(refit?.extra?.cols).toBe(80);
+	});
+
+	it("reports how many panes exist and how many died, which tells one pane from the shared module", async () => {
+		await renderAndSetup();
+		vi.mocked(api.request.logRendererDiagnostic).mockClear();
+
+		await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+
+		const recover = vi
+			.mocked(api.request.logRendererDiagnostic)
+			.mock.calls.map((c) => c[0] as { tag: string; extra?: Record<string, unknown> })
+			.find((call) => call.tag === "terminal-recover");
+		expect(recover?.extra?.liveTerminals).toBeGreaterThan(0);
+		expect(recover?.extra?.sessionCrashes).toBeGreaterThan(0);
+	});
+
+	it("leaves a healthy terminal alone", async () => {
+		await renderAndSetup();
+		const builtBefore = vi.mocked(Terminal).mock.calls.length;
+		makeRefitsMeasurable();
+
+		await act(async () => {
+			fireResize?.();
+			await new Promise((resolve) => setTimeout(resolve, REFIT_DEBOUNCE_MS));
+		});
+
+		expect(mockTermInstance.resize).toHaveBeenCalled();
+		expect(vi.mocked(Terminal).mock.calls.length).toBe(builtBefore);
+		expect(vi.mocked(toast.error)).not.toHaveBeenCalled();
+	});
+
+	it("stops rebuilding after the budget and offers a window reload instead", async () => {
+		await renderAndSetup();
+
+		for (let i = 0; i < 4; i++) {
+			await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+		}
+		const builtAfterBudget = vi.mocked(Terminal).mock.calls.length;
+		await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+
+		expect(vi.mocked(toast.error)).toHaveBeenCalled();
+		expect(vi.mocked(Terminal).mock.calls.length).toBe(builtAfterBudget);
+	});
+
+	it("earns the budget back after a stretch of health", async () => {
+		await renderAndSetup();
+		for (let i = 0; i < 4; i++) {
+			await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+		}
+		expect(vi.mocked(toast.error)).toHaveBeenCalledTimes(1);
+
+		const realNow = Date.now;
+		Date.now = () => realNow() + 10 * 60_000;
+		try {
+			const builtBefore = vi.mocked(Terminal).mock.calls.length;
+			await crashOnNextRefit(new Error("RuntimeError: Out of bounds memory access"));
+			expect(vi.mocked(Terminal).mock.calls.length).toBeGreaterThan(builtBefore);
+		} finally {
+			Date.now = realNow;
+		}
 	});
 });

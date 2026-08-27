@@ -1,22 +1,30 @@
 import { existsSync, readdirSync, unlinkSync, mkdirSync } from "node:fs";
-import type { AgentMessageSource, CliRequest, CliResponse, CustomColumn, Label, Project, Task, TaskStatus, TaskNote, NoteSource, SharedArtifact, SharedImage } from "../shared/types";
+import type { AgentMessageSource, CliRequest, CliResponse, CustomColumn, Label, Project, Task, TaskPriority, TaskStatus, TaskType, TaskNote, NoteSource, SharedArtifact, SharedImage } from "../shared/types";
 import { isValidNotificationDurationMs, NOTIFICATION_MAX_DURATION_MS, NOTIFICATION_MIN_DURATION_MS } from "../shared/duration";
+import { agentReplyCommand, seqIsShared } from "../shared/agent-message-envelope";
 import { socketMetaPathFor } from "../shared/socket-meta";
 import { isCliEndpointHandle } from "../shared/cli-endpoint";
-import { ACTIVE_STATUSES, ALL_STATUSES, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, appendTaskNote, buildTaskDialogSubject, getTaskTitle, isStatusGuardBlocked, normalizePriority, titleFromDescription } from "../shared/types";
+import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, getTaskTitle, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
 import { CODEX_STATUS_HOOK_EVENTS, getCodexHookTargetStatus, type CodexStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
+import type { DeepLinkNav } from "../shared/deep-link";
+import { markPendingDeepLinkNav } from "./deep-link-nav";
 import { SharedImageError, saveSharedImage } from "./shared-images";
 import { SharedArtifactError, saveSharedArtifact } from "./shared-artifacts";
+import { appendArtifactVersion, latestArtifactVersion } from "../shared/artifact-versions";
 import { addAutomation, deleteAutomation, loadAutomations, updateAutomation } from "./automations-data";
-import { createAgentRequest, type AgentLaunchChoice } from "./agent-requests";
+import { createAgentRequest } from "./agent-requests";
+import type { AgentLaunchChoice } from "../shared/types";
 import { deliverLaunchHandoff } from "./agent-launch-handoff";
 import * as data from "./data";
+import { loadSpacesFile } from "./spaces-data";
 import { createScratchTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
 import { getDevServerStatus, runDevServer, stopDevServer, restartDevServer } from "./rpc-handlers/tmux-pty";
 import { getTmuxLayout } from "./pty-server";
 import { scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
 import { NATIVE_PROMPT_DELIVERY_METHOD, deliverNativePromptAsOwner } from "./agent-prompt-native";
+import { deliverAgentPrompt } from "./agent-prompt-delivery";
+import type { AgentPromptDeliveryStatus } from "../shared/agent-prompt-delivery";
 import { NATIVE_PANE_INPUT_METHOD, runNativePaneInputAsOwner } from "./pane-input-native";
 import type { PaneInputProgram } from "../shared/pane-input";
 import { getUserIdleSeconds } from "./user-activity";
@@ -117,9 +125,20 @@ function findTaskByRef(tasks: Task[], ref: string): Task | null {
  * when the task was launched with variants, so stored ids can dangle — point
  * the caller at the stable seq handle instead of a bare failure.
  */
-function taskNotFoundError(ref: string): Error {
+/**
+ * `scopedProject` is the project the lookup was restricted to (explicit
+ * `--project`, or the caller's own worktree). Naming it turns the commonest
+ * failure — an agent addressing a task on ANOTHER board, where the CLI silently
+ * stamped its own project on the request — into an actionable hint instead of an
+ * id-drift wild goose chase.
+ */
+function taskNotFoundError(ref: string, scopedProject?: Project): Error {
+	const scope = scopedProject
+		? `Task not found in project "${scopedProject.name}": ${ref}. If it lives on another board, pass ` +
+			`\`--project <id>\` (\`dev3 projects list\`). `
+		: `Task not found: ${ref}. `;
 	return new Error(
-		`Task not found: ${ref}. If the task was launched by an older app version its id may have changed — ` +
+		`${scope}If the task was launched by an older app version its id may have changed — ` +
 		"run `dev3 tasks list` to find it by seq, or address it as `--task seq:<N>`.",
 	);
 }
@@ -145,7 +164,7 @@ async function requirePaneTask(params: Record<string, unknown>): Promise<{ proje
 	if (params.projectId) {
 		const project = await data.getProject(params.projectId as string);
 		const task = findTaskByRef(await data.loadTasks(project), taskId);
-		if (!task) throw taskNotFoundError(taskId);
+		if (!task) throw taskNotFoundError(taskId, project);
 		return { project, task };
 	}
 	const found = await resolveTaskAcrossProjects(taskId);
@@ -203,7 +222,7 @@ async function resolveTaskFromParams(params: Record<string, unknown>): Promise<{
 		const project = await data.getProject(params.projectId as string);
 		const tasks = await data.loadTasks(project);
 		const task = findTaskByRef(tasks, taskId);
-		if (!task) throw taskNotFoundError(taskId);
+		if (!task) throw taskNotFoundError(taskId, project);
 		return { project, task };
 	}
 
@@ -230,23 +249,68 @@ async function resolveAgentMessageSource(
 		return null; // ambiguous/broken sender ref — deliver the raw text instead
 	}
 	if (!found || found.task.id === targetTaskId) return null;
+	// Whether `seq:<N>` still resolves on the SENDER's board decides the reply
+	// address, and only the board can answer that (see agentReplyRef).
+	const seqShared = await isSeqSharedOnBoard(found.project, found.task);
 	return {
 		taskId: found.task.id,
 		seq: found.task.seq,
+		variantIndex: found.task.variantIndex,
+		seqShared,
 		title: getTaskTitle(found.task),
 		projectId: found.task.projectId,
 	};
 }
 
-/** Result of the agent-initiated launch approval flow. */
+/** {@link seqIsShared} against a project's live task list; pessimistic if it cannot be read. */
+async function isSeqSharedOnBoard(project: Project, task: Task): Promise<boolean> {
+	try {
+		return seqIsShared(task, await data.loadTasks(project));
+	} catch {
+		return task.variantIndex != null;
+	}
+}
+
+/**
+ * Result of the agent-initiated launch approval flow.
+ *
+ * `launched` is one entry per task that actually started, in variant order — a
+ * plain launch has exactly one. The seq is shared by the whole group, which is
+ * why the address the requester must use lives per entry rather than being
+ * derivable from the seq (see `agentReplyRef` and the
+ * `address-a-peer-by-seq-unless-the-seq-is-shared` record).
+ */
 type LaunchApprovalOutcome =
 	| { approved: false }
-	| { approved: true; task: Task; seq: number; title: string; replyCommand: string };
+	| {
+		approved: true;
+		seq: number;
+		title: string;
+		launched: Array<{ variantIndex: number | null; replyCommand: string }>;
+	};
+
+/**
+ * Priority an agent-initiated launch starts on. A target that never had one set
+ * (a scratch peer, or a task created without `--priority`) inherits the
+ * requesting task's band, so a P0 agent's helpers do not sink to P3 — issue
+ * #1496. An explicit priority on the target always wins, and the user can still
+ * override either in the launch dialog. Unreadable requester ⇒ the plain default.
+ */
+async function resolveLaunchPriority(task: Task, requester: AgentMessageSource): Promise<TaskPriority> {
+	if (task.priority) return task.priority;
+	try {
+		const found = await resolveTaskAcrossProjects(requester.taskId);
+		return found?.task.priority ?? DEFAULT_PRIORITY;
+	} catch {
+		return DEFAULT_PRIORITY;
+	}
+}
 
 /**
  * Ask the user to approve an agent-initiated launch, then perform it with the
- * agent/config/account they picked in the dialog. Blocks until the user answers,
- * exactly like the completion approval — the requesting CLI waits on the socket.
+ * agent/config/account/priority they picked in the dialog. Blocks until the user
+ * answers, exactly like the completion approval — the requesting CLI waits on the
+ * socket.
  *
  * The launched task's first message tells it who started it (`deliverLaunchHandoff`),
  * so the two agents can talk over the existing cross-task envelope.
@@ -263,7 +327,17 @@ async function requestAgentLaunchApproval(opts: {
 		throw new Error("No app window is connected — cannot ask the user for approval");
 	}
 
-	const { requestId, decision, isNew } = createAgentRequest("launch", task.id, project.id);
+	// A launch is reversible, so an unanswered dialog approves itself rather than
+	// pinning the requesting agent to a dead socket. The completion dialog
+	// deliberately does not do this — it destroys a worktree.
+	const defaultPriority = await resolveLaunchPriority(task, requester);
+	const autoApproveAfterMs = agentLaunchAutoApproveMs(await loadSettings());
+	const { requestId, decision, isNew, autoApproveAt } = createAgentRequest(
+		"launch",
+		task.id,
+		project.id,
+		{ autoApproveAfterMs },
+	);
 	if (isNew) {
 		push("agentLaunchRequested", {
 			requestId,
@@ -277,30 +351,79 @@ async function requestAgentLaunchApproval(opts: {
 			// Same read-only context card as the completion dialog, so the user
 			// recognizes which task an agent wants to set running.
 			subject: buildTaskDialogSubject(task, project),
+			defaultPriority,
+			canAddVariants: canSpawnAsVariants(task),
+			autoApproveAt,
 		});
 	}
 
 	const answer = await decision;
 	if (!answer.approved) return { approved: false };
 
-	const choice: AgentLaunchChoice = answer.launch ?? { agentId: null, configId: null };
+	// An auto-approval with no client watching carries no launch choice at all —
+	// one default variant, and the inherited priority must still apply, so it is
+	// resolved here, not in the dialog.
+	const choice: AgentLaunchChoice = answer.launch ?? { variants: [{ agentId: null, configId: null }] };
+	// The dialog only offers the control when the target can take it, but the
+	// choice arrives over RPC from any connected client — clamp rather than let
+	// spawnVariants throw and strand the requester.
+	const variants = canSpawnAsVariants(task) ? choice.variants : choice.variants.slice(0, 1);
 	const launched = await launchTaskWithAgentChoice({
 		taskId: task.id,
 		projectId: project.id,
 		targetStatus,
-		choice,
+		choice: { variants, priority: choice.priority ?? defaultPriority },
 	});
-	// Fire-and-forget: the handoff waits for the child's agent pane, which takes
-	// far longer than the requesting agent should sit blocked on a socket.
-	void deliverLaunchHandoff({ projectId: project.id, childTaskId: task.id, source: requester });
+	// Fire-and-forget: the handoff waits for each child's agent pane, which takes
+	// far longer than the requesting agent should sit blocked on a socket. Every
+	// variant gets its own note — each one is a separate agent that has to know
+	// who started it.
+	for (const child of launched) {
+		void deliverLaunchHandoff({ projectId: project.id, childTaskId: child.id, source: requester });
+	}
+
+	// Read the board AFTER the launch: launching with variants mints the siblings
+	// that decide whether `seq:<N>` is still an unambiguous address.
+	const head = launched[0]!;
+	const boardTasks = await loadBoardTasks(project);
 
 	return {
 		approved: true,
-		task: launched,
-		seq: launched.seq,
-		title: getTaskTitle(launched),
-		replyCommand: `dev3 message --task seq:${launched.seq} "your message"`,
+		seq: head.seq,
+		title: getTaskTitle(head),
+		launched: launched.map((child) => ({
+			variantIndex: child.variantIndex ?? null,
+			// The requester may live on another board (it launched a task in a
+			// different project), and then the bare `--task` form would resolve
+			// against its own.
+			replyCommand: agentReplyCommand({
+				target: {
+					...child,
+					seqShared: boardTasks ? seqIsShared(child, boardTasks) : child.variantIndex != null,
+				},
+				fromProjectId: requester.projectId ?? child.projectId,
+				quoted: "your message",
+			}),
+		})),
 	};
+}
+
+/**
+ * Can this launch be turned into a variant group? `spawnVariants` mints a fresh
+ * group off a `todo` source, so a task that is already running, or already a
+ * member of a group, has nothing to spawn from.
+ */
+function canSpawnAsVariants(task: Task): boolean {
+	return task.status === "todo" && task.groupId == null;
+}
+
+/** The board's task list for seq-sharing checks, or null if it cannot be read. */
+async function loadBoardTasks(project: Project): Promise<Task[] | null> {
+	try {
+		return await data.loadTasks(project);
+	} catch {
+		return null;
+	}
 }
 
 type Handler = (params: Record<string, unknown>) => Promise<unknown>;
@@ -427,6 +550,10 @@ const handlers: Record<string, Handler> = {
 			} else if (event === "projectUpdated" && projectId) {
 				const project = await data.getProject(projectId);
 				localPush("projectUpdated", { project });
+			} else if (event === "spacesUpdated") {
+				// Re-read locally: the identity-checked cache sees the peer's write.
+				const file = await loadSpacesFile();
+				localPush("spacesUpdated", { file });
 			}
 		} catch (err) {
 			log.debug("_notify handler error (non-fatal)", { event, error: String(err) });
@@ -472,7 +599,7 @@ const handlers: Record<string, Handler> = {
 			const project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const task = findTaskByRef(tasks, taskId);
-			if (!task) throw taskNotFoundError(taskId);
+			if (!task) throw taskNotFoundError(taskId, project);
 			return await withArchivedHistory(project, await syncTaskBranchName(project, task));
 		}
 
@@ -491,13 +618,14 @@ const handlers: Record<string, Handler> = {
 		if (!taskId) throw new Error("taskId is required");
 
 		let task: Task | null = null;
+		let scopedProject: Project | undefined;
 		if (params.projectId) {
-			const project = await data.getProject(params.projectId as string);
-			task = findTaskByRef(await data.loadTasks(project), taskId);
+			scopedProject = await data.getProject(params.projectId as string);
+			task = findTaskByRef(await data.loadTasks(scopedProject), taskId);
 		} else {
 			task = (await resolveTaskAcrossProjects(taskId))?.task ?? null;
 		}
-		if (!task) throw taskNotFoundError(taskId);
+		if (!task) throw taskNotFoundError(taskId, scopedProject);
 
 		return await taskPeek({
 			task,
@@ -617,7 +745,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId);
+			if (!found) throw taskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -672,6 +800,38 @@ const handlers: Record<string, Handler> = {
 				updates.title = titleFromDescription(description);
 			}
 		}
+		// Task type and the preamble in the description move together, always. The
+		// preset prompt is frozen into the description at creation, so flipping the
+		// field alone would produce a task the data calls a coordinator while its
+		// agent was never told it is one — a badge nobody behind it honours.
+		let taskTypeChange: { next: TaskType | null; agentPrompt: string } | undefined;
+		if (params.taskType !== undefined) {
+			const raw = params.taskType;
+			const next = raw === null || raw === "standard" ? null : normalizeTaskType(String(raw));
+			if (raw !== null && raw !== "standard" && !next) {
+				throw new Error(`Invalid task type "${raw}". Use ${TASK_TYPES.join(", ")} or standard.`);
+			}
+			if ((task.taskType ?? null) !== next) {
+				const settings = await loadSettings();
+				const base = (updates.description as string | undefined) ?? task.description;
+				// Strip EVERY type's preamble before building, so switching between two
+				// roles cannot leave the old brief behind, and a repeat cannot stack two
+				// copies of a 40-line preamble onto one description.
+				let ownText = base;
+				for (const type of TASK_TYPES) {
+					ownText = withoutPresetPrompt(ownText, presetPromptForTaskType(type, project, settings));
+				}
+				updates.taskType = next;
+				const preamble = next ? presetPromptForTaskType(next, project, settings) : null;
+				updates.description = preamble ? withPresetPrompt(ownText, preamble) : ownText;
+				taskTypeChange = {
+					next,
+					agentPrompt: preamble
+						? `Your role just changed: this task is now ${next === "coordinator" ? "the COORDINATOR of this board" : "a PR REVIEW"}. Everything below is your standing instruction from here on, and it replaces any earlier instruction about what this task is.\n\n${preamble}`
+						: "Your role just changed: this task no longer carries a special role. The role brief you were given no longer applies — you are an ordinary task agent again and may do the work yourself.",
+				};
+			}
+		}
 		let manualCompletion: boolean | undefined;
 		if (params.manualCompletion !== undefined) {
 			if (typeof params.manualCompletion !== "boolean") {
@@ -689,8 +849,9 @@ const handlers: Record<string, Handler> = {
 			&& priority === undefined
 			&& !titlePreserved
 			&& params.manualCompletion === undefined
+			&& params.taskType === undefined
 		) {
-			throw new Error("Nothing to update. Provide --title, --description, --priority, or --manual-completion.");
+			throw new Error("Nothing to update. Provide --title, --description, --priority, --manual-completion, or --type.");
 		}
 
 		let updated = task;
@@ -716,7 +877,22 @@ const handlers: Record<string, Handler> = {
 			for (const t of changed) getPushMessage()?.("taskUpdated", { projectId: project.id, task: t });
 			updated = { ...updated, priority };
 		}
-		return { task: updated, titlePreserved };
+		// Tell the agent that has to honour the new role. A task with no worktree has
+		// no session to tell — it reads the rewritten description at launch instead,
+		// which is why the description is rewritten above rather than only here.
+		let roleDelivery: AgentPromptDeliveryStatus | "no-session" | undefined;
+		if (taskTypeChange) {
+			if (!updated.worktreePath) {
+				roleDelivery = "no-session";
+			} else {
+				try {
+					roleDelivery = (await deliverAgentPrompt(updated, taskTypeChange.agentPrompt)).status;
+				} catch {
+					roleDelivery = "not-delivered";
+				}
+			}
+		}
+		return { task: updated, titlePreserved, ...(roleDelivery ? { roleDelivery } : {}) };
 	},
 
 	"overview.set": async (params) => {
@@ -759,7 +935,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId);
+			if (!found) throw taskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -798,7 +974,7 @@ const handlers: Record<string, Handler> = {
 			const project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId);
+			if (!found) throw taskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -822,7 +998,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId);
+			if (!found) throw taskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1029,6 +1205,33 @@ const handlers: Record<string, Handler> = {
 		return { taskId: updated.id, projectId: project.id, ...state, liveBackend: null };
 	},
 
+	/**
+	 * `dev3 task open` — navigate the running UI to a task from outside the app.
+	 * Deliberately the same two paths as an inbound `dev3://task/<id>` link
+	 * (decisions/2026/08/04/dev3-url-scheme-deep-links.md), so the open-mode
+	 * preference and the cold-start pull-on-mount come for free.
+	 *
+	 * The window layer is imported lazily and never in headless remote mode,
+	 * which has no windows and must not drag in electrobun.
+	 */
+	"task.open": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params);
+		const nav: DeepLinkNav = { kind: "task", taskId: task.id, projectId: project.id };
+		if (process.env.DEV3_HEADLESS !== "1") {
+			const { focusFocusedWindow, getWindowCount, openNewWindow } = await import("./window-manager");
+			if (getWindowCount() === 0) {
+				markPendingDeepLinkNav(nav);
+				openNewWindow();
+				return { taskId: task.id, projectId: project.id, delivered: true, reopened: true };
+			}
+			focusFocusedWindow();
+		}
+		const push = getPushMessage();
+		if (!push) return { taskId: task.id, projectId: project.id, delivered: false };
+		push("openDeepLink", nav);
+		return { taskId: task.id, projectId: project.id, delivered: true };
+	},
+
 	"task.setLabels": async (params) => {
 		const taskId = params.taskId as string;
 		const projectId = params.projectId as string;
@@ -1172,7 +1375,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId);
+			if (!found) throw taskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1369,6 +1572,7 @@ const handlers: Record<string, Handler> = {
 			taskId: (params.taskId as string) ?? "",
 			paneId: (params.paneId as string) ?? "",
 			text: ((params.text as string) ?? "").toString(),
+			hold: params.hold === true,
 		});
 		return { delivered };
 	},
@@ -1463,17 +1667,24 @@ const handlers: Record<string, Handler> = {
 			? params.assetPaths.filter((path): path is string => typeof path === "string" && path.length > 0)
 			: [];
 		const title = typeof params.title === "string" && params.title.trim() ? params.title.trim() : undefined;
+		const artifactId = typeof params.artifactId === "string" && params.artifactId.trim() ? params.artifactId.trim() : undefined;
+		const forceNew = params.forceNew === true;
 
 		let incoming: SharedArtifact;
 		try {
-			incoming = saveSharedArtifact(project.path, htmlPath, assetPaths, title);
+			incoming = saveSharedArtifact(project.path, htmlPath, assetPaths, title, { artifactId, forceNew });
 		} catch (error) {
 			if (error instanceof SharedArtifactError) throw error;
 			throw new Error(`Failed to store artifact: ${error instanceof Error ? error.message : String(error)}`);
 		}
 
-		const { task: updated } = await data.updateTaskWith<void>(project, task.id, (current) => {
-			return { updates: { sharedArtifacts: [...(current.sharedArtifacts ?? []), incoming] }, result: undefined };
+		// Re-publishing an artifact adds a version to the row the user already has
+		// instead of a new row. Nothing is deleted from disk: a version the cap
+		// trims only leaves the record, its stored dir stays where it was.
+		const { task: updated, result: version } = await data.updateTaskWith<number>(project, task.id, (current) => {
+			const { artifacts } = appendArtifactVersion(current.sharedArtifacts ?? [], incoming);
+			const merged = artifacts.find((artifact) => artifact.groupKey === incoming.groupKey);
+			return { updates: { sharedArtifacts: artifacts }, result: merged ? latestArtifactVersion(merged) : 1 };
 		});
 		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
 
@@ -1488,12 +1699,27 @@ const handlers: Record<string, Handler> = {
 		};
 		if (isNotificationSuppressed()) {
 			pushCliShowArtifact(payload);
-			return { delivered: true, queued: true, stored: 1, taskId: task.id };
+			return { delivered: true, queued: true, stored: 1, taskId: task.id, version };
 		}
 		const push = getPushMessage();
-		if (!push) return { delivered: false, stored: 1, taskId: task.id };
+		if (!push) return { delivered: false, stored: 1, taskId: task.id, version };
 		push("cliShowArtifact", payload);
-		return { delivered: true, stored: 1, taskId: task.id };
+		return { delivered: true, stored: 1, taskId: task.id, version };
+	},
+
+	/**
+	 * `dev3 artifact-template` — provision the task's pristine starter on demand
+	 * and answer with its absolute path, which the CLI then copies into the
+	 * worktree. The recovery path for a session whose `DEV3_ARTIFACT_TEMPLATE_DIR`
+	 * was baked at launch time and is therefore missing: an older app version, or
+	 * a shell that never inherited the launch env (issue #1437).
+	 */
+	"artifact.template-dir": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params);
+		const worktreePath = typeof params.worktreePath === "string" && params.worktreePath ? params.worktreePath : undefined;
+		// Imported here, not at module scope: only this rarely-used route needs it.
+		const { ensureArtifactTemplate } = await import("./artifact-template");
+		return { dir: ensureArtifactTemplate(project, task, { worktreePath }), taskId: task.id, projectId: project.id };
 	},
 
 	// UI control: report what the app is currently showing, so the agent can decide
@@ -1592,6 +1818,35 @@ const handlers: Record<string, Handler> = {
 			port: getServerPort(),
 			staticCode: getStaticCode(),
 		};
+	},
+
+	// `dev3 update` on a box with a running headless server DELEGATES here rather
+	// than updating the files itself, and that is the whole point: only this process
+	// can hand its port and its live cloudflared to the successor. A separate CLI
+	// process doing the swap would leave this server running an install that is no
+	// longer on disk, and the next restart would change the public URL.
+	"remote.selfUpdate": async (params) => {
+		const { runSelfUpdate } = await import("./self-update");
+		const { loadSettings } = await import("./settings");
+		const channel = (await loadSettings()).updateChannel;
+		const dryRun = Boolean((params as { dryRun?: boolean } | undefined)?.dryRun);
+		if (dryRun) {
+			const { buildPlan } = await import("./self-update");
+			const { install, plan, runningVersion, summary } = await buildPlan(channel);
+			return {
+				ok: plan.kind !== "refused",
+				restarting: false,
+				message: summary,
+				install,
+				kind: plan.kind,
+				runningVersion,
+				// The OFFERED build, so `dev3 update --check` can print it without planning
+				// a second time in a process whose install method is a different one.
+				version: plan.kind === "brew" || plan.kind === "tarball" ? plan.version : null,
+				channel,
+			};
+		}
+		return await runSelfUpdate({ channel, restart: true });
 	},
 };
 

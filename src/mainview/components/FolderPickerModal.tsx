@@ -15,6 +15,7 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import {
+	relativeToRoot,
 	subscribeFolderPicker,
 	type FolderPickerRequest,
 } from "../folder-picker";
@@ -37,8 +38,21 @@ function basename(p: string): string {
 /** Build crumbs. The root "/" crumb has no text label — rendered with a drive
  *  icon instead, so we never get a "/ / Users" double-slash artefact. */
 interface Crumb { label: string | null; path: string; isRoot: boolean }
-function buildBreadcrumbs(path: string): Crumb[] {
+function buildBreadcrumbs(path: string, confineTo?: string | null): Crumb[] {
 	if (!path) return [];
+	// Confined: the trail starts at the confinement root, because a crumb the
+	// picker refuses to open is worse than no crumb.
+	if (confineTo) {
+		const rel = relativeToRoot(confineTo, path);
+		const crumbs: Crumb[] = [{ label: basename(confineTo), path: confineTo, isRoot: false }];
+		if (rel === "" || rel === path) return crumbs;
+		let acc = confineTo;
+		for (const part of rel.split("/").filter(Boolean)) {
+			acc += "/" + part;
+			crumbs.push({ label: part, path: acc, isRoot: false });
+		}
+		return crumbs;
+	}
 	const root: Crumb = { label: null, path: "/", isRoot: true };
 	if (path === "/") return [root];
 	const parts = path.split("/").filter(Boolean);
@@ -49,6 +63,12 @@ function buildBreadcrumbs(path: string): Crumb[] {
 		crumbs.push({ label: part, path: acc, isRoot: false });
 	}
 	return crumbs;
+}
+
+/** Is `candidate` the confinement root or inside it? */
+function isInsideRoot(root: string, candidate: string): boolean {
+	const rel = relativeToRoot(root, candidate);
+	return rel === "" || rel !== candidate;
 }
 
 // ── Nerd Font glyphs ───────────────────────────────────────────────
@@ -71,6 +91,9 @@ const NF = {
 	filter: "\uF0B0",         // nf-fa-filter
 	close: "\uF00D",          // nf-fa-times
 	loading: "\uF1CE",        // nf-fa-circle_o_notch (spinning)
+	file: "\uF016",           // nf-fa-file_o
+	eye: "\uF06E",            // nf-fa-eye
+	eyeSlash: "\uF070",       // nf-fa-eye_slash
 	plus: "\uF067",           // nf-fa-plus (safer than nf-md-folder_plus — see NF note above)
 } as const;
 
@@ -160,7 +183,9 @@ export default function FolderPickerHost() {
 
 	const handleClose = useCallback((result: string[] | null) => {
 		if (!request) return;
-		if (result && result.length > 0) result.forEach(pushRecent);
+		// A confined pick is a folder inside one project — useless as a global
+		// shortcut, and it would push the real recents out of the list.
+		if (result && result.length > 0 && !request.options.confineTo) result.forEach(pushRecent);
 		request.resolve(result);
 		setRequest(null);
 	}, [request]);
@@ -169,7 +194,7 @@ export default function FolderPickerHost() {
 
 	return (
 		<FolderPickerModal
-			key={request.options.initialPath ?? "__root__"}
+			key={`${request.options.mode ?? "folder"}:${request.options.initialPath ?? "__root__"}`}
 			options={request.options}
 			onClose={handleClose}
 		/>
@@ -190,11 +215,17 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 	const [listingError, setListingError] = useState<string | null>(null);
 	const [selectedPath, setSelectedPath] = useState<string[]>([]);
 	const [filterText, setFilterText] = useState("");
-	const [recentPaths] = useState<string[]>(() => loadRecent());
+	const [recentPaths] = useState<string[]>(() => (options.confineTo ? [] : loadRecent()));
 	const [home, setHome] = useState<string>("");
 	const [homeEntries, setHomeEntries] = useState<Set<string>>(new Set());
 	const [driveRoots, setDriveRoots] = useState<string[]>([]);
 	const [treeKey, setTreeKey] = useState(0);
+	const fileMode = options.mode === "file";
+	const confineTo = options.confineTo ?? null;
+	const [showHidden, setShowHidden] = useState(options.showHidden === true);
+	// A file the caller pointed at (or the user typed): the tree opens on its
+	// folder with the file already selected, so Select is live immediately.
+	const [pinnedFile, setPinnedFile] = useState<string | null>(null);
 	const [newFolderInput, setNewFolderInput] = useState<string | null>(null);
 	const [newFolderError, setNewFolderError] = useState<string | null>(null);
 	const [creatingFolder, setCreatingFolder] = useState(false);
@@ -204,17 +235,44 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 
 	const listingsRef = useRef<Map<string, FolderListing>>(new Map());
 
+	// Read through a ref so toggling "show hidden" does not change the identity
+	// of `listDir` — the initial-load effect and the tree's data loader both
+	// depend on it and must not re-run on a toggle.
+	const showHiddenRef = useRef(showHidden);
+	showHiddenRef.current = showHidden;
+	const listDir = useCallback(
+		(path: string | null): Promise<FolderListing> =>
+			api.request.listDirectory({ path, includeFiles: fileMode, showHidden: showHiddenRef.current }),
+		[fileMode],
+	);
+
+	/** List `path`; in file mode a path that IS a file resolves to its folder, with the file picked. */
+	const loadForPath = useCallback(async (path: string | null): Promise<{ listing: FolderListing; pick: string | null }> => {
+		if (confineTo && path && !isInsideRoot(confineTo, path)) {
+			const inside = await listDir(confineTo);
+			return { listing: { ...inside, error: t("folderPicker.outsideRoot") }, pick: null };
+		}
+		const listing = await listDir(path);
+		if (fileMode && listing.error && listing.parent) {
+			const parent = await listDir(listing.parent);
+			const hit = parent.entries.find((e) => !e.isDir && e.path === listing.path);
+			if (hit) return { listing: parent, pick: hit.path };
+		}
+		return { listing, pick: null };
+	}, [listDir, fileMode, confineTo, t]);
+
 	// Initial load: open the picker at `initialPath` (or home) AND fetch the
 	// home listing in parallel so we can populate sidebar shortcuts.
 	useEffect(() => {
 		let cancelled = false;
 		(async () => {
 			try {
-				const initial = await api.request.listDirectory({ path: options.initialPath ?? null });
+				const { listing: initial, pick } = await loadForPath(options.initialPath ?? confineTo);
 				if (cancelled) return;
 				listingsRef.current.set(initial.path, initial);
 				setCurrentRoot(initial.path);
-				setManualPath(initial.path);
+				setManualPath(pick ?? initial.path);
+				setPinnedFile(pick);
 				setListingError(initial.error ?? null);
 				setHome(initial.home);
 				setDriveRoots(initial.roots ?? []);
@@ -224,7 +282,7 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 				if (initial.path === initial.home) {
 					setHomeEntries(new Set(initial.entries.filter((e) => e.isDir).map((e) => e.name)));
 				} else {
-					const homeListing = await api.request.listDirectory({ path: initial.home });
+					const homeListing = await listDir(initial.home);
 					if (cancelled) return;
 					listingsRef.current.set(homeListing.path, homeListing);
 					setHomeEntries(new Set(homeListing.entries.filter((e) => e.isDir).map((e) => e.name)));
@@ -235,7 +293,7 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 			}
 		})();
 		return () => { cancelled = true; };
-	}, [options.initialPath]);
+	}, [options.initialPath, confineTo, loadForPath, listDir]);
 
 	// Escape cancels the inline "new folder" input first, otherwise closes the modal.
 	useEscapeKey(() => {
@@ -251,17 +309,30 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 		setListingError(null);
 		setPreselectRoot(selectOnArrival);
 		try {
-			const listing = await api.request.listDirectory({ path });
+			const { listing, pick } = await loadForPath(path);
 			listingsRef.current.set(listing.path, listing);
 			setCurrentRoot(listing.path);
-			setManualPath(listing.path);
+			setManualPath(pick ?? listing.path);
+			setPinnedFile(pick);
 			setListingError(listing.error ?? null);
 			setFilterText("");
 			setTreeKey((k) => k + 1);
 		} catch (err) {
 			setListingError(String(err));
 		}
-	}, []);
+	}, [loadForPath]);
+
+	// Toggling dotfiles changes what every listing contains, so the cache goes
+	// and the tree remounts on the folder the user is already looking at.
+	const toggleHidden = useCallback(() => {
+		// The ref has to flip BEFORE navigating: a state updater runs at render
+		// time, which is after the listing request has already gone out.
+		const next = !showHiddenRef.current;
+		showHiddenRef.current = next;
+		setShowHidden(next);
+		listingsRef.current.clear();
+		if (currentRoot) void navigateTo(currentRoot);
+	}, [currentRoot, navigateTo]);
 
 	const handleManualSubmit = useCallback((e: FormEvent) => {
 		e.preventDefault();
@@ -277,7 +348,7 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 		}
 	}, [manualPath, navigateTo]);
 
-	const breadcrumbs = useMemo(() => buildBreadcrumbs(currentRoot ?? ""), [currentRoot]);
+	const breadcrumbs = useMemo(() => buildBreadcrumbs(currentRoot ?? "", confineTo), [currentRoot, confineTo]);
 
 	const handleSelect = useCallback(() => {
 		if (selectedPath.length === 0) return;
@@ -316,6 +387,11 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 	// Build sidebar shortcuts — only those that actually exist under $HOME.
 	const quickPlaces = useMemo(() => {
 		const items: Array<{ label: string; path: string; glyph: string }> = [];
+		// Confined: every shortcut out there is a place the picker will refuse to
+		// open, so the root is the only one left standing.
+		if (confineTo) {
+			return [{ label: options.confineLabel ?? basename(confineTo), path: confineTo, glyph: NF.folderOpen }];
+		}
 		if (home) {
 			items.push({ label: t("folderPicker.home"), path: home, glyph: NF.home });
 			if (homeEntries.has("Desktop")) items.push({ label: "Desktop", path: `${home}/Desktop`, glyph: NF.desktop });
@@ -330,7 +406,7 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 			items.push({ label: t("folderPicker.rootLabel"), path: "/", glyph: NF.hardDrive });
 		}
 		return items;
-	}, [home, homeEntries, driveRoots, t]);
+	}, [home, homeEntries, driveRoots, confineTo, options.confineLabel, t]);
 
 	return (
 		<div
@@ -351,8 +427,21 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 				{/* Header */}
 				<div className="px-5 py-3 border-b border-edge flex items-center justify-between gap-3">
 					<h2 id="folder-picker-title" className="text-fg text-base font-semibold truncate">
-						{options.title ?? t("folderPicker.title")}
+						{options.title ?? t(fileMode ? "folderPicker.titleFile" : "folderPicker.title")}
 					</h2>
+					<button
+						type="button"
+						onClick={toggleHidden}
+						aria-pressed={showHidden}
+						data-testid="folder-picker-hidden-toggle"
+						title={t("folderPicker.showHidden")}
+						className={`ml-auto inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs transition-colors ${
+							showHidden ? "text-fg bg-elevated" : "text-fg-3 hover:text-fg hover:bg-elevated"
+						}`}
+					>
+						<Glyph glyph={showHidden ? NF.eye : NF.eyeSlash} size="0.85rem" />
+						<span>{t("folderPicker.showHidden")}</span>
+					</button>
 					<button
 						type="button"
 						onClick={() => onClose(null)}
@@ -485,10 +574,10 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 								</span>
 								<input
 									type="text"
-									aria-label={t("folderPicker.filterAriaLabel")}
+									aria-label={t(fileMode ? "folderPicker.filterFilesAriaLabel" : "folderPicker.filterAriaLabel")}
 									value={filterText}
 									onChange={(e) => setFilterText(e.target.value)}
-									placeholder={t("folderPicker.filterPlaceholder")}
+									placeholder={t(fileMode ? "folderPicker.filterFilesPlaceholder" : "folderPicker.filterPlaceholder")}
 									spellCheck={false}
 									autoCorrect="off"
 									autoCapitalize="off"
@@ -500,7 +589,7 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 						{/* New folder toolbar (only when enabled by caller). The destination
 						     is spelled out on both the button and the form — the folder the
 						     user highlighted, not always the one the tree is rooted at. */}
-						{options.allowCreateFolder && createTarget && (
+						{options.allowCreateFolder && !fileMode && createTarget && (
 							<div className="px-4 py-1.5 border-b border-edge flex flex-col gap-1 flex-shrink-0 bg-raised/20">
 								{newFolderInput === null ? (
 									<button
@@ -580,10 +669,14 @@ function FolderPickerModal({ options, onClose }: ModalProps) {
 									key={treeKey}
 									rootPath={currentRoot}
 									listingsRef={listingsRef}
+									listDir={listDir}
 									filterText={filterText}
 									multi={options.multi}
+									fileMode={fileMode}
+									hideCurrentRow={fileMode || (!!confineTo && currentRoot === confineTo)}
 									home={home}
 									preselectRoot={preselectRoot}
+									preselectPath={pinnedFile}
 									onSelect={setSelectedPath}
 									onNavigate={(p) => void navigateTo(p)}
 								/>
@@ -681,40 +774,53 @@ function SidebarItem({ glyph, label, subLabel, path, active, onClick }: SidebarI
 interface FolderTreeProps {
 	rootPath: string;
 	listingsRef: React.MutableRefObject<Map<string, FolderListing>>;
+	listDir: (path: string | null) => Promise<FolderListing>;
 	filterText: string;
 	multi: boolean;
+	/** Files are listed and are the only selectable rows. */
+	fileMode: boolean;
+	/** Drop the "current folder" row — it is meaningless for a file pick, and empty for a confinement root. */
+	hideCurrentRow: boolean;
 	home: string;
 	/** Start with the "current folder" row selected (used right after creating one). */
 	preselectRoot: boolean;
+	/** Start with this file row selected (the caller's current value). */
+	preselectPath: string | null;
 	onSelect: (paths: string[]) => void;
 	onNavigate: (path: string) => void;
 }
 
-function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectRoot, onSelect, onNavigate }: FolderTreeProps) {
+function FolderTree({ rootPath, listingsRef, listDir, filterText, multi, fileMode, hideCurrentRow, home, preselectRoot, preselectPath, onSelect, onNavigate }: FolderTreeProps) {
 	const t = useT();
 	// The folder the tree is rooted at is a legitimate answer, so it gets its own
 	// row. Without it the only way to pick the folder you navigated into was to
 	// go back out to its parent and find it there.
 	const [rootSelected, setRootSelected] = useState(preselectRoot);
+	const [pinned, setPinned] = useState<string | null>(preselectPath);
+	/** Paths seen as files in a parent listing — see getItem below. */
+	const filesRef = useRef<Set<string>>(new Set());
 	const dataLoader = useMemo(() => ({
 		async getItem(itemId: string): Promise<FolderNode> {
 			if (itemId === rootPath) {
 				return { path: rootPath, name: basename(rootPath), isDir: true, isRoot: true };
 			}
-			return { path: itemId, name: basename(itemId), isDir: true, isRoot: false };
+			// A child's kind is known from its parent listing; only a directly
+			// requested item can miss the cache, and those are folders we walked into.
+			const isDir = !fileMode || !filesRef.current.has(itemId);
+			return { path: itemId, name: basename(itemId), isDir, isRoot: false };
 		},
 		async getChildrenWithData(parentId: string): Promise<Array<{ id: string; data: FolderNode }>> {
 			const cached = listingsRef.current.get(parentId);
-			const listing = cached ?? await api.request.listDirectory({ path: parentId });
+			const listing = cached ?? await listDir(parentId);
 			if (!cached) listingsRef.current.set(listing.path, listing);
 			return listing.entries
-				.filter((e) => e.isDir)
-				.map((e) => ({
-					id: e.path,
-					data: { path: e.path, name: e.name, isDir: true, isRoot: false },
-				}));
+				.filter((e) => fileMode || e.isDir)
+				.map((e) => {
+					if (!e.isDir) filesRef.current.add(e.path);
+					return { id: e.path, data: { path: e.path, name: e.name, isDir: e.isDir, isRoot: false } };
+				});
 		},
-	}), [rootPath, listingsRef]);
+	}), [rootPath, listingsRef, listDir, fileMode]);
 
 	// hotkeysCoreFeature is what gives the tree arrow-key navigation, so it is
 	// not optional — a single-select picker has to be keyboard-operable too.
@@ -732,27 +838,37 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 	const selectedItems = tree.getSelectedItems();
 	const selectionKey = selectedItems.map((i) => i.getId()).sort().join(",");
 	useEffect(() => {
+		if (pinned) {
+			onSelect([pinned]);
+			return;
+		}
 		if (rootSelected) {
 			onSelect([rootPath]);
 			return;
 		}
 		const allPaths = selectedItems
-			.map((i) => i.getItemData()?.path)
-			.filter((p): p is string => p !== undefined)
+			.map((i) => i.getItemData())
+			// In file mode a folder row is only a way to walk deeper — the caller
+			// asked for a file, so a highlighted folder must not arm "Select".
+			.filter((d): d is FolderNode => d !== undefined && (!fileMode || !d.isDir))
+			.map((d) => d.path)
 			.sort();
 		const topLevel = allPaths.filter(
 			(p) => !allPaths.some((ancestor) => ancestor !== p && p.startsWith(ancestor + "/")),
 		);
 		onSelect(topLevel);
-	}, [selectionKey, rootSelected, rootPath, onSelect]);
+	}, [selectionKey, rootSelected, pinned, rootPath, fileMode, onSelect]);
 
 	const selectRootRow = useCallback(() => {
 		tree.setSelectedItems([]);
+		setPinned(null);
 		setRootSelected(true);
 	}, [tree]);
 
 	const handleDoubleClick = useCallback((item: ItemInstance<FolderNode>) => {
-		onNavigate(item.getItemData().path);
+		const data = item.getItemData();
+		if (!data.isDir) return;
+		onNavigate(data.path);
 	}, [onNavigate]);
 
 	const allItems = tree.getItems();
@@ -784,7 +900,8 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 
 	return (
 		<div {...tree.getContainerProps()} className="outline-none flex flex-col" role="tree">
-			{/* The current folder, as a pickable row. */}
+			{/* The current folder, as a pickable row — meaningless when the caller wants a file. */}
+			{!hideCurrentRow && (
 			<button
 				type="button"
 				data-testid="folder-picker-current-row"
@@ -806,10 +923,12 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 					{t("folderPicker.currentFolder")}
 				</span>
 			</button>
+			)}
 			{empty && !filter && (
 				<div className="px-3 py-6 text-center">
 					<div className="text-fg-3 text-xs">{t("folderPicker.emptyFolder")}</div>
-					<div className="text-fg-muted text-xs mt-1">{t("folderPicker.emptyFolderHint")}</div>
+					{/* The hint says "pick it as it is" — only true while that row exists. */}
+					{!hideCurrentRow && <div className="text-fg-muted text-xs mt-1">{t("folderPicker.emptyFolderHint")}</div>}
 				</div>
 			)}
 			{empty && filter && (
@@ -822,7 +941,7 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 				const level = item.getItemMeta().level;
 				const expanded = item.isExpanded();
 				const loading = item.isLoading?.() ?? false;
-				const selected = item.isSelected();
+				const selected = item.isSelected() || pinned === data.path;
 				const itemProps = item.getProps();
 				return (
 					<button
@@ -832,6 +951,7 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 						onClick={(e) => {
 							itemProps.onClick?.(e);
 							setRootSelected(false);
+							setPinned(null);
 							// Single-select callers expect exactly one folder, but
 							// headless-tree's selectionFeature still honors
 							// Cmd/Ctrl/Shift+click to accumulate selection. Collapse
@@ -848,7 +968,9 @@ function FolderTree({ rootPath, listingsRef, filterText, multi, home, preselectR
 						}`}
 					>
 						{data.isDir ? <ChevronGlyph expanded={expanded} /> : <ChevronPlaceholder />}
-						<FolderGlyph open={expanded && data.isDir} />
+						{data.isDir
+							? <FolderGlyph open={expanded} />
+							: <Glyph glyph={NF.file} size="0.95rem" className="text-fg-3" />}
 						<span className="truncate flex-1 min-w-0">{data.name}</span>
 						{loading && <Glyph glyph={NF.loading} size="0.8rem" className="text-fg-muted ml-1" spin />}
 					</button>

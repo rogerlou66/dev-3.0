@@ -37,6 +37,14 @@ export interface GitOpStep {
 	failureLabel?: string;
 	/** Extra lines shown after this step's failure line (conflict guidance). */
 	failureAdvice?: string[];
+	/**
+	 * Advice that depends on HOW the step failed, because one blanket line lies in
+	 * the other case. `git rebase` exits 1 when it stopped mid-rebase (conflicts,
+	 * measured) and 128 when it refused before touching the branch — and telling
+	 * someone to `git rebase --continue` when no rebase is in progress sends them
+	 * looking for conflicts that do not exist.
+	 */
+	failureAdviceWhen?: { code: number; advice: string[]; otherwise: string[] };
 }
 
 export interface GitOpScriptSpec {
@@ -66,6 +74,12 @@ function failureTail(step: GitOpStep, exitVar: string, exitFilePath: string): st
 		d.writeExitCodeFile(exitVar, exitFilePath),
 		d.print(d.style(`✗ ${label} failed (exit %s)`, "error"), { blankBefore: true, args: [d.exitCodeArg(exitVar)] }),
 		...(step.failureAdvice ?? []).map((line) => d.print("%s", { args: [d.quote(line)] })),
+		...(step.failureAdviceWhen
+			? d.branchOnCode(exitVar, step.failureAdviceWhen.code, {
+				match: indentLines(2, step.failureAdviceWhen.advice.map((line) => d.print("%s", { args: [d.quote(line)] }))),
+				otherwise: indentLines(2, step.failureAdviceWhen.otherwise.map((line) => d.print("%s", { args: [d.quote(line)] }))),
+			})
+			: []),
 		d.print(CLOSE_PROMPT, { blankBefore: true }),
 		d.readKey(),
 		d.exitWith(exitVar),
@@ -126,9 +140,15 @@ export function buildGitOpScript(spec: GitOpScriptSpec): string {
 // the app ships. A test that rebuilt an equivalent step list would stay green
 // while the handler drifted away from it.
 
+/**
+ * `fetchBranch` is null when the rebase target is a LOCAL ref — a repo with no
+ * remote, or a task based on a local branch. There is then no fetch step at all:
+ * `git fetch origin <base>` in a remoteless repo exited 128, the script printed
+ * "continuing", and the rebase went ahead against `origin/<base>` anyway.
+ */
 export function rebaseGitOpSpec(opts: {
 	exitFilePath: string;
-	fetchBranch: string;
+	fetchBranch: string | null;
 	rebaseTarget: string;
 }): GitOpScriptSpec {
 	return {
@@ -136,33 +156,76 @@ export function rebaseGitOpSpec(opts: {
 		successMessage: "Rebase complete",
 		successHoldSeconds: 5,
 		steps: [
-			{
+			...(opts.fetchBranch ? [{
 				announce: "Fetching origin...",
 				command: ["git", "fetch", "origin", opts.fetchBranch, "--quiet"],
 				// Unchanged from the bash original: a failed fetch never blocked the
 				// rebase, it just rebased onto the ref already on disk.
 				optional: true,
 				failureLabel: "Fetch",
-			},
+			}] : []),
 			{
 				announce: `Rebasing on ${opts.rebaseTarget}...`,
 				command: ["git", "rebase", opts.rebaseTarget],
 				failureLabel: "Rebase",
-				failureAdvice: [
-					"Resolve conflicts in the main terminal, then: git rebase --continue",
-					"Or abort with: git rebase --abort",
-				],
+				failureAdviceWhen: {
+					code: 1,
+					advice: [
+						"The rebase stopped part-way. Resolve the conflicts in the main terminal, then: git rebase --continue",
+						"Or abort with: git rebase --abort",
+						"If git refused to start (uncommitted changes), commit or stash them first — there is nothing to continue.",
+					],
+					otherwise: [
+						`git refused before touching your branch — it is still where it was, and no rebase is in progress.`,
+						"Nothing to continue or abort. Read git's message above.",
+					],
+				},
 			},
 		],
 	};
 }
 
-export function pushGitOpSpec(opts: { exitFilePath: string }): GitOpScriptSpec {
+/**
+ * `lease` turns this into a force push. It carries the branch and the sha the
+ * caller just fetched, so the argv is `--force-with-lease=<branch>:<sha>` — the
+ * EXPLICIT form, resolved in TypeScript like every other decision here.
+ *
+ * The bare `--force-with-lease` was not an option: it leases against the
+ * remote-tracking ref on disk, which errors out when the branch has no upstream
+ * (dev3 pushed with `git push origin HEAD`, never `-u`) and, worse, silently
+ * leases against a STALE ref when one exists — overwriting a push nobody fetched.
+ * With the sha spelled out, git compares it against the remote's real value
+ * during the push handshake and refuses if anyone moved the branch meanwhile.
+ */
+export function pushGitOpSpec(opts: {
+	exitFilePath: string;
+	lease?: { branch: string; expectSha: string } | null;
+}): GitOpScriptSpec {
+	const command = opts.lease
+		? ["git", "push", `--force-with-lease=${opts.lease.branch}:${opts.lease.expectSha}`, "origin", "HEAD"]
+		: ["git", "push", "-u", "origin", "HEAD"];
 	return {
 		exitFilePath: opts.exitFilePath,
-		successMessage: "Push complete",
+		successMessage: opts.lease ? "Force push complete" : "Push complete",
 		successHoldSeconds: 2,
-		steps: [{ command: ["git", "push", "origin", "HEAD"], failureLabel: "Push" }],
+		steps: [
+			{
+				announce: opts.lease
+					? `Force-pushing ${opts.lease.branch} with a lease on ${opts.lease.expectSha.slice(0, 8)}...`
+					: undefined,
+				command,
+				failureLabel: opts.lease ? "Force push" : "Push",
+				failureAdvice: opts.lease
+					? [
+						"The lease was refused: origin has moved since dev3 fetched it.",
+						"Someone (or an agent) pushed to this branch — fetch and inspect before retrying.",
+					]
+					: [
+						"If git refused this as non-fast-forward, the branch was rebased after being pushed.",
+						"Refresh the branch status and use Force push, which leases against origin.",
+					],
+			},
+		],
 	};
 }
 
@@ -181,6 +244,14 @@ export function mergeGitOpSpec(opts: {
 	baseBranch: string;
 	branchForMerge: string;
 	messagePath: string;
+	/**
+	 * Push the base branch after committing. Without it the squash lands in the
+	 * main clone's LOCAL base branch and stops there: with a remote the work looks
+	 * landed while `origin/<base>` never hears about it, and nothing in the UI says
+	 * the local base is now ahead. The caller only sets it when there is a remote,
+	 * and the click is confirmed first because it bypasses review and CI.
+	 */
+	pushBase?: boolean;
 }): GitOpScriptSpec {
 	const steps: GitOpStep[] = [];
 	if (opts.checkoutCommand) {
@@ -194,9 +265,29 @@ export function mergeGitOpSpec(opts: {
 		announce: `Squash-merging ${opts.branchForMerge} into ${opts.baseBranch}...`,
 		command: ["git", "merge", "--squash", opts.branchForMerge],
 		failureLabel: "Merge",
+		failureAdvice: [
+			`The project clone is left mid-merge on ${opts.baseBranch}.`,
+			"Resolve it there, or discard with: git merge --abort",
+		],
 	});
 	steps.push({ command: ["git", "commit", "-F", opts.messagePath], failureLabel: "Commit" });
-	return { exitFilePath: opts.exitFilePath, successMessage: "Merge complete", successHoldSeconds: 5, steps };
+	if (opts.pushBase) {
+		steps.push({
+			announce: `Pushing ${opts.baseBranch} to origin...`,
+			command: ["git", "push", "origin", opts.baseBranch],
+			failureLabel: "Push",
+			failureAdvice: [
+				`The squash commit is on your local ${opts.baseBranch} but did NOT reach origin.`,
+				`Push it yourself, or reset with: git reset --hard origin/${opts.baseBranch}`,
+			],
+		});
+	}
+	return {
+		exitFilePath: opts.exitFilePath,
+		successMessage: opts.pushBase ? `Merged and pushed to origin/${opts.baseBranch}` : "Merge complete",
+		successHoldSeconds: 5,
+		steps,
+	};
 }
 
 /**
@@ -204,6 +295,70 @@ export function mergeGitOpSpec(opts: {
  * would prepend one on Windows and it would become the first bytes of the
  * commit subject.
  */
-export async function writeMergeCommitMessage(messagePath: string, title: string): Promise<void> {
-	await Bun.write(messagePath, `${title}\n`);
+export async function writeMergeCommitMessage(messagePath: string, message: string): Promise<void> {
+	await Bun.write(messagePath, `${message.replace(/\s+$/, "")}\n`);
+}
+
+/** Longest subject git's own tooling formats without wrapping. */
+const SUBJECT_SOFT_LIMIT = 72;
+
+/** A scratch task's placeholder title (`Scratch — 14:32`) says nothing about the work. */
+const SCRATCH_TITLE = /^Scratch\s+—\s+\d{1,2}:\d{2}$/;
+
+/**
+ * A task title is only a subject when it reads like one. Rejected: empty, the
+ * scratch placeholder, and anything ending in the ellipsis `titleFromDescription`
+ * appends — that mark means the title IS a chopped-off description, which is the
+ * defect this whole module exists to stop. A newline can never reach a subject,
+ * so only the first line is ever considered.
+ */
+function titleAsSubject(taskTitle: string): { subject: string; overLong: boolean } | null {
+	const subject = (taskTitle.split("\n")[0] ?? "").trim();
+	if (!subject) return null;
+	if (SCRATCH_TITLE.test(subject)) return null;
+	if (/[…]$|\.\.\.$/.test(subject)) return null;
+	return { subject, overLong: subject.length > SUBJECT_SOFT_LIMIT };
+}
+
+function subjectOf(commitMessage: string): string {
+	return (commitMessage.split("\n")[0] ?? "").trim();
+}
+
+/**
+ * The squash-merge commit message, built from what git and the task already know.
+ *
+ * NO GENERATION, by requirement: every branch of this either copies a commit
+ * message the author wrote or copies the task title, and the previous behaviour —
+ * `task.title`, which is the first 80 characters of the task DESCRIPTION whenever
+ * no one renamed the task — is what put 86 truncated prose fragments with a
+ * trailing ellipsis into this repo's own main.
+ *
+ * `commits` are the branch's commits, oldest first, full `%B` bodies.
+ *  - exactly one → reuse it verbatim, subject and body. The author already wrote
+ *    the message for this change; re-deriving it can only lose information.
+ *  - several → the task title is the subject, the commit subjects are the body.
+ *  - a title that is not subject-shaped (see `titleAsSubject`) falls back to the
+ *    first commit's subject, and an over-long title yields to one too — but is
+ *    used in full when there is no commit to borrow from. Never truncated.
+ *  - nothing usable at all (no commits, no title) → `Merge <branch>`.
+ */
+export function buildMergeCommitMessage(opts: {
+	commits: string[];
+	taskTitle: string;
+	branchName: string;
+}): string {
+	const commits = opts.commits.map((c) => c.replace(/\s+$/, "")).filter((c) => c.trim().length > 0);
+	if (commits.length === 1) return `${commits[0]!.trim()}\n`;
+
+	const commitSubjects = commits.map(subjectOf).filter(Boolean);
+	const title = titleAsSubject(opts.taskTitle);
+	const fallback = commitSubjects[0] ?? `Merge ${opts.branchName}`;
+	const subject = !title
+		? fallback
+		: title.overLong && commitSubjects.length > 0
+			? commitSubjects[0]!
+			: title.subject;
+
+	const body = commitSubjects.length > 1 ? commitSubjects.map((s) => `- ${s}`).join("\n") : "";
+	return body ? `${subject}\n\n${body}\n` : `${subject}\n`;
 }

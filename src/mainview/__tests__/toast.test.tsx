@@ -2,7 +2,8 @@ import type { ReactElement } from "react";
 import { act, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../i18n";
-import { setToastSuppressed, taskToastContext, ToastHost, toast } from "../toast";
+import { createPortal } from "react-dom";
+import { setToastSuppressed, taskToastContext, ToastHost, toast, usePinnedToastSlot } from "../toast";
 
 /** `ToastHost` localizes its dismiss label, so every render needs the provider. */
 function render(ui: ReactElement) {
@@ -537,6 +538,56 @@ describe("toast service", () => {
 		expect(onTaskOverflow).toHaveBeenCalledWith(expect.objectContaining({ message: "Oldest", taskId: "task-1" }));
 	});
 
+	it("offers no Clear all while a single toast owns its own dismiss button", () => {
+		render(<ToastHost />);
+		act(() => toast.info("Alone", { durationMs: 60_000 }));
+		expect(screen.queryByRole("button", { name: /Clear all/ })).not.toBeInTheDocument();
+	});
+
+	it("sweeps the whole stack with Clear all and counts what it will clear", async () => {
+		const user = userEvent.setup();
+		render(<ToastHost />);
+		act(() => {
+			toast.info("First", { durationMs: 60_000 });
+			toast.error("Second", { durationMs: 60_000 });
+			toast.success("Third", { durationMs: 60_000 });
+		});
+		await user.click(screen.getByRole("button", { name: /Clear all/ }));
+		expect(screen.queryAllByRole("alert")).toHaveLength(0);
+		expect(screen.queryByRole("button", { name: /Clear all/ })).not.toBeInTheDocument();
+	});
+
+	it("does not turn a Clear all sweep into attention badges", async () => {
+		const user = userEvent.setup();
+		const onTaskOverflow = vi.fn();
+		render(<ToastHost onTaskOverflow={onTaskOverflow} />);
+		act(() => {
+			toast.info("First", { durationMs: 60_000, taskId: "task-1" });
+			toast.error("Second", { durationMs: 60_000, taskId: "task-2" });
+		});
+		await user.click(screen.getByRole("button", { name: /Clear all/ }));
+		expect(onTaskOverflow).not.toHaveBeenCalled();
+	});
+
+	it("pauses every timer while Clear all is hovered so the button cannot slip away", async () => {
+		const user = userEvent.setup();
+		render(<ToastHost />);
+		act(() => {
+			toast.info("First", { durationMs: 60_000 });
+			toast.error("Second", { durationMs: 60_000 });
+		});
+		const clearAll = screen.getByRole("button", { name: /Clear all/ });
+		expect(document.querySelectorAll("[data-toast-progress]")).toHaveLength(2);
+		await user.hover(clearAll);
+		for (const bar of document.querySelectorAll("[data-toast-progress]")) {
+			expect(bar as HTMLElement).toHaveStyle({ animationPlayState: "paused" });
+		}
+		await user.unhover(clearAll);
+		for (const bar of document.querySelectorAll("[data-toast-progress]")) {
+			expect(bar as HTMLElement).toHaveStyle({ animationPlayState: "running" });
+		}
+	});
+
 	it("does not report unscoped, manually dismissed, or timed-out eviction", () => {
 		vi.useFakeTimers();
 		const onTaskOverflow = vi.fn();
@@ -593,4 +644,31 @@ describe("toast service", () => {
 		expect(await screen.findByText("First queued")).toBeInTheDocument();
 		expect(screen.getByText("Second queued")).toBeInTheDocument();
 	});
+});
+
+describe("ToastHost — the pinned slot owns the corner with the toasts", () => {
+	function Pinned() {
+		const slot = usePinnedToastSlot();
+		return slot ? createPortal(<div data-testid="pinned">Update ready</div>, slot) : null;
+	}
+
+	it("exposes the slot with an empty stack, because that is when a prompt needs it most", () => {
+		render(<><ToastHost /><Pinned /></>);
+		expect(screen.getByTestId("pinned")).toBeInTheDocument();
+	});
+
+	it("keeps the pinned surface above the toasts inside one stack", async () => {
+		render(<><ToastHost /><Pinned /></>);
+		act(() => toast.info("Agent shared 2 images"));
+
+		const pinned = await screen.findByTestId("pinned");
+		const card = toastCard();
+		// Same fixed container: neither can cover the other, whatever either one's height.
+		const stack = pinned.closest("div.fixed");
+		expect(stack).not.toBeNull();
+		expect(stack?.contains(card)).toBe(true);
+		// Pinned first in DOM order, so it renders at the top of the column.
+		expect(pinned.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
 });

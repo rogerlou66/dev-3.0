@@ -55,9 +55,11 @@ export default function TaskGitActionsSheet({
 }: TaskGitActionsSheetProps) {
 	const t = useT();
 	const {
+		baseBranch,
 		branchStatus,
 		compareRef,
 		displayRef,
+		mergeRoute,
 		handleCommit,
 		handleCreatePR,
 		handleMerge,
@@ -123,14 +125,30 @@ export default function TaskGitActionsSheet({
 		run: withDismiss(() => void handleRebase()),
 	});
 
-	rows.push({
-		key: "push",
-		icon: <PushIcon className={`h-5 w-5 shrink-0 ${!branchStatus || ahead === 0 ? "text-fg-muted" : "text-accent"}`} />,
-		label: t("infoPanel.push"),
-		disabled: !branchStatus || ahead === 0,
-		reason: !branchStatus ? t("infoPanel.statusLoading") : ahead === 0 ? t("infoPanel.pushDisabled") : undefined,
-		run: withDismiss(() => void handlePush()),
-	});
+	// No `origin` means push and PR have no destination; a non-GitHub origin has
+	// nowhere for `gh` to open one; a foreign-code task has no business writing to
+	// the branch at all. Same three rules as the desktop bar.
+	const noRemote = branchStatus?.hasRemote === false;
+	const noGitHubRemote = !!branchStatus && branchStatus.hasRemote && !branchStatus.remoteIsGitHub;
+	const ownBranch = !task.foreignCode;
+	const pushIsForced = !!branchStatus && branchStatus.hasRemote && branchStatus.remoteAhead > 0;
+	const pushRowDisabled = noRemote || !branchStatus || ahead === 0;
+	if (ownBranch) {
+		rows.push({
+			key: "push",
+			icon: <PushIcon className={`h-5 w-5 shrink-0 ${pushRowDisabled ? "text-fg-muted" : pushIsForced ? "text-danger" : "text-accent"}`} />,
+			label: pushIsForced ? t("infoPanel.forcePush") : t("infoPanel.push"),
+			disabled: pushRowDisabled,
+			reason: !branchStatus
+				? t("infoPanel.statusLoading")
+				: noRemote
+					? t("infoPanel.noRemoteDisabled")
+					: pushIsForced
+						? t("infoPanel.forcePushTooltip", { branch: task.branchName ?? "" })
+						: ahead === 0 ? t("infoPanel.pushDisabled") : undefined,
+			run: withDismiss(() => void handlePush()),
+		});
+	}
 
 	if (hasPR) {
 		rows.push({
@@ -142,13 +160,17 @@ export default function TaskGitActionsSheet({
 			external: true,
 			run: withDismiss(() => handleOpenPR()),
 		});
-	} else {
-		const prDisabled = !branchStatus || ahead === 0;
+	} else if (ownBranch) {
+		const prDisabled = noRemote || noGitHubRemote || !branchStatus || ahead === 0;
 		const prReason = !branchStatus
 			? t("infoPanel.statusLoading")
-			: ahead === 0
-				? t("infoPanel.createPRDisabledNoCommits")
-				: undefined;
+			: noRemote
+				? t("infoPanel.noRemoteDisabled")
+				: noGitHubRemote
+					? t("infoPanel.noGitHubRemoteDisabled")
+					: ahead === 0
+						? t("infoPanel.createPRDisabledNoCommits")
+						: undefined;
 		rows.push({
 			key: "create-pr",
 			icon: <CreatePRIcon className={`h-5 w-5 shrink-0 ${prDisabled ? "text-fg-muted" : "text-success"}`} />,
@@ -167,20 +189,28 @@ export default function TaskGitActionsSheet({
 		});
 	}
 
-	rows.push({
-		key: "merge",
-		icon: <MergeIcon className={`h-5 w-5 shrink-0 ${!branchStatus || ahead === 0 || behind > 0 ? "text-fg-muted" : "text-success"}`} />,
-		label: t("infoPanel.merge"),
-		disabled: !branchStatus || ahead === 0 || behind > 0,
-		reason: !branchStatus
-			? t("infoPanel.statusLoading")
-			: behind > 0
-				? t("infoPanel.mergeDisabledBehind")
+	if (ownBranch) {
+		// Same two routes as the desktop bar: an open PR means gh merges the PR, so
+		// "behind the base" is GitHub's judgement, not a local rebase requirement.
+		const mergeIsPr = mergeRoute === "pull-request";
+		const mergeRowDisabled = !branchStatus || ahead === 0 || (!mergeIsPr && behind > 0);
+		rows.push({
+			key: "merge",
+			icon: <MergeIcon className={`h-5 w-5 shrink-0 ${mergeRowDisabled ? "text-fg-muted" : "text-success"}`} />,
+			label: mergeIsPr ? t("infoPanel.mergePr") : t("infoPanel.merge"),
+			disabled: mergeRowDisabled,
+			reason: !branchStatus
+				? t("infoPanel.statusLoading")
 				: ahead === 0
 					? t("infoPanel.mergeDisabledNoCommits")
-					: undefined,
-		run: withDismiss(() => void handleMerge()),
-	});
+					: mergeIsPr
+						? t("infoPanel.mergePrTooltip", { pr: String(branchStatus.prNumber), branch: baseBranch })
+						: behind > 0
+							? t("infoPanel.mergeDisabledBehind")
+							: undefined,
+			run: withDismiss(() => void handleMerge()),
+		});
+	}
 
 	return (
 		<section className="border-t border-edge pt-4">

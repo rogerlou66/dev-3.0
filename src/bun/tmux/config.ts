@@ -13,6 +13,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { DEV3_HOME } from "../paths";
 import { dev3TempPath } from "../temp-paths";
 import { SHELL_INIT_DIR, writeShellInit } from "../shell-init";
+import { getUserShell } from "../shell-env";
 import { CATPPUCCIN_PLUGIN_DIR, writeCatppuccinPlugin } from "./themes";
 
 /**
@@ -122,14 +123,22 @@ bind | split-window -h -c "${PANE_CWD_FORMAT}"
 bind \\ split-window -h -c "${PANE_CWD_FORMAT}"
 bind - split-window -v -c "${PANE_CWD_FORMAT}"
 
-# Alt+arrow pane switching (no prefix required)
-bind -n M-Left select-pane -L
-bind -n M-Right select-pane -R
-bind -n M-Up select-pane -U
-bind -n M-Down select-pane -D
+# Alt+Shift+arrow pane switching (no prefix required). Plain Alt+arrow is
+# deliberately NOT bound: the shell and agent TUIs use modifier+arrow for word
+# motion, and a root-table binding swallows the key before the pane sees it.
+# The unbinds are load-bearing, not cosmetic — configureTmux re-sources this
+# file into a LIVE server, where a merely deleted bind line stays in effect.
+unbind -n M-Left
+unbind -n M-Right
+unbind -n M-Up
+unbind -n M-Down
+bind -n M-S-Left select-pane -L
+bind -n M-S-Right select-pane -R
+bind -n M-S-Up select-pane -U
+bind -n M-S-Down select-pane -D
 
 # Remember the last AGENT pane the user focused, per session. Fires on every
-# pane selection (mouse, Alt+arrow, programmatic). The conditional keeps the
+# pane selection (mouse, Alt+Shift+arrow, programmatic). The conditional keeps the
 # previous value when the newly-focused pane is not an agent pane, so focusing a
 # shell / dev-server split never misroutes a hand-off. Read at send time by
 # resolveAgentPromptTargetPane. Session-scoped: the dev3 tmux server hosts many
@@ -163,6 +172,63 @@ set -ga update-environment TERM_PROGRAM
 set-environment -g ZDOTDIR ${SHELL_INIT_DIR}
 `;
 
+/**
+ * `$ENV` is the only rc file a POSIX `sh` (dash / busybox ash) reads for an
+ * interactive shell, so it is where the dev3 prompt goes. The user's own value
+ * travels along as `DEV3_USER_ENV` and the init file sources it first —
+ * clobbering `$ENV` outright would silently drop their aliases.
+ *
+ * Harmless for zsh (ignores `$ENV`) and for bash (reads it only when invoked
+ * as `sh`, where the file is valid anyway).
+ */
+function shellEnvConfig(): string {
+	// dev3 runs inside its own tmux panes, so `$ENV` here is often the file we
+	// are about to point at — forwarding that would make the init file source
+	// itself forever.
+	const shrc = `${SHELL_INIT_DIR}/.shrc`;
+	const inherited = process.env.ENV?.trim();
+	const userEnv = inherited && inherited !== shrc ? tmuxConfigValue(inherited) : null;
+	const envLine = tmuxConfigValue(shrc);
+	return [
+		"# Shell prompt — POSIX sh reads $ENV for interactive shells",
+		...(userEnv ? [`set-environment -g DEV3_USER_ENV ${userEnv}`] : []),
+		...(envLine ? [`set-environment -g ENV ${envLine}`] : []),
+		...defaultShellConfig(),
+		"",
+	].join("\n");
+}
+
+/**
+ * A path spliced into a tmux config line, quoted. tmux splits a config line into
+ * words, so an unquoted value with a space dies with "too many arguments" and a
+ * value with a newline becomes a second COMMAND (verified on tmux 3.6a). Single
+ * quotes are literal in tmux and have no escape, so a value carrying one — or a
+ * newline — is dropped rather than emitted broken.
+ */
+function tmuxConfigValue(value: string): string | null {
+	return /['\r\n]/.test(value) ? null : `'${value}'`;
+}
+
+/**
+ * Panes dev3 spawns carry their shell explicitly; a pane the USER splits off
+ * takes tmux's `default-shell`, which a long-lived server froze at whatever
+ * `$SHELL` was when it started — yesterday's zsh, on a machine whose owner has
+ * since chosen sh. Naming it here makes sourcing this config repair that.
+ *
+ * Best-effort: an unreadable shell setting must not stop the tmux config from
+ * being written at all.
+ */
+function defaultShellConfig(): string[] {
+	try {
+		const shell = getUserShell();
+		if (!shell.startsWith("/")) return [];
+		const quoted = tmuxConfigValue(shell);
+		return quoted ? [`set -g default-shell ${quoted}`] : [];
+	} catch {
+		return [];
+	}
+}
+
 // Status bar setup — references Catppuccin status modules built by the plugin
 const TMUX_STATUS_BAR = `
 # Status bar — Catppuccin modules
@@ -181,12 +247,22 @@ export function buildThemeConfig(flavor: "mocha" | "latte"): string {
 		`source "${pluginDir}/catppuccin_options_tmux.conf"`,
 		`source "${pluginDir}/catppuccin_tmux.conf"`,
 		TMUX_CONFIG_FUNCTIONAL,
+		shellEnvConfig(),
 		TMUX_STATUS_BAR,
 	].join("\n");
 }
 
+/**
+ * Rewrite both themed configs. Called at startup, and again when a setting the
+ * config embeds changes — today that is the shell, whose path is baked into
+ * `default-shell`.
+ */
+export function writeTmuxConfigs(): void {
+	writeShellInit();
+	writeFileSync(TMUX_CONF_DARK_PATH, buildThemeConfig("mocha"));
+	writeFileSync(TMUX_CONF_LIGHT_PATH, buildThemeConfig("latte"));
+}
+
 // Write Catppuccin plugin files + both themed configs + shell init at startup
 writeCatppuccinPlugin();
-writeShellInit();
-writeFileSync(TMUX_CONF_DARK_PATH, buildThemeConfig("mocha"));
-writeFileSync(TMUX_CONF_LIGHT_PATH, buildThemeConfig("latte"));
+writeTmuxConfigs();

@@ -96,6 +96,15 @@ back into the agent's terminal as a prompt.
   <img src="docs/screenshots/code-review.jpg" width="900" alt="Built-in diff viewer with an inline comment being written on a line range">
 </p>
 
+Markdown, Mermaid and images render as a preview instead of raw diff lines, and the preview
+reviews like the rest of the diff: **select any text and comment on it.** The comment lands on
+the same source lines a gutter comment would, marks the block it belongs to, lists under the
+file, and joins the same review export.
+
+<p align="center">
+  <img src="docs/screenshots/md-preview-comment-review.jpg" width="900" alt="A comment made by selecting text in a rendered Markdown preview — the block is marked, the comment is listed under the file and queued in the review export">
+</p>
+
 Not sure the diff is safe? Launch a pack of **read-only bug hunters** — several agents that
 comb the same branch diff in parallel, each seeded to look somewhere different, and report only
 what they can prove.
@@ -130,6 +139,17 @@ completion rate, active-day streak and average task lifetime — each against la
 
 <p align="center">
   <img src="docs/screenshots/productivity-stats.jpg" width="900" alt="Productivity screen — six gauges plus tasks-completed and lines-changed charts">
+</p>
+
+### Spaces, when one flat list of projects stops working
+
+Group projects into **Spaces** — *Client work*, *Products*, *Infra* — and the dashboard groups
+itself, with a rail that filters it down to one space. A project can sit in several spaces at
+once; nothing moves on disk and every project keeps its own board. Define no spaces and the
+dashboard is exactly the screen it was.
+
+<p align="center">
+  <img src="docs/screenshots/spaces-dashboard.jpg" width="900" alt="The dashboard grouped into Client work, Products and Infra spaces, with a rail on the left that filters it to one space">
 </p>
 
 ### The board is yours to shape
@@ -252,6 +272,10 @@ different bet. Pick by your goal, not a feature checklist:
 
 ## Quick start
 
+📖 **Tutorial — [Your first task, screen by screen](https://dev3.h0x91b.com/first-task.html).** The
+guided tour dev-3.0 runs on its own first launch, written out with screenshots: describe a task, watch
+an agent do it in its own worktree, read the diff, merge, close. Nothing to install to read it.
+
 🤖 **The fastest way** — paste this into Claude Code, Codex, Gemini CLI, whatever you already
 run:
 
@@ -306,6 +330,7 @@ rate-limit tracking and skill directories differ per agent — the full grid is 
 
 | | |
 |---|---|
+| [Your first task](https://dev3.h0x91b.com/first-task.html) | The guided first-run tour, screen by screen — the fastest way to see what using dev-3.0 feels like |
 | [Install guide](docs/install.md) | Every install path, tmux versions on Linux, cloud-VM caveats, build from source |
 | [Remote access](docs/remote-access.md) | `dev3 remote` in depth — tunnels, systemd, sessions, exposed ports |
 | [Troubleshooting](docs/troubleshooting.md) | `dev3 doctor`, disk reclamation, Full Disk Access, terminal colors and agent themes |
@@ -313,7 +338,8 @@ rate-limit tracking and skill directories differ per agent — the full grid is 
 | [Agent support matrix](agent-support-matrix.md) | What each agent supports, feature by feature |
 | [CLI exit codes](docs/cli-exit-codes.md) | The `dev3` exit-code contract, for scripting |
 | [Diagnostic logs](docs/diagnostic-logs.md) | What is logged locally, for how long, and what is redacted |
-| [AGENTS.md](AGENTS.md) | Architecture and contributor guide |
+| [Contributing](CONTRIBUTING.md) | Setup, the pre-PR checklist, and what review looks like here |
+| [AGENTS.md](AGENTS.md) | Architecture and house rules — the deep reference behind the contributing guide |
 
 ## Telemetry
 
@@ -324,17 +350,50 @@ The app reports usage analytics so the project can see what is actually used:
 | Google Analytics 4 | App launch, version, OS, screen resolution, language, screen navigation, a 10-minute heartbeat, agent launches, and unhandled errors. Identified by a random per-install id, geolocated via a public-IP lookup against `api.ipify.org`. Project *names* and file paths are deliberately never sent — only internal ids. |
 | PostHog | Task and project actions (created, moved, merged, pushed …) plus unhandled errors, under a random per-install id. Also delivers feature flags. Live in the official release builds; a build from source has no key and stays off. |
 
-Both are compiled in at build time and can be compiled out. Build from source with
-`VITE_TELEMETRY=off` in the repo-root `.env` (or in the environment) and no analytics code runs:
-no GA4 hits, no public-IP lookup, no PostHog client, no error autocapture (`false`, `0` and `no`
-work the same way; crash logging into the app's own local log file is unaffected). Feature flags then
-fall back to their shipped defaults. Leaving the variable unset means `on`, which is what the
-released binaries do.
+Neither channel sends your project names, task titles, file paths, prompts, diffs or terminal
+output. Autocapture runs with element text and attributes masked, and paths are stripped out of
+crash reports before they are sent — the local log file keeps the untouched text.
+
+### Turning it off
+
+Any **one** of these switches off everything at once: no GA4 hits, no public-IP lookup, no PostHog
+client, no crash reports. Feature flags then fall back to their shipped defaults.
+
+| How | Where | Takes effect |
+|---|---|---|
+| **Settings → System → Telemetry** | The toggle, in any released build | Switching off is immediate; switching back on needs a relaunch |
+| `DEV3_TELEMETRY=off` | The app's environment (`false`, `0` and `no` work the same way) | Next launch, and it locks the toggle off |
+| `DO_NOT_TRACK=1` | The app's environment — the [cross-vendor convention](https://consoledonottrack.com/) | Next launch, and it locks the toggle off |
+| `VITE_TELEMETRY=off` | A build from source; compiles the channels out entirely | Build time |
 
 ```bash
-echo 'VITE_TELEMETRY=off' >> .env
-bun run build
+# For one launch, or add it to your shell profile for every launch
+DEV3_TELEMETRY=off /Applications/dev-3.0.app/Contents/MacOS/dev-3.0
+
+# Compile it out instead
+echo 'VITE_TELEMETRY=off' >> .env && bun run build
 ```
+
+An environment variable read from your shell profile requires **Settings → System → Import shell
+environment** to be on (it is by default); a variable set on the launch command itself always
+applies. An opted-out install also stops handing its per-install id to the renderer at all, so a
+browser on the remote-access server cannot read it either.
+
+### The rules this project holds itself to
+
+These are not aspirations — they are the constraints any change touching telemetry has to meet.
+See [AGENTS.md](AGENTS.md#telemetry-anonymous-always-opt-out-always-respected-mandatory) for the
+contributor-facing version.
+
+1. **Everything sent is anonymous, always.** No project names, repo paths, task titles, branch
+   names, prompts, diffs, file contents, terminal output, or anything else that could identify you
+   or your customer. Only a random per-install id and coarse facts about the app itself.
+2. **An opt-out is always respected, everywhere.** One switch turns off every channel, with no
+   exception kept alive "just for crashes" or "just for feature flags".
+3. **An opt-out works in a released binary.** A switch that only exists when you rebuild from
+   source is not an opt-out.
+4. **A channel that cannot be masked is not enabled.** If a vendor feature would send visible text
+   or free-form strings we cannot redact, it stays off rather than shipping with a promise attached.
 
 ## Development
 
@@ -351,8 +410,9 @@ Built on [Electrobun](https://electrobun.dev) (native webview, no Chromium) and
 [Bun](https://bun.sh), with React 19 + Tailwind in front, [ghostty-web](https://github.com/nichochar/ghostty-web)
 for GPU-accelerated terminals, and tmux underneath.
 
-Contributions welcome — read [AGENTS.md](AGENTS.md) first; it is the architecture doc and the
-house rules in one file.
+Contributions welcome — start with [CONTRIBUTING.md](CONTRIBUTING.md): setup, the rules PRs most
+often bounce on, and what review looks like here. [AGENTS.md](AGENTS.md) is the deep reference
+behind it — the architecture doc and the house rules in one file.
 
 ## Star history
 

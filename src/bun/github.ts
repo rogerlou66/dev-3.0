@@ -373,6 +373,40 @@ export async function getGitHubAuthEnv(project: ProjectGitHubSelection): Promise
 	return buildTokenEnv(account.host, token);
 }
 
+/**
+ * Did `gh` refuse because this repo is not a GitHub repo at all?
+ *
+ * WHY THIS IS NOT A URL CHECK. The obvious implementation reads `git remote
+ * get-url origin` and looks for a github.com host. It is wrong in the field: an
+ * SSH config alias hides the real host, and `git@github.com-personal:owner/repo`
+ * — the standard two-accounts setup, and what this very repo uses — reads as "not
+ * GitHub" while `gh` resolves it happily. That misfire disables Create PR on the
+ * user's own main repo, which is worse than the bug the check exists to prevent.
+ * So ask the tool that will actually run the command.
+ *
+ * The polarity is deliberate: only gh's two DEFINITIVE messages count. A timeout,
+ * a network blip, a missing binary, or an auth prompt all leave the answer as
+ * "GitHub, as far as we know", because a false negative kills a working button
+ * while a false positive costs one wasted agent turn.
+ */
+export function isNotAGitHubRepoError(result: { stdout?: string; stderr?: string }): boolean {
+	const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.toLowerCase();
+	return text.includes("point to a known github host") || text.includes("no git remotes found");
+}
+
+/**
+ * Can `gh` operate on this repo? One cheap call, and it answers the only question
+ * that matters before a PR handoff — see {@link isNotAGitHubRepoError} for why
+ * this is not a URL match.
+ */
+export async function isGitHubRepo(
+	project: ProjectGitHubSelection,
+	cwd: string,
+): Promise<boolean> {
+	const result = await runGitHub(project, cwd, ["repo", "view", "--json", "nameWithOwner"], { timeoutMs: 10_000 });
+	return result.ok || !isNotAGitHubRepoError(result);
+}
+
 export async function runGitHub(
 	project: ProjectGitHubSelection,
 	cwd: string,
@@ -381,6 +415,108 @@ export async function runGitHub(
 ): Promise<GitHubCommandResult> {
 	const env = await getGitHubAuthEnv(project);
 	return runGh(args, { cwd, env, timeoutMs: options?.timeoutMs });
+}
+
+/** What one `gh pr list --head` answer tells a caller. */
+export interface OpenPullRequestProbe {
+	/**
+	 * The open PR whose head is this branch, or null when there is none. `title`
+	 * and `author` are what a review task is named after; both are null when gh
+	 * returned them empty, never a placeholder string.
+	 */
+	pr: { number: number; url: string; title: string | null; author: string | null } | null;
+	/** False ONLY when gh definitively said this is not a GitHub repo. */
+	isGitHub: boolean;
+}
+
+/**
+ * The open PR for one branch. Two callers, one implementation: the branch-status
+ * poll (which also uses it as the "can gh work here" probe) and Merge, which has
+ * to know whether it is merging a pull request or squashing locally.
+ */
+export async function findOpenPullRequest(
+	project: ProjectGitHubSelection,
+	cwd: string,
+	headBranch: string,
+	options?: { timeoutMs?: number },
+): Promise<OpenPullRequestProbe> {
+	if (!headBranch) return { pr: null, isGitHub: true };
+	const result = await runGitHub(
+		project,
+		cwd,
+		["pr", "list", "--head", headBranch, "--state", "open", "--json", "number,url,title,author", "--limit", "1"],
+		{ timeoutMs: options?.timeoutMs },
+	);
+	const isGitHub = result.ok || !isNotAGitHubRepoError(result);
+	if (result.ok && result.stdout) {
+		try {
+			const prs = JSON.parse(result.stdout);
+			if (Array.isArray(prs) && prs.length > 0 && typeof prs[0].number === "number") {
+				const author = prs[0].author as { name?: unknown; login?: unknown } | null | undefined;
+				// A GitHub display name is optional, the login never is, and the login is
+				// what a human recognises anyway when the name is missing.
+				const authorName = [author?.name, author?.login]
+					.find((candidate) => typeof candidate === "string" && candidate.trim()) as string | undefined;
+				return {
+					pr: {
+						number: prs[0].number,
+						url: typeof prs[0].url === "string" ? prs[0].url : "",
+						title: typeof prs[0].title === "string" && prs[0].title.trim() ? prs[0].title : null,
+						author: authorName?.trim() ?? null,
+					},
+					isGitHub,
+				};
+			}
+		} catch (err) {
+			log.warn("Failed to parse gh pr list output", { error: String(err) });
+		}
+	}
+	return { pr: null, isGitHub };
+}
+
+export type PullRequestMergeMethod = "squash" | "merge" | "rebase";
+
+/**
+ * Which merge button the repo actually allows, in dev3's order of preference.
+ * `gh pr merge` with NO method flag opens an interactive prompt when more than
+ * one is allowed — in a pane nobody is watching that is a hang, so the method is
+ * always spelled out.
+ */
+export function pickMergeMethod(allowed: { squash?: boolean; merge?: boolean; rebase?: boolean }): PullRequestMergeMethod {
+	if (allowed.squash) return "squash";
+	if (allowed.merge) return "merge";
+	if (allowed.rebase) return "rebase";
+	// Nothing allowed is not a real GitHub answer — it means we failed to read the
+	// repo. Squash is both the most common setting and this project's own, and gh
+	// gives a precise error if it turns out to be disabled.
+	return "squash";
+}
+
+export async function resolveMergeMethod(
+	project: ProjectGitHubSelection,
+	cwd: string,
+): Promise<PullRequestMergeMethod> {
+	const result = await runGitHub(
+		project,
+		cwd,
+		["repo", "view", "--json", "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed"],
+		{ timeoutMs: 10_000 },
+	);
+	if (!result.ok || !result.stdout) {
+		log.warn("Could not read the repo's allowed merge methods", { code: result.code, stderr: result.stderr });
+		return pickMergeMethod({});
+	}
+	try {
+		const parsed = JSON.parse(result.stdout);
+		return pickMergeMethod({
+			squash: parsed?.squashMergeAllowed === true,
+			merge: parsed?.mergeCommitAllowed === true,
+			rebase: parsed?.rebaseMergeAllowed === true,
+		});
+	} catch (err) {
+		log.warn("Failed to parse gh repo view merge methods", { error: String(err) });
+		return pickMergeMethod({});
+	}
 }
 
 // A merged PR never un-merges, so a terminal answer is cached for the process

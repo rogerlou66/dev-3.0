@@ -11,7 +11,7 @@ import { getTaskAgentMeta } from "./taskAgentMeta";
  */
 
 /** The funnel groups. FLAGS bundles the boolean `is:`/`has:` facets. */
-export type FilterGroupId = "priority" | "status" | "labels" | "agents" | "flags";
+export type FilterGroupId = "priority" | "status" | "spaces" | "labels" | "agents" | "flags";
 
 export interface FilterFunnelOption {
 	facet: FacetKey;
@@ -49,6 +49,9 @@ export interface FacetResolver {
 	priorityFor: (task: Task) => string;
 	hasPortFor: (task: Task) => boolean;
 	isAttentionFor: (task: Task) => boolean;
+	/** Spaces the task's project belongs to. Surfaces that cannot span projects
+	 *  (a single project's board) return [] so the SPACES group is dropped. */
+	spaceNamesFor?: (task: Task) => string[];
 	prNumberFor?: (task: Task) => number | null;
 }
 
@@ -66,6 +69,7 @@ export function taskQueryContext(task: Task, resolver: FacetResolver): TaskQuery
 		priorityValue: resolver.priorityFor(task).toLowerCase(),
 		hasPort: resolver.hasPortFor(task),
 		isAttention: resolver.isAttentionFor(task),
+		spaceNames: resolver.spaceNamesFor ? resolver.spaceNamesFor(task) : null,
 		prNumber: resolver.prNumberFor?.(task) ?? null,
 	};
 }
@@ -75,7 +79,7 @@ export interface FilterFunnelCandidates {
 	priorityCandidates: FilterFunnelOption[];
 	/** Full ordered status vocabulary (built-in statuses + custom columns). */
 	statusCandidates: FilterFunnelOption[];
-	flagLabels: { attention: string; port: string };
+	flagLabels: { attention: string; port: string; home: string };
 }
 
 /**
@@ -91,17 +95,29 @@ export function buildFilterGroups(
 	{ priorityCandidates, statusCandidates, flagLabels }: FilterFunnelCandidates,
 ): FilterFunnelGroup[] {
 	const labelByValue = new Map<string, FilterFunnelOption>();
+	const spaceByValue = new Map<string, FilterFunnelOption>();
 	const agentByValue = new Map<string, FilterFunnelOption>();
 	const presentStatus = new Set<string>();
 	const presentPriority = new Set<string>();
 	let anyAttention = false;
 	let anyPort = false;
+	let anyHome = false;
 
 	for (const task of tasks) {
 		for (const label of resolver.labelsFor(task)) {
 			const key = label.name.toLowerCase();
 			if (!labelByValue.has(key)) {
 				labelByValue.set(key, { facet: "label", value: label.name, label: label.name, color: label.color });
+			}
+		}
+		if (resolver.spaceNamesFor) {
+			const names = resolver.spaceNamesFor(task);
+			if (names.length === 0) anyHome = true;
+			for (const name of names) {
+				const key = name.toLowerCase();
+				if (!spaceByValue.has(key)) {
+					spaceByValue.set(key, { facet: "space", value: name, label: name });
+				}
 			}
 		}
 		const agentName = taskAgentName(task, resolver.agents);
@@ -123,6 +139,10 @@ export function buildFilterGroups(
 	const byLabel = (a: FilterFunnelOption, b: FilterFunnelOption) => a.label.localeCompare(b.label);
 	const labelOptions = [...labelByValue.values()].sort(byLabel);
 	const agentOptions = [...agentByValue.values()].sort(byLabel);
+	// Real spaces alphabetically, then the computed Home group last — same order
+	// as the dashboard rail.
+	const spaceOptions = [...spaceByValue.values()].sort(byLabel);
+	if (anyHome) spaceOptions.push({ facet: "is", value: "home", label: flagLabels.home });
 	const flagOptions: FilterFunnelOption[] = [];
 	if (anyAttention) flagOptions.push({ facet: "is", value: "attention", label: flagLabels.attention });
 	if (anyPort) flagOptions.push({ facet: "has", value: "port", label: flagLabels.port });
@@ -130,6 +150,7 @@ export function buildFilterGroups(
 	const groups: FilterFunnelGroup[] = [
 		{ id: "priority", options: priorityOptions },
 		{ id: "status", options: statusOptions },
+		{ id: "spaces", options: spaceOptions },
 		{ id: "labels", options: labelOptions },
 		{ id: "agents", options: agentOptions },
 		{ id: "flags", options: flagOptions },

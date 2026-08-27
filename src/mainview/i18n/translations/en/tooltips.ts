@@ -7,6 +7,7 @@ export const tooltips = {
 		"Navigation history works like a browser — every board, task and settings screen you visit becomes a step you can walk back through.",
 	"ttip.header.navForward": "Return to the screen you just went back from. The history stack keeps your recent screens in order.",
 	"ttip.header.switchProject": "Jump straight to another project's board without going through the dashboard.",
+	"ttip.header.switchVariant": "This task runs several variants — jump to another attempt without leaving the screen (also \u21e7\u2318[ / \u21e7\u2318]).",
 	"ttip.header.updateReady": "A new version is downloaded and ready. Click to restart the app and apply it.",
 	"ttip.header.quickShell":
 		"A throwaway terminal for quick one-off commands. It runs as a scratch task in the Operations board, so nothing touches your project worktrees.",
@@ -42,6 +43,14 @@ export const tooltips = {
 		"Keeps the task open and makes completion your decision. Turn it off when the final merge should trigger the usual suggestion.",
 	"ttip.task.siblings":
 		"Open the sibling overview to compare variant titles and statuses, then jump to any live variant.",
+	"ttip.task.devOpen":
+		"The task's dev server is up on {ports}. Opens the lowest one in your browser.",
+	"ttip.task.devStarting":
+		"The dev server launched but nothing is listening yet.",
+	"ttip.task.devConflict":
+		"Another process already holds {ports}. The dev script will fail to bind until it is freed.",
+	"ttip.task.devStop":
+		"Kills the dev server for this task. Nothing is lost — it restarts in one click.",
 	"ttip.task.ports":
 		"Network ports allocated to this task. Every task gets its own ports, so parallel dev servers never collide.",
 	"ttip.task.run": "Creates the git worktree, opens the terminal and launches the agent on this task.",
@@ -68,7 +77,8 @@ export const tooltips = {
 	// Active tasks sidebar
 	"ttip.sidebar.scopeProject": "Show active tasks from this project only.",
 	"ttip.sidebar.scopeGlobal": "Show active tasks from every project — cards get a project badge.",
-	"ttip.sidebar.scopeAttention": "Only tasks waiting for your input — reviews and questions — across all projects.",
+	"ttip.sidebar.scopeSpace": "Tasks from every project sharing a space with this one.",
+	"ttip.sidebar.scopeSpaceDisabled": "This project is in no space, so there is nothing wider to show. Add it to one in Project Settings, or with the Spaces… button on its Dashboard row.",
 	"ttip.sidebar.hide": "The terminal takes the full width. Bring the panel back with the same icon at the top right of the task toolbar.",
 	"ttip.filter.funnel": "Filter the list by priority, status, labels or agent. Checked values become tokens in the search field.",
 
@@ -83,9 +93,8 @@ export const tooltips = {
 		"tmux: closes a pane and terminates whatever runs inside. A picker opens first, so you choose exactly which pane dies.",
 
 	// Git bar
-	"ttip.git.changeRef": "Change comparison branch",
-	"ttip.git.refDropdown":
-		"Choose which branch the diff and the ahead/behind counters compare against — usually the base branch you'll merge into.",
+	"ttip.infoPanel.branchChip":
+		"The task's git branch. Click for the full name plus one-click copies: the branch, the worktree path, and a ready checkout command.",
 	"ttip.git.commit":
 		"Hands the commit to the agent in the task terminal: it reviews the changes, stages them and writes the message. Nothing is pushed.",
 	"ttip.git.rebase": "Replays this task's commits on top of the latest base branch. Keeps the diff honest and surfaces conflicts early.",

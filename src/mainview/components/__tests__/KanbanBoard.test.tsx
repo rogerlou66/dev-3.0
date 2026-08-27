@@ -114,6 +114,7 @@ async function renderBoardWith(props: Partial<React.ComponentProps<typeof Kanban
 					navigate={props.navigate ?? vi.fn()}
 					bellCounts={props.bellCounts ?? new Map()}
 					taskPorts={props.taskPorts ?? new Map()}
+					taskDevServers={props.taskDevServers ?? new Map()}
 					onOpenUnresolvedComments={props.onOpenUnresolvedComments}
 				/>
 			</I18nProvider>,
@@ -442,11 +443,15 @@ describe("tip rotation", () => {
 				<I18nProvider>
 					<KanbanBoard
 						project={project}
-						tasks={[]}
+						// One task, deliberately: a board with none at all belongs to a user
+						// who has not started, and its To Do column explains the first task
+						// instead of carrying a tip.
+						tasks={[makeTask({ id: "tip-host" })]}
 						dispatch={vi.fn()}
 						navigate={vi.fn()}
 						bellCounts={new Map()}
 						taskPorts={new Map()}
+						taskDevServers={new Map()}
 					/>
 				</I18nProvider>,
 			);
@@ -454,6 +459,29 @@ describe("tip rotation", () => {
 		// The progress bar drives rotation; return it so tests can fire its animationend.
 		return await screen.findByTestId("tip-progress");
 	}
+
+	it("shows no tip at all on a board with zero tasks", async () => {
+		vi.mocked(api.request.getTipState).mockResolvedValue({ snoozedUntil: 0, seen: {}, rotationIndex: 0 });
+		await act(async () => {
+			render(
+				<I18nProvider>
+					<KanbanBoard
+						project={project}
+						tasks={[]}
+						dispatch={vi.fn()}
+						navigate={vi.fn()}
+						bellCounts={new Map()}
+						taskPorts={new Map()}
+						taskDevServers={new Map()}
+					/>
+				</I18nProvider>,
+			);
+		});
+		// Observed on a real first run: the first tips a newcomer met were about
+		// hovering a task card and spawning bug hunters, in the To Do column, with
+		// zero cards on the board.
+		expect(screen.queryByTestId("tip-progress")).toBeNull();
+	});
 
 	it("rotates the tip when the progress-bar animation ends, advancing rotationIndex", async () => {
 		const getTipState = vi.mocked(api.request.getTipState);

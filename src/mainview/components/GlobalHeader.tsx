@@ -1,24 +1,34 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
-import type { Project, Task, UpdateChangelog } from "../../shared/types";
-import { getTaskTitle, taskSeqLabel, ACTIVE_STATUSES, isBuiltinOpsProject, orderProjectsForDisplay } from "../../shared/types";
+import { createPortal } from "react-dom";
+import type { CodingAgent, Project, Task, UpdateChangelog } from "../../shared/types";
+import { getTaskTitle, taskSeqLabel, ACTIVE_STATUSES, isBuiltinOpsProject, isSpaceSensitive, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
 import type { Route } from "../state";
 import { useT } from "../i18n";
+import { HELP_ATTRACTOR_DISMISS_EVENT } from "../help";
 import { parseDisplayVersion } from "../../shared/update-channel";
-import { useProjectPrivacy } from "../sensitive-projects";
+import { MASK_CLASS, useProjectPrivacy } from "../sensitive-projects";
+import { useSpaces } from "../useSpaces";
+import { groupProjectsForSwitcher } from "../utils/spaceGroups";
 import { useCompact } from "../utils/useCompact";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { api, isElectrobun } from "../rpc";
+import { isRemote } from "../utils/platform";
 import { subscribeFullscreen, isFullscreenActive, isFullscreenSupported, toggleFullscreen } from "../fullscreen";
-import { toast } from "../toast";
+import { toast, usePinnedToastSlot } from "../toast";
 import TmuxSessionManager from "./TmuxSessionManager";
 import InlineRename from "./InlineRename";
 import NativeBackendMark from "./NativeBackendMark";
+import TaskTitleHoverCard from "./TaskTitleHoverCard";
+import TaskBreadcrumbBadge from "./TaskBreadcrumbBadge";
 import GitPullButton from "./GitPullButton";
 import UpdateReadyPopover, { UpdateWhatsNew } from "./UpdateReadyPopover";
 import CanaryBadge from "./CanaryBadge";
 import PreventSleepToggle from "./PreventSleepToggle";
 import RateLimitIndicator from "./RateLimitIndicator";
 import MemoryHeadroomIndicator from "./MemoryHeadroomIndicator";
+import AgentTrafficIndicator from "./agent-traffic/AgentTrafficIndicator";
+import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "../agent-traffic-events";
+import ConnectionQualityIndicator from "./ConnectionQualityIndicator";
 import BottomSheet from "./BottomSheet";
 import Tooltip from "./Tooltip";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
@@ -35,7 +45,7 @@ import {
 	GitHubIcon,
 	ReportBugIcon,
 	ChangelogIcon,
-	KebabIcon,
+	OverflowDotsIcon,
 	WrenchIcon,
 	SlidersIcon,
 	UpdateReadyIcon,
@@ -53,6 +63,7 @@ interface GlobalHeaderProps {
 	route: Route;
 	projects: Project[];
 	tasks: Task[];
+	agents: CodingAgent[];
 	navigate: (route: Route) => void;
 	goBack: () => void;
 	goForward: () => void;
@@ -62,9 +73,30 @@ interface GlobalHeaderProps {
 	updateReadySignal?: number;
 	updateChangelog?: UpdateChangelog | null;
 	updateDownloadStatus?: string | null;
-	remoteAccessAvailable: boolean;
+	remoteAccessAvailable?: boolean;
 	remoteAccessActive: boolean;
+	/** False until help mode has been opened once — see `HELP_ATTRACTOR_SCREENS`. */
+	helpDiscovered?: boolean;
+	/**
+	 * A guided tour is running. The callout stays down while it does: the tour is
+	 * already teaching, and bible §10 allows exactly one callout per screen.
+	 */
+	tourRunning?: boolean;
 }
+
+/**
+ * Screens where the header's `?` rests highlighted until help mode has been
+ * opened once. Help mode is the product's only teaching channel (bible §5.4), so
+ * a user who never notices the button never learns anything — these are the four
+ * screens a new user actually lands on. Transient and debug screens are out: an
+ * attractor there would be noise on a surface nobody is learning from.
+ */
+const HELP_ATTRACTOR_SCREENS: ReadonlySet<Route["screen"]> = new Set([
+	"dashboard",
+	"project",
+	"task",
+	"project-settings",
+]);
 
 interface BreadcrumbSegment {
 	label: string;
@@ -77,13 +109,16 @@ interface BreadcrumbSegment {
 /** Cache TTL for project task counts (30 seconds) */
 const COUNTS_CACHE_TTL = 30_000;
 
-function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable, remoteAccessActive }: GlobalHeaderProps) {
+function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable = false, remoteAccessActive, helpDiscovered = false, tourRunning = false }: GlobalHeaderProps) {
 	const t = useT();
 	useKeymapVersion();
+	const highlightHelp = !helpDiscovered && !tourRunning && HELP_ATTRACTOR_SCREENS.has(route.screen);
 	const privacy = useProjectPrivacy();
+	const { file: spacesFile } = useSpaces();
 	const compact = useCompact();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const androidShell = isAndroidAppShell();
+	const viewedOverRemote = isRemote();
 	// Live fullscreen state for the action-sheet toggle label (browser only).
 	const fullscreenActive = useSyncExternalStore(subscribeFullscreen, isFullscreenActive);
 	const [showActionSheet, setShowActionSheet] = useState(false);
@@ -91,7 +126,9 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	const overflowMenuRef = useRef<HTMLDivElement>(null);
 	const [showUpdateDropdown, setShowUpdateDropdown] = useState(false);
 	const [restarting, setRestarting] = useState(false);
+	const [restartContext, setRestartContext] = useState<{ headless: boolean; remoteActive: boolean; tasksInProgress: number } | null>(null);
 	const [showToast, setShowToast] = useState(false);
+	const pinnedToastSlot = usePinnedToastSlot();
 	const [showProjectDropdown, setShowProjectDropdown] = useState(false);
 	const [projectTaskCounts, setProjectTaskCounts] = useState<Record<string, number>>({});
 	const dropdownRef = useRef<HTMLDivElement>(null);
@@ -126,6 +163,18 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 		setShowToast(!!updateVersion);
 	}, [updateVersion, updateReadySignal]);
 
+	useEffect(() => {
+		if (!updateVersion) {
+			setRestartContext(null);
+			return;
+		}
+		let cancelled = false;
+		api.request.getUpdateRestartContext()
+			.then((context) => { if (!cancelled) setRestartContext(context); })
+			.catch(() => { if (!cancelled) setRestartContext(null); });
+		return () => { cancelled = true; };
+	}, [updateVersion, showUpdateDropdown]);
+
 	// Close whichever header dropdown is open on Escape.
 	useEscapeKey(
 		() => {
@@ -145,13 +194,20 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 			if (showProjectDropdown && projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
 				setShowProjectDropdown(false);
 			}
-			if (showOverflowMenu && overflowMenuRef.current && !overflowMenuRef.current.contains(e.target as Node)) {
+			// A menu row's flyout (memory breakdown, tmux sessions) is portaled to
+			// <body>, so it is "outside" the menu by DOM — without this exemption the
+			// first click inside it closed the menu and unmounted the flyout with it.
+			const inFlyout = (e.target as Element | null)?.closest?.("[data-header-flyout]") != null;
+			if (showOverflowMenu && overflowMenuRef.current && !overflowMenuRef.current.contains(e.target as Node) && !inFlyout) {
 				setShowOverflowMenu(false);
 			}
 		}
-		document.addEventListener("mousedown", handleClick);
+		// Capture phase: a click landing on a surface that stops mousedown from
+		// bubbling (a task card, the terminal) never reaches a bubble-phase document
+		// listener, which left the menu open until the trigger was clicked again.
+		document.addEventListener("mousedown", handleClick, true);
 		return () => {
-			document.removeEventListener("mousedown", handleClick);
+			document.removeEventListener("mousedown", handleClick, true);
 		};
 	}, [showUpdateDropdown, showProjectDropdown, showOverflowMenu]);
 
@@ -217,7 +273,14 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 			// here so an update triggered right after a navigation still restores
 			// to the correct surface.
 			await api.request.saveLastRoute({ route: JSON.stringify(route) });
-			await api.request.applyUpdate();
+			const outcome = await api.request.applyUpdate();
+			// Installed, but this process is not being replaced (a foreground headless
+			// server has nothing to relaunch it). Stop pretending a restart is coming.
+			if (outcome && !outcome.restarting) {
+				setRestarting(false);
+				dismissToast();
+				toast.info(outcome.message ?? t("update.installedNoRestart"), { source: "update" });
+			}
 		} catch (err) {
 			setRestarting(false);
 			toast.error(t("update.applyFailed", { error: String(err) }), { source: "update" });
@@ -229,6 +292,12 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 		// Navigate to project board (clears activeTaskId / returns from settings/task)
 		navigate({ screen: "project", projectId: route.projectId });
 	}, [route, navigate]);
+
+	// Every task of one variant group, same source the ⇧⌘[ / ⇧⌘] cycling reads.
+	const variantGroupFor = useCallback(
+		(task: Task) => (task.groupId ? tasks.filter((candidate) => candidate.groupId === task.groupId) : [task]),
+		[tasks],
+	);
 
 	const segments: BreadcrumbSegment[] = [];
 
@@ -250,7 +319,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 			const isOnKanban = route.screen === "project" && !route.activeTaskId && !route.taskView;
 			const projectNameOnClick = !isOnKanban ? handleProjectNameClick : undefined;
 			segments.push({
-				label: isBuiltinOpsProject(project) ? t("ops.boardName") : project.name,
+				label: projectDisplayName(project, t("ops.boardName")),
 				isProjectDropdown: true,
 				onClick: projectNameOnClick,
 			});
@@ -299,6 +368,69 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 	// Built-in Operations board pinned first; ⌘0 jumps to it, ⌘1-9 to the rest.
 	const availableProjects = orderProjectsForDisplay(projects.filter((p) => !p.deleted));
 	const switcherHasPinnedBuiltin = availableProjects.length > 0 && isBuiltinOpsProject(availableProjects[0]);
+	// ⌘N stays keyed to BOARD order, so the badge keeps matching the shortcut once
+	// spaces regroup the rows (same split as the ⌘K palette's shortcutIndexById).
+	const switcherShortcutById: Record<string, string> = {};
+	availableProjects.forEach((p, idx) => {
+		if (isBuiltinOpsProject(p)) {
+			switcherShortcutById[p.id] = "0";
+			return;
+		}
+		const nonBuiltinIdx = switcherHasPinnedBuiltin ? idx - 1 : idx;
+		if (nonBuiltinIdx < 9) switcherShortcutById[p.id] = String(nonBuiltinIdx + 1);
+	});
+	// Spaces group the switcher exactly as they group the dashboard, except the
+	// current project's own space is hoisted first. null = no space holds a
+	// visible project, and the flat list below stays byte-identical to today's.
+	const switcherGroups = groupProjectsForSwitcher(availableProjects, spacesFile, currentProjectId);
+	const sensitiveProjectIds = new Set(projects.filter((p) => p.sensitive).map((p) => p.id));
+
+	// One switcher row. `keyPrefix` disambiguates a project that belongs to
+	// several spaces and therefore renders under each of them.
+	function renderSwitcherRow(p: Project, keyPrefix: string) {
+		const isCurrent = currentProjectId === p.id;
+		const count = projectTaskCounts[p.id];
+		const isBuiltin = isBuiltinOpsProject(p);
+		const locked = privacy.isLocked(p);
+		const shortcutLabel = switcherShortcutById[p.id];
+		return (
+			<button
+				key={`${keyPrefix}:${p.id}`}
+				aria-disabled={locked || undefined}
+				title={locked ? t("streamer.projectLocked") : undefined}
+				onClick={() => {
+					setShowProjectDropdown(false);
+					navigate({ screen: "project", projectId: p.id });
+				}}
+				className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
+					isCurrent ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-elevated hover:text-fg"
+				}`}
+			>
+				{isBuiltin && (
+					<span className="text-accent flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0E7}"}</span>
+				)}
+				{locked && (
+					<span aria-hidden="true" className="text-fg-muted flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F033E}"}</span>
+				)}
+				<span className={`truncate text-sm flex-1 ${privacy.maskClass(p)}`}>{projectDisplayName(p, t("ops.boardName"))}</span>
+				{isBuiltin && (
+					<span className="flex-shrink-0 px-1 py-0.5 rounded bg-raised text-fg-3 text-nano font-medium uppercase tracking-wide">{t("ops.badgeSystem")}</span>
+				)}
+				<span className="text-micro text-fg-muted flex-shrink-0">
+					{count != null
+						? count > 0
+							? t.plural("header.activeTaskCount", count)
+							: t("header.noActiveTasks")
+						: ""}
+				</span>
+				{shortcutLabel && (
+					<kbd className="flex-shrink-0 inline-flex items-center gap-0.5 text-dense text-fg-muted/60 font-mono">
+						<span className="text-micro">{"⌘"}</span>{shortcutLabel}
+					</kbd>
+				)}
+			</button>
+		);
+	}
 
 	// Narrow viewport: the simple, dispatch-style right-cluster actions fold into
 	// a single kebab → BottomSheet. The Command Palette gets a touch entry here
@@ -374,16 +506,19 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 
 	return (
 		<>
-		<div className="relative z-30 flex items-center justify-between px-5 py-2.5 border-b border-edge flex-shrink-0 glass-header" data-collapse-on-compose>
+		<div className="relative z-30 flex items-center justify-between px-2.5 py-2.5 border-b border-edge flex-shrink-0 glass-header" data-collapse-on-compose>
 			{/* Breadcrumbs */}
 			<nav className="flex items-center gap-2 text-sm min-w-0" aria-label={t("nav.appHeader")}>
-				{/* Back / forward navigation — segmented history control (Safari toolbar style) */}
+				{/* Back / forward navigation — segmented history control (Safari toolbar style).
+					    Both halves centre their glyph explicitly: on a coarse pointer the 24px
+					    touch floor grows the box past its padding, and content that is not
+					    centred then parks at the left edge. */}
 				<div className="flex items-stretch flex-shrink-0 -ml-1.5 rounded-md border border-edge bg-raised overflow-hidden">
 					<Tooltip content={t("header.navBack")} detail={t("ttip.header.navBack")}>
 						<button
 							onClick={goBack}
 							disabled={!canGoBack}
-							className={`header-anim px-1.5 py-[5px] transition-colors ${
+							className={`header-anim px-1.5 py-[5px] inline-flex items-center justify-center transition-colors ${
 								canGoBack
 									? "text-fg-3 hover:text-fg hover:bg-elevated"
 									: "text-fg-muted/40 cursor-default"
@@ -398,7 +533,7 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 						<button
 							onClick={goForward}
 							disabled={!canGoForward}
-							className={`header-anim px-1.5 py-[5px] transition-colors ${
+							className={`header-anim px-1.5 py-[5px] inline-flex items-center justify-center transition-colors ${
 								canGoForward
 									? "text-fg-3 hover:text-fg hover:bg-elevated"
 									: "text-fg-muted/40 cursor-default"
@@ -432,78 +567,72 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 								</span>
 							)
 						) : seg.isProjectDropdown ? (
-							<div className="relative flex items-center gap-0.5" ref={projectDropdownRef}>
-								{seg.onClick ? (
-									<button
-										onClick={seg.onClick}
-										className="text-accent hover:text-accent-emphasis transition-colors truncate"
-									>
-										{seg.label}
-									</button>
-								) : (
-									<span className="text-fg font-semibold truncate">{seg.label}</span>
-								)}
-								<Tooltip content={t("header.switchProject")} detail={t("ttip.header.switchProject")}>
-									<button
-										onClick={() => setShowProjectDropdown((v) => !v)}
-										className="header-anim text-fg-muted hover:text-fg transition-colors flex-shrink-0 p-0.5 rounded hover:bg-elevated"
-										aria-label={t("header.switchProject")}
-									>
-										<span className={`inline-block transition-transform ${showProjectDropdown ? "rotate-180" : ""}`}>
-											<DropdownIcon className="w-3 h-3 block" />
-										</span>
-									</button>
-							</Tooltip>
+							<div className="relative flex-shrink-0 min-w-0" ref={projectDropdownRef}>
+								{/* Segmented control, same grammar as the back/forward pair on the
+								    left: name half opens the board, chevron half opens the switcher. */}
+								<div className="flex items-stretch min-w-0 rounded-md border border-edge bg-raised overflow-hidden">
+									{seg.onClick ? (
+										<button
+											onClick={seg.onClick}
+											className="header-anim px-2 py-[3px] min-w-0 text-accent hover:text-accent-emphasis hover:bg-elevated transition-colors truncate"
+										>
+											{seg.label}
+										</button>
+									) : (
+										<span className="px-2 py-[3px] min-w-0 text-fg font-semibold truncate">{seg.label}</span>
+									)}
+									<span className="w-px self-stretch bg-edge flex-shrink-0" aria-hidden="true" />
+									<Tooltip content={t("header.switchProject")} detail={t("ttip.header.switchProject")}>
+										<button
+											onClick={() => setShowProjectDropdown((v) => !v)}
+											aria-haspopup="menu"
+											aria-expanded={showProjectDropdown}
+											className={`header-anim px-1.5 py-[3px] flex items-center justify-center transition-colors ${
+												showProjectDropdown ? "text-fg bg-elevated" : "text-fg-3 hover:text-fg hover:bg-elevated"
+											}`}
+											aria-label={t("header.switchProject")}
+											data-testid="project-switcher-toggle"
+										>
+											<span className={`inline-block transition-transform ${showProjectDropdown ? "rotate-180" : ""}`}>
+												<DropdownIcon className="w-3.5 h-3.5 block" />
+											</span>
+										</button>
+									</Tooltip>
+								</div>
+								{/* `w-96`, not `w-72`: a row carries the space indent, an active-task
+								    count and a shortcut badge beside the project name. */}
 								{showProjectDropdown && (
-									<div className="absolute left-0 top-full mt-1.5 w-72 bg-overlay border border-edge rounded-xl shadow-2xl z-50 py-1 max-h-80 overflow-y-auto">
-										{availableProjects.map((p, idx) => {
-											const isCurrent = currentProjectId === p.id;
-											const count = projectTaskCounts[p.id];
-											const isBuiltin = isBuiltinOpsProject(p);
-											const locked = privacy.isLocked(p);
-											// \u23180 for the pinned built-in board; \u23181-9 for the rest.
-											const nonBuiltinIdx = switcherHasPinnedBuiltin ? idx - 1 : idx;
-											const shortcutLabel = isBuiltin ? "0" : (nonBuiltinIdx < 9 ? String(nonBuiltinIdx + 1) : null);
-											return (
-												<button
-													key={p.id}
-													aria-disabled={locked || undefined}
-													title={locked ? t("streamer.projectLocked") : undefined}
-													onClick={() => {
-														setShowProjectDropdown(false);
-														navigate({ screen: "project", projectId: p.id });
-													}}
-													className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
-														isCurrent
-															? "bg-accent/10 text-accent"
-															: "text-fg-2 hover:bg-elevated hover:text-fg"
-													}`}
-												>
-													{isBuiltin && (
-														<span className="text-accent flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{""}</span>
-													)}
-													{locked && (
-														<span aria-hidden="true" className="text-fg-muted flex-shrink-0 text-sm-plus" style={{ fontFamily: "\'JetBrainsMono Nerd Font Mono\'" }}>{"\u{F033E}"}</span>
-													)}
-													<span className={`truncate text-sm flex-1 ${privacy.maskClass(p)}`}>{isBuiltin ? t("ops.boardName") : p.name}</span>
-													{isBuiltin && (
-														<span className="flex-shrink-0 px-1 py-0.5 rounded bg-raised text-fg-3 text-nano font-medium uppercase tracking-wide">{t("ops.badgeSystem")}</span>
-													)}
-													<span className="text-micro text-fg-muted flex-shrink-0">
-														{count != null
-															? count > 0
-																? t.plural("header.activeTaskCount", count)
-																: t("header.noActiveTasks")
-															: ""}
-													</span>
-													{shortcutLabel && (
-														<kbd className="flex-shrink-0 inline-flex items-center gap-0.5 text-dense text-fg-muted/60 font-mono">
-															<span className="text-micro">{"\u2318"}</span>{shortcutLabel}
-														</kbd>
-													)}
-												</button>
-											);
-										})}
+									<div role="menu" className="absolute left-0 top-full mt-1.5 w-96 max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:mt-0 max-md:w-auto bg-overlay border border-edge rounded-xl shadow-2xl z-50 py-1 max-h-80 overflow-y-auto">
+										{switcherGroups === null ? (
+											availableProjects.map((p) => renderSwitcherRow(p, "flat"))
+										) : (
+											<>
+												{/* The builtin Operations board never joins a space; it stays
+												    pinned above every group, exactly as on the dashboard. */}
+												{availableProjects.filter(isBuiltinOpsProject).map((p) => renderSwitcherRow(p, "builtin"))}
+												{switcherGroups.map((group) => {
+													const masked = group.space ? isSpaceSensitive(group.space, sensitiveProjectIds) : false;
+													return (
+														<div key={group.space?.id ?? "home"} className="pt-2 first:pt-0">
+															{/* Label, then a hairline running to the edge — the same
+															    grammar the Keyboard settings use for their sections. */}
+															<div className="px-3 pb-1 flex items-center gap-2">
+																<span className={`text-nano font-semibold uppercase tracking-wider truncate ${group.space ? "text-accent/90" : "text-fg-3"} ${masked ? MASK_CLASS : ""}`}>
+																	{group.space ? group.space.name : t("spaces.homeGroup")}
+																</span>
+																<span className="text-nano text-fg-muted tabular-nums flex-shrink-0">{group.projects.length}</span>
+																<span aria-hidden="true" className={`h-px flex-1 ${group.space ? "bg-accent/25" : "bg-edge/60"}`} />
+															</div>
+															{/* The trunk: rows sit indented off a vertical rule, so a
+															    project reads as filed under its space. */}
+															<div className={`ml-3 border-l ${group.space ? "border-accent/30" : "border-edge/60"}`}>
+																{group.projects.map((p) => renderSwitcherRow(p, group.space?.id ?? "home"))}
+															</div>
+														</div>
+													);
+												})}
+											</>
+										)}
 									</div>
 								)}
 							</div>
@@ -514,28 +643,43 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 							>
 								{seg.label}
 							</button>
-						) : (
-							<span className="flex items-baseline gap-1.5 min-w-0 overflow-hidden">
-								{seg.badge && (
-									<span className="font-mono text-micro text-accent/70 flex-shrink-0 tracking-wide">{seg.badge}</span>
-								)}
-								{seg.task && (
+						) : seg.task ? (
+							// The badge owns variant switching, so it sits outside the hover
+							// card: a control cannot share its trigger with a hover popover.
+							<span className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+								<TaskBreadcrumbBadge
+									task={seg.task}
+									groupMembers={variantGroupFor(seg.task)}
+									agents={agents}
+									isFullPage={route.screen === "task"}
+									navigate={navigate}
+									onOpen={() => setShowProjectDropdown(false)}
+								/>
+								{/* Hovering the title is how the facts that no longer fit the
+								    summary bar (labels, branch, seq, age) are reached. */}
+								<TaskTitleHoverCard
+									task={seg.task}
+									project={projects.find((p) => p.id === seg.task?.projectId) ?? null}
+								>
 									<NativeBackendMark
 										task={seg.task}
 										className="w-3.5 h-3.5"
 										testId="breadcrumb-native-backend"
 									/>
-								)}
-								{seg.task ? (
 									<InlineRename
 										taskId={seg.task.id}
 										projectId={seg.task.projectId}
 										currentTitle={seg.label}
 										hasCustomTitle={!!seg.task.customTitle}
 									/>
-								) : (
-									<span className="text-fg font-semibold truncate">{seg.label}</span>
+								</TaskTitleHoverCard>
+							</span>
+						) : (
+							<span className="flex items-baseline gap-1.5 min-w-0 overflow-hidden">
+								{seg.badge && (
+									<span className="font-mono text-micro text-accent/70 flex-shrink-0 tracking-wide">{seg.badge}</span>
 								)}
+								<span className="text-fg font-semibold truncate">{seg.label}</span>
 							</span>
 						)}
 					</Fragment>
@@ -575,6 +719,8 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 									version={updateVersion}
 									changelog={updateChangelog}
 									restarting={restarting}
+									tasksInProgress={restartContext?.tasksInProgress ?? 0}
+									keepsRemoteLink={restartContext?.headless ?? false}
 									onRestart={handleRestart}
 									onSeeAllChanges={() => {
 										setShowUpdateDropdown(false);
@@ -586,105 +732,61 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 					</div>
 				)}
 
-				{/* Prevent-sleep toggle — keeps the machine awake while dev-3.0 runs.
-				    Folded into the kebab bottom sheet on narrow. */}
-				{!isNarrow && <PreventSleepToggle />}
-
-				{/* Memory headroom — the one ambient resource readout in the header
-				    (PRODUCT_UX_BIBLE §12.6). Folds into the kebab sheet on narrow
-				    like its neighbours: a phone header has no room for a readout
-				    nobody acts on at a glance. In the sheet it opens a BottomSheet
-				    instead of a popover. */}
-				{!isNarrow && <MemoryHeadroomIndicator navigate={navigate} />}
-
-				{/* Ambient agent rate-limit indicator — hidden until any limit data exists
-				    (folded into the kebab bottom sheet on narrow). */}
-				{!isNarrow && <RateLimitIndicator compact={compact} />}
-
-				{/* Quick Shell — opens the built-in Operations shell in $HOME (folded into the kebab on narrow) */}
-				{!isNarrow && (
-					<Tooltip content={t("quickShell.tooltipWithShortcut")} detail={t("ttip.header.quickShell")}>
-						<button
-							onClick={() => window.dispatchEvent(new CustomEvent("menu:open-quick-shell"))}
-							className="header-anim flex items-center gap-1 transition-colors px-1.5 py-1 rounded-lg text-fg-3 hover:text-fg hover:bg-elevated"
-							aria-label={t("quickShell.tooltipWithShortcut")}
-						>
-							<QuickShellIcon className="w-[1.125rem] h-[1.125rem]" />
-							{!compact && <span className="text-micro font-medium">{t("quickShell.open")}</span>}
-						</button>
-				</Tooltip>
-				)}
-
-				{/* Project Terminal — visible when inside a git project. Hidden for
-				    virtual ("Operations") boards: their synthetic path is created
-				    lazily per-task, so opening one throws "Project path does not
-				    exist" (same reason Git Pull below is hidden). */}
-				{"projectId" in route && !isVirtualProject && !isNarrow && (
-					<Tooltip content={projectTerminalTooltip} detail={t("ttip.header.projectTerminal")}>
-						<button
-							onClick={() => {
-								if (route.screen === "project-terminal") {
-									navigate({ screen: "project", projectId: route.projectId });
-								} else {
-									navigate({ screen: "project-terminal", projectId: route.projectId });
-								}
-							}}
-							className={`header-anim flex items-center gap-1 transition-colors px-1.5 py-1 rounded-lg ${
-								route.screen === "project-terminal"
-									? "text-accent bg-accent/15 hover:bg-accent/25"
-									: "text-fg-3 hover:text-fg hover:bg-elevated"
-							}`}
-							aria-label={projectTerminalTooltip}
-						>
-							<ProjectTerminalIcon className="w-[1.125rem] h-[1.125rem]" />
-							{!compact && <span className="text-micro font-medium">{t("projectTerminal.open")}</span>}
-						</button>
-				</Tooltip>
-				)}
-
-				{/* Git Pull — quick pull of origin/{main|master} into project main worktree.
-				    Hidden for virtual ("Operations") boards, which have no git repo.
-				    Folded into the kebab bottom sheet on narrow. */}
-				{"projectId" in route && !isVirtualProject && !isNarrow && (
-					<GitPullButton projectId={route.projectId} compact={compact} />
-				)}
-
-				{/* Remote Access QR Code (folded into the kebab on narrow) */}
-				{remoteAccessAvailable && !isNarrow && (
-					<Tooltip content={t("header.remoteAccessTooltip")} detail={t("ttip.header.remoteAccess")}>
-						<button
-							onClick={() => { void openRemoteAccess(); }}
-							className={`header-anim flex items-center gap-1 transition-colors px-1.5 py-1 rounded-lg ${remoteAccessActive ? "text-accent bg-accent/15 hover:bg-accent/25 remote-access-active" : "text-fg-3 hover:text-fg hover:bg-elevated"}`}
-							aria-label={t("header.remoteAccessTooltip")}
-						>
-							<RemoteQRIcon className="w-[1.125rem] h-[1.125rem]" />
-						</button>
-				</Tooltip>
-				)}
-
-				{/* Tmux Session Manager — folded into the kebab bottom sheet on narrow. */}
-				{!isNarrow && <TmuxSessionManager navigate={navigate} />}
-
 				{/* Overflow menu — low-frequency actions (Stats / GitHub / Report / Changelog)
-				    always live under a single kebab to keep the header lean.
+				    always live under a single kebab to keep the header lean. It opens the
+				    cluster (leftmost) because it is the one control present on every screen,
+				    so nothing shifts under the cursor; the settings pair keeps the right end.
 				    On narrow the whole cluster folds into the action sheet below instead. */}
 				{!isNarrow && (
 					<div className="relative" ref={overflowMenuRef}>
 						<Tooltip content={t("header.moreActions")} detail={t("ttip.header.moreActions")}>
+							{/* Horizontal dots inside a visible chip: the old vertical kebab, borderless
+							    and next to real `|` separators, read as one more separator instead of a
+							    control. The border is what says "button", the row of dots says "menu". */}
 							<button
 								onClick={() => setShowOverflowMenu((v) => !v)}
-								className={`header-anim flex items-center transition-colors px-1.5 py-1 rounded-lg ${
-									showOverflowMenu ? "text-fg bg-elevated" : "text-fg-3 hover:text-fg hover:bg-elevated"
+								className={`header-anim flex items-center transition-colors px-1.5 py-1 rounded-lg border ${
+									showOverflowMenu
+										? "text-fg bg-elevated border-edge-active"
+										: "text-fg-2 border-edge bg-raised/60 hover:text-fg hover:bg-elevated hover:border-edge-active"
 								}`}
 								aria-label={t("header.moreActions")}
 								aria-haspopup="menu"
 								aria-expanded={showOverflowMenu}
 							>
-								<KebabIcon className="w-[1.125rem] h-[1.125rem]" />
+								<OverflowDotsIcon className="w-[1.125rem] h-[1.125rem]" />
 							</button>
 					</Tooltip>
 						{showOverflowMenu && (
 							<div className="absolute right-0 top-full mt-1.5 w-52 bg-overlay border border-edge rounded-xl shadow-2xl z-50 py-1" role="menu">
+								{/* Stateful rows: they keep the menu open on click, because the row
+								    itself (icon state, session count, memory number) is the answer. */}
+								<PreventSleepToggle variant="row" />
+								<MemoryHeadroomIndicator navigate={navigate} variant="menu" />
+								<AgentTrafficIndicator
+									projectId={currentProjectId}
+									navigate={navigate}
+									onOpenLog={() => {
+										setShowOverflowMenu(false);
+										window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT));
+									}}
+									variant="menu"
+								/>
+								{viewedOverRemote && <ConnectionQualityIndicator variant="menu" />}
+								<TmuxSessionManager navigate={navigate} variant="menu" />
+								<button
+									role="menuitem"
+									onClick={() => {
+										setShowOverflowMenu(false);
+										window.dispatchEvent(new CustomEvent("menu:open-quick-shell"));
+									}}
+									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+									aria-label={t("quickShell.tooltipWithShortcut")}
+								>
+									<QuickShellIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
+									<span className="text-sm">{t("quickShell.open")}</span>
+								</button>
+								<div className="my-1 border-t border-edge" />
 								{route.screen !== "stats" && (
 									<button
 										role="menuitem"
@@ -738,23 +840,135 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 					</div>
 				)}
 
+				{/* Agent traffic — the ONLY control here whose bar slot is earned per
+				    occasion: the kebab row above is its home, and this pill appears
+				    immediately right of the three dots only while messages have landed
+				    since the user last looked, then disappears when they look. Never on a
+				    phone header (bible §5.9, §12.6). */}
+				<AgentTrafficIndicator
+					projectId={currentProjectId}
+					navigate={navigate}
+					onOpenLog={() => window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT))}
+				/>
+
+				{/* Prevent-sleep lives in the kebab sheet only, at every width: it is on for
+				    everyone and practically never switched off, so a permanent header slot
+				    bought nothing. */}
+
+				{/* Memory headroom — the one ambient resource readout in the header
+				    (PRODUCT_UX_BIBLE §12.6). The bar carries it only while the OS
+				    reports pressure; with headroom to spare it lives in the overflow
+				    menu instead (the component decides — see its `variant`). Folds into
+				    the kebab sheet on narrow, where the breakdown is a BottomSheet. */}
+				{!isNarrow && <MemoryHeadroomIndicator navigate={navigate} />}
+
+				{/* Ambient agent rate-limit indicator — hidden until any limit data exists
+				    (folded into the kebab bottom sheet on narrow). */}
+				{!isNarrow && <RateLimitIndicator compact={compact} />}
+
+				{/* Quick Shell lives in the overflow menu at every width — it is a
+				    keyboard action (⌘⇧`) far more than a button. */}
+
+				{/* Project Terminal — visible when inside a git project. Hidden for
+				    virtual ("Operations") boards: their synthetic path is created
+				    lazily per-task, so opening one throws "Project path does not
+				    exist" (same reason Git Pull below is hidden). */}
+				{"projectId" in route && !isVirtualProject && !isNarrow && (
+						<Tooltip content={projectTerminalTooltip} detail={t("ttip.header.projectTerminal")}>
+						<button
+							onClick={() => {
+								if (route.screen === "project-terminal") {
+									navigate({ screen: "project", projectId: route.projectId });
+								} else {
+									navigate({ screen: "project-terminal", projectId: route.projectId });
+								}
+							}}
+							className={`header-anim flex items-center gap-1 transition-colors px-1.5 py-1 rounded-lg ${
+								route.screen === "project-terminal"
+									? "text-accent bg-accent/15 hover:bg-accent/25"
+									: "text-fg-3 hover:text-fg hover:bg-elevated"
+							}`}
+								aria-label={projectTerminalTooltip}
+						>
+							<ProjectTerminalIcon className="w-[1.125rem] h-[1.125rem]" />
+							{!compact && <span className="text-micro font-medium">{t("projectTerminal.open")}</span>}
+						</button>
+				</Tooltip>
+				)}
+
+				{/* Git Pull — quick pull of origin/{main|master} into project main worktree.
+				    Hidden for virtual ("Operations") boards, which have no git repo.
+				    Folded into the kebab bottom sheet on narrow. */}
+				{"projectId" in route && !isVirtualProject && !isNarrow && (
+					<GitPullButton projectId={route.projectId} compact={compact} />
+				)}
+
+				{/* Remote Access QR Code (folded into the kebab on narrow). Seen from the
+				    far end of a remote session the QR offers a code for the connection you
+				    are already using, so that slot carries the connection-quality readout
+				    instead — a swap, never a second control. */}
+					{remoteAccessAvailable && !isNarrow && !viewedOverRemote && (
+					<Tooltip content={t("header.remoteAccessTooltip")} detail={t("ttip.header.remoteAccess")}>
+						<button
+							onClick={() => { void openRemoteAccess(); }}
+							className={`header-anim flex items-center gap-1 transition-colors px-1.5 py-1 rounded-lg ${remoteAccessActive ? "text-accent bg-accent/15 hover:bg-accent/25 remote-access-active" : "text-fg-3 hover:text-fg hover:bg-elevated"}`}
+							aria-label={t("header.remoteAccessTooltip")}
+						>
+							<RemoteQRIcon className="w-[1.125rem] h-[1.125rem]" />
+						</button>
+				</Tooltip>
+				)}
+				{/* …and it takes that slot only while the connection misbehaves. A healthy
+				    remote session shows nothing here; the number stays in the kebab. */}
+				{!isNarrow && viewedOverRemote && <ConnectionQualityIndicator />}
+
 				{/* Help mode ("Explain this screen") — bright accent "?", always inline on
 				    every screen (never folds into the kebab); narrow gets it via the sheet. */}
 				{!isNarrow && (
+					<div className="relative">
 					<Tooltip
 						content={t("header.helpTooltip")}
 						detail={t("ttip.header.helpMode")}
 						kbd={HELP_MODE_SHORTCUT ? shortcutKeysFor(HELP_MODE_SHORTCUT) : undefined}
+						// The callout below says the same thing, in the same place — hovering
+						// would stack two copies of one sentence on top of each other.
+						disabled={highlightHelp}
 					>
 						<button
 							onClick={() => window.dispatchEvent(new CustomEvent("menu:enter-help-mode"))}
-							className="header-anim flex items-center text-accent hover:text-accent-emphasis transition-colors px-1.5 py-1 rounded-lg hover:bg-accent/10"
+							className={`header-anim flex items-center text-accent hover:text-accent-emphasis transition-colors px-1.5 py-1 rounded-lg hover:bg-accent/10${
+								highlightHelp ? " bg-accent/10 ring-1 ring-accent/40 motion-safe:animate-help-attractor" : ""
+							}`}
 							aria-label={t("header.helpTooltip")}
+							data-help-attractor={highlightHelp ? "on" : undefined}
 							data-testid="header-help-mode"
 						>
 							<HelpModeIcon className="w-[1.125rem] h-[1.125rem]" />
 						</button>
 					</Tooltip>
+					{/* The attention lives beside the control, never as a plate in the middle
+					    of a screen (bible §5.4a). Dismissing it counts as discovery, so it
+					    never returns. Anchored, not portalled: it must move with the button. */}
+					{highlightHelp && (
+						<div
+							role="note"
+							data-testid="help-attractor-callout"
+							className="absolute right-0 top-full mt-2 z-50 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-accent/40 bg-elevated shadow-popover px-3.5 py-3 text-left"
+						>
+							<button
+								type="button"
+								onClick={() => window.dispatchEvent(new CustomEvent(HELP_ATTRACTOR_DISMISS_EVENT))}
+								aria-label={t("header.helpCallout.dismiss")}
+								data-testid="help-attractor-dismiss"
+								className="absolute top-1.5 right-1.5 text-fg-muted hover:text-fg transition-colors px-1.5 py-0.5 rounded-md hover:bg-raised-hover text-sm leading-none"
+							>
+								×
+							</button>
+							<div className="text-fg text-sm font-semibold pr-6">{t("header.helpCallout.title")}</div>
+							<p className="text-fg-3 text-xs leading-relaxed mt-1">{t("header.helpCallout.body")}</p>
+						</div>
+					)}
+					</div>
 				)}
 
 				{/* Project settings — anywhere inside a project (not on project-settings screen itself) */}
@@ -795,11 +1009,11 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 					<Tooltip content={t("header.moreActions")} detail={t("ttip.header.moreActions")}>
 						<button
 							onClick={() => setShowActionSheet(true)}
-							className="header-anim flex items-center justify-center w-9 h-9 rounded-lg text-fg-3 hover:text-fg hover:bg-elevated transition-colors"
+							className="header-anim flex items-center justify-center w-9 h-9 rounded-lg border border-edge bg-raised/60 text-fg-2 hover:text-fg hover:bg-elevated hover:border-edge-active transition-colors"
 							aria-label={t("header.moreActions")}
 							aria-haspopup="dialog"
 						>
-							<KebabIcon className="w-[1.125rem] h-[1.125rem]" />
+							<OverflowDotsIcon className="w-[1.125rem] h-[1.125rem]" />
 						</button>
 				</Tooltip>
 				)}
@@ -821,12 +1035,24 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 					<div className="flex flex-wrap items-center gap-1.5 pb-3 mb-1 border-b border-edge/60">
 						<PreventSleepToggle />
 						<MemoryHeadroomIndicator navigate={navigate} />
+						{viewedOverRemote && <ConnectionQualityIndicator />}
 						<RateLimitIndicator compact={false} />
 						{currentProjectId && !isVirtualProject && (
 							<GitPullButton projectId={currentProjectId} compact={false} />
 						)}
 						<TmuxSessionManager navigate={navigate} />
 					</div>
+					{/* Agent traffic is the phone's only way in, so it is a row here — and it
+					    takes the same shape as the rows below it, not the chip row above. */}
+					<AgentTrafficIndicator
+						projectId={currentProjectId}
+						navigate={navigate}
+						onOpenLog={() => {
+							setShowActionSheet(false);
+							window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT));
+						}}
+						variant="sheet"
+					/>
 					{headerSheetRows.map((row) => (
 						<button
 							key={row.key}
@@ -848,8 +1074,8 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 			</BottomSheet>
 		)}
 		{/* One-time response to a manual update check. */}
-		{showToast && updateVersion && (
-			<div className="fixed top-14 right-4 z-50 animate-slide-in-right">
+		{showToast && updateVersion && pinnedToastSlot && createPortal(
+			<div className="animate-slide-in-right pointer-events-auto" data-testid="update-prompt-pinned">
 				<div className="bg-overlay border border-accent/30 rounded-xl shadow-2xl p-4 w-80 flex items-start gap-3">
 					<UpdateReadyIcon className="w-5 h-5 text-accent mt-0.5 flex-shrink-0" />
 					<div className="flex-1 min-w-0">
@@ -891,14 +1117,16 @@ function GlobalHeader({ route, projects, tasks, navigate, goBack, goForward, can
 					</div>
 					<button
 						onClick={dismissToast}
+						aria-label={t("update.laterBtn")}
 						className="text-fg-muted hover:text-fg transition-colors flex-shrink-0"
 					>
-						<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
 						</svg>
 					</button>
 				</div>
-			</div>
+			</div>,
+			pinnedToastSlot,
 		)}
 		</>
 	);

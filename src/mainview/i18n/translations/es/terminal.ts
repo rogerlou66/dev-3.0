@@ -2,6 +2,9 @@ const terminal = {
 	// TaskTerminal
 	"terminal.connecting": "Conectando...",
 	"terminal.syncing": "Sincronizando terminal...",
+	"terminal.taskCompletedTitle": "Esta tarea está completada",
+	"terminal.taskCancelledTitle": "Esta tarea está cancelada",
+	"terminal.taskClosedHint": "Su terminal y su worktree se eliminaron al cerrar la tarea: ya no queda nada que ejecutar aquí.",
 	"terminal.envError": "Error del entorno de la tarea",
 	"terminal.worktreeNotFound": "El directorio de trabajo de la tarea ya no existe. Esto puede ocurrir cuando el worktree se elimina externamente.",
 	"terminal.errorPath": "Worktree no encontrado:",
@@ -9,6 +12,9 @@ const terminal = {
 	"terminal.cancelTask": "Cancelar tarea",
 	"terminal.sessionEnded": "Sesión de terminal finalizada",
 	"terminal.sessionEndedDesc": "El proceso del terminal ha finalizado. El worktree y todos los archivos están intactos.",
+	"terminal.hostGoneTitle": "El terminal de esta tarea no está en marcha",
+	"terminal.hostGoneDesc": "Su proceso anfitrión del terminal ha desaparecido: lo mataron, se cayó o nunca arrancó. El worktree y todos los archivos están intactos, y la conversación del agente se puede reanudar.",
+	"terminal.hostGoneRestart": "Reiniciar el terminal",
 	"terminal.resumeAgentSession": "Reanudar sesión",
 	"terminal.copyHint": "¡Copiado! Solo selecciona texto en cualquier panel de terminal — se copia al portapapeles automáticamente, sin ⌘C.",
 	"terminal.searchPlaceholder": "Buscar en el terminal…",
@@ -25,6 +31,15 @@ const terminal = {
 	"terminal.wakeResume": "Despertar y reanudar el agente",
 	"terminal.wakeShell": "Despertar con una shell simple",
 	"terminal.wakeShellDesc": "Una shell simple arranca al instante; reanudar vuelve a leer la conversación del agente.",
+	"terminal.setupFailedTitle": "El setup falló (código {code})",
+	"terminal.setupFailedDesc": "El script de configuración del proyecto no terminó, así que el agente no se inició. Puedes iniciarlo igualmente — el prompt de la tarea se conserva.",
+	"terminal.setupFailedStartAnyway": "Iniciar el agente igualmente",
+	"terminal.setupFailedRerun": "Volver a ejecutar el setup",
+	"terminal.setupRerunning": "Ejecutando el setup…",
+	"terminal.setupRerunFailed": "No se pudo volver a ejecutar el setup: {error}",
+	"terminal.setupFailedDismiss": "Cerrar",
+	"terminal.setupFailedAgentRunningDesc": "El agente está en marcha — puede que falten dependencias.",
+	"terminal.setupFailedHint": "Puede que falten dependencias. Volver a ejecutar el setup no toca al agente; iniciarlo de cero sí.",
 
 	// Mobile pane pager (narrow viewport: one zoomed pane at a time)
 	"panePager.role": "Paneles del terminal",
@@ -117,6 +132,7 @@ const terminal = {
 	"cheatSheet.lastPane": "Último panel activo",
 	"cheatSheet.showPaneNumbers": "Mostrar números de panel (saltar pulsando dígito)",
 	"cheatSheet.directionalSelect": "Seleccionar panel por dirección",
+	"cheatSheet.directionalSelectNoPrefix": "Seleccionar panel por dirección (sin prefijo)",
 	"cheatSheet.markPane": "Marcar el panel actual",
 	"cheatSheet.swapWithMarked": "Intercambiar panel actual con el marcado",
 	"cheatSheet.swapWithPrevNext": "Intercambiar con panel anterior / siguiente",
@@ -247,6 +263,11 @@ const terminal = {
 	"terminal.filePreviewContentCopied": "Contenido copiado",
 	"terminal.filePreviewRendered": "Renderizado",
 	"terminal.filePreviewRaw": "Sin formato",
+	"terminal.rendererCrashed": "El renderizador del terminal falló y no pudo reiniciarse solo. Haz clic para recargar la ventana — tu sesión sigue activa.",
+	"terminal.perf.title": "Rendimiento del terminal",
+	"terminal.perf.close": "Cerrar el panel de rendimiento",
+	"terminal.perf.noPanes": "No hay ningún terminal abierto. Abre el terminal de una tarea para empezar a medir.",
+	"terminal.perf.legend": "p50 / p95 / max. fps es el bucle de render, upd es con qué frecuencia cambió la imagen.",
 };
 
 export default terminal;

@@ -16,6 +16,10 @@ Why this shape at all, and why the old records were renamed despite the cost:
 **Writing a new record?** `decisions/YYYY/MM/DD/your-slug.md`, never a number. Do not add rows
 to this table — it is a frozen map of what was renamed once, not a registry.
 
+**Changing behavior an existing record describes?** Don't leave it lying: add a supersede note
+at its top — "Superseded on YYYY-MM-DD by `decisions/YYYY/MM/DD/<new-slug>.md`: <one line on
+what changed>" — and write the new record, in the same commit as the code change.
+
 | Old name | New path |
 |---|---|
 | `001-claude-trust-auto-register.md` | [`2026/02/23/claude-trust-auto-register.md`](2026/02/23/claude-trust-auto-register.md) |

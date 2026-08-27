@@ -1,4 +1,4 @@
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import GlobalHeader from "../GlobalHeader";
 import { I18nProvider } from "../../i18n";
@@ -25,14 +25,21 @@ const projectTerminalLabel = () => `Project Terminal (${shortcutKeysFor(PROJECT_
 vi.mock("../../rpc", () => ({
 	// Browser mode: the fullscreen toggle row is visible in the action sheet.
 	isElectrobun: false,
+	// No round-trip probe: the connection-quality readout starts and stays silent,
+	// which is what this suite wants — it is not the widget's test.
+	getRoundTripProbe: () => null,
 	api: {
 		request: {
 			getSystemMemory: vi.fn().mockResolvedValue(null),
 			getTasks: vi.fn(),
 			applyUpdate: vi.fn(),
+			// The update plaque asks what a restart would interrupt (and whether it keeps
+			// the remote link) as soon as an update is offered.
+			getUpdateRestartContext: vi.fn().mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 }),
 			saveLastRoute: vi.fn(),
 			renameTask: vi.fn(),
-			getProjectCurrentBranch: vi.fn().mockResolvedValue({ branch: "main", isBaseBranch: true, isDirty: false }),
+			// `behindOrigin` > 0 keeps the pull button rendered — it hides when there is nothing to pull.
+			getProjectCurrentBranch: vi.fn().mockResolvedValue({ branch: "main", isBaseBranch: true, isDirty: false, behindOrigin: 2 }),
 			pullProjectMain: vi.fn(),
 			getPreventSleepState: vi.fn().mockResolvedValue({ enabled: false, available: false, forcedByRemote: false }),
 			setPreventSleep: vi.fn(),
@@ -41,10 +48,11 @@ vi.mock("../../rpc", () => ({
 				qrDataUrl: "data:image/png;base64,test",
 				accessUrl: "http://192.168.0.1:1234/?token=test",
 				tunnelState: "idle",
-				cloudflaredInstalled: true,
+				tunnelBinaryInstalled: true,
 				interfaces: [],
 				selectedHost: "192.168.0.1",
 			}),
+			getSpaces: vi.fn().mockResolvedValue({ version: 1, spaces: [], order: [] }),
 			listAgentAccounts: vi.fn().mockResolvedValue({
 				claude: { accounts: [], activeId: null, systemIdentity: null },
 				codex: { accounts: [], activeId: null, currentIdentity: null },
@@ -59,6 +67,10 @@ vi.mock("../../toast", () => ({
 		info: vi.fn(),
 		success: vi.fn(),
 	},
+	// Stands in for the real ToastHost slot, which no header test mounts. Body is
+	// the honest substitute: the update prompt portals somewhere queryable, exactly
+	// as it does in the app.
+	usePinnedToastSlot: () => document.body,
 }));
 
 import { api } from "../../rpc";
@@ -197,6 +209,7 @@ function headerElement(
 				route={route}
 				projects={projects}
 				tasks={tasks}
+				agents={[]}
 				navigate={navigate ?? vi.fn()}
 				goBack={extra?.goBack ?? vi.fn()}
 				goForward={extra?.goForward ?? vi.fn()}
@@ -221,6 +234,7 @@ describe("GlobalHeader — project switcher dropdown", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mockedApi.request.getTasks.mockResolvedValue([]);
+		mockedApi.request.getSpaces.mockResolvedValue({ version: 1, spaces: [], order: [] });
 	});
 
 	it("shows chevron button next to project name when inside a project", () => {
@@ -229,6 +243,26 @@ describe("GlobalHeader — project switcher dropdown", () => {
 		expect(chevron).toBeInTheDocument();
 		// Project name text is rendered separately from the chevron
 		expect(screen.getByText("Project Alpha")).toBeInTheDocument();
+	});
+
+	it("declares the chevron as a menu trigger and reflects the open state", async () => {
+		const user = userEvent.setup();
+		renderHeader({ screen: "project", projectId: "p1" });
+		const chevron = getChevronButton();
+		expect(chevron).toHaveAttribute("aria-haspopup", "menu");
+		expect(chevron).toHaveAttribute("aria-expanded", "false");
+		await user.click(chevron);
+		expect(chevron).toHaveAttribute("aria-expanded", "true");
+	});
+
+	it("keeps the name and the chevron inside one bordered segmented control", () => {
+		renderHeader({ screen: "project", projectId: "p1", activeTaskId: "t1" }, [project1, project2], vi.fn(), [
+			{ id: "t1", seq: 1, title: "Task 1", status: "in-progress" } as Task,
+		]);
+		const shell = getChevronButton().parentElement!;
+		expect(shell).toHaveClass("border-edge");
+		// Both halves live in that shell — the chevron is no longer a loose glyph.
+		expect(within(shell).getByRole("button", { name: "Project Alpha" })).toBeInTheDocument();
 	});
 
 	it("does not show project dropdown on dashboard", () => {
@@ -401,6 +435,68 @@ describe("GlobalHeader — project switcher dropdown", () => {
 		expect(await screen.findAllByText("No active tasks")).toHaveLength(2);
 	});
 
+	describe("space grouping", () => {
+		const project4: Project = { ...project2, id: "p4", name: "Project Delta" };
+
+		function withSpaces() {
+			// Board order puts sp_other first; the current project (p1) is in sp_dev,
+			// so sp_dev must still be rendered first.
+			mockedApi.request.getSpaces.mockResolvedValue({
+				version: 1,
+				spaces: [
+					{ id: "sp_dev", name: "Dev Space", parentId: null, projectIds: ["p1", "p2"], createdAt: 1 },
+					{ id: "sp_other", name: "Other Space", parentId: null, projectIds: ["p2"], createdAt: 2 },
+				],
+				order: ["sp_other", "sp_dev"],
+			});
+		}
+
+		async function openSwitcher() {
+			const user = userEvent.setup();
+			renderHeader({ screen: "project", projectId: "p1" }, [project1, project2, project4]);
+			await user.click(getChevronButton());
+			return await screen.findByRole("menu");
+		}
+
+		it("hoists the current project's space above the other groups, Home last", async () => {
+			withSpaces();
+			const menu = await openSwitcher();
+			await within(menu).findByText("Dev Space");
+			const headers = within(menu)
+				.getAllByText(/Dev Space|Other Space|Home/)
+				.map((el) => el.textContent);
+			expect(headers).toEqual(["Dev Space", "Other Space", "Home"]);
+		});
+
+		it("lists a project under every space it belongs to, plus once under Home", async () => {
+			withSpaces();
+			const menu = await openSwitcher();
+			await within(menu).findByText("Dev Space");
+			// Beta is in both spaces → two rows; Delta has no space → the Home group.
+			expect(within(menu).getAllByText("Project Beta")).toHaveLength(2);
+			expect(within(menu).getAllByText("Project Delta")).toHaveLength(1);
+		});
+
+		it("keeps the ⌘N badge on board order, not on the regrouped row order", async () => {
+			withSpaces();
+			const menu = await openSwitcher();
+			await within(menu).findByText("Dev Space");
+			const rows = within(menu).getAllByRole("button");
+			const badgeOf = (name: string) =>
+				rows.find((r) => r.textContent?.includes(name))?.querySelector("kbd")?.textContent;
+			// p1 is board index 0 → ⌘1, even though it now sits under a hoisted space.
+			expect(badgeOf("Project Alpha")).toBe("⌘1");
+			expect(badgeOf("Project Beta")).toBe("⌘2");
+			expect(badgeOf("Project Delta")).toBe("⌘3");
+		});
+
+		it("stays flat when no space holds a visible project", async () => {
+			const menu = await openSwitcher();
+			expect(within(menu).queryByText("Home")).not.toBeInTheDocument();
+			expect(within(menu).getAllByRole("button")).toHaveLength(3);
+		});
+	});
+
 	it("shows downloading indicator when updateDownloadStatus is downloading", () => {
 		renderHeader(
 			{ screen: "dashboard" },
@@ -549,6 +645,24 @@ describe("GlobalHeader — breadcrumb inline rename", () => {
 		expect(screen.getByTitle("Edit title")).toBeInTheDocument();
 	});
 
+	it("shows branch, seq and labels on the title hover card", async () => {
+		const user = userEvent.setup();
+		renderHeader(
+			{ screen: "task", projectId: "p1", taskId: "t1" },
+			[{ ...project1, labels: [{ id: "lbl1", name: "Bug", color: "#ef4444" }] }],
+			vi.fn(),
+			[makeBreadcrumbTask({ labelIds: ["lbl1"] })],
+		);
+		expect(screen.queryByTestId("task-title-hover-card")).not.toBeInTheDocument();
+
+		await user.hover(screen.getByText("My Task Title"));
+
+		const card = screen.getByTestId("task-title-hover-card");
+		expect(within(card).getByText("feat/test")).toBeInTheDocument();
+		expect(within(card).getByText("#42")).toBeInTheDocument();
+		expect(within(card).getByText("Bug")).toBeInTheDocument();
+	});
+
 	it("shows pencil icon for task segment in split view", () => {
 		renderHeader(
 			{ screen: "project", projectId: "p1", activeTaskId: "t1" },
@@ -608,7 +722,9 @@ describe("GlobalHeader — breadcrumb inline rename", () => {
 
 		await user.click(screen.getByTestId("rename-cancel"));
 		expect(screen.queryByDisplayValue("My Task Title")).not.toBeInTheDocument();
-		expect(screen.getByText("My Task Title")).toBeInTheDocument();
+		// Scoped to the breadcrumb: pointing at the title also opens the hover
+		// card, which repeats the title in full.
+		expect(within(screen.getByRole("navigation")).getByText("My Task Title")).toBeInTheDocument();
 	});
 
 	it("does not save when title is unchanged", async () => {
@@ -632,6 +748,9 @@ describe("GlobalHeader — manual update prompt", () => {
 		mockedApi.request.getTasks.mockResolvedValue([]);
 		mockedApi.request.applyUpdate.mockResolvedValue(undefined as any);
 		mockedApi.request.saveLastRoute.mockResolvedValue(undefined as any);
+		// Auto-restart now requires a KNOWN non-headless context, so each test states
+		// it — `clearAllMocks` clears calls but not an implementation a sibling set.
+		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 });
 	});
 
 	afterEach(() => {
@@ -702,6 +821,30 @@ describe("GlobalHeader — manual update prompt", () => {
 		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
 	});
 
+	// The auto-restart gate must FAIL CLOSED. It reads the restart context over RPC;
+	// while that is unknown — pending, or failed — the box may be a headless
+	// `dev3 remote` server, where an unattended restart from a phone tab is exactly
+	// what the quiet-window policy refuses. Not knowing means not restarting.
+	it("does NOT auto-restart on a headless box", async () => {
+		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: true, remoteActive: false, tasksInProgress: 0 });
+		renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { updateVersion: "1.2.3" });
+
+		act(() => { vi.advanceTimersByTime(300_000); });
+		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
+	});
+
+	it("does NOT auto-restart when the restart context could not be read", async () => {
+		mockedApi.request.getUpdateRestartContext.mockRejectedValue(new Error("no answer"));
+		renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { updateVersion: "1.2.3" });
+
+		act(() => { vi.advanceTimersByTime(300_000); });
+		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
+	});
+
 	it("shows an error toast and re-enables restart when applyUpdate fails (issue #813)", async () => {
 		mockedApi.request.applyUpdate.mockRejectedValue(new Error("Update not ready to apply"));
 		renderHeader(
@@ -754,9 +897,12 @@ describe("GlobalHeader — project terminal button", () => {
 		expect(screen.getByText("Terminal")).toBeInTheDocument();
 	});
 
-	it("shows quick shell before project terminal", () => {
+	it("keeps quick shell out of the bar and inside the kebab menu, icon included", async () => {
+		const user = userEvent.setup();
 		renderHeader({ screen: "project", projectId: "p1" });
+		expect(screen.queryByLabelText("Quick Shell — new scratch in Operations (⌘⇧`)")).not.toBeInTheDocument();
 
+		await user.click(screen.getByLabelText("More"));
 		const quickShellButton = screen.getByLabelText("Quick Shell \u2014 new scratch in Operations (\u2318\u21e7`)");
 		const projectButton = screen.getByLabelText(projectTerminalLabel());
 
@@ -765,13 +911,27 @@ describe("GlobalHeader — project terminal button", () => {
 		).toBeTruthy();
 	});
 
-	it("renders a Quick Shell icon (regression: was an empty placeholder)", () => {
+	it("fires the quick-shell event from the menu row and closes the menu", async () => {
+		const user = userEvent.setup();
+		const handler = vi.fn();
+		window.addEventListener("menu:open-quick-shell", handler);
 		renderHeader({ screen: "project", projectId: "p1" });
-		// Migrated to Tooltip (aria-label, no native title) with an animated SVG icon.
-		const quickShellButton = screen.getByLabelText("Quick Shell — new scratch in Operations (⌘⇧`)");
-		const icon = quickShellButton.querySelector("svg");
-		expect(icon).toBeTruthy();
-		expect(quickShellButton.className).toContain("header-anim");
+
+		await user.click(screen.getByLabelText("More"));
+		await user.click(screen.getByLabelText("Quick Shell — new scratch in Operations (⌘⇧`)"));
+
+		expect(handler).toHaveBeenCalledTimes(1);
+		expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+		window.removeEventListener("menu:open-quick-shell", handler);
+	});
+
+	it("keeps the tmux session list in the kebab menu too", async () => {
+		const user = userEvent.setup();
+		renderHeader({ screen: "project", projectId: "p1" });
+		expect(screen.queryByLabelText("tmux Sessions")).not.toBeInTheDocument();
+
+		await user.click(screen.getByLabelText("More"));
+		expect(screen.getByLabelText("tmux Sessions")).toHaveAttribute("role", "menuitem");
 	});
 
 	it("does not show terminal button on dashboard", () => {
@@ -821,6 +981,22 @@ describe("GlobalHeader — remote access indicator", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mockedApi.request.getTasks.mockResolvedValue([]);
+		// The QR icon lives in the DESKTOP window. Seen from the far end of a remote
+		// session it would offer a code for the connection already in use, so that
+		// slot carries the connection-quality readout there instead.
+		(window as any).__electrobunWebviewId = 1;
+	});
+	afterEach(() => {
+		delete (window as any).__electrobunWebviewId;
+	});
+
+	it("hands the slot to the connection-quality readout in a remote tab", () => {
+		delete (window as any).__electrobunWebviewId;
+		renderHeader({ screen: "dashboard" });
+
+		expect(
+			screen.queryByLabelText("Open on your phone — scan QR code for remote access"),
+		).not.toBeInTheDocument();
 	});
 
 	it("keeps the QR icon neutral until the tunnel is active", () => {
@@ -899,6 +1075,70 @@ describe("GlobalHeader — compact layout", () => {
 		const more = screen.getByLabelText("More");
 		await user.click(more);
 		expect(screen.getByText("Change Log")).toBeInTheDocument();
+	});
+
+	it("keeps prevent-sleep out of the roomy header bar and inside the kebab menu", async () => {
+		mockMatchMedia(false);
+		mockedApi.request.getPreventSleepState.mockResolvedValue({
+			enabled: true,
+			available: true,
+			forcedByRemote: false,
+		});
+		const user = userEvent.setup();
+		renderHeader({ screen: "project", projectId: "p1" });
+		// Nobody switches it off, so the bar itself no longer carries it.
+		await act(async () => {});
+		expect(screen.queryByLabelText("No Sleep")).not.toBeInTheDocument();
+
+		await user.click(screen.getByLabelText("More"));
+		const toggle = await screen.findByLabelText("No Sleep");
+		// Inside the menu, not merely somewhere on screen — that is the whole point.
+		expect(toggle.closest("[role=menu]")).not.toBeNull();
+		expect(toggle).toHaveAttribute("role", "menuitem");
+	});
+
+	it("stays open while a menu row's flyout is clicked — it is portaled, not outside", async () => {
+		mockMatchMedia(false);
+		const user = userEvent.setup();
+		renderHeader({ screen: "project", projectId: "p1" });
+		await act(async () => {});
+
+		await user.click(screen.getByLabelText("More"));
+		expect(screen.getByText("Change Log")).toBeInTheDocument();
+
+		// The memory / tmux detail panels render into <body>, so by DOM they are
+		// "outside" the menu. Clicking one must not dismiss the menu underneath.
+		const flyout = document.createElement("div");
+		flyout.setAttribute("data-header-flyout", "true");
+		const inner = document.createElement("button");
+		flyout.appendChild(inner);
+		document.body.appendChild(flyout);
+		await act(async () => {
+			fireEvent.mouseDown(inner);
+		});
+		expect(screen.getByText("Change Log")).toBeInTheDocument();
+
+		// An ordinary outside click still closes it.
+		await act(async () => {
+			fireEvent.mouseDown(document.body);
+		});
+		expect(screen.queryByText("Change Log")).not.toBeInTheDocument();
+		flyout.remove();
+	});
+
+	it("opens the utilities cluster — nothing sits left of the kebab", async () => {
+		renderHeader({ screen: "project", projectId: "p1" });
+		await act(async () => {});
+
+		const more = screen.getByLabelText("More");
+		const cluster = document.querySelector('[data-help-id="header.utilities"]')!;
+		expect(cluster).toContainElement(more);
+		// Every other control in the cluster must follow it in document order.
+		const others = [...cluster.querySelectorAll("button")].filter((b) => b !== more && !more.contains(b));
+		expect(others.length).toBeGreaterThan(0);
+		for (const other of others) {
+			expect(more.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		}
 	});
 });
 
@@ -996,9 +1236,9 @@ describe("GlobalHeader — virtual (Operations) board git affordances", () => {
 		builtin: true,
 	};
 
-	it("shows the Pull button for a git project", () => {
+	it("shows the Pull button for a git project with commits waiting upstream", async () => {
 		renderHeader({ screen: "project", projectId: "p1" });
-		expect(screen.getByText("Pull")).toBeInTheDocument();
+		expect(await screen.findByText("Pull")).toBeInTheDocument();
 	});
 
 	it("hides the Pull button for a virtual project", () => {
@@ -1138,7 +1378,7 @@ describe("GlobalHeader — narrow viewport action sheet", () => {
 		renderHeader({ screen: "project", projectId: "p1" });
 		await user.click(screen.getByLabelText("More"));
 		// Git pull + tmux manager now live in the sheet's controls strip.
-		expect(screen.getByTestId("git-pull-button")).toBeInTheDocument();
+		expect(await screen.findByTestId("git-pull-button")).toBeInTheDocument();
 		expect(screen.getByLabelText("tmux Sessions")).toBeInTheDocument();
 	});
 
@@ -1166,6 +1406,8 @@ describe("GlobalHeader — remote access button", () => {
 	});
 
 	it("opens instantly on the first click via a non-blocking local QR fetch", async () => {
+		// Desktop: the QR button only exists there (see the remote-access suite).
+		(window as any).__electrobunWebviewId = 1;
 		const events: CustomEvent[] = [];
 		const listener = (e: Event) => events.push(e as CustomEvent);
 		window.addEventListener("rpc:showRemoteAccessQR", listener);
@@ -1182,6 +1424,7 @@ describe("GlobalHeader — remote access button", () => {
 			expect(events[0].detail.autoStartTunnel).toBe(true);
 		} finally {
 			window.removeEventListener("rpc:showRemoteAccessQR", listener);
+			delete (window as any).__electrobunWebviewId;
 		}
 	});
 });

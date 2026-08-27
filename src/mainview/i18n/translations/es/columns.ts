@@ -72,6 +72,7 @@ const columns = {
 	"filter.funnelLabel": "Filtrar tareas",
 	"filter.group.priority": "Prioridad",
 	"filter.group.status": "Estado",
+	"filter.group.spaces": "Espacios",
 	"filter.group.labels": "Etiquetas",
 	"filter.group.agents": "Agentes",
 	"filter.group.flags": "Indicadores",

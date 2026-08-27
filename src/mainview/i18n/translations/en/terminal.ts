@@ -2,6 +2,9 @@ const terminal = {
 	// TaskTerminal
 	"terminal.connecting": "Connecting...",
 	"terminal.syncing": "Syncing terminal...",
+	"terminal.taskCompletedTitle": "This task is completed",
+	"terminal.taskCancelledTitle": "This task is cancelled",
+	"terminal.taskClosedHint": "Its terminal and worktree were removed when the task closed — there is nothing left to run here.",
 	"terminal.envError": "Task environment error",
 	"terminal.worktreeNotFound": "The task's working directory no longer exists. This can happen when the worktree is removed externally.",
 	"terminal.errorPath": "Worktree not found:",
@@ -9,6 +12,9 @@ const terminal = {
 	"terminal.cancelTask": "Cancel Task",
 	"terminal.sessionEnded": "Terminal session ended",
 	"terminal.sessionEndedDesc": "The terminal process has exited. The worktree and all files are still intact.",
+	"terminal.hostGoneTitle": "This task's terminal is not running",
+	"terminal.hostGoneDesc": "Its terminal host process is gone — killed, crashed, or never started. The worktree and all files are intact, and the agent's conversation can be resumed.",
+	"terminal.hostGoneRestart": "Restart terminal",
 	"terminal.resumeAgentSession": "Resume Session",
 	"terminal.copyHint": "Copied! Just select text in any terminal pane — it's on your clipboard automatically, no ⌘C needed.",
 	"terminal.searchPlaceholder": "Search terminal…",
@@ -25,6 +31,15 @@ const terminal = {
 	"terminal.wakeResume": "Wake and resume agent",
 	"terminal.wakeShell": "Wake with a plain shell",
 	"terminal.wakeShellDesc": "A plain shell starts instantly; resuming replays the agent's conversation.",
+	"terminal.setupFailedTitle": "Setup failed (exit {code})",
+	"terminal.setupFailedDesc": "The project setup script did not finish, so the agent was not started. You can start it anyway — the task prompt is preserved.",
+	"terminal.setupFailedStartAnyway": "Start agent anyway",
+	"terminal.setupFailedRerun": "Re-run setup",
+	"terminal.setupRerunning": "Running setup…",
+	"terminal.setupRerunFailed": "Could not re-run setup: {error}",
+	"terminal.setupFailedDismiss": "Dismiss",
+	"terminal.setupFailedAgentRunningDesc": "The agent is running — dependencies may be missing.",
+	"terminal.setupFailedHint": "Dependencies may be missing. Re-running setup leaves the agent alone; starting it fresh does not.",
 
 	// Mobile pane pager (narrow viewport: one zoomed pane at a time)
 	"panePager.role": "Terminal panes",
@@ -117,6 +132,7 @@ const terminal = {
 	"cheatSheet.lastPane": "Last active pane",
 	"cheatSheet.showPaneNumbers": "Show pane numbers (jump by digit)",
 	"cheatSheet.directionalSelect": "Select pane by direction",
+	"cheatSheet.directionalSelectNoPrefix": "Select pane by direction (no prefix)",
 	"cheatSheet.markPane": "Mark current pane",
 	"cheatSheet.swapWithMarked": "Swap current pane with the marked one",
 	"cheatSheet.swapWithPrevNext": "Swap with previous / next pane",
@@ -247,6 +263,13 @@ const terminal = {
 	"terminal.filePreviewContentCopied": "Content copied",
 	"terminal.filePreviewRendered": "Rendered",
 	"terminal.filePreviewRaw": "Raw",
+	"terminal.rendererCrashed": "The terminal renderer crashed and could not restart itself. Click to reload the window — your session keeps running.",
+	// TerminalPerfOverlay (View → Debug). Metric names inside the HUD name code —
+	// `fps`, `render`, `write`, `p50` — and stay untranslated like terminal output.
+	"terminal.perf.title": "Terminal Performance",
+	"terminal.perf.close": "Close the performance overlay",
+	"terminal.perf.noPanes": "No terminal is open. Open a task terminal to start measuring.",
+	"terminal.perf.legend": "p50 / p95 / max. fps is the render loop, upd is how often the picture changed.",
 } as const;
 
 export default terminal;

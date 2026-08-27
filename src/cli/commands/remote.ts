@@ -42,7 +42,9 @@ What it does:
   By default a Cloudflare quick tunnel (trycloudflare.com) is started and its
   public URL is included in the QR, so you can connect from any device without
   setting up SSH port-forwarding. \`cloudflared\` is installed as a brew
-  dependency. Pass --no-tunnel for local-only mode (LAN + SSH forward only).
+  dependency. A custom tunnel command (Settings → System → Tunnel provider)
+  replaces the quick tunnel for every tunnel dev3 starts, this one included.
+  Pass --no-tunnel for local-only mode (LAN + SSH forward only).
 
 Subcommands:
   start (default)     Start the headless server in the BACKGROUND (survives the
@@ -82,9 +84,9 @@ Flags (start):
       \`cloudflared\` is unavailable.
 
   --expose-ports=<csv>
-      Comma-separated list of dev-server ports to expose via Cloudflare quick
-      tunnels at startup (one tunnel per port, each with its own random
-      \`*.trycloudflare.com\` URL). Retries every 2 s for 60 s until the port
+      Comma-separated list of dev-server ports to expose at startup through
+      the configured tunnel provider (Cloudflare quick tunnels by default, one
+      tunnel per port with its own URL). Retries every 2 s for 60 s until the port
       is actually listening. Useful for headless boxes where you can't click
       the GUI \`Expose\` button.
       Example: --expose-ports=3000,5173
@@ -578,6 +580,15 @@ async function statusRemote(args: ParsedArgs): Promise<void> {
 		["Version:", state.version || "unknown"],
 	];
 	if (state.logFile) fields.push(["Log:", state.logFile]);
+	// A self-update restarts the server with no visible "updating…" state anywhere,
+	// so without this line an overnight restart is indistinguishable from a crash.
+	if (state.lastUpdate) {
+		fields.push([
+			"Last update:",
+			`${state.lastUpdate.fromVersion} → ${state.lastUpdate.toVersion}` +
+			(state.lastUpdate.startedAt ? ` (started ${state.lastUpdate.startedAt})` : ""),
+		]);
+	}
 	printDetail(fields);
 
 	// Best-effort: append a fresh access URL if the server's socket answers.

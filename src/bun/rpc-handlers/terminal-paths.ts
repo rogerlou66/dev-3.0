@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { Utils } from "../electrobun-platform";
 import type { FilePreviewResult, ResolvedTerminalPath } from "../../shared/types";
 import * as data from "../data";
+import { run as runGit } from "../git";
 import { spawn } from "../spawn";
 import { log } from "./shared";
 
@@ -12,6 +13,12 @@ import { log } from "./shared";
  * Backend for Cmd/Ctrl+Click file-path links in terminal output: resolve
  * regex-detected candidates against the task worktree / project directory,
  * open them per the user's setting, and feed the in-app preview modal.
+ *
+ * A relative candidate that does not exist under a base is looked up a second
+ * time as a path SUFFIX in that base's git file index, so the way agents
+ * actually name files in prose ("architecture.md" for `docs/architecture.md`)
+ * becomes a link. Only a unique match counts — see
+ * decisions/2026/08/24/terminal-links-unique-suffix-fallback.md.
  *
  * All three handlers take client-supplied paths, so every path they touch is
  * gated to {@link allowedRoots} — the home directory plus registered project
@@ -86,6 +93,77 @@ async function terminalPathBases(params: { taskId?: string; projectId?: string }
 	return bases;
 }
 
+const FILE_INDEX_TTL_MS = 15_000;
+const FILE_INDEX_LIST_TIMEOUT_MS = 3_000;
+// Above this a "unique" suffix match stops being trustworthy to compute cheaply,
+// so the whole index is dropped and the base keeps plain relative resolution.
+const FILE_INDEX_MAX_FILES = 50_000;
+
+/** Repo-relative paths grouped by basename; `null` = too many to disambiguate. */
+type FileIndex = Map<string, string[] | null> | null;
+const FILE_INDEX_MAX_PER_BASENAME = 16;
+
+const fileIndexCache = new Map<string, { at: number; index: FileIndex }>();
+
+/**
+ * Every file git knows about under `base` (tracked plus untracked-not-ignored),
+ * grouped by basename. Cheap enough to rebuild on a TTL — one `git ls-files`
+ * per base per 15s, regardless of how many candidates ask for it.
+ */
+async function fileIndexFor(base: string): Promise<FileIndex> {
+	const hit = fileIndexCache.get(base);
+	if (hit && Date.now() - hit.at < FILE_INDEX_TTL_MS) return hit.index;
+	const index = await buildFileIndex(base);
+	fileIndexCache.set(base, { at: Date.now(), index });
+	return index;
+}
+
+async function buildFileIndex(base: string): Promise<FileIndex> {
+	const result = await runGit(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], base, {
+		timeoutMs: FILE_INDEX_LIST_TIMEOUT_MS,
+	});
+	if (!result.ok) return null;
+	const paths = result.stdout.split("\0").filter(Boolean);
+	if (paths.length > FILE_INDEX_MAX_FILES) {
+		log.warn("terminal-paths: file index skipped, repo too large", { base, files: paths.length });
+		return null;
+	}
+	const index: NonNullable<FileIndex> = new Map();
+	for (const path of paths) {
+		const basename = path.slice(path.lastIndexOf("/") + 1);
+		const known = index.get(basename);
+		if (known === null) continue;
+		if (!known) {
+			index.set(basename, [path]);
+		} else if (known.length >= FILE_INDEX_MAX_PER_BASENAME) {
+			index.set(basename, null);
+		} else {
+			known.push(path);
+		}
+	}
+	return index;
+}
+
+// An explicit relative path ("./x", "../x") states where it lives; only a
+// path the output left rooted at nothing gets searched.
+const EXPLICITLY_ROOTED = /^\.{1,2}\//;
+
+/**
+ * The one file under `base` whose path ends in `candidate` at a segment
+ * boundary. Ambiguous matches resolve to nothing: no link beats a link that
+ * opens the wrong file.
+ */
+async function resolveBySuffix(base: string, candidate: string, roots: string[]): Promise<ResolvedTerminalPath | null> {
+	if (EXPLICITLY_ROOTED.test(candidate) || candidate.split("/").includes("..")) return null;
+	const index = await fileIndexFor(base);
+	if (!index) return null;
+	const known = index.get(candidate.slice(candidate.lastIndexOf("/") + 1));
+	if (!known) return null;
+	const matches = known.filter((path) => path === candidate || path.endsWith(`/${candidate}`));
+	if (matches.length !== 1) return null;
+	return statPathKind(resolvePath(base, matches[0]!), roots);
+}
+
 async function resolveTerminalPaths(params: {
 	taskId?: string;
 	projectId?: string;
@@ -104,13 +182,18 @@ async function resolveTerminalPaths(params: {
 			resolved[raw] = await statPathKind(resolvePath(expanded), roots);
 			continue;
 		}
+		let hit: ResolvedTerminalPath | null = null;
 		for (const base of bases) {
-			const hit = await statPathKind(resolvePath(base, expanded), roots);
-			if (hit) {
-				resolved[raw] = hit;
-				break;
-			}
+			hit = await statPathKind(resolvePath(base, expanded), roots);
+			if (hit) break;
 		}
+		// Only once every base has been tried as-is: a file that exists where the
+		// output said it does must never lose to a suffix match somewhere else.
+		for (const base of bases) {
+			if (hit) break;
+			hit = await resolveBySuffix(base, expanded, roots);
+		}
+		resolved[raw] = hit;
 	}
 	return { resolved };
 }

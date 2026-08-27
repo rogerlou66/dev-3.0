@@ -4,16 +4,18 @@ import type { RemoteNetInterface } from "../../shared/types";
 /** Give Cloudflare's quick-tunnel hostname time to propagate before publishing it to the UI. */
 export const TUNNEL_DNS_SETTLE_DELAY_MS = 5_000;
 
-async function getRemoteAccessQR(params: { tunnel?: boolean; host?: string }): Promise<{ qrDataUrl: string; accessUrl: string; tunnelState: string; cloudflaredInstalled: boolean; interfaces: RemoteNetInterface[]; selectedHost: string }> {
-	const { isCloudflaredAvailable, getTunnelState, startTunnel } = await import("../cloudflare-tunnel");
+async function getRemoteAccessQR(params: { tunnel?: boolean; host?: string }): Promise<{ qrDataUrl: string; accessUrl: string; tunnelState: string; tunnelBinaryInstalled: boolean; tunnelProvider: "cloudflare" | "custom" | "misconfigured"; tunnelFailureReason: string | null; interfaces: RemoteNetInterface[]; selectedHost: string }> {
+	const { isTunnelBinaryAvailable, getTunnelState, getMainTunnelFailureReason, startTunnel } = await import("../cloudflare-tunnel");
+	const { resolveRemoteTunnelProvider } = await import("../tunnel-provider");
 	const { getServerPort } = await import("../remote-access-server");
-	const cloudflaredInstalled = isCloudflaredAvailable();
+	const tunnelBinaryInstalled = isTunnelBinaryAvailable();
+	const tunnelProvider = resolveRemoteTunnelProvider().kind;
 	const tunnelState = getTunnelState();
 
 	// Opening Remote Access is an explicit request to share the app, so the
 	// public tunnel is the default when cloudflared is available. Callers that
 	// need a local/LAN URL pass tunnel: false (for example, the interface picker).
-	if (params?.tunnel !== false && cloudflaredInstalled && tunnelState === "idle") {
+	if (params?.tunnel !== false && tunnelBinaryInstalled && tunnelState === "idle") {
 		const tunnelUrl = await startTunnel(getServerPort());
 		if (tunnelUrl) {
 			// cloudflared prints the hostname before Cloudflare's edge has finished
@@ -29,15 +31,12 @@ async function getRemoteAccessQR(params: { tunnel?: boolean; host?: string }): P
 		qrDataUrl,
 		accessUrl,
 		tunnelState: getTunnelState(),
-		cloudflaredInstalled,
+		tunnelBinaryInstalled,
+		tunnelProvider,
+		tunnelFailureReason: getMainTunnelFailureReason(),
 		interfaces: getLocalInterfaces(),
 		selectedHost: resolveAccessHost(host),
 	};
-}
-
-async function checkCloudflared(): Promise<{ installed: boolean }> {
-	const { isCloudflaredAvailable } = await import("../cloudflare-tunnel");
-	return { installed: isCloudflaredAvailable() };
 }
 
 async function startTunnel(): Promise<{ url: string | null; state: string }> {
@@ -54,7 +53,6 @@ async function stopTunnel(): Promise<void> {
 
 export const remoteAccessHandlers = {
 	getRemoteAccessQR,
-	checkCloudflared,
 	startTunnel,
 	stopTunnel,
 };

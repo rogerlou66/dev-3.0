@@ -1,3 +1,4 @@
+import { getAgentTrafficEnabled } from "./agent-traffic-flag";
 import type { TranslationKey } from "./i18n";
 
 /**
@@ -90,6 +91,7 @@ export const ALL_COMMANDS: PaletteCommand[] = [
 	{ id: "term-open-quick-shell", labelKey: "command.openQuickShell", category: "terminal", scope: "always" },
 	{ id: "term-cheat-sheet", labelKey: "command.tmuxCheatSheet", category: "terminal", scope: "always" },
 	{ id: "help-keyboard-shortcuts", labelKey: "command.keyboardShortcuts", category: "app", scope: "always" },
+	{ id: "view-agent-traffic-log", labelKey: "command.agentTrafficLog", category: "app", scope: "project" },
 ];
 
 export interface CommandContext {
@@ -124,6 +126,7 @@ const REMOTE_HIDDEN_COMMANDS = new Set<string>(["task-open-in-finder"]);
 /** Commands runnable in the current route context, in registry order. */
 export function availableCommands(ctx: CommandContext): PaletteCommand[] {
 	return ALL_COMMANDS.filter((c) => {
+		if (c.id === "view-agent-traffic-log" && !getAgentTrafficEnabled()) return false;
 		if (ctx.remote && !ctx.androidApp && REMOTE_HIDDEN_COMMANDS.has(c.id)) return false;
 		if (
 			ctx.isVirtual &&

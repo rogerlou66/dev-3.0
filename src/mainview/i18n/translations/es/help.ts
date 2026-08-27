@@ -3,6 +3,7 @@ const help = {
 	"help.ui.aboutSection": "Acerca de esta sección",
 	"help.ui.modeBanner": "Modo ayuda — haz clic en cualquier zona resaltada para saber qué hace",
 	"help.ui.exitHint": "Esc para salir",
+	"help.ui.runTour": "Guíame en la primera tarea",
 	"help.ui.whatYouCanDo": "Qué puedes hacer aquí",
 	"help.ui.explainScreen": "Explicar esta pantalla…",
 	"help.ui.openShortcuts": "Abrir atajos de teclado",
@@ -36,13 +37,13 @@ const help = {
 	// ── Board chrome ──
 	"help.board.filterBar.title": "Búsqueda y filtros",
 	"help.board.filterBar.body":
-		"Una sola caja busca y filtra el tablero. Escribe texto libre para una búsqueda difusa por título/descripción, o filtra con tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review is:attention has:port. Los chips de prioridad P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens, así que escribir y hacer clic nunca se contradicen. La × lo borra todo. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
+		"Una sola caja busca y filtra el tablero. Escribe texto libre para una búsqueda difusa por título/descripción, o filtra con tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:home has:port. Los chips de prioridad P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens, así que escribir y hacer clic nunca se contradicen. La × lo borra todo. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
 	"help.board.priorityFilter.title": "Filtro de prioridad",
 	"help.board.priorityFilter.body":
 		"Cada tarea tiene una prioridad P0 (la más alta) … P4 (la más baja, P3 por defecto). Las columnas siempre se ordenan por ella, así lo más importante queda arriba. Haz clic en un chip para mostrar solo esa prioridad; arrastra una tarjeta a otra banda para recategorizarla.",
 	"help.filters.dsl.title": "Búsqueda y filtros",
 	"help.filters.dsl.body":
-		"Escribe para una búsqueda difusa por títulos y descripciones, o filtra con tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review is:attention has:port. Entrecomilla los valores con espacios. Combina facetas (Y); repite una faceta para ampliar (O). Los chips P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
+		"Escribe para una búsqueda difusa por títulos y descripciones, o filtra con tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:home has:port. Entrecomilla los valores con espacios. Combina facetas (Y); repite una faceta para ampliar (O). Los chips P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
 	"help.board.taskCard.title": "Tarjeta de tarea",
 	"help.board.taskCard.body":
 		"Los puntos de colores son variantes paralelas de agentes (cada una en su worktree), la campana significa que el agente te llama, y la insignia #123 es el PR de la tarea con su estado de CI y revisión. Clic derecho para todas las acciones.",
@@ -61,6 +62,18 @@ const help = {
 	"help.dashboard.projectRow.title": "Fila de proyecto",
 	"help.dashboard.projectRow.body":
 		"El número a la derecha son los agentes activos ahora. Las filas de colores debajo son tareas que te esperan — preguntas y revisiones. Haz clic en una para saltar directo a esa tarea.",
+	"help.dashboard.spaces.title": "Espacios",
+	"help.dashboard.spaces.body":
+		"Un espacio agrupa proyectos en este panel y nada más: nunca mueve archivos, nunca toca un tablero y un proyecto puede estar en varios. Haz clic en un espacio para filtrar la lista. El número junto a un espacio es cuántos proyectos contiene; la cabecera del grupo en la lista añade cuántas de sus tareas te esperan. Arrastra una fila para reordenar; su menú ⋯ edita qué proyectos la componen, la renombra o borra la agrupación — los proyectos siguen intactos.",
+	"help.dashboard.addProject.title": "Agregar proyecto",
+	"help.dashboard.addProject.body":
+		"Apunta dev-3.0 a un repositorio git de esta máquina: elige una carpeta que ya tengas, clona una URL o crea un repositorio vacío. Agregarlo no modifica nada dentro. Cada tarea del tablero resultante recibe su propia rama, carpeta y terminal. La opción Operations crea un tablero sin git, para trabajo que no es código.",
+	"help.dashboard.opsBoard.title": "El tablero Operations",
+	"help.dashboard.opsBoard.body":
+		"Un tablero para el trabajo que no trata de un repositorio: investigación, scripts de una sola vez, notas para un agente, cualquier cosa que de otro modo no sabrías dónde archivar. Sus tareas reciben una carpeta gestionada en lugar de un worktree de git, así que no hay rama, ni diff, ni pull request — todo lo demás, incluido el agente y la terminal, funciona igual que en un tablero git. Toda instalación empieza con este, y puedes añadir más.",
+	"help.dashboard.firstRun.title": "Cómo empezar",
+	"help.dashboard.firstRun.body":
+		"Se muestra hasta que agregas tu primer repositorio; después ocupa su lugar la tarjeta de estadísticas. El camino más corto: agrega un proyecto, abre su tablero, describe una tarea con palabras normales y pulsa Save & Start — eso lanza un agente de inmediato.",
 
 	// ── Task inspector ──
 	"help.inspector.panel.title": "Inspector de tarea",
@@ -190,7 +203,7 @@ const help = {
 	// ── Viewers & workspace ──
 	"help.viewer.images.title": "Imágenes compartidas",
 	"help.viewer.images.body":
-		"Capturas y renders que un agente compartió con `dev3 show-image`, las más nuevas primero. Recorre el historial, copia una imagen o revela el archivo original en disco.",
+		"Capturas y renders que un agente compartió con `dev3 show-image`, las más nuevas primero. Recorre el historial, descarga una imagen (también con clic derecho), copia su ruta o revela el archivo original en disco.",
 	"help.viewer.artifact.title": "Artefacto",
 	"help.viewer.artifact.body":
 		"Un informe HTML interactivo que un agente construyó con `dev3 show-artifact`, aislado junto a la terminal. Cambia su tamaño, ponlo a pantalla completa, recorre artefactos pasados o descárgalo como HTML (o un ZIP cuando incluye imágenes).",
@@ -199,6 +212,9 @@ const help = {
 	"help.terminal.quickShell.title": "Terminal del proyecto",
 	"help.terminal.quickShell.body":
 		"Una terminal a nivel de proyecto sin git worktree — para comandos rápidos que no son una tarea. Aquí nada se rastrea en el tablero ni se ata a una rama, a diferencia de una terminal de tarea.",
+	"help.terminal.task.title": "La terminal del agente",
+	"help.terminal.task.body":
+		"Es una shell real dentro de una sesión de tmux, ejecutándose en el worktree propio de esta tarea — así que lo que el agente escriba aquí no puede alcanzar tus otras ramas. La barra de abajo es tmux: cada entrada numerada es una ventana y la de la derecha es el nombre de la sesión de esta tarea. El agente sigue trabajando cuando sales de esta pantalla o cierras la app: la sesión es su dueña, no la ventana que estás mirando. Selecciona texto y se copia solo, sin ⌘C.",
 
 	// ── Header / sidebar ──
 	"help.header.utilities.title": "Utilidades de la aplicación",
@@ -221,8 +237,21 @@ const help = {
 	"help.field.streamerMode.title": "Oculta datos privados en directo",
 	"help.field.streamerMode.body":
 		"Al activarlo, los valores que revelan identidad — correos y nombres de cuentas, organizaciones, rutas de la carpeta personal, URLs de túnel y el código QR de acceso remoto — se difuminan en toda la interfaz. El contenido del terminal NO se oculta: los paneles muestran lo que impriman los agentes. Actívalo rápido desde la paleta de comandos ⇧⌘P.",
+	"help.header.agentTraffic.title": "Tráfico de agentes: quién habla y quién debe responder",
+	"help.header.agentTraffic.body": "El glifo aparece solo mientras tus agentes se han escrito en la última hora. El número cuenta parejas activas; ábrelo para verlas, y quien recibió el último mensaje es quien aún no ha respondido.",
+	"help.traffic.log.title": "Todos los mensajes que tus agentes se escribieron",
+	"help.traffic.log.body": "Todo el historial que dev3 guardó, lo más reciente primero: un toast dura 30 segundos, esto dura 30 días. Elige una pareja a la izquierda para leer solo esa conversación, y «Solo sin confirmar» muestra los mensajes cuya entrega dev3 no pudo probar.",
 	"help.header.memory.title": "La píldora de memoria muestra lo que QUEDA",
+	"help.header.connectionQuality.title": "Qué tan lenta es esta conexión",
+	"help.header.connectionQuality.body":
+		"Solo cuando ves dev3 desde otro dispositivo: es la ida y vuelta de una petición real por la misma conexión que usa la aplicación. Sube a la cabecera cuando el enlace deja de ser rápido; el resto del tiempo espera en este menú. Pasa el cursor para ver cuánto se gastó en tu ordenador y cuánto en la red.",
 	"help.header.memory.body": "El número es memoria libre, no usada. Pasa el cursor para ver quién se llevó el resto: dev-3.0 en sí ocupa unos cientos de megabytes; los gigabytes son de los agentes que lanzaste y de lo demás que esté corriendo.",
+	"help.sidebar.scope.title": "Qué proyectos entran en la lista",
+	"help.sidebar.scope.body":
+		"Tres iconos, tres tamaños de lista. La carpeta muestra solo las tareas de este proyecto. El anillo muestra todos los proyectos del mismo espacio, y aparece tachado cuando este proyecto no está en ninguno. El globo muestra todas las tareas de la máquina: así encuentras trabajo que dejaste en otro sitio.",
+	"help.tips.card.title": "¿Sabías que...?",
+	"help.tips.card.body":
+		"Una pista corta cada vez sobre algo que dev3 hace y que ningún botón en pantalla anuncia: un atajo, un arrastre, un comando de la CLI. Si la cierras no vuelve, y en Ajustes hay un interruptor para quitarlas todas.",
 } as const;
 
 export default help;

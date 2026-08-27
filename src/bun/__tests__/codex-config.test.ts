@@ -5,7 +5,10 @@ import {
 	getCodexSyntaxForVersion,
 	parseCodexVersion,
 	pickCodexProfileLaunchFlag,
+	tomlBasicString,
 } from "../codex-config";
+import { codexHookCommand } from "../../shared/agent-hooks";
+import { hookCliDialect } from "../../shared/dev3-cli-path";
 
 describe("ensureCodexConfig", () => {
 	const WORKTREES_PATH = "/Users/testuser/.dev3.0/worktrees";
@@ -711,5 +714,175 @@ enabled = true
 		expect(count(twice, "[permissions.dev3.network.unix_sockets]")).toBe(1);
 		expect(count(twice, `"${SOCKETS_PATH}" = "allow"`)).toBe(1);
 		expect(twice).not.toContain("allow_unix_sockets");
+	});
+});
+
+/**
+ * The hook command is spelled per platform, so these run against BOTH dialects
+ * on every runner instead of whichever one the host happens to be. Reading the
+ * host's dialect is exactly what made these seven red on windows-latest while
+ * macOS stayed green — same trap `joinLike` exists for.
+ */
+const POSIX_DIALECT = hookCliDialect({ platform: "darwin" });
+const WINDOWS_DIALECT = hookCliDialect({
+	platform: "win32",
+	execDir: "C:\\Program Files\\dev3",
+	homeDir: "C:\\Users\\dev",
+	exists: () => false,
+});
+
+/** Every spelling of our handler an older build or the other platform leaves behind. */
+const ALL_HOOK_COMMAND_SPELLINGS = [
+	codexHookCommand(POSIX_DIALECT),
+	`${POSIX_DIALECT.cli} hook codex`,
+	codexHookCommand(WINDOWS_DIALECT),
+];
+
+describe.each([
+	["POSIX", POSIX_DIALECT],
+	["Windows", WINDOWS_DIALECT],
+])("ensureCodexConfig dev3 hook block on %s (idempotence and self-healing)", (_name, dialect) => {
+	const WORKTREES_PATH = "/Users/testuser/.dev3.0/worktrees";
+	const SOCKETS_PATH = "/Users/testuser/.dev3.0/sockets";
+	const NEW = { codexVersion: "0.147.0", dialect };
+	const ensure = (content: string | null) =>
+		ensureCodexConfig(content, WORKTREES_PATH, SOCKETS_PATH, [], NEW);
+	/** Handlers carrying the `hook codex` subcommand, in any CLI spelling. */
+	const dev3Handlers = (config: string) => (config.match(/hook codex/g) ?? []).length;
+	const groups = (config: string) => (config.match(/^\[\[hooks\.[A-Za-z]+\]\]$/gm) ?? []).length;
+	/** The exact `command = "…"` line this dialect writes, TOML escaping included. */
+	const commandLine = (command: string) => `command = ${tomlBasicString(command)}`;
+	const ourCommandLine = commandLine(codexHookCommand(dialect));
+	const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+	it("declares each status hook exactly once, however often it runs", () => {
+		let config = ensure(null);
+		for (let i = 0; i < 3; i++) config = ensure(config);
+		expect(dev3Handlers(config)).toBe(6);
+		expect(groups(config)).toBe(6);
+	});
+
+	it("collapses a duplicated block whose opening marker was lost", () => {
+		// Exactly the shape found in the wild (h0x91b/dev-3.0#1527): one block that
+		// no longer starts with its marker, so the marker-based replace misses it and
+		// every launch appends one more copy.
+		const orphaned = ensure(null).replace("# >>> dev3 status hooks (generated — do not edit) >>>\n", "");
+		expect(dev3Handlers(orphaned)).toBe(6);
+
+		const healed = ensure(orphaned);
+		expect(dev3Handlers(healed)).toBe(6);
+		expect(groups(healed)).toBe(6);
+		expect(ensure(healed)).toBe(healed);
+	});
+
+	it("leaves the user's own hooks, and their own hand-written content, alone", () => {
+		const userConfig = [
+			'model = "gpt-5"',
+			"",
+			"# my own notification hook — do not touch",
+			"[[hooks.Stop]]",
+			"",
+			"[[hooks.Stop.hooks]]",
+			'type = "command"',
+			'command = "~/bin/notify-me.sh"',
+			"timeout = 5",
+			"",
+			'[hooks.state."/Users/testuser/.codex/config.toml:stop:0:0"]',
+			'trusted_hash = "sha256:abc"',
+			"",
+		].join("\n");
+
+		const config = ensure(ensure(userConfig));
+		expect(config).toContain('command = "~/bin/notify-me.sh"');
+		expect(config).toContain("# my own notification hook — do not touch");
+		expect(config).toContain('trusted_hash = "sha256:abc"');
+		expect(config).toContain('model = "gpt-5"');
+		expect(dev3Handlers(config)).toBe(6);
+		// Ours plus the user's one Stop group.
+		expect(groups(config)).toBe(7);
+	});
+
+	it("keeps a mixed group the user glued together, rather than guessing", () => {
+		const mixed = [
+			'model = "gpt-5"',
+			"",
+			"[[hooks.Stop]]",
+			"",
+			"[[hooks.Stop.hooks]]",
+			'type = "command"',
+			'command = "~/.dev3.0/bin/dev3 hook codex"',
+			"",
+			"[[hooks.Stop.hooks]]",
+			'type = "command"',
+			'command = "~/bin/notify-me.sh"',
+			"",
+		].join("\n");
+
+		const config = ensure(mixed);
+		expect(config).toContain('command = "~/bin/notify-me.sh"');
+		// The user's group survives untouched, so its dev3 handler is still counted.
+		expect(dev3Handlers(config)).toBe(7);
+	});
+
+	it("writes the command this platform's hook runner can actually execute", () => {
+		const config = ensure(null);
+		expect(count(config, ourCommandLine)).toBe(6);
+
+		if (dialect.posixShell) {
+			// The env guard is what keeps a foreign Codex session free (#1527).
+			expect(config).toContain(
+				`command = "sh -c '[ -z \\"$DEV3_TASK_ID\\" ] || exec ~/.dev3.0/bin/dev3 hook codex'"`,
+			);
+			return;
+		}
+		// Windows keeps the bare command on purpose: the runner there may be
+		// cmd.exe OR PowerShell and no one guard expression is valid in both, so a
+		// guard would cost every Windows task its status moves. See
+		// decisions/2026/08/25/guard-codex-status-hooks-on-dev3-task-env.md.
+		expect(config).toContain(commandLine(`${dialect.cli} hook codex`));
+		expect(config).not.toContain("sh -c");
+		expect(config).not.toContain("DEV3_TASK_ID");
+	});
+
+	it("leaves alone a hook the user wrote themselves that calls the dev3 CLI", () => {
+		// Calling `dev3` is not what makes a group ours — the `hook codex`
+		// subcommand is. A user's own board automation must survive every launch.
+		const own = [
+			"[[hooks.Notification]]",
+			"",
+			"[[hooks.Notification.hooks]]",
+			'type = "command"',
+			'command = "~/.dev3.0/bin/dev3 task move --status in-progress"',
+			"",
+			"[[hooks.Stop]]",
+			"",
+			"[[hooks.Stop.hooks]]",
+			'type = "command"',
+			'command = "~/.dev3.0/bin/dev3 note add mine"',
+			"",
+		].join("\n");
+
+		const config = ensure(ensure(own));
+		expect(config).toContain('command = "~/.dev3.0/bin/dev3 task move --status in-progress"');
+		expect(config).toContain('command = "~/.dev3.0/bin/dev3 note add mine"');
+		expect(dev3Handlers(config)).toBe(6);
+		// Ours plus the user's two groups.
+		expect(groups(config)).toBe(8);
+	});
+
+	it("still collects an orphan left by an older build, or by the other platform", () => {
+		const orphaned = ensure(null).replace("# >>> dev3 status hooks (generated — do not edit) >>>\n", "");
+
+		for (const spelling of ALL_HOOK_COMMAND_SPELLINGS) {
+			// Re-spell the orphan the way the other platform, or an older build,
+			// would have written it — then heal it with THIS dialect.
+			const foreign = orphaned.replaceAll(ourCommandLine, commandLine(spelling));
+			const healed = ensure(foreign);
+			expect(dev3Handlers(healed)).toBe(6);
+			expect(groups(healed)).toBe(6);
+			// Nothing but the freshly written block is left.
+			expect((healed.match(/^command = /gm) ?? []).length).toBe(6);
+			expect(count(healed, ourCommandLine)).toBe(6);
+		}
 	});
 });

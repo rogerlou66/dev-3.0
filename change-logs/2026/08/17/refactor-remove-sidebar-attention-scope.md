@@ -1,0 +1,1 @@
+The active-tasks sidebar scope switcher is now project/global: the attention scope (bell button with the pulsing count) was removed in favor of the upcoming Spaces scope. The same list is still one `is:attention` search token away, and the per-task attention bell is unchanged.

@@ -57,12 +57,6 @@ function LaunchVariantsModal({
 }: LaunchVariantsModalProps) {
 	const t = useT();
 
-	// Virtual ("Operations") boards run a single agent per operation — there is
-	// no git diff to compare parallel attempts against, and a shared fixed
-	// folder would have multiple agents clobbering each other. Hide the
-	// add-variant affordance so an operation is always one agent + one folder.
-	const isVirtual = project.kind === "virtual";
-
 	function makeDefaultVariant(): VariantRow {
 		// Try global default agent, fall back to first available
 		let agentId: string | null = globalSettings.defaultAgentId ?? null;
@@ -75,16 +69,32 @@ function LaunchVariantsModal({
 		}
 
 		// Settings resolution can pair defaultAgentId with a defaultConfigId from a
-		// *different* provider (stale builtin id reset to the Claude default); using
+		// *different* harness (stale builtin id reset to the Claude default); using
 		// it verbatim renders an empty Mode. Guard it like Spawn/Bug Hunters.
 		const globalConfigMatchesAgent =
 			!!globalSettings.defaultConfigId &&
 			!!agent?.configurations.some((c) => c.id === globalSettings.defaultConfigId);
-		const configId =
+		const normalConfigId =
 			(globalConfigMatchesAgent ? globalSettings.defaultConfigId : null) ??
 			agent?.defaultConfigId ??
 			agent?.configurations[0]?.id ??
 			null;
+		// The sandbox is a lesson, not anyone's repository: a first-run user meeting
+		// "do you want to proceed?" from the agent CLI has no way to judge it, and the
+		// guided tour would sit there waiting on work that never starts. So swap in the
+		// bypass TWIN of what the user would normally get — same model, same effort —
+		// because taking the first bypass preset instead silently changed the model too
+		// (live QA: an Opus 5 default launched the sandbox on Fable 5).
+		const normalConfig = agent?.configurations.find((c) => c.id === normalConfigId);
+		const sandboxBypass = project.sandbox
+			? (agent?.configurations.find(
+					(c) =>
+						c.permissionMode === "bypassPermissions" &&
+						c.model === normalConfig?.model &&
+						c.effort === normalConfig?.effort,
+				) ?? agent?.configurations.find((c) => c.permissionMode === "bypassPermissions"))
+			: undefined;
+		const configId = sandboxBypass?.id ?? normalConfigId;
 		// On retry (addAttempts) seed the source task's account so the attempt
 		// re-runs under the same one; a fresh todo has none → the default preselect.
 		return { agentId, configId, accountId: task.accountId };
@@ -271,6 +281,7 @@ function LaunchVariantsModal({
 				aria-modal="true"
 				aria-labelledby="launch-variants-title"
 				tabIndex={-1}
+				data-tour-anchor="launch.modal"
 				className="bg-overlay rounded-2xl shadow-2xl shadow-black/50 border border-edge-active w-full max-w-3xl mx-4 overflow-hidden outline-none"
 				onClick={(e) => e.stopPropagation()}
 			>
@@ -280,7 +291,7 @@ function LaunchVariantsModal({
 						<div className="min-w-0">
 							<div className="flex items-center gap-1.5">
 								<h2 id="launch-variants-title" className="text-fg text-lg font-semibold">{title}</h2>
-								<HelpSpot topicId="modal.launch-variants" />
+								<HelpSpot topicId="modal.launch-variants" className="w-5 h-5 text-base" />
 							</div>
 							<p className="text-fg-3 text-sm mt-1 truncate">{getTaskTitle(task)}</p>
 						</div>
@@ -330,7 +341,7 @@ function LaunchVariantsModal({
 						<div className={PICKER_HEADER_CONTAINER_CLASS}>
 							<div className={`${pickerLabelsHeaderClass(true)} text-xs text-fg-3 mb-1`}>
 								<span>{t("launch.favorites")}</span>
-								<span>{t("launch.provider")}</span>
+								<span>{t("launch.harness")}</span>
 								<span>{t("launch.model")}</span>
 								<span>{t("launch.mode")}</span>
 							</div>
@@ -425,16 +436,15 @@ function LaunchVariantsModal({
 				{/* Footer — wraps on a phone-width viewport instead of squeezing the
 				    labels into one-word-per-line columns. */}
 				<div className="px-6 py-4 border-t border-edge flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-					{isVirtual ? (
-						<div />
-					) : (
-						<button
-							onClick={addVariant}
-							className={`text-accent hover:text-accent-emphasis text-sm font-medium whitespace-nowrap ${pressClass}`}
-						>
-							{t("launch.addVariant")}
-						</button>
-					)}
+					{/* Available on every board kind, virtual included: a variant is its
+					    own task, and `git.virtualWorkDir` keys the operation folder on
+					    the task id, so parallel operations cannot collide. */}
+					<button
+						onClick={addVariant}
+						className={`text-accent hover:text-accent-emphasis text-sm font-medium whitespace-nowrap ${pressClass}`}
+					>
+						{t("launch.addVariant")}
+					</button>
 
 					<div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
 						<button

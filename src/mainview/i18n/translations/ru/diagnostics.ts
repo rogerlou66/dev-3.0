@@ -50,6 +50,27 @@ const diagnostics = {
 	"conn.pill.retry": "Нажмите, чтобы повторить",
 	"conn.pill.retryAria": "Соединение потеряно — переподключиться",
 	"conn.pill.restored": "Связь восстановлена",
+	// ── Remote connection quality (header readout) ──
+	"connQuality.title": "Качество соединения",
+	"connQuality.label": "Соединение",
+	"connQuality.definition": "Полный оборот одного запроса через то же соединение, которым живёт приложение.",
+	"connQuality.ariaLabel": "Оборот соединения {ms} мс — открыть разбор",
+	"connQuality.ariaLabelUnreachable": "Ни один запрос не возвращается — открыть разбор",
+	"connQuality.unreachable": "За это окно не ответил ни один запрос. Соединение открыто, но все запросы вышли по таймауту.",
+	"connQuality.median": "Обычный оборот",
+	"connQuality.p95": "Самый медленный из 20",
+	"connQuality.jitter": "Разброс",
+	"connQuality.ours": "Ушло на этом компьютере",
+	"connQuality.network": "Ушло на сеть",
+	"connQuality.path": "Маршрут",
+	"connQuality.pathTunnel": "Туннель Cloudflare",
+	"connQuality.pathLan": "Напрямую, локальная сеть",
+	"connQuality.pathLocal": "Та же машина",
+	"connQuality.pathOther": "Удалённо, маршрут неизвестен",
+	"connQuality.samples": "Замеров",
+	"connQuality.samplesWithLoss": "{count} (потеряно {lost})",
+	"connQuality.host": "Адрес",
+	"connQuality.compareHint": "Это весь путь целиком. Чтобы обвинить туннель, откройте прямой адрес в локальной сети и сравните то же число.",
 } as const;
 
 export default diagnostics;

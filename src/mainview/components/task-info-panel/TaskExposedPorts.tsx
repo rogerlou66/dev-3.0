@@ -75,7 +75,8 @@ function CopyUrlRow({ url }: { url: string }) {
 /**
  * Toolbar button + dropdown menu for the task's allocated dev-server ports
  * (`$DEV3_PORT0..N` slots from `project.portCount`). Each slot can be shared
- * publicly via a Cloudflare quick tunnel with one click.
+ * publicly with one click, through the configured tunnel provider (built-in
+ * Cloudflare quick tunnel by default, or the user's custom command).
  *
  * Source-of-ports: the project's pre-allocated pool. We deliberately do NOT
  * use port-scan detection — that picked up our own `cloudflared` / headless
@@ -329,7 +330,7 @@ function ExposedPortsMenu({ taskId, allocatedPorts, exposed, position, onClose, 
 											className="text-xs text-accent border border-accent/40 bg-accent/10 hover:bg-accent/20 px-2 py-1 rounded inline-flex items-center gap-1.5 disabled:opacity-60"
 										>
 											{isBusy && <Spinner />}
-											{isBusy ? t("tunnel.starting") : t("tunnel.exposeViaCloudflare")}
+											{isBusy ? t("tunnel.starting") : t("tunnel.exposePublicly")}
 										</button>
 									)}
 								</div>

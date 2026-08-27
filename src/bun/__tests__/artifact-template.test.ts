@@ -12,9 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_SHARED_ARTIFACT_HTML_BYTES, type Project, type Task } from "../../shared/types";
+import { ARTIFACT_TEMPLATE_FILES, ARTIFACT_TEMPLATE_VERSION } from "../../shared/artifact-template";
 import {
-	ARTIFACT_TEMPLATE_FILES,
-	ARTIFACT_TEMPLATE_VERSION,
 	artifactTemplateDir,
 	ensureArtifactTemplate,
 	ensureArtifactTemplateEnv,
@@ -235,6 +234,29 @@ describe("bundled artifact starter contract", () => {
 		expect(css).toContain(".evidence-table tr.regime td");
 	});
 
+	it("scales the whole report from one root text size, including chart labels", () => {
+		const html = readFileSync(htmlPath, "utf8");
+		const css = readFileSync(cssPath, "utf8");
+		const app = readFileSync(appPath, "utf8");
+		const guide = readFileSync(join(sourceDir, "AUTHORING.md"), "utf8");
+
+		expect(html).toContain('class="segmented text-size"');
+		expect(html).toContain('data-font-step="-1"');
+		expect(html).toContain('id="fontScaleValue"');
+		expect(html).toContain('data-font-step="1"');
+		expect(css).toContain("--dev3-font-scale: var(--dev3-font-scale-user, 1)");
+		expect(css).toContain("font-size: calc(100% * var(--dev3-font-scale))");
+		// Choices sizes its own chips and search field from these variables.
+		expect(css).toContain("--choices-font-size-md: .875rem");
+		// A px font size anywhere in the shell would be a block that refuses to scale.
+		expect(css.match(/font(-size)?: *[0-9.]+px/g)).toBeNull();
+		expect(app).toContain("FONT_SCALE_STEPS");
+		expect(app).toContain("function scaleOptionFonts");
+		expect(app).toContain("dev3-artifact-font-scale");
+		expect(guide).toContain("## Text size");
+		expect(guide).toContain("dev3Artifact.scaleFont(px)");
+	});
+
 	it("loads versioned cdnjs primitives without brittle integrity hashes", () => {
 		const html = readFileSync(htmlPath, "utf8");
 		const app = readFileSync(appPath, "utf8");
@@ -265,9 +287,25 @@ describe("bundled artifact starter contract", () => {
 
 		expect(css).toContain("width: min(100%, clamp(1180px, 88vw, 1840px))");
 		expect(css).toContain(".prose { max-width: 72ch; }");
-		expect(css).toContain(".kpis { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }");
+		expect(css).toContain(".kpis { grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }");
 		expect(css).toContain("@media (min-width: 1500px)");
 		expect(guide).toContain("`.prose`");
+	});
+
+	it("gives an unsized dashboard panel the whole row instead of a 1/12 sliver", () => {
+		const css = readFileSync(cssPath, "utf8");
+		const guide = readFileSync(join(sourceDir, "AUTHORING.md"), "utf8");
+
+		// span 12 would overflow the narrow and print grids, which have fewer columns.
+		expect(css).toContain(".dashboard-grid > * { min-width: 0; grid-column: 1 / -1; }");
+		expect(css).not.toContain(".dashboard-grid > * { min-width: 0; grid-column: span 12; }");
+		// The opt-in widths only exist where the 12 columns do.
+		const spanBlock = css.match(/@media \(min-width: 901px\) \{([\s\S]*?)\n {4}\}/)?.[1] || "";
+		for (const span of [3, 4, 5, 6, 7, 8, 9]) {
+			expect(spanBlock).toContain(`.dashboard-grid > .span-${span} { grid-column: span ${span}; }`);
+		}
+		expect(guide).toContain("`.dashboard-grid` is a 12-column grid");
+		expect(guide).toContain("`span-3` … `span-9`");
 	});
 
 	it("gives every table zebra rows, row hover, column rules, and a pinned header", () => {
@@ -325,6 +363,46 @@ describe("bundled artifact starter contract", () => {
 		expect(css).toContain(".choices__item--selectable.is-highlighted");
 	});
 
+	it("opens every menu and dropdown in the browser top layer instead of stacking guesses", () => {
+		const html = readFileSync(htmlPath, "utf8");
+		const css = readFileSync(cssPath, "utf8");
+		const app = readFileSync(appPath, "utf8");
+		const guide = readFileSync(join(sourceDir, "AUTHORING.md"), "utf8");
+		const printBlock = css.slice(css.indexOf("@media print"));
+
+		// A hand-rolled absolute panel is clipped by the card around it, so the
+		// shell promotes overlays instead of ordering them.
+		expect(app).toContain("showPopover");
+		expect(app).toContain("hidePopover");
+		expect(app).toContain('setAttribute("popover", "manual")');
+		expect(app).toContain("function placeOverlay");
+		expect(app).toContain("function initializePopovers");
+		// The Choices list is anchored to its field, so it needs the same lift.
+		expect(app).toContain('select.addEventListener("showDropdown"');
+		expect(app).toContain('select.addEventListener("hideDropdown"');
+		// Placement, dismissal, and focus belong to the shell, not to report code.
+		expect(app).toContain('dataset.placement = flip ? "top" : "bottom"');
+		expect(app).toContain('if (event.key !== "Escape") return');
+		expect(app).toContain("scheduleReposition");
+		expect(app).toContain("popover: popoverApi");
+
+		// Anything that competes across panels goes through the scale; the single
+		// digits left are a table ordering its own pinned cells.
+		for (const token of ["--dev3-z-nav", "--dev3-z-overlay", "--dev3-z-toast"]) expect(css).toContain(token);
+		expect(css).toContain("z-index: var(--dev3-z-nav)");
+		expect(css).toContain("z-index: var(--dev3-z-overlay)");
+		expect(css).toContain("z-index: var(--dev3-z-toast)");
+		expect(css).not.toMatch(/z-index:\s*\d{2}/);
+		expect(css).toContain(".popover:not([data-open]) { display: none; }");
+		expect(printBlock).toContain(".popover, [popover] { display: none !important; }");
+
+		// The starter demonstrates the pattern where it used to break: inside a card.
+		expect(html).toContain('data-popover-trigger="runsMenu"');
+		expect(html).toContain('<div class="popover" id="runsMenu">');
+		expect(guide).toContain("Never hand-roll `position: absolute` + `z-index`");
+		expect(guide).toContain("dev3Artifact.popover(panel, triggerElement)");
+	});
+
 	it("keeps the selected theme and report structure in print output", () => {
 		const css = readFileSync(cssPath, "utf8");
 		const app = readFileSync(appPath, "utf8");
@@ -336,8 +414,8 @@ describe("bundled artifact starter contract", () => {
 		expect(css).toContain(".scenario-panel, .table-tools, .toast, .print-hidden { display: none !important; }");
 		expect(css).toContain("break-inside: avoid");
 		expect(css).toContain("thead { display: table-header-group; }");
-		expect(css).toContain(".dashboard-grid > * { min-width: 0; }");
-		expect(css).toContain("var(--dev3-print-chart-height, 155px)");
+		expect(css).toContain(".dashboard-grid > * { min-width: 0; grid-column: 1 / -1; }");
+		expect(css).toContain("var(--dev3-print-chart-height, 9.6875rem)");
 		expect(app).toContain('document.querySelectorAll("details:not([open])")');
 		expect(app).toContain("element.getBoundingClientRect()");
 	});
@@ -380,7 +458,7 @@ describe("bundled artifact starter contract", () => {
 		expect(statSync(htmlPath).size).toBeLessThan(MAX_SHARED_ARTIFACT_HTML_BYTES);
 		// The shell stylesheet is not part of the authoring surface, so its budget
 		// only has to stay far below an inlined library.
-		expect(statSync(cssPath).size).toBeLessThan(34_000);
+		expect(statSync(cssPath).size).toBeLessThan(37_000);
 		expect(statSync(appPath).size).toBeLessThan(30_000);
 		expect(statSync(reportPath).size).toBeLessThan(15_000);
 	});

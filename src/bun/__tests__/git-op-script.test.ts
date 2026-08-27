@@ -43,14 +43,16 @@ const EXIT = "/tmp/dev3-T-git-rebase.sh.exit";
 
 const POSIX_PUSH = [
 	"#!/bin/bash",
-	"printf '\\033[2m$ %s\\033[0m\\n' 'git push origin HEAD'",
-	"'git' 'push' 'origin' 'HEAD'",
+	"printf '\\033[2m$ %s\\033[0m\\n' 'git push -u origin HEAD'",
+	"'git' 'push' '-u' 'origin' 'HEAD'",
 	"__DEV3_EC0=$?",
 	"if [ $__DEV3_EC0 -ne 0 ]; then",
 	"  printf '%s' \"$__DEV3_EC0\" > '/tmp/dev3-T-git-rebase.sh.exit'",
 	"  printf '\\n\\033[1;31m✗ Push failed (exit %s)\\033[0m\\n' \"$__DEV3_EC0\"",
+	"  printf '%s\\n' 'If git refused this as non-fast-forward, the branch was rebased after being pushed.'",
+	"  printf '%s\\n' 'Refresh the branch status and use Force push, which leases against origin.'",
 	"  printf '\\nPress any key to close this pane.\\n'",
-	"  if [ -n \"$ZSH_VERSION\" ]; then read -k 1 -s; else read -n 1 -s; fi",
+	"  if [ -n \"$ZSH_VERSION\" ]; then read -k 1 -s; elif [ -n \"$BASH_VERSION\" ]; then read -n 1 -s; else read -r _dev3_key; fi",
 	"  exit $__DEV3_EC0",
 	"fi",
 	"printf '%s' \"$__DEV3_EC0\" > '/tmp/dev3-T-git-rebase.sh.exit'",
@@ -62,6 +64,33 @@ describe("POSIX git-op scripts (pinned)", () => {
 	it("renders the push script exactly", () => {
 		asPlatform("darwin");
 		expect(buildGitOpScript(pushGitOpSpec({ exitFilePath: EXIT }))).toBe(POSIX_PUSH);
+	});
+
+	/**
+	 * The lease value must be an EXPLICIT sha. A bare `--force-with-lease` leases
+	 * against the remote-tracking ref on disk: it errors out when the branch has no
+	 * upstream, and silently overwrites an unfetched push when that ref is stale.
+	 */
+	it("spells the force-with-lease value out as <branch>:<sha>", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(pushGitOpSpec({
+			exitFilePath: EXIT,
+			lease: { branch: "feat/x", expectSha: "0123456789abcdef" },
+		}));
+		expect(script).toContain("'--force-with-lease=feat/x:0123456789abcdef'");
+		// The bare form must never appear — it is the failure this exists to prevent.
+		expect(script).not.toMatch(/'--force-with-lease'/);
+		expect(script).not.toContain("--force '");
+		expect(script).not.toMatch(/'-f'/);
+		expect(script).toContain("Force push failed");
+		expect(script).toContain("✓ Force push complete");
+	});
+
+	it("pushes plainly, and never forces, when no lease is supplied", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(pushGitOpSpec({ exitFilePath: EXIT }));
+		expect(script).not.toContain("force");
+		expect(script).toContain("'git' 'push' '-u' 'origin' 'HEAD'");
 	});
 
 	it("keeps the rebase's fetch non-fatal and its conflict guidance intact", () => {
@@ -79,6 +108,39 @@ describe("POSIX git-op scripts (pinned)", () => {
 		expect(script).toContain("'git' 'rebase' 'origin/main'");
 		expect(script).toContain("git rebase --continue");
 		expect(script).toContain("git rebase --abort");
+	});
+
+	// `git rebase` exits 1 when it stopped mid-rebase and 128 when it refused
+	// before touching the branch (both measured). One blanket "resolve conflicts,
+	// then --continue" sent the user hunting for conflicts that never existed.
+	it("tells apart a stopped rebase from one git refused to start", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(rebaseGitOpSpec({
+			exitFilePath: EXIT,
+			fetchBranch: null,
+			rebaseTarget: "master",
+		}));
+		expect(script).toContain("if [ $__DEV3_EC0 -eq 1 ]; then");
+		const [onOne, onAnythingElse] = script.split("if [ $__DEV3_EC0 -eq 1 ]; then")[1].split(/^\s*else\s*$/m);
+		expect(onOne).toContain("git rebase --continue");
+		expect(onOne).toContain("git rebase --abort");
+		expect(onAnythingElse).toContain("Nothing to continue or abort");
+		expect(onAnythingElse).not.toContain("git rebase --continue");
+	});
+
+	// A local rebase target means no remote to fetch from: the step is absent, not
+	// present-and-failing with "Fetch exited with 128 — continuing".
+	it("omits the fetch step entirely for a local rebase target", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(rebaseGitOpSpec({
+			exitFilePath: EXIT,
+			fetchBranch: null,
+			rebaseTarget: "master",
+		}));
+		expect(script).not.toContain("fetch");
+		expect(script).toContain("'git' 'rebase' 'master'");
+		// The rebase is now step 0, so its code is the one that becomes the verdict.
+		expect(script).toContain("printf '%s' \"$__DEV3_EC0\" > '/tmp/dev3-T-git-rebase.sh.exit'");
 	});
 
 	it("passes the merge subject as a file, never as an argument", () => {
@@ -105,7 +167,44 @@ describe("POSIX git-op scripts (pinned)", () => {
 			branchForMerge: "feat/x",
 			messagePath: "/tmp/m.txt",
 		}));
-		expect(script).not.toContain("checkout");
+		// The COMMAND, not the word: guidance text may legitimately mention it.
+		expect(script).not.toContain("'checkout'");
+	});
+
+	/**
+	 * A merge that stops at the local base branch is a half-landing: with a remote,
+	 * `origin/<base>` never hears about the squash and nothing says the local base
+	 * is ahead. `pushBase` is the second half, and it must be the LAST (gating)
+	 * step so its exit code is the operation's verdict.
+	 */
+	it("pushes the base branch last when pushBase is set", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(mergeGitOpSpec({
+			exitFilePath: EXIT,
+			checkoutCommand: null,
+			baseBranch: "main",
+			branchForMerge: "feat/x",
+			messagePath: "/tmp/m.txt",
+			pushBase: true,
+		}));
+		expect(script).toContain("'git' 'push' 'origin' 'main'");
+		expect(script).toContain("Merged and pushed to origin/main");
+		expect(script.indexOf("'git' 'commit'")).toBeLessThan(script.indexOf("'git' 'push'"));
+		// The push is the verdict step, so its failure must exit rather than warn.
+		expect(script).toMatch(/Push failed[\s\S]*?exit \$__DEV3_EC/);
+	});
+
+	it("stays local when pushBase is absent", () => {
+		asPlatform("darwin");
+		const script = buildGitOpScript(mergeGitOpSpec({
+			exitFilePath: EXIT,
+			checkoutCommand: null,
+			baseBranch: "main",
+			branchForMerge: "feat/x",
+			messagePath: "/tmp/m.txt",
+		}));
+		expect(script).not.toContain("'push'");
+		expect(script).toContain("✓ Merge complete");
 	});
 });
 

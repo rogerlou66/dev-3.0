@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, FitAddon } from "ghostty-web";
 import { useT } from "./i18n";
 import { toast } from "./toast";
@@ -23,9 +23,14 @@ import {
 } from "./terminal-bidi/flag";
 import { installBidiRender, uninstallBidiRender } from "./terminal-bidi/proxy";
 import { installCursorVisibilityGate, type CursorVisibilityGate } from "./terminal-cursor-focus";
+import { installRenderGuard, type RenderGuard } from "./terminal-render-guard";
+import { session } from "./terminal-session-stats";
+import { createTerminalLatencyProbe, registerLatencyProbe } from "./terminal-latency";
+import { createBreadcrumbTrail } from "./terminal-breadcrumbs";
 import { installGlyphCellFit, type GlyphCellFit } from "./terminal-glyph-cell-fit";
+import { installGlyphAtlas, type GlyphAtlasHandle } from "./terminal-glyph-atlas";
 import { getScrollThreshold } from "./scroll-speed";
-import { createWheelPacer } from "./wheel-pacer";
+import { createWheelPacer, WHEEL_DRAIN_INTERVAL_MS } from "./wheel-pacer";
 import type { TaskPaneAction } from "../shared/task-panes";
 import { matchesShortcut } from "./keymap";
 import { uploadDroppedFile } from "./utils/uploadDroppedFile";
@@ -95,6 +100,10 @@ const TERMINAL_BASE_FONT_SIZE = 14;
  * already three dropped frames — worth a line, while staying quiet in normal use.
  */
 const TERMINAL_DISPOSE_BUDGET_MS = 50;
+/** Rebuilds allowed per mounted pane before we stop and ask for a window reload. */
+const MAX_RENDERER_RECOVERIES = 3;
+/** A pane healthy for this long earns its rebuild budget back. */
+const RECOVERY_BUDGET_RESET_MS = 60_000;
 
 /**
  * How long the sync gate waits for the first repaint before lifting itself.
@@ -172,8 +181,8 @@ export function buildResizeDance(cols: number, rows: number): [string, string] {
  * - A zero horizontal delta returns "".
  *
  * Otherwise it emits |Δcol| of \x1b[C (right) or \x1b[D (left). Plain arrows
- * (no Alt modifier) are emitted on purpose so the sequence never collides with
- * tmux's `bind -n M-Left/Right` pane-switch bindings (which are Alt+Arrow).
+ * (no modifier) are emitted on purpose: Alt+Arrow is the shell's word motion and
+ * Alt+Shift+Arrow is tmux's prefix-free `select-pane` binding.
  *
  * Exported for unit testing — keeps the delta→sequence mapping pinned.
  */
@@ -272,6 +281,11 @@ interface TerminalViewProps {
 
 function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSessionLost, touchComposeMode }: TerminalViewProps) {
 	const t = useT();
+	// Rebuild budget for a dead ghostty renderer (see recoverFromRendererCrash).
+	const [terminalGeneration, setTerminalGeneration] = useState(0);
+	const recoveryAttemptsRef = useRef(0);
+	const lastRecoveryAtRef = useRef(0);
+	const recoverFromRendererCrashRef = useRef<((reason: string, error: string) => void) | null>(null);
 	// Mirror t in a ref so the long-lived terminal-setup effect's closures
 	// (e.g. the select-to-copy hint) always read the latest translator.
 	const tRef = useRef(t);
@@ -294,8 +308,10 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	const copyDiagnosticsRef = useRef<TerminalCopyDiagnostics | null>(null);
 	/** Hides the cursor while input would not reach this terminal. */
 	const cursorGateRef = useRef<CursorVisibilityGate | null>(null);
+	const renderGuardRef = useRef<RenderGuard | null>(null);
 	/** Keeps block, box-drawing and powerline glyphs on the cell background's box. */
 	const glyphFitRef = useRef<GlyphCellFit | null>(null);
+	const glyphAtlasRef = useRef<GlyphAtlasHandle | null>(null);
 	// Native backend only. The watermark is what a reconnect resumes from, so it
 	// must survive the socket — a tmux session never sets either of these.
 	const nativeSeqRef = useRef<number | null>(null);
@@ -411,6 +427,55 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		logDiagnostic("terminal-copy", level, message, extra);
 	}
 
+	/**
+	 * Rebuild the terminal after ghostty-web's renderer died.
+	 *
+	 * `startRenderLoop` schedules the next frame only AFTER a successful render and
+	 * is private, so a single throw inside `render()` stops the terminal forever:
+	 * the pane goes blank, the PTY and tmux keep running, and neither a resize nor a
+	 * fullscreen toggle can bring it back — only a fresh Terminal can. Both crashes
+	 * seen in the field arrive through `term.resize` (a JS `RangeError` from an
+	 * unguarded `String.fromCodePoint` in the draw path, and a WASM
+	 * `Out of bounds memory access`), which is why this hangs off that one catch.
+	 *
+	 * Bumping the generation re-runs the terminal effect: full dispose, fresh
+	 * Terminal, fresh WASM handle, and tmux repaints into it on attach.
+	 */
+	const recoverFromRendererCrash = useCallback((reason: string, error: string) => {
+		// The budget guards against a rebuild loop, not against a second crash an hour
+		// later — so a pane that has been healthy for a while starts over with a full
+		// budget instead of silently losing the ability to heal itself.
+		const now = Date.now();
+		if (now - lastRecoveryAtRef.current > RECOVERY_BUDGET_RESET_MS) recoveryAttemptsRef.current = 0;
+		lastRecoveryAtRef.current = now;
+		const attempt = recoveryAttemptsRef.current + 1;
+		// A rebuild that instantly dies again means the shared WASM module itself is
+		// corrupt — no number of retries fixes that, so stop and hand the user the
+		// one action that does (reloading the window; tmux keeps the session alive).
+		if (attempt > MAX_RENDERER_RECOVERIES) {
+			logDiagnostic("terminal-recover", "error", "giving up on terminal recovery", {
+				reason,
+				error,
+				attempt,
+				liveTerminals: session.liveTerminals,
+				sessionCrashes: session.crashes,
+			});
+			toast.error(t("terminal.rendererCrashed"), { taskId, onClick: () => window.location.reload() });
+			return;
+		}
+		recoveryAttemptsRef.current = attempt;
+		session.crashes += 1;
+		logDiagnostic("terminal-recover", "warn", "rebuilding the terminal after a renderer crash", {
+			reason,
+			error,
+			attempt,
+			liveTerminals: session.liveTerminals,
+			sessionCrashes: session.crashes,
+		});
+		setTerminalGeneration((generation) => generation + 1);
+	}, [t, taskId]);
+	recoverFromRendererCrashRef.current = recoverFromRendererCrash;
+
 	useEffect(() => {
 		const observer = new MutationObserver(() => {
 			setResolvedTheme((document.documentElement.dataset.theme as "dark" | "light") || "dark");
@@ -500,6 +565,17 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 
 	useEffect(() => {
 		let disposed = false;
+		// The run-up to a crash: successful resizes, dpr flips and backgrounding are
+		// invisible in the log otherwise, and they are the only trigger candidates the
+		// field reports name. Attached to every error payload below.
+		const trail = createBreadcrumbTrail();
+		let lastDpr = window.devicePixelRatio;
+		// Owned by this effect run, so a terminal that never opened cannot decrement
+		// the session count on cleanup.
+		let countedLive = false;
+		// One screen reset per Terminal instance. A rebuild re-runs this effect and
+		// therefore earns a fresh one; a reconnect does not.
+		let screenResetForThisTerminal = false;
 		let fitAddon: FitAddon | null = null;
 		let ws: WebSocket | null = null;
 		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -514,6 +590,36 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		let nativeSelectionClipboardCleanup: (() => void) | undefined;
 		const termSubs: Array<{ dispose(): void }> = [];
 		const diagnosticsId = `terminal-copy-${taskId}-${Math.random().toString(36).slice(2, 8)}`;
+
+		// How long this pane actually takes from keystroke to pixel. Read it live with
+		// window.__dev3TerminalLatency(); a summary reaches the log every minute.
+		const latency = createTerminalLatencyProbe({
+			report: (snapshot) => {
+				logDiagnostic("terminal-latency", "info", "keystroke-to-pixel latency", {
+					echoP50: snapshot.echo.p50,
+					echoP95: snapshot.echo.p95,
+					paintP50: snapshot.paint.p50,
+					paintP95: snapshot.paint.p95,
+					paintMax: snapshot.paint.max,
+					writeP95: snapshot.write.p95,
+					frameP50: snapshot.frame.p50,
+					frameP95: snapshot.frame.p95,
+					gapP95: snapshot.gap.p95,
+					gapMax: snapshot.gap.max,
+					fps: snapshot.rates.fps,
+					updates: snapshot.rates.updates,
+					longFrames: snapshot.rates.longFrames,
+					samples: snapshot.echo.count,
+					frames: snapshot.frame.count,
+				});
+			},
+		});
+		// The key is also what the Debug overlay labels the pane with, so it drops
+		// the token and the scheme rather than printing a secret at 2 Hz.
+		const unregisterLatency = registerLatencyProbe(
+			`${taskId.slice(0, 8)} · ${ptyUrl.replace(/[?&]token=[^&]*/g, "").replace(/^wss?:\/\//, "")}`,
+			latency,
+		);
 
 		// TEMP DIAGNOSTIC: install per-terminal clipboard instrumentation.
 		copyDiagnosticsRef.current = installTerminalCopyDiagnostics({
@@ -575,6 +681,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			}
 			console.log("[TerminalView] Terminal opened in DOM successfully");
 			termRef.current = term;
+			session.liveTerminals += 1;
+			countedLive = true;
+			trail.note("open", `${term.cols}x${term.rows} dpr${lastDpr}`);
 
 
 			// Beta: paint right-to-left rows in visual order (Settings → System →
@@ -590,10 +699,61 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				// Powerline prompts and block-drawn bars are only flush if the glyph
 				// shares the background's cell box; the vendor's own metrics do not.
 				glyphFitRef.current = installGlyphCellFit(term.renderer);
+				// AFTER the cell fit, which wraps the same method: a glyph the fit
+				// reshapes has to reach it, so the atlas defers exactly those, and
+				// anything else it cannot cache falls through into the fitted wrapper.
+				glyphAtlasRef.current = installGlyphAtlas(term.renderer as never);
 			}
 
 			if (getTerminalBidiEnabled() && term.renderer) {
 				installBidiRender(term.renderer);
+			}
+
+			// Outermost render wrapper: it must survive whatever the gates above do, and
+			// it is the only place that can keep the vendor's loop alive through a bad
+			// frame or notice that the loop stopped. Installed last, disposed first.
+			if (term.renderer) {
+				renderGuardRef.current = installRenderGuard(term.renderer, {
+					onFrame: (durationMs) => latency.noteFrame(durationMs),
+					onFrameError: (error, consecutive) => {
+						if (disposed) return;
+						if (consecutive === 1) {
+							session.frameErrorPanes += 1;
+							trail.note("frame-error");
+						}
+						logDiagnostic("render-guard", "error", "render frame threw", {
+							error: String(error),
+							consecutive,
+							frames: renderGuardRef.current?.framesPainted() ?? 0,
+							socketBytes,
+							socketBatches,
+							// One pane or the shared WASM module: only the session totals say which.
+							liveTerminals: session.liveTerminals,
+							frameErrorPanes: session.frameErrorPanes,
+							trail: trail.format(),
+						});
+						if (consecutive === 1) recoverFromRendererCrashRef.current?.("render-frame", String(error));
+					},
+					onStalled: (msSinceLastFrame) => {
+						if (disposed) return;
+						// The two numbers that make this readable: whether the loop ever ran,
+						// and whether the PTY was feeding it while it went quiet.
+						logDiagnostic("render-guard", "error", "no frames painted while visible", {
+							msSinceLastFrame,
+							frames: renderGuardRef.current?.framesPainted() ?? 0,
+							socketBytes,
+							socketBatches,
+							msSinceLastByte: lastSocketByteAt ? Date.now() - lastSocketByteAt : null,
+							writeErrors,
+							socketErrors,
+							liveTerminals: session.liveTerminals,
+							frameErrorPanes: session.frameErrorPanes,
+							trail: trail.format(),
+						});
+						recoverFromRendererCrashRef.current?.("render-stalled", `no frames for ${msSinceLastFrame}ms`);
+					},
+				});
+				logDiagnostic("render-guard", "info", "render guard installed", { cols: term.cols, rows: term.rows });
 			}
 
 			// File paths in output become Cmd/Ctrl+Click links; open behavior is
@@ -880,13 +1040,21 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				// its own width: those bytes were laid out for the writer's geometry and
 				// every line reaching the right edge would wrap in the wrong place.
 				// Adopt the PTY's shape instead and letterbox inside the container.
+				// A resolution change moves the whole canvas onto a different backing
+				// scale, which is the reported trigger and is otherwise unrecorded.
+				if (window.devicePixelRatio !== lastDpr) {
+					trail.note("dpr", `${lastDpr}->${window.devicePixelRatio}`);
+					lastDpr = window.devicePixelRatio;
+				}
 				const pty = ptyGeometryRef.current;
 				if (pty && nativeRoleRef.current === "observer") {
 					try {
 						term.resize(pty.cols, pty.rows);
+						trail.note("resize-observer", `${pty.cols}x${pty.rows}`);
 					} catch (err) {
 						if (!disposed) {
-							logDiagnostic("refit", "error", "observer term.resize threw", { error: String(err), cols: pty.cols, rows: pty.rows });
+							logDiagnostic("refit", "error", "observer term.resize threw", { error: String(err), cols: pty.cols, rows: pty.rows, trail: trail.format() });
+							recoverFromRendererCrashRef.current?.("observer-resize", String(err));
 						}
 					}
 					return;
@@ -899,15 +1067,20 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				try {
 					dims = fitAddon.proposeDimensions();
 				} catch (err) {
-					if (!disposed) logDiagnostic("refit", "error", "proposeDimensions threw", { error: String(err) });
+					if (!disposed) {
+						logDiagnostic("refit", "error", "proposeDimensions threw", { error: String(err), trail: trail.format() });
+						recoverFromRendererCrashRef.current?.("propose-dimensions", String(err));
+					}
 					return;
 				}
 				if (!dims) return;
 				try {
 					term.resize(dims.cols, dims.rows);
+					trail.note("resize", `${dims.cols}x${dims.rows}`);
 				} catch (err) {
 					if (!disposed) {
-						logDiagnostic("refit", "error", "term.resize threw", { error: String(err), cols: dims.cols, rows: dims.rows });
+						logDiagnostic("refit", "error", "term.resize threw", { error: String(err), cols: dims.cols, rows: dims.rows, trail: trail.format() });
+						recoverFromRendererCrashRef.current?.("fit-resize", String(err));
 					}
 				}
 			}
@@ -1235,12 +1408,46 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 
 			let scrollAccumulator = 0;
 			const wheelPacer = createWheelPacer();
+			// The cell the backlog reports against — a drain fires after the wheel
+			// event that produced it, so it has no event of its own to read.
+			let lastWheelCell: [number, number] = [1, 1];
+			let wheelDrainTimer: ReturnType<typeof setTimeout> | null = null;
+
+			/**
+			 * Keep emptying the backlog at the paced rate after the finger stopped, so
+			 * a hard flick arrives in full instead of ending where the bucket ran dry.
+			 */
+			function scheduleWheelDrain() {
+				if (wheelDrainTimer !== null || wheelPacer.pending() === 0) return;
+				wheelDrainTimer = setTimeout(() => {
+					wheelDrainTimer = null;
+					if (disposed) return;
+					// `term.input` throws once ghostty is gone, and the wheel handler that
+					// used to own this call caught exactly that. A timer has no caller to
+					// hand the throw to, so it stops the drain instead of escaping.
+					try {
+						const direction = wheelPacer.direction();
+						const allowed = wheelPacer.drain(performance.now());
+						if (allowed > 0 && direction !== 0) {
+							const [col, row] = lastWheelCell;
+							sgrMouse(direction < 0 ? 64 : 65, col, row, true, allowed);
+						}
+						latency.noteWheelSent(allowed, wheelPacer.pending());
+					} catch {
+						wheelPacer.reset();
+						return;
+					}
+					scheduleWheelDrain();
+				}, WHEEL_DRAIN_INTERVAL_MS);
+			}
 
 			term.attachCustomWheelEventHandler((e: WheelEvent) => {
 				if (disposed) return false;
 				try {
 					if (!term.hasMouseTracking()) return false;
+					latency.noteWheelEvent();
 					const [col, row] = cellCoords(e);
+					lastWheelCell = [col, row];
 
 					// Read live so the Settings → Appearance scroll-speed slider
 					// takes effect without rebuilding the terminal (cheap cache read).
@@ -1250,21 +1457,28 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					if (lines !== 0) {
 						scrollAccumulator -= lines * threshold;
 						if (lines < 0) tmuxCopyModeMayBeActiveRef.current = true;
-						const code = lines < 0 ? 64 : 65;
+						const direction: 1 | -1 = lines < 0 ? -1 : 1;
 						// Paced and sent as one write — an unpaced flick overruns the
 						// PTY's 1022-byte read window and TUIs paste the sliced tail
-						// into their prompt (decision 175).
+						// into their prompt (decision 175). What the pace holds back is
+						// queued, not dropped, and drained by the timer above.
 						const allowed = wheelPacer.take(
 							Math.abs(lines),
+							direction,
 							performance.now(),
 						);
-						if (allowed > 0) sgrMouse(code, col, row, true, allowed);
+						if (allowed > 0) sgrMouse(direction < 0 ? 64 : 65, col, row, true, allowed);
+						latency.noteWheelSent(allowed, wheelPacer.pending());
+						scheduleWheelDrain();
 					}
 					return true;
 				} catch { return false; /* disposed */ }
 			});
 
 			return () => {
+				if (wheelDrainTimer !== null) clearTimeout(wheelDrainTimer);
+				wheelDrainTimer = null;
+				wheelPacer.reset();
 				altClickTarget.removeEventListener("mousedown", onAltClickMove, {
 					capture: true,
 				});
@@ -1345,55 +1559,82 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		const OSC52_RE =
 			/\x1b\]52;[^;]*;[A-Za-z0-9+/=]*(?:\x07|\x1b\\)/g;
 
-		// ── Terminal write batching ─────────────────────────────────────
-		// AI agents produce thousands of WS messages per second. Writing
-		// each one to ghostty-web individually forces per-write layout and
-		// render passes. Instead, we accumulate incoming data and flush in
-		// a single term.write() call per animation frame (~60fps).
-		let pendingWrite = "";
-		let writeRafId: number | null = null;
-		// Guards scheduling separately from the frame id: a callback that runs before
-		// requestAnimationFrame returns would otherwise leave the id set forever and
-		// every later batch would sit in the queue unwritten.
-		let writeScheduled = false;
-		/** Whether the pending batch carries bytes from the PTY, not our own clear. */
-		let pendingFromSocket = false;
-		// Reference to the terminal for batched writes (set by connectPty)
+		// ── Terminal writes ─────────────────────────────────────────────
+		// Deliberately NOT batched into an animation frame, and this is the whole
+		// point of the change: ghostty-web's `write()` only parses into WASM and
+		// marks rows dirty — painting happens in its own rAF loop — so a batch here
+		// coalesces nothing the vendor's loop does not already coalesce, and costs a
+		// whole frame. ghostty registers its next-frame callback from INSIDE its own
+		// callback, so a write scheduled from a socket message that lands between
+		// frames always runs after that frame has already painted, and the bytes wait
+		// for the frame after. The batch was inherited from xterm.js, which really did
+		// render on write. See decisions/2026/08/19/terminal-latency-unbatch-writes.md.
+			/**
+			 * Byte/frame bookkeeping for the render guard's diagnostics. Without these a
+			 * blank pane cannot be told apart from a pane nothing was sent to — the exact
+			 * ambiguity that made the 2026-08-18 14:00 incident unreadable in the log.
+			 */
+			let socketBytes = 0;
+			let socketBatches = 0;
+			let lastSocketByteAt = 0;
+			let writeErrors = 0;
+			let socketErrors = 0;
+
+			function noteSocketBytes(len: number): void {
+				socketBytes += len;
+				socketBatches += 1;
+				lastSocketByteAt = Date.now();
+			}
+		// Reference to the terminal being written into (set by connectPty)
 		let batchTerm: Terminal | null = null;
 		// Rewrites SGR colors unreadable on the current background: pale/dim
 		// in light mode, too-dark ink in dark mode. See utils/ansi-theme-adapt.ts.
 		const themeFilter = createAnsiThemeFilter();
 
-		function enqueueTermWrite(data: string) {
-			pendingWrite += data;
-			if (!writeScheduled) {
-				writeScheduled = true;
-				writeRafId = requestAnimationFrame(() => {
-					writeScheduled = false;
-					writeRafId = null;
-					if (disposed || !pendingWrite || !batchTerm) return;
-					const batch = themeFilter(pendingWrite, resolvedThemeRef.current);
-					pendingWrite = "";
-					if (!batch) return;
-					const fromSocket = pendingFromSocket;
-					pendingFromSocket = false;
-					try {
-						batchTerm.write(batch);
-						// Only the socket's own output proves the canvas is current; the
-						// clear we enqueue ourselves must leave the gate up.
-						if (fromSocket) releaseSyncGate();
-						// Drop any stale selection left floating over the
-						// just-repainted cells when the app owns the screen
-						// (alt-screen or primary+mouse-tracking); ghostty-web
-						// won't do it on its own.
-						clearStaleSelectionOnWrite(batchTerm);
-						// ghostty-web never fires onRender, so the write batch is
-						// the "content changed" signal for the link underlines.
-						linkUnderlines?.requestRedraw();
-					} catch {
-						// Swallow ghostty-web rendering errors
-					}
-				});
+		/**
+		 * Hand one chunk straight to ghostty. `fromSocket` separates PTY output from
+		 * the resets we write ourselves — only the former proves the canvas is current.
+		 *
+		 * Callers must concatenate anything that has to land in ONE write (a reset in
+		 * front of a replay) before calling, exactly as they did with the old batch.
+		 */
+		function writeToTerminal(data: string, fromSocket: boolean) {
+			if (disposed || !batchTerm) return;
+			// The filter carries an incomplete CSI across calls, so chunking is safe.
+			const batch = themeFilter(data, resolvedThemeRef.current);
+			if (!batch) return;
+			try {
+				const startedAt = performance.now();
+				batchTerm.write(batch);
+				latency.noteWrite(performance.now() - startedAt);
+				if (fromSocket) releaseSyncGate();
+				// Drop any stale selection left floating over the
+				// just-repainted cells when the app owns the screen
+				// (alt-screen or primary+mouse-tracking); ghostty-web
+				// won't do it on its own.
+				clearStaleSelectionOnWrite(batchTerm);
+				// ghostty-web never fires onRender, so the write is
+				// the "content changed" signal for the link underlines.
+				linkUnderlines?.requestRedraw();
+			} catch (err) {
+				// Used to be swallowed outright to keep analytics from drowning in
+				// per-frame exceptions — which also hid the crash that leaves the pane
+				// blank for good. Throttled instead of silent, and it now asks for a
+				// rebuild: a throw here means ghostty's state, not this chunk, is gone.
+				writeErrors += 1;
+				if (writeErrors <= 3 || writeErrors % 60 === 0) {
+					logDiagnostic("terminal-write", "error", "term.write threw", {
+						error: String(err),
+						batchLen: batch.length,
+						fromSocket,
+						writeErrors,
+						socketBytes,
+						socketBatches,
+						liveTerminals: session.liveTerminals,
+						trail: trail.format(),
+					});
+				}
+				if (writeErrors === 1) recoverFromRendererCrashRef.current?.("term-write", String(err));
 			}
 		}
 
@@ -1455,10 +1696,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				return;
 			}
 			const cleaned = payload.replace(OSC52_RE, "");
-			if (reset || cleaned) {
-				pendingFromSocket = true;
-				enqueueTermWrite(reset + cleaned);
-			}
+			// RIS and the replay travel as one string so the screen is replaced in a
+			// single write — see the reset comment above.
+			if (reset || cleaned) writeToTerminal(reset + cleaned, true);
 		}
 
 		function connectPty(term: Terminal, fit: FitAddon) {
@@ -1476,7 +1716,16 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			// showed task A's output until B's own redraw landed. RIS through the batched
 			// write path, which is what actually repaints. Skipped on a native resume:
 			// there the server sends a delta that expects the screen it left behind.
-			if (nativeSeqRef.current === null) enqueueTermWrite("\x1bc");
+			//
+			// ONCE PER TERMINAL, never per socket: leftover pixels are a property of
+			// constructing a Terminal, and a reconnect (resume from background, socket
+			// churn) reuses the same one. Resetting it on every reconnect is what
+			// started killing panes on 2026-08-15 — see the decision record
+			// reset-the-terminal-once-not-every-reconnect.
+			if (nativeSeqRef.current === null && !screenResetForThisTerminal) {
+				screenResetForThisTerminal = true;
+				writeToTerminal("\x1bc", false);
+			}
 			const diagnosticPtyUrl = ptyUrl.replace(/([?&]token=)[^&]+/, "$1***");
 			console.log("[TerminalView] Creating WebSocket connection to", diagnosticPtyUrl);
 			let socket: WebSocket;
@@ -1516,6 +1765,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				if (socket !== ws) return;
 				if (disposed) return;
 				try {
+					latency.noteOutput();
 					if (typeof event.data === "string") {
 						// A native session frames every message with a watermark header; a
 						// tmux session sends bare terminal text and never enters this branch.
@@ -1525,15 +1775,33 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 							return;
 						}
 						const cleaned = event.data.replace(OSC52_RE, "");
-						if (cleaned) { pendingFromSocket = true; enqueueTermWrite(cleaned); }
+						if (cleaned) {
+							noteSocketBytes(cleaned.length);
+							latency.noteBytes(cleaned.length);
+							writeToTerminal(cleaned, true);
+						}
 					} else {
-						// Binary data — decode and batch with text data
+						// Binary data — decode, then write on the same path as text
 						const str = new TextDecoder().decode(new Uint8Array(event.data));
-						if (str) { pendingFromSocket = true; enqueueTermWrite(str); }
+						if (str) {
+							noteSocketBytes(str.length);
+							latency.noteBytes(str.length);
+							writeToTerminal(str, true);
+						}
 					}
-				} catch {
-					// A malformed renderer chunk must not tear down the socket loop.
-				}
+				} catch (err) {
+					// Same trade as the write batch above: throttled instead of silent, so a
+					// crash on the receiving path stops being invisible.
+					socketErrors += 1;
+					if (socketErrors <= 3 || socketErrors % 60 === 0) {
+						logDiagnostic("terminal-socket", "error", "socket message handling threw", {
+							error: String(err),
+							socketErrors,
+							socketBytes,
+							trail: trail.format(),
+						});
+					}
+					}
 			};
 
 			socket.onclose = (event) => {
@@ -1575,6 +1843,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				term.onData((data) => {
 					if (disposed) return;
 					if (ws?.readyState === WebSocket.OPEN) {
+						latency.noteInput(data);
 						ws.send(data);
 					}
 				}),
@@ -1603,8 +1872,12 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			if (disposed) return;
 			if (document.visibilityState === "hidden") {
 				wasHidden = true;
+				trail.note("hidden");
 				return;
 			}
+			// "Lost the terminal after the machine woke up" is the other half of the
+			// report, and a wake arrives here as a long stretch spent hidden.
+			if (wasHidden) trail.note("visible", event.type);
 			const term = termRef.current;
 			const fit = fitAddonRef.current;
 			if (!term || !fit) return;
@@ -1649,24 +1922,31 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			// so a debug line never reaches the file and the marker would not be durable.
 			logDiagnostic("terminal-dispose", "info", "cleanup started");
 			disposed = true;
+			if (countedLive) {
+				countedLive = false;
+				session.liveTerminals = Math.max(0, session.liveTerminals - 1);
+			}
 			document.removeEventListener("visibilitychange", reconnectPtyOnResume);
 			window.removeEventListener("pageshow", reconnectPtyOnResume);
 			window.removeEventListener("online", reconnectPtyOnResume);
 			if (reconnectTimer !== null) clearTimeout(reconnectTimer);
 			if (refitTimer !== null) clearTimeout(refitTimer);
-			// Cancel pending write batch to prevent writing to disposed terminal
-			writeScheduled = false;
-			if (writeRafId !== null) {
-				cancelAnimationFrame(writeRafId);
-				writeRafId = null;
-			}
+			// Writes are synchronous now, so nothing can be in flight — `disposed`
+			// alone stops any later chunk from reaching a torn-down terminal.
+			unregisterLatency();
+			latency.dispose();
 			copyDiagnosticsRef.current?.dispose();
 			copyDiagnosticsRef.current = null;
+			renderGuardRef.current?.dispose();
+			renderGuardRef.current = null;
 			cursorGateRef.current?.dispose();
 			cursorGateRef.current = null;
+			// Before the cell fit: this wrapper sits on top of it, and restoring the
+			// inner one first would drop this one on the floor.
+			glyphAtlasRef.current?.dispose();
+			glyphAtlasRef.current = null;
 			glyphFitRef.current?.dispose();
 			glyphFitRef.current = null;
-			pendingWrite = "";
 			layoutObserver?.disconnect();
 			mouseCleanup?.();
 			linkUnderlines?.dispose();
@@ -1725,7 +2005,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				});
 			}
 		};
-	}, [ptyUrl, taskId]);
+	}, [ptyUrl, taskId, terminalGeneration]);
 
 	useEffect(() => {
 		try {

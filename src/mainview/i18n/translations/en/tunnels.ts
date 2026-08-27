@@ -1,5 +1,5 @@
 const tunnels = {
-	"tunnel.exposeViaCloudflare": "Expose via Cloudflare",
+	"tunnel.exposePublicly": "Expose via public tunnel",
 	"tunnel.stopExposing": "Stop exposing",
 	"tunnel.addToShared": "Add to shared tunnel",
 	"tunnel.copySshCommand": "Copy SSH command",

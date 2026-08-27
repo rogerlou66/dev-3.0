@@ -30,6 +30,7 @@ vi.mock("../../rpc", () => ({
 		request: {
 			getTerminalPreview: vi.fn(),
 			getAllProjectTasks: vi.fn(() => Promise.resolve([])),
+			getSpaces: vi.fn(() => Promise.resolve({ version: 1, spaces: [], order: [] })),
 			setTaskPriority: vi.fn(() => Promise.resolve([])),
 			// Feature-discovery tip rotation (useTipRotation).
 			getGlobalSettings: vi.fn(() => Promise.resolve({ tipsDisabled: true })),
@@ -445,57 +446,13 @@ function makeTask(overrides?: Partial<Task>): Task {
 		});
 	});
 
-	it("attention scope shows only tasks needing user input, oldest-first, cross-project", async () => {
-		const user = userEvent.setup();
-		const { api } = await import("../../rpc");
-		const otherProject: Project = {
-			id: "p2",
-			name: "Other Project",
-			path: "/tmp/other",
-			setupScript: "",
-			devScript: "",
-			cleanupScript: "",
-			defaultBaseBranch: "main",
-			createdAt: "2025-01-01T00:00:00Z",
-		};
-		const olderReview = makeTask({
-			id: "rv-old", seq: 100, projectId: "p2",
-			title: "Older review", description: "Older review",
-			status: "review-by-user",
-			groupId: null as unknown as string, variantIndex: null,
-			movedAt: "2025-01-01T00:00:00Z",
-		});
-		const newerReview = makeTask({
-			id: "rv-new", seq: 101, projectId: "p1",
-			title: "Newer review", description: "Newer review",
-			status: "review-by-user",
-			groupId: null as unknown as string, variantIndex: null,
-			movedAt: "2025-06-01T00:00:00Z",
-		});
-		const question = makeTask({
-			id: "q1", seq: 102, projectId: "p1",
-			title: "Has a question", description: "Has a question",
-			status: "user-questions",
-			groupId: null as unknown as string, variantIndex: null,
-			movedAt: "2025-03-01T00:00:00Z",
-		});
-		const working = makeTask({
-			id: "w1", seq: 103, projectId: "p1",
-			title: "Still working", description: "Still working",
-			status: "in-progress",
-			groupId: null as unknown as string, variantIndex: null,
-		});
-		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
-			{ projectId: "p1", tasks: [newerReview, question, working] },
-			{ projectId: "p2", tasks: [olderReview] },
-		]);
-
+	it("falls back to the project scope when localStorage holds the removed attention value", () => {
+		localStorage.setItem("dev3-sidebar-scope", "attention");
 		render(
 			<I18nProvider>
 				<ActiveTasksSidebar
 					project={project}
-					tasks={[working]}
-					allProjects={[project, otherProject]}
+					tasks={[makeTask()]}
 					activeTaskId="t1"
 					dispatch={vi.fn()}
 					navigate={vi.fn()}
@@ -505,121 +462,8 @@ function makeTask(overrides?: Partial<Task>): Task {
 				/>
 			</I18nProvider>,
 		);
-
-		await user.click(screen.getByTestId("sidebar-scope-attention"));
-
-		await waitFor(() => {
-			expect(screen.getByText("Older review")).toBeInTheDocument();
-		});
-		// in-progress task is excluded from attention scope
-		expect(screen.queryByText("Still working")).not.toBeInTheDocument();
-		// question task (other attention status) is included
-		expect(screen.getByText("Has a question")).toBeInTheDocument();
-		// oldest-first across all attention-status tasks (flat list, no STATUS_ORDER grouping)
-		const older = screen.getByText("Older review");
-		const newer = screen.getByText("Newer review");
-		expect(
-			older.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING,
-		).toBeTruthy();
-		expect(localStorage.getItem("dev3-sidebar-scope")).toBe("attention");
-	});
-
-	it("attention scope includes every review-by-colleague (PR Review) task", async () => {
-		const user = userEvent.setup();
-		const { api } = await import("../../rpc");
-		const signalled = makeTask({
-			id: "pr-signal", seq: 200, projectId: "p1",
-			title: "PR signalled", description: "PR signalled",
-			status: "review-by-colleague",
-			groupId: null as unknown as string, variantIndex: null,
-			movedAt: "2025-02-01T00:00:00Z",
-		});
-		const quiet = makeTask({
-			id: "pr-quiet", seq: 201, projectId: "p1",
-			title: "PR quiet", description: "PR quiet",
-			status: "review-by-colleague",
-			groupId: null as unknown as string, variantIndex: null,
-			movedAt: "2025-02-02T00:00:00Z",
-		});
-		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
-			{ projectId: "p1", tasks: [signalled, quiet] },
-		]);
-
-		render(
-			<I18nProvider>
-				<ActiveTasksSidebar
-					project={project}
-					tasks={[]}
-					allProjects={[project]}
-					activeTaskId="t1"
-					dispatch={vi.fn()}
-					navigate={vi.fn()}
-					agents={[claudeAgent]}
-					bellCounts={new Map([["pr-signal", 1]])}
-					taskPorts={new Map()}
-				/>
-			</I18nProvider>,
-		);
-
-		await user.click(screen.getByTestId("sidebar-scope-attention"));
-
-		await waitFor(() => {
-			expect(screen.getByText("PR signalled")).toBeInTheDocument();
-		});
-		expect(screen.getByText("PR quiet")).toBeInTheDocument();
-	});
-
-	it("shows a count badge on the bell when tasks await input and attention scope is inactive", () => {
-		render(
-			<I18nProvider>
-				<ActiveTasksSidebar
-					project={project}
-					tasks={[
-						makeTask({ id: "a1", status: "review-by-user" }),
-						makeTask({ id: "a2", status: "user-questions" }),
-						makeTask({ id: "a3", status: "in-progress" }),
-					]}
-					activeTaskId="a1"
-					dispatch={vi.fn()}
-					navigate={vi.fn()}
-					agents={[claudeAgent]}
-					bellCounts={new Map()}
-					taskPorts={new Map()}
-				/>
-			</I18nProvider>,
-		);
-
-		// Two attention-status tasks → badge reads "2".
-		expect(screen.getByTestId("sidebar-scope-attention")).toHaveTextContent("2");
-	});
-
-	it("shows the attention empty state when nothing needs the user's input", async () => {
-		const user = userEvent.setup();
-		const { api } = await import("../../rpc");
-		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
-			{ projectId: "p1", tasks: [makeTask({ id: "w1", status: "in-progress" })] },
-		]);
-
-		render(
-			<I18nProvider>
-				<ActiveTasksSidebar
-					project={project}
-					tasks={[makeTask({ id: "w1", status: "in-progress" })]}
-					activeTaskId="w1"
-					dispatch={vi.fn()}
-					navigate={vi.fn()}
-					agents={[claudeAgent]}
-					bellCounts={new Map()}
-					taskPorts={new Map()}
-				/>
-			</I18nProvider>,
-		);
-
-		await user.click(screen.getByTestId("sidebar-scope-attention"));
-
-		await waitFor(() => {
-			expect(screen.getByText("Nothing needs your attention")).toBeInTheDocument();
-		});
+		expect(screen.getByTestId("sidebar-scope-project")).toHaveAttribute("aria-pressed", "true");
+		expect(screen.queryByTestId("sidebar-scope-attention")).not.toBeInTheDocument();
 	});
 
 	it("shows overview inline only for the active task when overview is set", () => {
@@ -1295,5 +1139,291 @@ describe("ActiveTasksSidebar — native terminal backend mark", () => {
 		renderSidebar(makeTask());
 		expect(screen.queryByTestId("sidebar-native-backend-t1")).toBeNull();
 		expect(screen.getByRole("button", { name: "Привет! как сам?" })).toBeInTheDocument();
+	});
+});
+
+describe("ActiveTasksSidebar — space scope", () => {
+	const otherProject: Project = {
+		id: "p2",
+		name: "Sibling Project",
+		path: "/tmp/sibling",
+		setupScript: "",
+		devScript: "",
+		cleanupScript: "",
+		defaultBaseBranch: "main",
+		createdAt: "2025-01-01T00:00:00Z",
+	};
+	const strangerProject: Project = { ...otherProject, id: "p3", name: "Stranger Project", path: "/tmp/stranger" };
+
+	function mockSpaces(projectIds: string[][]) {
+		return {
+			version: 1 as const,
+			spaces: projectIds.map((ids, i) => ({
+				id: `sp_${i}`,
+				name: `Space ${i}`,
+				parentId: null,
+				projectIds: ids,
+				createdAt: 1,
+			})),
+			order: projectIds.map((_, i) => `sp_${i}`),
+		};
+	}
+
+	function renderSidebarWith(allProjects: Project[]) {
+		return render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					project={project}
+					tasks={[makeTask()]}
+					allProjects={allProjects}
+					activeTaskId="t1"
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+	}
+
+	it("shows tasks only from projects sharing a space with the current one", async () => {
+		const user = userEvent.setup();
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"]]));
+		const siblingTask = makeTask({
+			id: "t-sib", seq: 200, projectId: "p2",
+			title: "Sibling task", description: "Sibling task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		const strangerTask = makeTask({
+			id: "t-str", seq: 201, projectId: "p3",
+			title: "Stranger task", description: "Stranger task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+			{ projectId: "p2", tasks: [siblingTask] },
+			{ projectId: "p3", tasks: [strangerTask] },
+		]);
+
+		renderSidebarWith([project, otherProject, strangerProject]);
+
+		const spaceBtn = await screen.findByTestId("sidebar-scope-space");
+		await waitFor(() => expect(spaceBtn).not.toHaveAttribute("aria-disabled"));
+		await user.click(spaceBtn);
+
+		await waitFor(() => expect(screen.getByText("Sibling task")).toBeInTheDocument());
+		expect(screen.queryByText("Stranger task")).not.toBeInTheDocument();
+		// Foreign rows carry the project badge.
+		expect(screen.getByTestId("sidebar-project-badge-t-sib")).toHaveTextContent("Sibling Project");
+		expect(localStorage.getItem("dev3-sidebar-scope")).toBe("space");
+	});
+
+	it("does not render the space button at all when no space exists", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue({ version: 1, spaces: [], order: [] });
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+		]);
+		renderSidebarWith([project]);
+		// The switcher a user who never opted in sees: exactly yesterday's two.
+		await waitFor(() => expect(screen.getByTestId("sidebar-scope-project")).toBeInTheDocument());
+		expect(screen.getByTestId("sidebar-scope-global")).toBeInTheDocument();
+		expect(screen.queryByTestId("sidebar-scope-space")).not.toBeInTheDocument();
+	});
+
+	it("tints only the selected scope with the accent pill", async () => {
+		const user = userEvent.setup();
+		const { api } = await import("../../rpc");
+		// Explicit stored choice, so this asserts tinting and not the derived default.
+		localStorage.setItem("dev3-sidebar-scope", "project");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"]]));
+		renderSidebarWith([project, otherProject]);
+
+		const projectBtn = await screen.findByTestId("sidebar-scope-project");
+		expect(projectBtn.className).toContain("bg-accent/20");
+		expect(screen.getByTestId("sidebar-scope-global").className).not.toContain("bg-accent/20");
+
+		await user.click(screen.getByTestId("sidebar-scope-global"));
+		await waitFor(() => expect(screen.getByTestId("sidebar-scope-global").className).toContain("bg-accent/20"));
+		expect(screen.getByTestId("sidebar-scope-project").className).not.toContain("bg-accent/20");
+	});
+
+	it("opens on the space scope by default when the project is in a space", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"]]));
+		const siblingTask = makeTask({
+			id: "t-sib", seq: 200, projectId: "p2",
+			title: "Sibling task", description: "Sibling task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+			{ projectId: "p2", tasks: [siblingTask] },
+		]);
+		renderSidebarWith([project, otherProject]);
+
+		// Nothing was clicked, so nothing is stored — the default is derived.
+		await waitFor(() => expect(screen.getByTestId("sidebar-scope-space")).toHaveAttribute("aria-pressed", "true"));
+		expect(screen.getByTestId("sidebar-scope-project")).toHaveAttribute("aria-pressed", "false");
+		expect(localStorage.getItem("dev3-sidebar-scope")).toBeNull();
+		await waitFor(() => expect(screen.getByText("Sibling task")).toBeInTheDocument());
+	});
+
+	it("opens on the project scope by default when the project is in no space", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p2"]]));
+		renderSidebarWith([project, otherProject]);
+		await waitFor(() => expect(screen.getByTestId("sidebar-scope-project")).toHaveAttribute("aria-pressed", "true"));
+		expect(screen.getByTestId("sidebar-scope-space")).toHaveAttribute("aria-pressed", "false");
+	});
+
+	it("keeps an explicit project choice even when the project is in a space", async () => {
+		const { api } = await import("../../rpc");
+		localStorage.setItem("dev3-sidebar-scope", "project");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"]]));
+		renderSidebarWith([project, otherProject]);
+		await waitFor(() => expect(screen.getByTestId("sidebar-scope-space")).not.toHaveAttribute("aria-disabled"));
+		expect(screen.getByTestId("sidebar-scope-project")).toHaveAttribute("aria-pressed", "true");
+		expect(screen.getByTestId("sidebar-scope-space")).toHaveAttribute("aria-pressed", "false");
+	});
+
+	it("disables the space button and strikes its glyph when the project is in no space", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p2"]]));
+		renderSidebarWith([project, otherProject]);
+		const spaceBtn = await screen.findByTestId("sidebar-scope-space");
+		await waitFor(() => expect(spaceBtn).toHaveAttribute("aria-disabled", "true"));
+		expect(spaceBtn.className).toContain("cursor-not-allowed");
+		// The strike lives on the glyph wrapper — an inline-flex box stops the
+		// button's own text-decoration from reaching it.
+		expect(spaceBtn.querySelector(".line-through")).not.toBeNull();
+	});
+
+	it("falls back to the project scope when the stored scope is space but the project has no memberships", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p2"]]));
+		localStorage.setItem("dev3-sidebar-scope", "space");
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+		]);
+		renderSidebarWith([project, otherProject]);
+		// The project's own task list (the props-driven project scope) renders.
+		await waitFor(() => expect(screen.getByText("Привет! как сам?")).toBeInTheDocument());
+	});
+});
+
+describe("ActiveTasksSidebar — dashboard mount (no current project)", () => {
+	function renderDashboardMount() {
+		return render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					allProjects={[project]}
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+	}
+
+	it("hides the scope switcher and shows the across-all-spaces subtitle", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+		]);
+		renderDashboardMount();
+		await waitFor(() => expect(screen.getByText("Привет! как сам?")).toBeInTheDocument());
+		expect(screen.queryByTestId("sidebar-scope-project")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("sidebar-scope-space")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("sidebar-scope-global")).not.toBeInTheDocument();
+		expect(screen.getByText("Across all spaces")).toBeInTheDocument();
+	});
+
+	it("shows every project's tasks regardless of the stored scope", async () => {
+		const { api } = await import("../../rpc");
+		localStorage.setItem("dev3-sidebar-scope", "project");
+		const other = makeTask({
+			id: "t-other", seq: 7, projectId: "p9",
+			title: "Other project task", description: "Other project task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+			{ projectId: "p9", tasks: [other] },
+		]);
+		render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					allProjects={[project, { ...project, id: "p9", name: "Ninth" }]}
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("Other project task")).toBeInTheDocument());
+		expect(screen.getByTestId("sidebar-project-badge-t-other")).toHaveTextContent("Ninth");
+	});
+
+	it("the presets preserve every other filter in the query", async () => {
+		const user = userEvent.setup();
+		const { api } = await import("../../rpc");
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask(), makeTask({ id: "t-rev", seq: 8, status: "review-by-user", title: "Waiting on you", description: "Waiting on you", groupId: null as unknown as string, variantIndex: null })] },
+		]);
+		renderDashboardMount();
+		await waitFor(() => expect(screen.getByText("Waiting on you")).toBeInTheDocument());
+
+		// A filter the user set by hand, unrelated to the presets.
+		const search = screen.getByPlaceholderText("Search tasks...");
+		await user.type(search, 'priority:P2 hello');
+
+		await user.click(screen.getByTestId("sidebar-preset-attention"));
+		expect((search as HTMLInputElement).value).toBe("priority:P2 hello is:attention");
+
+		await user.click(screen.getByTestId("sidebar-preset-all"));
+		expect((search as HTMLInputElement).value).toBe("priority:P2 hello");
+	});
+
+	it("a preset already in effect is a no-op rather than a query rewrite", async () => {
+		const user = userEvent.setup();
+		const { api } = await import("../../rpc");
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+		]);
+		renderDashboardMount();
+		const search = await screen.findByPlaceholderText("Search tasks...");
+		await user.type(search, "space:Labs");
+
+		await user.click(screen.getByTestId("sidebar-preset-all"));   // already "All"
+		expect((search as HTMLInputElement).value).toBe("space:Labs");
+
+		await user.click(screen.getByTestId("sidebar-preset-attention"));
+		await user.click(screen.getByTestId("sidebar-preset-attention")); // already on
+		expect((search as HTMLInputElement).value).toBe("space:Labs is:attention");
+	});
+
+	it("the Needs-you preset drives the is:attention token", async () => {
+		const user = userEvent.setup();
+		const { api } = await import("../../rpc");
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask(), makeTask({ id: "t-rev", seq: 8, status: "review-by-user", title: "Waiting on you", description: "Waiting on you", groupId: null as unknown as string, variantIndex: null })] },
+		]);
+		renderDashboardMount();
+		await waitFor(() => expect(screen.getByText("Waiting on you")).toBeInTheDocument());
+
+		await user.click(screen.getByTestId("sidebar-preset-attention"));
+		await waitFor(() => {
+			expect(screen.getByText("Waiting on you")).toBeInTheDocument();
+			expect(screen.queryByText("Привет! как сам?")).not.toBeInTheDocument();
+		});
+		await user.click(screen.getByTestId("sidebar-preset-all"));
+		await waitFor(() => expect(screen.getByText("Привет! как сам?")).toBeInTheDocument());
 	});
 });

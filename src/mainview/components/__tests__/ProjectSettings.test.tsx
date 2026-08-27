@@ -2,6 +2,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ProjectSettings from "../ProjectSettings";
 import { api } from "../../rpc";
+import { openFolderPicker, openFolderPickerMulti } from "../../folder-picker";
 import { I18nProvider } from "../../i18n";
 import type { Project, Task } from "../../../shared/types";
 import type { AppAction, Route } from "../../state";
@@ -34,6 +35,11 @@ vi.mock("../../rpc", () => ({
 			getGlobalSettings: vi.fn().mockResolvedValue({}),
 		},
 	},
+}));
+
+vi.mock("../../folder-picker", () => ({
+	openFolderPicker: vi.fn(),
+	openFolderPickerMulti: vi.fn(),
 }));
 
 vi.mock("../../confirm", () => ({
@@ -257,6 +263,40 @@ describe("ProjectSettings", () => {
 			await renderProjectSettings(mockProject, { clonePaths: ["node_modules"] });
 			await goToProjectTab();
 			expect(screen.getByText("Auto-detect")).toBeInTheDocument();
+		});
+
+		it("fills a clone-path row from a picker locked to the project root", async () => {
+			const user = userEvent.setup();
+			vi.mocked(openFolderPicker).mockResolvedValue("packages/api");
+			await renderProjectSettings(mockProject, { clonePaths: ["node_modules"] });
+			await goToProjectTab();
+
+			await user.click(screen.getByLabelText("Pick a folder inside the project"));
+
+			// Confined to the project's own root, and the row got the RELATIVE
+			// path the field stores — an absolute one would break cloning.
+			expect(vi.mocked(openFolderPicker).mock.calls[0][0]).toMatchObject({
+				confineTo: "/tmp/test",
+			});
+			await vi.waitFor(() =>
+				expect(screen.getByDisplayValue("packages/api")).toBeInTheDocument(),
+			);
+		});
+
+		it("appends several folders at once via the footer browse button", async () => {
+			const user = userEvent.setup();
+			vi.mocked(openFolderPickerMulti).mockResolvedValue(["packages/a", "packages/b"]);
+			await renderProjectSettings(mockProject, { clonePaths: ["node_modules"] });
+			await goToProjectTab();
+
+			await user.click(screen.getByText("+ Browse…"));
+
+			await vi.waitFor(() => {
+				expect(screen.getByDisplayValue("packages/a")).toBeInTheDocument();
+				expect(screen.getByDisplayValue("packages/b")).toBeInTheDocument();
+				// The row that was already there survives.
+				expect(screen.getByDisplayValue("node_modules")).toBeInTheDocument();
+			});
 		});
 	});
 
@@ -953,6 +993,72 @@ describe("environment variables editor", () => {
 			expect(mockSave).toHaveBeenCalledWith(
 				expect.objectContaining({ projectId: "proj-1", env: {} }),
 			);
+		});
+	});
+	describe("project rename (Board tab)", () => {
+		it("saves a trimmed name on blur", async () => {
+			const mockSave = api.request.updateProjectSettings as ReturnType<typeof vi.fn>;
+			mockSave.mockClear();
+			const user = userEvent.setup();
+			await renderProjectSettings();
+
+			const input = screen.getByLabelText("Project name");
+			expect(input).toHaveValue("Test Project");
+			await user.clear(input);
+			await user.type(input, "  Renamed  ");
+			await user.tab();
+
+			await vi.waitFor(() => {
+				expect(mockSave).toHaveBeenCalledWith({ projectId: "proj-1", name: "Renamed" });
+			});
+		});
+
+		it("saves on Enter without needing a Save button", async () => {
+			const mockSave = api.request.updateProjectSettings as ReturnType<typeof vi.fn>;
+			mockSave.mockClear();
+			const user = userEvent.setup();
+			await renderProjectSettings();
+
+			const input = screen.getByLabelText("Project name");
+			await user.clear(input);
+			await user.type(input, "Renamed{Enter}");
+
+			await vi.waitFor(() => {
+				expect(mockSave).toHaveBeenCalledWith({ projectId: "proj-1", name: "Renamed" });
+			});
+		});
+
+		it("refuses a blank name and restores the stored one", async () => {
+			const mockSave = api.request.updateProjectSettings as ReturnType<typeof vi.fn>;
+			mockSave.mockClear();
+			const user = userEvent.setup();
+			await renderProjectSettings();
+
+			const input = screen.getByLabelText("Project name");
+			await user.clear(input);
+			expect(input).toHaveAttribute("aria-invalid", "true");
+			await user.tab();
+
+			expect(mockSave).not.toHaveBeenCalled();
+			expect(input).toHaveValue("Test Project");
+		});
+
+		it("does not save when the name is unchanged", async () => {
+			const mockSave = api.request.updateProjectSettings as ReturnType<typeof vi.fn>;
+			mockSave.mockClear();
+			const user = userEvent.setup();
+			await renderProjectSettings();
+
+			const input = screen.getByLabelText("Project name");
+			await user.click(input);
+			await user.tab();
+
+			expect(mockSave).not.toHaveBeenCalled();
+		});
+
+		it("shows the project path so it is clear nothing on disk moves", async () => {
+			await renderProjectSettings();
+			expect(screen.getByTitle("/tmp/test")).toHaveTextContent("/tmp/test");
 		});
 	});
 });

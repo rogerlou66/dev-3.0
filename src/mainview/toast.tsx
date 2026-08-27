@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useNarrowViewport } from "./hooks/useNarrowViewport";
 import { useT } from "./i18n";
 import type { TranslationKey } from "./i18n";
@@ -188,10 +188,40 @@ const VARIANT: Record<ToastVariant, { icon: string; border: string; text: string
 	error: { icon: "\uf06a", border: "border-danger/40", text: "text-danger", bar: "bg-danger" },
 	success: { icon: "\uf058", border: "border-success/40", text: "text-success", bar: "bg-success" },
 	info: { icon: "\uf05a", border: "border-accent/40", text: "text-accent", bar: "bg-accent" },
-	warning: { icon: "\uf071", border: "border-warning/40", text: "text-warning", bar: "bg-warning" },
+	warning: { icon: "\uf071", border: "border-warning/40", text: "text-warning-strong", bar: "bg-warning" },
 	// Envelope, not a severity glyph: this toast reports mail between agents.
 	agent: { icon: "\uf0e0", border: "border-agent/40", text: "text-agent", bar: "bg-agent" },
 };
+
+// THE TOP-RIGHT CORNER HAS EXACTLY ONE OWNER, and it is the host below. A second
+// `fixed top-14 right-4` stack cannot know how tall the first one is, so the two
+// simply land on top of each other — the update prompt used to disappear under an
+// arriving toast. Anything persistent that belongs in this corner portals into the
+// slot instead and gets stacked, the same way StatusDock owns the bottom-left one.
+let pinnedSlot: HTMLElement | null = null;
+const pinnedSlotListeners = new Set<() => void>();
+
+function setPinnedSlot(node: HTMLElement | null): void {
+	if (pinnedSlot === node) return;
+	pinnedSlot = node;
+	for (const listener of pinnedSlotListeners) listener();
+}
+
+/**
+ * The node above the transient toast stack, for a surface that must stay put until
+ * the user acts on it (the update prompt). `null` until {@link ToastHost} mounts —
+ * render nothing then rather than falling back to your own fixed position.
+ */
+export function usePinnedToastSlot(): HTMLElement | null {
+	return useSyncExternalStore(
+		(onChange) => {
+			pinnedSlotListeners.add(onChange);
+			return () => pinnedSlotListeners.delete(onChange);
+		},
+		() => pinnedSlot,
+		() => null,
+	);
+}
 
 function rendererIsActive(): boolean {
 	if (typeof document === "undefined") return true;
@@ -275,6 +305,29 @@ export function ToastHost({ onTaskOverflow, resolveOrigin }: ToastHostProps = {}
 			return view.paused === paused ? view : { ...view, paused };
 		});
 		if (next.some((view, index) => view !== toastsRef.current[index])) publish(next);
+	}
+
+	/**
+	 * Explicit user dismissal of the whole stack. Deliberately does NOT run
+	 * `onTaskOverflow`: that handler exists to preserve toasts capacity dropped
+	 * behind the user's back, and raising five attention badges for toasts the
+	 * user just swept away would defeat the button.
+	 */
+	function dismissAll(): void {
+		if (!toastsRef.current.length) return;
+		for (const { entry } of toastsRef.current) clearRuntime(entry.id);
+		publish([]);
+	}
+
+	/** Hovering/focusing Clear all pauses every timer, so the button can't slip away. */
+	function setStackInteraction(kind: "hovered" | "focused", value: boolean): void {
+		for (const [id, runtime] of runtimesRef.current) {
+			if (runtime[kind] === value) continue;
+			runtime[kind] = value;
+			if (!activeRef.current || runtime.hovered || runtime.focused) pauseRuntime(id);
+			else startRuntime(id);
+		}
+		publishPauseState();
 	}
 
 	function setInteraction(id: number, kind: "hovered" | "focused", value: boolean): void {
@@ -377,10 +430,17 @@ export function ToastHost({ onTaskOverflow, resolveOrigin }: ToastHostProps = {}
 		};
 	}, []);
 
-	if (!toasts.length) return null;
-
+	// NO EARLY RETURN even with an empty stack: the pinned slot is a portal target, so
+	// it has to exist in the DOM before the update prompt can ask for it — and the
+	// prompt is at its most useful precisely when no toast is on screen.
 	return (
-		<div className="fixed top-14 right-4 z-[55] flex flex-col gap-2.5 pointer-events-none">
+		<div className="fixed top-14 right-4 z-[55] flex flex-col gap-5 pointer-events-none">
+			{/* Pinned above the transient pile, separated by twice the intra-group gap so
+			    the two read as "a decision waiting for you" and "things that just
+			    happened" rather than one undifferentiated column. */}
+			<div ref={setPinnedSlot} className="flex flex-col gap-2.5 empty:hidden" />
+			{toasts.length > 0 && (
+			<div className="flex flex-col gap-2.5">
 			{toasts.map(({ entry, paused, context, onClick }) => (
 				<ToastCard
 					key={entry.id}
@@ -393,6 +453,38 @@ export function ToastHost({ onTaskOverflow, resolveOrigin }: ToastHostProps = {}
 					onInteraction={setInteraction}
 				/>
 			))}
+			{/* Centered under the stack, sized to its own content: the control belongs to
+			    the pile without pretending to be another card in it. The border is
+			    structural here — it floats over arbitrary app content, so it needs an
+			    edge of its own to stay a readable object. */}
+			{toasts.length > 1 && (
+				<div className="flex justify-center">
+					<button
+						type="button"
+						onClick={dismissAll}
+						onMouseEnter={() => setStackInteraction("hovered", true)}
+						onMouseLeave={() => setStackInteraction("hovered", false)}
+						onFocus={() => setStackInteraction("focused", true)}
+						onBlur={() => setStackInteraction("focused", false)}
+						className="animate-slide-in-right pointer-events-auto group flex items-center gap-2 rounded-lg border border-edge bg-overlay/95 px-3 py-1.5 text-xs font-medium text-fg-3 shadow-xl backdrop-blur-sm outline-none transition-[color,background-color,border-color,transform] duration-150 ease-out hover:border-edge-active hover:bg-elevated hover:text-fg focus-visible:ring-2 focus-visible:ring-accent/50 active:scale-[0.96]"
+					>
+						<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								strokeLinecap="round"
+								strokeLinejoin="round"
+								strokeWidth={1.5}
+								d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+							/>
+						</svg>
+						<span>{t("toast.clearAll")}</span>
+						<span className="rounded-full bg-fg/10 px-1.5 py-0.5 text-micro tabular-nums text-fg-2 transition-colors group-hover:bg-fg/20 group-hover:text-fg">
+							{toasts.length}
+						</span>
+					</button>
+				</div>
+			)}
+			</div>
+			)}
 		</div>
 	);
 }

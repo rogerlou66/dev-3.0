@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type Dispatch, type MutableRefObject } from "react";
-import type { CodingAgent, PortInfo, Project, SharedArtifact, Task, ResourceUsage } from "../../shared/types";
+import type { DevServerSummary, PortInfo, Project, SharedArtifact, Task, ResourceUsage } from "../../shared/types";
 import { getTaskOpenMode, type AppAction, type Route } from "../state";
 import type { NavigationGuard } from "../navigation-guard";
 import { api } from "../rpc";
@@ -13,8 +13,10 @@ import ActiveTasksSidebar from "./ActiveTasksSidebar";
 import { useState } from "react";
 import { useT } from "../i18n";
 import TaskWorkspacePane from "./TaskWorkspacePane";
+import BackToKanbanEmptyState from "./BackToKanbanEmptyState";
 import { createUnresolvedCommentsDiffRequest, useTaskInlineDiffState } from "./task-inline-diff";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useAgents } from "../hooks/useAgents";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 
 interface ProjectViewProps {
@@ -22,10 +24,13 @@ interface ProjectViewProps {
 	projects: Project[];
 	tasks: Task[];
 	dispatch: Dispatch<AppAction>;
+	/** The live route — the inline diff's open/closed state rides on it. */
+	route: Route;
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
 	bellReasons?: Map<string, string[]>;
 	taskPorts: Map<string, PortInfo[]>;
+	taskDevServers: Map<string, DevServerSummary>;
 	taskResourceUsage?: Map<string, ResourceUsage>;
 	activeTaskId?: string;
 	taskView?: boolean;
@@ -43,10 +48,12 @@ function ProjectView({
 	projects,
 	tasks,
 	dispatch,
+	route,
 	navigate,
 	bellCounts,
 	bellReasons,
 	taskPorts,
+	taskDevServers,
 	taskResourceUsage,
 	activeTaskId,
 	taskView,
@@ -60,10 +67,11 @@ function ProjectView({
 }: ProjectViewProps) {
 	const t = useT();
 	const project = projects.find((p) => p.id === projectId);
-	const [agents, setAgents] = useState<CodingAgent[]>([]);
-	const inlineDiff = useTaskInlineDiffState(activeTaskId);
+	const agents = useAgents();
+	const inlineDiff = useTaskInlineDiffState(route, dispatch);
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
-	const taskUpdateEpochRef = useRef(0);
+	const inFlightTaskUpdatesRef = useRef(new Map<string, Task>());
+	const tasksFetchInFlightRef = useRef(false);
 	const unresolvedRouteKeyRef = useRef<string | null>(null);
 	// Board fetch state — drives the skeleton / retry panel instead of letting a
 	// failed or slow load render as an empty board (remote/mobile).
@@ -80,36 +88,56 @@ function ProjectView({
 		}
 	}, [navigate, projectId]);
 
-	// A scheduled launch can push its new task while this view's initial fetch is
-	// in flight. Keep the live update instead of letting the older disk snapshot
-	// overwrite it when the request returns.
+	// A scheduled launch can push a new or changed task while this view's fetch is
+	// in flight. Collect those pushes and overlay them onto the snapshot instead of
+	// letting the older disk state overwrite them — dropping the whole snapshot
+	// would leave the board showing only the pushed cards until the next remount.
+	// Recording is limited to the in-flight window; outside it the normal
+	// `updateTask` path owns the card and the map would only retain dead objects.
 	useEffect(() => {
 		function onTaskUpdated(e: Event) {
+			if (!tasksFetchInFlightRef.current) return;
 			const { task } = (e as CustomEvent<{ task: Task }>).detail;
-			if (task?.projectId === projectId) taskUpdateEpochRef.current += 1;
+			if (task?.projectId === projectId) inFlightTaskUpdatesRef.current.set(task.id, task);
 		}
 		window.addEventListener("rpc:taskUpdated", onTaskUpdated);
 		return () => window.removeEventListener("rpc:taskUpdated", onTaskUpdated);
 	}, [projectId]);
 
 	useEffect(() => {
-		const taskUpdateEpoch = taskUpdateEpochRef.current;
+		const pushed = inFlightTaskUpdatesRef.current;
+		pushed.clear();
+		tasksFetchInFlightRef.current = true;
 		let cancelled = false;
 		setTasksStatus("loading");
 		(async () => {
 			try {
 				const tasks = await api.request.getTasks({ projectId });
+				// A superseded fetch must not touch the flag — a newer one owns it now.
 				if (cancelled) return;
-				if (taskUpdateEpoch === taskUpdateEpochRef.current) {
-					dispatch({ type: "setTasks", projectId, tasks });
+				tasksFetchInFlightRef.current = false;
+				// Fast path: nothing raced the fetch, so the snapshot ships untouched.
+				let merged = tasks;
+				if (pushed.size > 0) {
+					merged = tasks.map((task) => pushed.get(task.id) ?? task);
+					const known = new Set(tasks.map((task) => task.id));
+					for (const [id, task] of pushed) if (!known.has(id)) merged.push(task);
 				}
+				pushed.clear();
+				dispatch({ type: "setTasks", projectId, tasks: merged });
 				setTasksStatus("ready");
 			} catch (err) {
 				console.error("Failed to load tasks:", err);
-				if (!cancelled) setTasksStatus("error");
+				if (cancelled) return;
+				tasksFetchInFlightRef.current = false;
+				setTasksStatus("error");
 			}
 		})();
-		return () => { cancelled = true; };
+		return () => {
+			cancelled = true;
+			tasksFetchInFlightRef.current = false;
+			pushed.clear();
+		};
 	}, [projectId, dispatch, tasksReloadNonce]);
 
 	// A remote socket that dropped mid-session leaves the board frozen on a stale
@@ -125,11 +153,7 @@ function ProjectView({
 		setTasksReloadNonce((n) => n + 1);
 	}, [rpcState]);
 
-	useEffect(() => {
-		api.request.getAgents().then(setAgents).catch(() => {});
-	}, []);
-
-	// Opening the inline diff is a distinct surface but not a route — fire its
+	// The diff is a history step on the task route, not its own screen — fire its
 	// page view explicitly (once per open) so it shows up alongside navigation.
 	// Use the human-readable seq id (e.g. "981-1"), falling back to the raw id.
 	// The empty "select a task" pane is a dead end on narrow viewports — there is
@@ -182,19 +206,10 @@ function ProjectView({
 				skipCopyModeReset={skipCopyModeReset}
 			/>
 		) : (
-			<div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-base px-6 text-center">
-				<span className="text-fg-muted text-sm">{t("project.selectTaskForTerminal")}</span>
-				<button
-					type="button"
-					onClick={() => navigate({ screen: "project", projectId })}
-					className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-edge bg-raised text-fg-3 hover:text-fg hover:bg-raised-hover hover:border-edge-active transition-colors text-sm"
-				>
-					<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-					</svg>
-					<span>{t("project.backToKanban")}</span>
-				</button>
-			</div>
+			<BackToKanbanEmptyState
+				message={t("project.selectTaskForTerminal")}
+				onBack={() => navigate({ screen: "project", projectId })}
+			/>
 		);
 
 		// Narrow (mobile) viewports keep the terminal full-width — there is no room
@@ -287,6 +302,7 @@ function ProjectView({
 				bellCounts={bellCounts}
 				bellReasons={bellReasons}
 				taskPorts={taskPorts}
+				taskDevServers={taskDevServers}
 				taskResourceUsage={taskResourceUsage}
 				onOpenUnresolvedComments={openUnresolvedFromBoard}
 			/>

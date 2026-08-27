@@ -3,8 +3,9 @@
 // here so every command-with-subcommands prints its own focused usage instead
 // of falling back to the generic top-level help.
 //
-// `remote` and `gui` intentionally render their own richer, hand-written help
-// inside their handlers and are NOT listed here (see `ownsHelp` in main.ts).
+// `remote`, `gui` and `update` intentionally render their own richer,
+// hand-written help inside their handlers and are NOT listed here (see
+// `OWNS_HELP` below).
 
 import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES, MAX_SCHEDULED_MESSAGE_LENGTH } from "../shared/types";
 
@@ -39,6 +40,11 @@ const GLOBAL_OPTIONS = [
 	"--task <id> / --task-id   Override the target task (else auto-detected from the worktree);",
 	"                          accepts a full id, an id prefix (≥8 chars), or seq:<N> (the stable",
 	"                          per-project number printed by `task create` and shown on cards)",
+	"--instance <sel>          Which running dev3 instance to talk to: self | primary | task:<id> |",
+	"                          seq:<N>. Several instances share ~/.dev3.0 (the installed app plus a",
+	"                          dev build a task's devScript booted); discovery prefers the installed",
+	"                          one, so name the other explicitly. DEV3_CLI_SOCKET=<path> pins the",
+	"                          same thing for a whole shell; --instance wins over it.",
 	"-h, --help                Show help",
 	"-v, --version             Show CLI version",
 ];
@@ -83,14 +89,17 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "update",
-				usage: 'dev3 task update [<id>] [--title "..."] [--description "..." | --description -] [--priority P0..P4] [--manual-completion on|off]',
-				summary: "Update a task's title, description, priority, or completion policy.",
+				usage: 'dev3 task update [<id>] [--title "..."] [--description "..." | --description -] [--priority P0..P4] [--manual-completion on|off] [--type coordinator|pr-review|standard]',
+				summary: "Update a task's title, description, priority, completion policy, or type.",
 				details: [
 					"--title <text>        New title (cannot be empty).",
 					'--description <text>  New description ("" clears it); use - to read it from stdin.',
 					"--priority <P0..P4>   Set importance (P0 highest … P4 lowest); applies to the whole variant group.",
 					"                      Only set priority when the user asks — never on your own initiative.",
 					"--manual-completion on|off  Control whether merge detection suggests completing this task.",
+					"--type coordinator|pr-review|standard  Set the task's type, or clear it with standard.",
+					"                      Rewrites the description's role preamble and tells a running agent,",
+					"                      so the badge never claims a role the agent was not given.",
 					"--force               Overwrite a user-edited title (diagnostics only — avoid).",
 				],
 			},
@@ -108,6 +117,16 @@ const COMMANDS: CommandHelp[] = [
 					'"completed" asks the user for approval; "cancelled" is forbidden via CLI.',
 					"Starting SOMEONE ELSE'S task (--task <other> + an active status) also asks",
 					"the user, who picks the agent; exit 10 if they decline.",
+				],
+			},
+			{
+				name: "open",
+				usage: "dev3 task open [<id>] [--task <id>]",
+				summary: "Focus the app on a task (same navigation as a dev3://task/<id> link).",
+				details: [
+					"Without an id, targets the current worktree's task.",
+					"Honors the split-vs-fullscreen task open-mode preference.",
+					"Reopens a window when the app sits window-less in the dock.",
 				],
 			},
 		],
@@ -261,8 +280,40 @@ const COMMANDS: CommandHelp[] = [
 	},
 	{
 		name: "conversations",
-		summary: "Search past task conversations (transcripts + notes/overview).",
+		summary: "Search past task conversations, or parse this task's transcripts into JSON.",
 		subcommands: [
+			{
+				name: "dump",
+				usage: "dev3 conversations dump [--latest] [--verbatim] [--payload N] [--action N] [--compact] [--raw] [--stdout] [--out <dir>]",
+				summary: "Parse this task's agent transcripts into dev3's conversation model and write JSON.",
+				details: [
+					"Writes to the task's own conversations/ folder, next to logs/ and diffs/.",
+					"By default the dump is trimmed: duplicated fields dropped, session bookkeeping",
+					"collapsed to counts, tool payloads truncated. The native transcript stays the",
+					"source of truth, so nothing trimmed here is lost.",
+					"--latest      Only the most recently written transcript.",
+					"--payload N   Characters kept per tool output / file content (default 1000).",
+					"--action N    Characters kept per shell command / file path (default 2000).",
+					"--verbatim    No trimming at all — everything, full length.",
+					"--compact     One-line JSON. Indented by default, since dumps get read by hand.",
+					"--raw         Keep each native record alongside the parsed event (much larger).",
+					"--stdout      Print the JSON instead of writing files.",
+					"--out DIR     Write somewhere else.",
+				],
+			},
+			{
+				name: "handoff",
+				usage: "dev3 conversations handoff [--for claude|codex|markdown] [--thinking] [--tool-output N] [--turns N] [--out FILE]",
+				summary: "Retell this task's conversation as one message another agent can be handed.",
+				details: [
+					"Prints to stdout, so it pipes into `dev3 message`.",
+					"--for TARGET      Framing: markdown to read, claude or codex to hand over (default markdown).",
+					"--thinking        Include the previous agent's reasoning (off by default).",
+					"--tool-output N   Characters of tool output kept per call (default 2048, 0 drops it).",
+					"--turns N         Keep only the last N turns.",
+					"--out FILE        Write to a file instead of stdout.",
+				],
+			},
 			{
 				name: "search",
 				usage: 'dev3 conversations search "<query>" [--limit N] [--all-statuses] [--json]',
@@ -282,7 +333,7 @@ const COMMANDS: CommandHelp[] = [
 			{
 				name: "start",
 				usage: "dev3 dev-server start [task-id] [--wait] [--timeout <sec>]",
-				summary: "Start a task's dev server. --wait blocks until it is listening on a port (default timeout 120s).",
+				summary: "Start a task's dev server. --wait blocks until it is listening on an assigned DEV3_PORT* (default timeout 120s).",
 			},
 			{
 				name: "stop",
@@ -292,7 +343,7 @@ const COMMANDS: CommandHelp[] = [
 			{
 				name: "restart",
 				usage: "dev3 dev-server restart [task-id] [--wait] [--timeout <sec>]",
-				summary: "Restart a task's dev server. --wait blocks until the NEW server is listening on a port.",
+				summary: "Restart a task's dev server. --wait blocks until the NEW server is listening on an assigned DEV3_PORT*.",
 			},
 			{
 				name: "status",
@@ -414,11 +465,45 @@ const COMMANDS: CommandHelp[] = [
 		name: "show-artifact",
 		summary: "Surface a task-bound HTML artifact in the running app.",
 		subcommands: [],
-		usage: 'dev3 show-artifact <file.html> [--assets <file...>] [--title "..."] [--task <id>]',
+		usage: 'dev3 show-artifact <file.html> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]',
 		details: [
 			"--assets <paths...>   Copy local CSS, classic JS, and raster assets; all following paths belong to the artifact until the next flag.",
 			"--title <text>        Viewer title (defaults to the HTML filename).",
+			"--artifact-id <slug>  Group versions under a stable id, so re-wording the title does not fork a second artifact.",
+			"--new                 Publish a separate artifact instead of a new version of the matching one.",
+			"Re-publishing adds a VERSION to the artifact with the same id (or title) — one row, switchable in the viewer.",
 			"Artifacts with local assets download as ZIP; standalone artifacts download as HTML.",
+		],
+	},
+	{
+		name: "artifact-template",
+		summary: "Copy this task's dev3 artifact starter into ./dev3-artifact-report.",
+		subcommands: [],
+		usage: "dev3 artifact-template [--task <id|seq:N>]",
+		details: [
+			"Provisions the pristine starter, copies it into ./dev3-artifact-report, and prints that path.",
+			"Re-running it restores the managed files over an existing copy.",
+			"Use it when $DEV3_ARTIFACT_TEMPLATE_DIR is unset: that variable is baked into the session",
+			"environment at launch, so an older session or a shell that never inherited it has no other way",
+			"to reach the starter.",
+		],
+	},
+	{
+		name: "inline-html",
+		summary: "Fold a multi-file HTML report into one self-contained file.",
+		subcommands: [],
+		usage: "dev3 inline-html <index.html|dir> -o <out.html> [--json] [--quiet]",
+		details: [
+			"Embeds local stylesheets, scripts, images, SVGs and fonts (including url() refs inside CSS)",
+			"as data URIs; remote CDN references are left alone because they resolve from the browser.",
+			"A directory argument is read as <dir>/index.html.",
+			"-o <path>   Where to write the folded file. Build outside the repo (/tmp) so it cannot be staged.",
+			"--json      Machine-readable report (what was inlined, left external, and flagged).",
+			"--quiet     Write the file and print nothing.",
+			"Refuses to write in two cases: exit 13 a referenced local file is missing, exit 14 a",
+			"credential-shaped string is embedded. Home paths, emails and tunnel URLs are reported,",
+			"not blocked — a public URL is public forever, so review them first.",
+			"Needs no running app: it is a pure file transform.",
 		],
 	},
 	{
@@ -593,7 +678,7 @@ export function renderHelp(command: string, subcommand?: string): string | null 
 }
 
 /** Commands that render their own (richer) --help inside their handlers. */
-const OWNS_HELP = new Set(["remote", "gui"]);
+const OWNS_HELP = new Set(["remote", "gui", "update"]);
 
 /**
  * What `main()` should do about `--help` for a given argv (minus the leading

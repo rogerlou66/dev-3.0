@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
-import { getAllowedTransitions, type Project, type Task, type CliRequest, type TaskNote, type SharedArtifact, type SharedImage } from "../../shared/types";
+import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type SharedArtifact, type SharedImage } from "../../shared/types";
 
 // ---- Mocks ----
 
@@ -39,8 +39,14 @@ vi.mock("../shared-images", () => ({
 
 vi.mock("../shared-artifacts", () => ({
 	SharedArtifactError: class SharedArtifactError extends Error {},
-	saveSharedArtifact: vi.fn((_projectPath: string, htmlPath: string, assetPaths: string[], title?: string) => ({
+	saveSharedArtifact: vi.fn((_projectPath: string, htmlPath: string, assetPaths: string[], title?: string, keyOptions?: { artifactId?: string; forceNew?: boolean }) => ({
 		id: "artifact-1",
+		groupKey: keyOptions?.forceNew
+			? "new:artifact-1"
+			: keyOptions?.artifactId
+				? `id:${keyOptions.artifactId.toLowerCase()}`
+				: `title:${(title || "report").toLowerCase()}`,
+		version: 1,
 		kind: "html",
 		title: title || "report",
 		name: "report.html",
@@ -125,6 +131,10 @@ vi.mock("../settings", () => ({
 	recordFavoriteUsages: vi.fn(),
 }));
 
+vi.mock("../agent-prompt-delivery", () => ({
+	deliverAgentPrompt: vi.fn(async () => ({ status: "delivered" })),
+}));
+
 vi.mock("../vents", () => ({
 	addVent: vi.fn(() => ({ fileName: "2026-06-15_14-30_x.md", path: "/tmp/v/2026-06-15_14-30_x.md", name: "x" })),
 }));
@@ -135,8 +145,19 @@ vi.mock("../remote-access-server", () => ({
 	getStaticCode: vi.fn(() => null),
 }));
 
+// `tunnelManager` too: `port-tunnels` registers its change hook at module scope,
+// and the socket server reaches that module through the launch path, so a mock
+// without it dies on import rather than in a test.
 vi.mock("../cloudflare-tunnel", () => ({
 	getTunnelUrl: vi.fn(() => null),
+	tunnelManager: {
+		setChangeHook: vi.fn(),
+		get: vi.fn(() => undefined),
+		list: vi.fn(() => []),
+		start: vi.fn(),
+		stop: vi.fn(),
+		stopAll: vi.fn(),
+	},
 }));
 
 vi.mock("node:fs", () => ({
@@ -152,6 +173,7 @@ import * as git from "../git";
 import * as pty from "../pty-server";
 import { activateTask, moveTask, runCleanupScript, emitTaskSound, getPushMessage, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "../rpc-handlers";
 import { loadSettings } from "../settings";
+import { deliverAgentPrompt } from "../agent-prompt-delivery";
 import { runDevServer, stopDevServer, restartDevServer, getDevServerStatus } from "../rpc-handlers/tmux-pty";
 import { flushAndEnd } from "../socket-backpressure";
 import { existsSync, readdirSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
@@ -160,6 +182,17 @@ import { getServerPort } from "../remote-access-server";
 import { saveSharedImage } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
+
+// `task.open` imports the window layer lazily; mocking it keeps electrobun out.
+vi.mock("../window-manager", () => ({
+	getWindowCount: vi.fn(() => 1),
+	focusFocusedWindow: vi.fn(() => true),
+	openNewWindow: vi.fn(),
+}));
+
+vi.mock("../artifact-template", () => ({
+	ensureArtifactTemplate: vi.fn(() => "/wt-container/artifact-template-v1"),
+}));
 
 vi.mock("../task-pane-runs", () => ({
 	PaneRunError: class PaneRunError extends Error {},
@@ -942,7 +975,10 @@ describe("task.show", () => {
 			makeRequest("task.show", { taskId: "deadbeef-1111-2222-3333-444444444444", projectId: "proj-1" }),
 		);
 		expect(resp.ok).toBe(false);
-		expect(resp.error).toContain("Task not found: deadbeef");
+		// A project-scoped lookup names the board it searched and offers --project:
+		// addressing another project's task is the commonest cause of this miss.
+		expect(resp.error).toContain('Task not found in project "Test Project": deadbeef');
+		expect(resp.error).toContain("--project <id>");
 		expect(resp.error).toContain("seq:<N>");
 		expect(resp.error).toContain("dev3 tasks list");
 	});
@@ -1365,12 +1401,181 @@ describe("ui.show-artifact", () => {
 			"/tmp/report.html",
 			["/tmp/app.css", "/tmp/app.js", "/tmp/chart.png"],
 			"Metrics",
+			{ artifactId: undefined, forceNew: false },
 		);
 		expect(pushFn).toHaveBeenCalledWith("taskUpdated", expect.objectContaining({ projectId: project.id }));
 		expect(pushFn).toHaveBeenCalledWith(
 			"cliShowArtifact",
 			expect.objectContaining({ taskId: task.id, newCount: 1, taskSeq: task.seq }),
 		);
+	});
+
+	it("re-publishing the same title adds a version to the one row", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			sharedArtifacts: [{
+				id: "existing",
+				groupKey: "title:metrics",
+				version: 1,
+				kind: "html",
+				title: "Metrics",
+				name: "old.html",
+				storedPath: "/wt/shared-artifacts/existing/old.html",
+				originalPath: "/tmp/old.html",
+				bytes: 5,
+				createdAt: 1,
+				assets: [],
+			}],
+		});
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		let persisted: Task | undefined;
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await (mutator as (t: Task) => { updates: Partial<Task>; result: unknown })(task);
+			persisted = { ...task, ...updates };
+			return { task: persisted, result } as never;
+		});
+
+		const response = await handleRequest(makeRequest("ui.show-artifact", {
+			taskId: task.id,
+			projectId: project.id,
+			htmlPath: "/tmp/report.html",
+			title: "Metrics",
+		}));
+
+		expect(response.ok).toBe(true);
+		expect(response.data).toMatchObject({ version: 2 });
+		expect(persisted?.sharedArtifacts).toHaveLength(1);
+		const merged = persisted?.sharedArtifacts?.[0];
+		expect(merged?.id).toBe("existing");
+		expect(merged?.version).toBe(2);
+		expect(merged?.name).toBe("report.html");
+		expect(merged?.previousVersions?.map((entry) => entry.storedPath)).toEqual(["/wt/shared-artifacts/existing/old.html"]);
+	});
+
+	it("collapses pre-versioning rows sharing a title on the next publish", async () => {
+		const project = makeProject();
+		const legacy: SharedArtifact[] = [1, 2, 3].map((n) => ({
+			id: `legacy-${n}`,
+			kind: "html",
+			title: "Metrics",
+			name: `legacy-${n}.html`,
+			storedPath: `/wt/shared-artifacts/legacy-${n}/report.html`,
+			originalPath: `/tmp/legacy-${n}.html`,
+			bytes: 5,
+			createdAt: n,
+			assets: [],
+		}));
+		const task = makeTask({ sharedArtifacts: legacy });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		let persisted: Task | undefined;
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await (mutator as (t: Task) => { updates: Partial<Task>; result: unknown })(task);
+			persisted = { ...task, ...updates };
+			return { task: persisted, result } as never;
+		});
+
+		await handleRequest(makeRequest("ui.show-artifact", {
+			taskId: task.id,
+			projectId: project.id,
+			htmlPath: "/tmp/report.html",
+			title: "Metrics",
+		}));
+
+		expect(persisted?.sharedArtifacts).toHaveLength(1);
+		expect(persisted?.sharedArtifacts?.[0].id).toBe("legacy-1");
+		expect(persisted?.sharedArtifacts?.[0].version).toBe(4);
+		// Every stored path survives the collapse — nothing on disk is dropped.
+		expect(persisted?.sharedArtifacts?.[0].previousVersions?.map((entry) => entry.storedPath)).toEqual([
+			"/wt/shared-artifacts/legacy-1/report.html",
+			"/wt/shared-artifacts/legacy-2/report.html",
+			"/wt/shared-artifacts/legacy-3/report.html",
+		]);
+	});
+
+	it("--new keeps the publish as its own artifact", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			sharedArtifacts: [{
+				id: "existing",
+				groupKey: "title:metrics",
+				version: 1,
+				kind: "html",
+				title: "Metrics",
+				name: "old.html",
+				storedPath: "/wt/shared-artifacts/existing/old.html",
+				originalPath: "/tmp/old.html",
+				bytes: 5,
+				createdAt: 1,
+				assets: [],
+			}],
+		});
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		let persisted: Task | undefined;
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await (mutator as (t: Task) => { updates: Partial<Task>; result: unknown })(task);
+			persisted = { ...task, ...updates };
+			return { task: persisted, result } as never;
+		});
+
+		await handleRequest(makeRequest("ui.show-artifact", {
+			taskId: task.id,
+			projectId: project.id,
+			htmlPath: "/tmp/report.html",
+			title: "Metrics",
+			forceNew: true,
+		}));
+
+		expect(saveSharedArtifact).toHaveBeenCalledWith(
+			project.path,
+			"/tmp/report.html",
+			[],
+			"Metrics",
+			{ artifactId: undefined, forceNew: true },
+		);
+		expect(persisted?.sharedArtifacts?.map((artifact) => artifact.id)).toEqual(["existing", "artifact-1"]);
+	});
+
+	it("groups on --artifact-id even when the title was reworded", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			sharedArtifacts: [{
+				id: "existing",
+				groupKey: "id:weekly",
+				version: 1,
+				kind: "html",
+				title: "Old wording",
+				name: "old.html",
+				storedPath: "/wt/shared-artifacts/existing/old.html",
+				originalPath: "/tmp/old.html",
+				bytes: 5,
+				createdAt: 1,
+				assets: [],
+			}],
+		});
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		let persisted: Task | undefined;
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await (mutator as (t: Task) => { updates: Partial<Task>; result: unknown })(task);
+			persisted = { ...task, ...updates };
+			return { task: persisted, result } as never;
+		});
+
+		await handleRequest(makeRequest("ui.show-artifact", {
+			taskId: task.id,
+			projectId: project.id,
+			htmlPath: "/tmp/report.html",
+			title: "Brand new wording",
+			artifactId: "weekly",
+		}));
+
+		expect(persisted?.sharedArtifacts).toHaveLength(1);
+		expect(persisted?.sharedArtifacts?.[0].version).toBe(2);
+		// The newest title wins on the row the user sees.
+		expect(persisted?.sharedArtifacts?.[0].title).toBe("Brand new wording");
 	});
 
 	it("rejects a missing HTML path", async () => {
@@ -1407,6 +1612,42 @@ describe("ui.show-artifact", () => {
 		expect(response.data).toMatchObject({ delivered: true, queued: true, stored: 1 });
 		expect(pushFn).toHaveBeenCalledWith("taskUpdated", expect.anything());
 		expect(pushCliShowArtifact).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id, newCount: 1 }));
+	});
+});
+
+describe("artifact.template-dir", () => {
+	it("provisions the starter on demand and answers with its path", async () => {
+		const project = makeProject();
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const { ensureArtifactTemplate } = await import("../artifact-template");
+
+		const resp = await handleRequest(makeRequest("artifact.template-dir", {
+			taskId: task.id,
+			projectId: project.id,
+			worktreePath: "/wt-container/worktree",
+		}));
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ dir: "/wt-container/artifact-template-v1", taskId: task.id });
+		expect(ensureArtifactTemplate).toHaveBeenCalledWith(project, task, { worktreePath: "/wt-container/worktree" });
+	});
+
+	it("reports the provisioning failure instead of inventing a path", async () => {
+		const project = makeProject();
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const { ensureArtifactTemplate } = await import("../artifact-template");
+		vi.mocked(ensureArtifactTemplate).mockImplementationOnce(() => {
+			throw new Error("Bundled dev3 artifact template not found");
+		});
+
+		const resp = await handleRequest(makeRequest("artifact.template-dir", { taskId: task.id, projectId: project.id }));
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("artifact template not found");
 	});
 });
 
@@ -1681,6 +1922,130 @@ describe("task.update", () => {
 		expect(pushFn).not.toHaveBeenCalled();
 	});
 
+	// The hole the coordinator flagged: flipping the field alone would leave a card
+	// wearing a badge its agent was never told about.
+	describe("task.update --type", () => {
+		it("promotes a task, prepends the role preamble, and tells the running agent", async () => {
+			const project = makeProject();
+			const task = makeTask({ description: "coordinate my board" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+			}));
+
+			expect(resp.ok).toBe(true);
+			const updates = vi.mocked(data.updateTask).mock.calls[0]![2] as Partial<Task>;
+			expect(updates.taskType).toBe("coordinator");
+			expect(updates.description!.startsWith(COORDINATOR_PROMPT)).toBe(true);
+			expect(updates.description!.endsWith("coordinate my board")).toBe(true);
+			expect(vi.mocked(deliverAgentPrompt).mock.calls[0]![1]).toContain(COORDINATOR_PROMPT);
+			expect((resp.data as { roleDelivery?: string }).roleDelivery).toBe("delivered");
+		});
+
+		it("demotes a task and strips the preamble back off", async () => {
+			const project = makeProject();
+			const task = makeTask({
+				taskType: "coordinator",
+				description: withPresetPrompt("coordinate my board", COORDINATOR_PROMPT),
+			});
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "standard",
+			}));
+
+			expect(resp.ok).toBe(true);
+			const updates = vi.mocked(data.updateTask).mock.calls[0]![2] as Partial<Task>;
+			expect(updates.taskType).toBeNull();
+			expect(updates.description).toBe("coordinate my board");
+			expect(vi.mocked(deliverAgentPrompt).mock.calls[0]![1]).toContain("no longer carries a special role");
+		});
+
+		it("swaps one role's preamble for the other without leaving the old brief", async () => {
+			const project = makeProject();
+			const task = makeTask({
+				taskType: "coordinator",
+				description: withPresetPrompt("look at this branch", COORDINATOR_PROMPT),
+			});
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "pr-review",
+			}));
+
+			expect(resp.ok).toBe(true);
+			const updates = vi.mocked(data.updateTask).mock.calls[0]![2] as Partial<Task>;
+			expect(updates.taskType).toBe("pr-review");
+			expect(updates.description!.startsWith(DEFAULT_PR_REVIEW_PROMPT)).toBe(true);
+			expect(updates.description).not.toContain(COORDINATOR_PROMPT);
+			expect(updates.description!.endsWith("look at this branch")).toBe(true);
+		});
+
+		it("says plainly when there is no session to tell", async () => {
+			const project = makeProject();
+			const task = makeTask({ worktreePath: null });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect((resp.data as { roleDelivery?: string }).roleDelivery).toBe("no-session");
+			expect(deliverAgentPrompt).not.toHaveBeenCalled();
+		});
+
+		it("rejects an unknown type without writing anything", async () => {
+			const project = makeProject();
+			const task = makeTask();
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "overlord",
+			}));
+
+			expect(resp.ok).toBe(false);
+			expect(data.updateTask).not.toHaveBeenCalled();
+		});
+
+		it("writes nothing when the task already has that type", async () => {
+			const project = makeProject();
+			const task = makeTask({ taskType: "coordinator" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(data.updateTask).not.toHaveBeenCalled();
+			expect(deliverAgentPrompt).not.toHaveBeenCalled();
+		});
+	});
+
 	it("auto-generates title from description", async () => {
 		const project = makeProject();
 		const task = makeTask();
@@ -1882,6 +2247,38 @@ describe("task.update", () => {
 		expect(call.titleEditedByUser).toBeUndefined();
 		const result = resp.data as { task: Task; titlePreserved: boolean };
 		expect(result.titlePreserved).toBe(false);
+	});
+
+	// The whole review-task naming design rests on this: dev3 writes a DRAFT title
+	// at creation and the reviewing agent is told to replace it. The draft lives in
+	// `title` with NO customTitle at all, which is a shape the guard's other cases
+	// never exercise — if it were protected, the prompt's instruction could not be
+	// carried out and every review card would keep the PR author's own wording.
+	it("lets an agent rename over dev3's drafted review title", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			title: "Review of #493 from Arseny Pavlenko about pin tmux to a vendored",
+			customTitle: undefined,
+			titleEditedByUser: false,
+		});
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(data.updateTask).mockResolvedValue({ ...task, customTitle: "Review of #493 from Arseny Pavlenko about drop the PATH shim" });
+		vi.mocked(getPushMessage).mockReturnValue(null);
+
+		const resp = await handleRequest(
+			makeRequest("task.update", {
+				taskId: task.id,
+				projectId: "proj-1",
+				title: "Review of #493 from Arseny Pavlenko about drop the PATH shim",
+			}),
+		);
+
+		expect(resp.ok).toBe(true);
+		expect((resp.data as { titlePreserved: boolean }).titlePreserved).toBe(false);
+		const call = vi.mocked(data.updateTask).mock.calls[0][2];
+		expect(call.customTitle).toBe("Review of #493 from Arseny Pavlenko about drop the PATH shim");
+		expect(call.titleEditedByUser).toBeUndefined();
 	});
 
 	it("overwrites user-edited title when --force is set", async () => {
@@ -3010,7 +3407,7 @@ describe("task.setLabels", () => {
 		);
 
 		expect(resp.ok).toBe(false);
-		expect(resp.error).toContain("Task not found: missing-task");
+		expect(resp.error).toContain("missing-task");
 		expect(data.updateTask).not.toHaveBeenCalled();
 	});
 
@@ -3398,5 +3795,53 @@ describe("vent.add", () => {
 		const resp = await handleRequest(makeRequest("vent.add", { name: "n", content: "" }));
 		expect(resp.ok).toBe(false);
 		expect(addVent).not.toHaveBeenCalled();
+	});
+});
+
+describe("task.open", () => {
+	it("focuses the live window and pushes the same nav an inbound deep link uses", async () => {
+		const project = makeProject();
+		const task = makeTask();
+		const push = vi.fn();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(getPushMessage).mockReturnValue(push as never);
+		const wm = await import("../window-manager");
+		vi.mocked(wm.getWindowCount).mockReturnValue(1);
+
+		const resp = await handleRequest(makeRequest("task.open", { taskId: task.id, projectId: project.id }));
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ taskId: task.id, projectId: project.id, delivered: true });
+		expect(wm.focusFocusedWindow).toHaveBeenCalled();
+		expect(push).toHaveBeenCalledWith("openDeepLink", { kind: "task", taskId: task.id, projectId: project.id });
+	});
+
+	it("stashes the target and reopens a window when the app sits window-less", async () => {
+		const project = makeProject();
+		const task = makeTask();
+		const push = vi.fn();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(getPushMessage).mockReturnValue(push as never);
+		const wm = await import("../window-manager");
+		vi.mocked(wm.getWindowCount).mockReturnValue(0);
+
+		const resp = await handleRequest(makeRequest("task.open", { taskId: task.id, projectId: project.id }));
+
+		expect(resp.data).toMatchObject({ delivered: true, reopened: true });
+		expect(wm.openNewWindow).toHaveBeenCalled();
+		expect(push).not.toHaveBeenCalled();
+		const { consumePendingDeepLinkNav } = await import("../deep-link-nav");
+		expect(consumePendingDeepLinkNav()).toEqual({ kind: "task", taskId: task.id, projectId: project.id });
+	});
+
+	it("fails on an unknown task", async () => {
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([]);
+
+		const resp = await handleRequest(makeRequest("task.open", { taskId: "nope-1234", projectId: "proj-1" }));
+
+		expect(resp.ok).toBe(false);
 	});
 });

@@ -449,4 +449,36 @@ describe("AddProjectModal", () => {
 
 		expect(mockedApi.request.addVirtualProject).toHaveBeenCalledWith({ name: "Operations" });
 	});
+
+	// Blast-radius copy (bible §10). Two lines only, and the same two on every git
+	// tab: a wall of reassurance reads as a warning, which is the opposite of the point.
+	describe("blast-radius copy", () => {
+		const baseClaim = /Tasks start from this project's base branch/;
+		const branchClaim = /own branch in its own worktree/;
+
+		it("states both consequences on every git tab", async () => {
+			const user = userEvent.setup();
+			renderModal();
+
+			expect(screen.getByText(baseClaim)).toBeInTheDocument();
+			expect(screen.getByText(branchClaim)).toBeInTheDocument();
+
+			await user.click(screen.getByText("Clone from URL"));
+			expect(screen.getByText(baseClaim)).toBeInTheDocument();
+			expect(screen.getByText(branchClaim)).toBeInTheDocument();
+
+			await user.click(screen.getByText("New"));
+			expect(screen.getByText(baseClaim)).toBeInTheDocument();
+			expect(screen.getByText(branchClaim)).toBeInTheDocument();
+		});
+
+		it("is absent on the Operations board, which has no repository at all", async () => {
+			const user = userEvent.setup();
+			renderModal();
+			await user.click(screen.getByText("Operations"));
+
+			expect(screen.queryByText(baseClaim)).not.toBeInTheDocument();
+			expect(screen.queryByText(branchClaim)).not.toBeInTheDocument();
+		});
+	});
 });

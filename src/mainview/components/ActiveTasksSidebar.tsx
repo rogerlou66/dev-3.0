@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback, type Dispatch } from "react";
 import { useTaskSortOrder } from "../hooks/useTaskSortOrder";
 import type { CodingAgent, PortInfo, Project, Task, TaskPriority, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, ALL_PRIORITIES, DEFAULT_PRIORITY } from "../../shared/types";
+import { ACTIVE_STATUSES, ALL_PRIORITIES, DEFAULT_PRIORITY, spacesOfProject } from "../../shared/types";
 import { PRIORITY_NAME_KEYS } from "./priorityStyles";
 import { groupTasksIntoTiers } from "./sidebarTiers";
 import { toast } from "../toast";
@@ -11,7 +11,7 @@ import { api } from "../rpc";
 import type { AppAction, Route } from "../state";
 import { useT } from "../i18n";
 import { getStatusLabel } from "../utils/statusLabel";
-import { matchesTaskQuery } from "../utils/taskSearch";
+import { isFacetTokenActive, matchesTaskQuery, toggleFacetToken } from "../utils/taskSearch";
 import { buildFilterGroups, taskQueryContext, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
 import FilterFunnel from "./FilterFunnel";
 import TipCard from "./TipCard";
@@ -21,8 +21,10 @@ import { getTaskAgentMeta } from "../utils/taskAgentMeta";
 import Tooltip from "./Tooltip";
 import { PanelLeftIcon } from "./TaskIcons";
 import ActiveTaskRow from "./ActiveTaskRow";
+import { useSpaces } from "../useSpaces";
+import { spaceSiblingProjectIds } from "../utils/spaceScope";
 
-type SidebarScope = "project" | "global" | "attention";
+type SidebarScope = "project" | "global" | "space";
 const LS_SIDEBAR_SCOPE = "dev3-sidebar-scope";
 
 /** Build a translucent fill from a "#rrggbb" status color for subtle tints. */
@@ -33,12 +35,13 @@ function statusTint(hex: string, alpha: number): string {
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function readScope(): SidebarScope {
+/** null = the user never picked a scope, so the default is derived per project. */
+function readScope(): SidebarScope | null {
 	try {
 		const v = localStorage.getItem(LS_SIDEBAR_SCOPE);
-		if (v === "global" || v === "project" || v === "attention") return v;
+		if (v === "global" || v === "project" || v === "space") return v;
 	} catch { /* ignore */ }
-	return "project";
+	return null;
 }
 
 function writeScope(scope: SidebarScope) {
@@ -48,8 +51,10 @@ function writeScope(scope: SidebarScope) {
 }
 
 interface ActiveTasksSidebarProps {
-	project: Project;
-	tasks: Task[];
+	/** Absent on the dashboard mount: no current project, so the scope locks to
+	 *  global ("across all spaces") and the scope switcher is not rendered. */
+	project?: Project;
+	tasks?: Task[];
 	allProjects?: Project[];
 	activeTaskId?: string;
 	dispatch: Dispatch<AppAction>;
@@ -78,15 +83,18 @@ const STATUS_ORDER: TaskStatus[] = [
  * Nerd Font scope glyph: outline variant by default, filled variant when the
  * scope is active. Both glyphs stay mounted and cross-fade, so the swap
  * animates in both directions without a motion dependency.
+ *
+ * `struck` strikes the glyph through — the button's own `line-through` cannot
+ * reach here, an inline-flex box stops text-decoration propagation.
  */
-function ScopeGlyph({ outline, filled, active }: { outline: string; filled: string; active: boolean }) {
+function ScopeGlyph({ outline, filled, active, struck }: { outline: string; filled: string; active: boolean; struck?: boolean }) {
 	const motion = "transition-[opacity,filter,scale] duration-300 ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none";
 	const shown = "scale-100 opacity-100 blur-0";
 	const hidden = "scale-[0.25] opacity-0 blur-[4px]";
 	return (
 		<span
 			aria-hidden
-			className="relative inline-flex items-center justify-center text-sm leading-none"
+			className={`relative inline-flex items-center justify-center text-sm leading-none ${struck ? "line-through" : ""}`}
 			style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
 		>
 			<span className={`${motion} ${active ? hidden : shown}`}>{outline}</span>
@@ -99,11 +107,18 @@ function ScopeGlyph({ outline, filled, active }: { outline: string; filled: stri
 
 /** Shared chrome for the three scope toggles — press feedback included. */
 const SCOPE_BUTTON_CLASS =
-	"inline-flex items-center justify-center h-5 w-5 leading-none transition-[color,scale] duration-150 ease-out active:scale-[0.96]";
+	"inline-flex items-center justify-center h-5 w-5 rounded-md leading-none transition-[color,background-color,scale] duration-150 ease-out active:scale-[0.96]";
+
+/**
+ * The glyph swap alone reads as noise at 20px — the selected scope carries an
+ * accent-tinted pill, the same "this control is on" language as the rest of the app.
+ */
+const SCOPE_STATE_CLASS = (active: boolean) =>
+	active ? "bg-accent/20 text-accent" : "text-fg-muted hover:text-fg-2 hover:bg-fg/5";
 
 function ActiveTasksSidebar({
 	project,
-	tasks,
+	tasks = [],
 	allProjects,
 	activeTaskId,
 	dispatch,
@@ -126,15 +141,34 @@ function ActiveTasksSidebar({
 		const id = setInterval(() => setNow(Date.now()), 1000);
 		return () => clearInterval(id);
 	}, []);
-	const [scope, setScopeState] = useState<SidebarScope>(readScope);
+	const [scope, setScopeState] = useState<SidebarScope | null>(readScope);
 	const [globalTasks, setGlobalTasks] = useState<Task[]>([]);
 	const [globalLoading, setGlobalLoading] = useState(false);
 	const searchRef = useRef<HTMLInputElement>(null);
+	const { spaces, loading: spacesLoading } = useSpaces();
+
+	// null = the current project is in no space → the button disables and a
+	// stored "space" scope falls back to project below.
+	const siblingIds = useMemo(
+		() => (project ? spaceSiblingProjectIds(spaces, project.id) : null),
+		[spaces, project],
+	);
 
 	const setScope = useCallback((next: SidebarScope) => {
 		setScopeState(next);
 		writeScope(next);
 	}, []);
+
+	// No current project → the dashboard mount: global is the only meaningful scope.
+	// Never picked a scope → a project that lives in a space opens on its space,
+	// a standalone (Home) project on itself.
+	const effectiveScope: SidebarScope = !project
+		? "global"
+		: scope === null
+			? (siblingIds !== null ? "space" : "project")
+			: scope === "space" && siblingIds === null && !spacesLoading
+				? "project"
+				: scope;
 
 	// Ctrl/Cmd+F focuses the search input when sidebar is visible
 	useEffect(() => {
@@ -152,12 +186,11 @@ function ActiveTasksSidebar({
 		return () => window.removeEventListener("keydown", handleKeyDown);
 	}, [disableGlobalFindShortcut]);
 
-	// Always fetch global tasks (for the attention badge) and re-fetch when
-	// switching into global/attention scope. Loading spinner only shows in
-	// scoped views so project-scope mounts are silent.
+	// Always fetch global tasks and re-fetch when switching into global scope.
+	// Loading spinner only shows in scoped views so project-scope mounts are silent.
 	useEffect(() => {
 		let cancelled = false;
-		const isScoped = scope === "global" || scope === "attention";
+		const isScoped = effectiveScope !== "project";
 		if (isScoped) setGlobalLoading(true);
 		(async () => {
 			try {
@@ -179,11 +212,11 @@ function ActiveTasksSidebar({
 		return () => {
 			cancelled = true;
 		};
-	}, [scope]);
+	}, [effectiveScope]);
 
 	// Keep global tasks live across all projects.
 	useEffect(() => {
-		if (scope !== "global" && scope !== "attention") return;
+		if (effectiveScope === "project") return;
 		function onTaskUpdated(e: Event) {
 			const { task } = (e as CustomEvent).detail as { task: Task };
 			setGlobalTasks((prev) => {
@@ -207,26 +240,13 @@ function ActiveTasksSidebar({
 		}
 		window.addEventListener("rpc:taskUpdated", onTaskUpdated);
 		return () => window.removeEventListener("rpc:taskUpdated", onTaskUpdated);
-	}, [scope]);
+	}, [effectiveScope]);
 
-	const sourceTasks = (scope === "global" || scope === "attention") ? globalTasks : tasks;
-
-	// The attention scope and `is:attention` facet share the same status rule.
-	// PR Review belongs in this queue whether or not it currently has a bell.
-	const isAttention = useCallback((task: Task) => isAttentionTask(task), []);
-
-	// Count of attention tasks across all available data (global when loaded, else project).
-	const attentionCount = useMemo(() => {
-		const pool = globalTasks.length > 0 ? globalTasks : tasks;
-		return pool.filter(isAttention).length;
-	}, [globalTasks, tasks, isAttention]);
+	const sourceTasks = effectiveScope === "project" ? tasks : globalTasks;
 
 	let activeTasks = sourceTasks.filter((task) => ACTIVE_STATUSES.includes(task.status));
-	// Attention scope keeps only tasks needing the user (funnel pool + search
-	// operate on this subset). The priority-first ordering is applied by
-	// `groupTasksIntoTiers` below — same sort as every other tier.
-	if (scope === "attention") {
-		activeTasks = activeTasks.filter(isAttention);
+	if (effectiveScope === "space" && siblingIds) {
+		activeTasks = activeTasks.filter((task) => siblingIds.has(task.projectId));
 	}
 
 	const projectById = useMemo(() => {
@@ -234,13 +254,14 @@ function ActiveTasksSidebar({
 		if (allProjects) {
 			for (const p of allProjects) map.set(p.id, p);
 		}
-		map.set(project.id, project);
+		if (project) map.set(project.id, project);
 		return map;
 	}, [allProjects, project]);
 
 	// Facet resolver + funnel pool for the token-DSL filter. Labels/statuses are
 	// resolved per the task's OWN project (the pool may be cross-project in
-	// global/attention scope). The sidebar has no per-task PR number.
+	// global scope). The sidebar tracks no live PR map — the matcher falls back to
+	// the task's own sticky prNumber/prUrl, so PR search still works here.
 	const resolver: FacetResolver = useMemo(() => ({
 		agents,
 		labelsFor: (task) => {
@@ -255,8 +276,11 @@ function ActiveTasksSidebar({
 		},
 		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
 		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
-		isAttentionFor: (task) => isAttention(task),
-	}), [agents, projectById, taskPorts, isAttention, t]);
+		isAttentionFor: (task) => isAttentionTask(task),
+		// Space names come from the task's OWN project, so a cross-project pool
+		// can be filtered by space; a single-project pool yields one value.
+		spaceNamesFor: (task) => spacesOfProject(spaces, task.projectId).map((s) => s.name),
+	}), [agents, projectById, taskPorts, spaces, t]);
 
 	const priorityCandidates = useMemo<FilterFunnelOption[]>(
 		() => ALL_PRIORITIES.map((p) => ({ facet: "priority" as const, value: p, label: `${p} — ${t(PRIORITY_NAME_KEYS[p])}` })),
@@ -282,7 +306,7 @@ function ActiveTasksSidebar({
 		() => buildFilterGroups(activeTasks, resolver, {
 			priorityCandidates,
 			statusCandidates,
-			flagLabels: { attention: t("filter.flag.attention"), port: t("filter.flag.port") },
+			flagLabels: { attention: t("filter.flag.attention"), port: t("filter.flag.port"), home: t("spaces.homeGroup") },
 		}),
 		[activeTasks, resolver, priorityCandidates, statusCandidates, t],
 	);
@@ -322,13 +346,11 @@ function ActiveTasksSidebar({
 		[projectById, statusColors],
 	);
 
-	// A rendered readiness-tier block. `showHeader` is false only for the
-	// attention scope, which renders a single flat list with no header.
+	// A rendered readiness-tier block.
 	interface SidebarGroup {
 		key: string;
 		label: string;
 		color: string;
-		showHeader: boolean;
 		tasks: Task[];
 	}
 
@@ -338,25 +360,29 @@ function ActiveTasksSidebar({
 	// scope, just the current one otherwise — mirrors the kanban's column order.
 	const orderedCustomColumns = useMemo(() => {
 		const cols: { projectId: string; columnId: string }[] = [];
-		const projectsToScan = scope === "global" ? Array.from(projectById.values()) : [project];
+		const projectsToScan =
+			effectiveScope === "global"
+				? Array.from(projectById.values())
+				: effectiveScope === "space" && siblingIds
+					? Array.from(projectById.values()).filter((p) => siblingIds.has(p.id))
+					: project ? [project] : [];
 		for (const p of projectsToScan) {
 			for (const col of p.customColumns ?? []) cols.push({ projectId: p.id, columnId: col.id });
 		}
 		return cols;
-	}, [scope, projectById, project]);
+	}, [effectiveScope, siblingIds, projectById, project]);
 
-	// Readiness tiers: NEEDS YOU → custom columns → WAITING (attention scope: one
-	// flat NEEDS-YOU list). Grouping + within-tier ordering is a pure function so
-	// it is unit-tested without rendering; here we only map it to header chrome.
-	const tiers = groupTasksIntoTiers(activeTasks, { scope, orderedCustomColumns, sortOrder });
+	// Readiness tiers: NEEDS YOU → custom columns → WAITING. Grouping +
+	// within-tier ordering is a pure function so it is unit-tested without
+	// rendering; here we only map it to header chrome.
+	const tiers = groupTasksIntoTiers(activeTasks, { scope: effectiveScope, orderedCustomColumns, sortOrder });
 	const grouped: SidebarGroup[] = tiers.map((tier) => {
 		if (tier.kind === "needs-you") {
 			return {
 				key: tier.key,
-				label: scope === "attention" ? "" : t("sidebar.tier.needsYou"),
+				label: t("sidebar.tier.needsYou"),
 				// Warm attention hue (the "act now" zone), matching the bell.
 				color: statusColors["user-questions"],
-				showHeader: scope !== "attention",
 				tasks: tier.tasks,
 			};
 		}
@@ -366,7 +392,6 @@ function ActiveTasksSidebar({
 				label: t("sidebar.tier.waiting"),
 				// Neutral grey — nothing needs the user in this zone.
 				color: statusColors["review-by-ai"],
-				showHeader: true,
 				tasks: tier.tasks,
 			};
 		}
@@ -376,7 +401,6 @@ function ActiveTasksSidebar({
 			key: tier.key,
 			label: col?.name ?? "",
 			color: col?.color ?? statusColors["in-progress"],
-			showHeader: true,
 			tasks: tier.tasks,
 		};
 	});
@@ -398,8 +422,9 @@ function ActiveTasksSidebar({
 	function handleTaskClick(task: Task) {
 		if (task.shuttingDown) return;
 		preview.close();
-		const targetProjectId = task.projectId || project.id;
-		if (task.id === activeTaskId && targetProjectId === project.id) {
+		const targetProjectId = task.projectId || project?.id;
+		if (!targetProjectId) return;
+		if (task.id === activeTaskId && project && targetProjectId === project.id) {
 			navigate({ screen: "project", projectId: project.id });
 			return;
 		}
@@ -410,85 +435,127 @@ function ActiveTasksSidebar({
 		});
 	}
 
-	const projectLabels = project.labels ?? [];
+	const projectLabels = project?.labels ?? [];
 
 	return (
 		<nav className="h-full flex flex-col bg-base" aria-label={t("nav.activeTasks")}>
 			{/* Header */}
 			<div className="flex items-center justify-between gap-2 px-3 py-2.5 border-b border-edge flex-shrink-0">
-				<span className="text-xs font-semibold text-fg-2 uppercase tracking-wider truncate">
-					{t("sidebar.activeTasks")}
+				<span className="min-w-0 flex flex-col">
+					<span className="text-xs font-semibold text-fg-2 uppercase tracking-wider truncate">
+						{t("sidebar.activeTasks")}
+					</span>
+					{!project && (
+						<span className="text-fg-muted text-nano truncate">{t("spaces.acrossAllSpaces")}</span>
+					)}
 				</span>
 				<div className="flex items-center gap-2 flex-shrink-0 h-5">
-					<div role="group" className="inline-flex items-center gap-px" aria-label={t("sidebar.scopeToggleTitle")}>
+					{/* Dashboard mount: no scope switcher (global is the only scope),
+					    but the mock's All / Needs-you preset over `is:attention`. */}
+					{!project && (
+						<div role="group" className="inline-flex items-center rounded-lg bg-raised p-0.5" aria-label={t("sidebar.scopeToggleTitle")}>
+							{/* Presets toggle ONLY the `is:attention` token, so any other
+							    filter the user set (space:, label:, free text) survives. */}
+							{([
+								{ key: "all", label: t("spaces.filterAll"), wantsAttention: false },
+								{ key: "attention", label: t("spaces.filterNeedsYou"), wantsAttention: true },
+							] as const).map(({ key, label, wantsAttention }) => {
+								const attentionOn = isFacetTokenActive(searchQuery, "is", "attention");
+								return (
+									<button
+										key={key}
+										type="button"
+										onClick={() => {
+											if (attentionOn !== wantsAttention) {
+												setSearchQuery(toggleFacetToken(searchQuery, "is", "attention"));
+											}
+										}}
+										aria-pressed={attentionOn === wantsAttention}
+										className={`px-2 py-0.5 rounded-md text-nano font-medium transition-colors ${
+											attentionOn === wantsAttention ? "bg-accent/20 text-accent" : "text-fg-3 hover:text-fg-2"
+										}`}
+										data-testid={`sidebar-preset-${key}`}
+									>
+										{label}
+									</button>
+								);
+							})}
+						</div>
+					)}
+					{project && (
+					<div
+							role="group"
+							data-help-id="sidebar.scope"
+							className="inline-flex items-center gap-px rounded-lg bg-raised p-0.5"
+							aria-label={t("sidebar.scopeToggleTitle")}
+						>
 						{/* Folder \u2014 this project only */}
 						<Tooltip content={t("sidebar.scopeProject")} detail={t("ttip.sidebar.scopeProject")} placement="bottom">
 							<button
 								type="button"
 								onClick={() => setScope("project")}
-								aria-pressed={scope === "project"}
+								aria-pressed={effectiveScope === "project"}
 								aria-label={t("sidebar.scopeProject")}
-								className={`${SCOPE_BUTTON_CLASS} ${
-									scope === "project" ? "text-fg" : "text-fg-muted hover:text-fg-2"
-								}`}
+								className={`${SCOPE_BUTTON_CLASS} ${SCOPE_STATE_CLASS(effectiveScope === "project")}`}
 								data-testid="sidebar-scope-project"
 							>
 								{/* Nerd Font: nf-fa-folder_open_o (U+F115) \u2192 nf-fa-folder_open (U+F07C) */}
-								<ScopeGlyph outline={"\uF115"} filled={"\uF07C"} active={scope === "project"} />
+								<ScopeGlyph outline={"\uF115"} filled={"\uF07C"} active={effectiveScope === "project"} />
 							</button>
 						</Tooltip>
+						{/* Ring \u2014 the current project's spaces (union of sibling projects).
+						    Absent until a space exists at all: someone who never opted in
+						    must see yesterday's switcher. Disabled (not hidden) when spaces
+						    exist but this project is in none \u2014 the struck-through ring says
+						    "off" outright and the tooltip teaches where to fix it. */}
+						{spaces.length > 0 && (
+						<Tooltip
+							content={t("sidebar.scopeSpace")}
+							detail={siblingIds === null ? t("ttip.sidebar.scopeSpaceDisabled") : t("ttip.sidebar.scopeSpace")}
+							placement="bottom"
+						>
+							<button
+								type="button"
+								onClick={() => siblingIds !== null && setScope("space")}
+								aria-pressed={effectiveScope === "space"}
+								aria-disabled={siblingIds === null || undefined}
+								aria-label={t("sidebar.scopeSpace")}
+								className={`${SCOPE_BUTTON_CLASS} ${
+									siblingIds === null
+										? "text-fg-muted/50 cursor-not-allowed"
+										: SCOPE_STATE_CLASS(effectiveScope === "space")
+								}`}
+								data-testid="sidebar-scope-space"
+							>
+								{/* Nerd Font: nf-cod-circle_large_outline (U+EABC) \u2192 nf-cod-circle_large_filled (U+EBB5) */}
+								<ScopeGlyph outline={"\uEABC"} filled={"\uEBB5"} active={effectiveScope === "space"} struck={siblingIds === null} />
+							</button>
+						</Tooltip>
+						)}
 						{/* Globe \u2014 all projects */}
 						<Tooltip content={t("sidebar.scopeGlobal")} detail={t("ttip.sidebar.scopeGlobal")} placement="bottom">
 							<button
 								type="button"
 								onClick={() => setScope("global")}
-								aria-pressed={scope === "global"}
+								aria-pressed={effectiveScope === "global"}
 								aria-label={t("sidebar.scopeGlobal")}
-								className={`${SCOPE_BUTTON_CLASS} ${
-									scope === "global" ? "text-fg" : "text-fg-muted hover:text-fg-2"
-								}`}
+								className={`${SCOPE_BUTTON_CLASS} ${SCOPE_STATE_CLASS(effectiveScope === "global")}`}
 								data-testid="sidebar-scope-global"
 							>
 								{/* Nerd Font: nf-cod-globe (U+EB01) \u2014 no filled counterpart, so the
 								    active state rests on color alone. */}
-								<ScopeGlyph outline={"\uEB01"} filled={"\uEB01"} active={scope === "global"} />
-							</button>
-						</Tooltip>
-						{/* Bell \u2014 attention mode: cross-project, filtered to tasks needing user input */}
-						<Tooltip content={t("sidebar.scopeAttention")} detail={t("ttip.sidebar.scopeAttention")} placement="bottom">
-							<button
-								type="button"
-								onClick={() => setScope("attention")}
-								aria-pressed={scope === "attention"}
-								aria-label={t("sidebar.scopeAttention")}
-								className={`relative ${SCOPE_BUTTON_CLASS} ${
-									scope === "attention"
-										? "text-awake"
-										: attentionCount > 0
-											? "text-awake/70 hover:text-awake"
-											: "text-fg-muted hover:text-fg-2"
-								}`}
-								data-testid="sidebar-scope-attention"
-							>
-								{/* Nerd Font: nf-fa-bell_o (U+F0A2) \u2192 nf-fa-bell (U+F0F3) */}
-								<span className={scope !== "attention" && attentionCount > 0 ? "animate-pulse motion-reduce:animate-none" : ""}>
-									<ScopeGlyph outline={"\uF0A2"} filled={"\uF0F3"} active={scope === "attention"} />
-								</span>
-								{attentionCount > 0 && scope !== "attention" && (
-									<span className="absolute -top-1 -right-1 min-w-[0.875rem] h-3.5 flex items-center justify-center px-0.5 rounded-full bg-awake text-nano font-bold text-fg leading-none pointer-events-none">
-										{attentionCount > 9 ? "9+" : attentionCount}
-									</span>
-								)}
+								<ScopeGlyph outline={"\uEB01"} filled={"\uEB01"} active={effectiveScope === "global"} />
 							</button>
 						</Tooltip>
 					</div>
+					)}
 					{activeTaskId && (
 						<Tooltip content={t("sidebar.hide")} detail={t("ttip.sidebar.hide")} placement="bottom">
 							<button
 								type="button"
-								onClick={() =>
-									navigate({ screen: "task", projectId: project.id, taskId: activeTaskId })
-								}
+								onClick={() => {
+									if (project) navigate({ screen: "task", projectId: project.id, taskId: activeTaskId });
+								}}
 								className="task-anim inline-flex items-center justify-center h-5 w-5 rounded text-fg-muted hover:text-accent hover:bg-fg/5 transition-[color,background-color,scale] duration-150 ease-out active:scale-[0.96]"
 								aria-label={t("sidebar.hide")}
 								data-testid="sidebar-hide"
@@ -546,14 +613,14 @@ function ActiveTasksSidebar({
 
 			{/* Feature-discovery tip — terminal-context tips lead here (see useTipRotation) */}
 			{currentTip && tipState && (
-				<div className="px-3 py-2 border-b border-edge flex-shrink-0">
+				<div className="px-3 py-2 border-b border-edge flex-shrink-0" data-help-id="tips.card">
 					<TipCard tip={currentTip} tipState={tipState} onChanged={applyTipState} compact />
 				</div>
 			)}
 
 			{/* Task list */}
 			<div className="flex-1 overflow-y-auto overflow-x-hidden" data-help-id="sidebar.active-tasks">
-				{(scope === "global" || scope === "attention") && globalLoading && grouped.length === 0 ? (
+				{effectiveScope !== "project" && globalLoading && grouped.length === 0 ? (
 					<div className="px-3 py-6 text-center text-xs text-fg-muted">
 						{t("sidebar.globalLoading")}
 					</div>
@@ -561,8 +628,6 @@ function ActiveTasksSidebar({
 					<div className="px-3 py-6 text-center text-xs text-fg-muted">
 						{searchQuery.trim() ? (
 							t("sidebar.noSearchResults")
-						) : scope === "attention" ? (
-							t("sidebar.noAttentionTasks")
 						) : (
 							<>
 								<p>{t("sidebar.noActiveTasks")}</p>
@@ -571,18 +636,17 @@ function ActiveTasksSidebar({
 						)}
 					</div>
 				) : (
-					grouped.map(({ key: groupKey, label: groupLabel, color: groupColor, showHeader: groupShowHeader, tasks: groupTasks }, groupIdx) => (
+					grouped.map(({ key: groupKey, label: groupLabel, color: groupColor, tasks: groupTasks }, groupIdx) => (
 						<div key={groupKey}>
 							{/* Solid separator between readiness-tier blocks */}
-							{groupIdx > 0 && groupShowHeader && (
+							{groupIdx > 0 && (
 								<div className="mx-3 border-t border-edge" />
 							)}
 
-							{/* Tier header with count (hidden in attention mode — flat list).
-							    No spinner: the WAITING tier merges working + AI-review + PRs, so
-							    a tier-wide spinner would mislead; the per-card rail busy-flow
-							    animation remains the "agent working" cue. */}
-							{groupShowHeader && <div className="relative px-3 py-1.5 flex items-center gap-2 sticky top-0 bg-base/95 backdrop-blur-sm z-10">
+							{/* Tier header with count. No spinner: the WAITING tier merges
+							    working + AI-review + PRs, so a tier-wide spinner would mislead;
+							    the per-card rail busy-flow animation remains the cue. */}
+							<div className="relative px-3 py-1.5 flex items-center gap-2 sticky top-0 bg-base/95 backdrop-blur-sm z-10">
 								{/* Faint zone wash + left bar so the tier reads as one color zone */}
 								<span
 									className="absolute inset-0 pointer-events-none"
@@ -602,21 +666,24 @@ function ActiveTasksSidebar({
 								<span className="text-dense text-fg-muted" data-testid={`sidebar-tier-count-${groupKey}`}>
 									{groupTasks.length}
 								</span>
-							</div>}
+							</div>
 
 							{/* Tasks in this status */}
 							{groupTasks.map((task, idx) => {
-								const isActive = task.id === activeTaskId && task.projectId === project.id;
+								const isActive = task.id === activeTaskId && task.projectId === project?.id;
 								const bellCount = bellCounts.get(task.id) ?? 0;
 								const { agent, configLabel } = getTaskAgentMeta(task, agents);
 								const taskLabelIds = task.labelIds ?? [];
 								const taskProject = projectById.get(task.projectId) ?? project;
-								const labelsPool = (taskProject.labels ?? projectLabels) as typeof projectLabels;
+								// Dashboard mount: a task whose project is not in `allProjects`
+								// cannot be rendered (the row needs its project for labels).
+								if (!taskProject) return null;
+								const labelsPool = (taskProject?.labels ?? projectLabels) as typeof projectLabels;
 								const assignedLabels = taskLabelIds
 									.map((id) => labelsPool.find((l) => l.id === id))
 									.filter(Boolean) as typeof projectLabels;
 								const groupMembers = task.groupId ? siblingMap.get(task.groupId) ?? [task] : [task];
-								const showProjectBadge = (scope === "global" || scope === "attention") && task.projectId !== project.id;
+								const showProjectBadge = effectiveScope !== "project" && task.projectId !== project?.id;
 
 								return (
 									<div key={task.id}>
@@ -634,7 +701,7 @@ function ActiveTasksSidebar({
 											configLabel={configLabel}
 											assignedLabels={assignedLabels}
 											groupMembers={groupMembers}
-											projectBadgeName={showProjectBadge ? taskProject.name ?? t("sidebar.unknownProject") : undefined}
+											projectBadgeName={showProjectBadge ? taskProject?.name ?? t("sidebar.unknownProject") : undefined}
 											ports={taskPorts.get(task.id)}
 											statusColors={statusColors}
 											color={taskColor(task)}
@@ -663,7 +730,7 @@ function ActiveTasksSidebar({
 					<TerminalPreviewPopover
 						{...preview.state}
 						taskId={hoveredTask?.id ?? null}
-						projectId={project.id}
+						projectId={project?.id ?? hoveredTask?.projectId ?? ""}
 						overview={hoveredTask?.overview ?? null}
 						userOverview={hoveredTask?.userOverview ?? null}
 						description={hoveredTask?.description ?? null}

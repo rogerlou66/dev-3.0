@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-	isCloudflaredAvailable: vi.fn(),
+	isTunnelBinaryAvailable: vi.fn(),
 	getTunnelState: vi.fn(),
 	startTunnel: vi.fn(),
 	stopTunnel: vi.fn(),
@@ -10,11 +10,17 @@ const mocks = vi.hoisted(() => ({
 	getLocalInterfaces: vi.fn(),
 	resolveAccessHost: vi.fn(),
 	getServerPort: vi.fn(),
+	resolveRemoteTunnelProvider: vi.fn(),
+}));
+
+vi.mock("../../tunnel-provider", () => ({
+	resolveRemoteTunnelProvider: mocks.resolveRemoteTunnelProvider,
 }));
 
 vi.mock("../../cloudflare-tunnel", () => ({
-	isCloudflaredAvailable: mocks.isCloudflaredAvailable,
+	isTunnelBinaryAvailable: mocks.isTunnelBinaryAvailable,
 	getTunnelState: mocks.getTunnelState,
+	getMainTunnelFailureReason: () => null,
 	startTunnel: mocks.startTunnel,
 	stopTunnel: mocks.stopTunnel,
 }));
@@ -33,7 +39,7 @@ describe("remote access handler", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.clearAllMocks();
-		mocks.isCloudflaredAvailable.mockReturnValue(true);
+		mocks.isTunnelBinaryAvailable.mockReturnValue(true);
 		mocks.getTunnelState.mockReturnValue("idle");
 		mocks.getServerPort.mockReturnValue(12478);
 		mocks.startTunnel.mockResolvedValue("https://public.trycloudflare.com");
@@ -41,6 +47,7 @@ describe("remote access handler", () => {
 		mocks.getAccessUrl.mockResolvedValue("https://public.trycloudflare.com/?token=test");
 		mocks.getLocalInterfaces.mockReturnValue([]);
 		mocks.resolveAccessHost.mockReturnValue("127.0.0.1");
+		mocks.resolveRemoteTunnelProvider.mockReturnValue({ kind: "cloudflare", command: null, urlRegex: null });
 	});
 
 	afterEach(() => {
@@ -73,5 +80,18 @@ describe("remote access handler", () => {
 		expect(mocks.startTunnel).not.toHaveBeenCalled();
 		expect(result.accessUrl).toBe("http://192.168.0.1:12478/?token=test");
 		expect(mocks.generateQrDataUrl).toHaveBeenCalledWith("192.168.0.1");
+	});
+
+	it("reports the configured tunnel provider so the modal can adapt its copy", async () => {
+		mocks.resolveRemoteTunnelProvider.mockReturnValue({
+			kind: "custom",
+			command: "my-tunnel {port}",
+			urlRegex: /https:\/\/\S+/,
+		});
+
+		const result = await remoteAccessHandlers.getRemoteAccessQR({ tunnel: false });
+
+		expect(result.tunnelProvider).toBe("custom");
+		expect(result.tunnelBinaryInstalled).toBe(true);
 	});
 });

@@ -1,9 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../../i18n";
 import ProjectQuickSwitchModal from "../ProjectQuickSwitchModal";
 import type { Project } from "../../../shared/types";
+
+// ProjectQuickSwitchModal now reads spaces (space names join the search
+// haystack), so the transport needs stubbing for every case in this file.
+vi.mock("../../rpc", () => ({
+	api: {
+		request: {
+			getSpaces: vi.fn(() =>
+				Promise.resolve({
+					version: 1,
+					spaces: [
+						{ id: "sp_a", name: "Client X", parentId: null, projectIds: ["p1"], createdAt: 1 },
+					],
+					order: ["sp_a"],
+				}),
+			),
+		},
+	},
+}));
 
 function project(id: string, name: string): Project {
 	return {
@@ -138,5 +156,24 @@ describe("ProjectQuickSwitchModal", () => {
 		expect(options[0].textContent).toContain("⌘0");
 		// Ordinary project keeps its board-index badge.
 		expect(options[1].textContent).toContain("⌘1");
+	});
+});
+
+describe("ProjectQuickSwitchModal — space name matching", () => {
+	it("lists a project when the query matches one of its spaces, keeping the label", async () => {
+		const user = userEvent.setup();
+		renderModal();
+		const rowTexts = () => screen.getAllByRole("option").map((el) => el.textContent ?? "");
+		await waitFor(() => expect(rowTexts()).toHaveLength(3));
+
+		await user.type(screen.getByRole("textbox"), "client");
+
+		await waitFor(() => {
+			const rows = rowTexts();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toContain("users-service");
+			// The space name widens the haystack only — it never leaks into the row.
+			expect(rows[0]).not.toContain("Client X");
+		});
 	});
 });

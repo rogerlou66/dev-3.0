@@ -9,6 +9,9 @@ interface ProjectActionButtonsProps {
 	project: Project;
 	navigate: (route: Route) => void;
 	onRemove?: (projectId: string) => void | Promise<void>;
+	/** Opens the space-membership picker anchored to the button. Omitted where
+	 *  spaces are not part of the surface (e.g. zero spaces exist). */
+	onOpenSpaces?: (project: Project, anchor: HTMLElement) => void;
 	className?: string;
 }
 
@@ -16,6 +19,7 @@ function ProjectActionButtons({
 	project,
 	navigate,
 	onRemove,
+	onOpenSpaces,
 	className = "",
 }: ProjectActionButtonsProps) {
 	const t = useT();
@@ -40,6 +44,28 @@ function ProjectActionButtons({
 
 	return (
 		<div className={`flex items-center gap-0.5 ${className}`.trim()}>
+			{onOpenSpaces && !isVirtual && (
+				<button
+					type="button"
+					onClick={(event) => {
+						stopEvent(event);
+						onOpenSpaces(project, event.currentTarget);
+					}}
+					className={neutralButton}
+					title={t("spaces.rowAction")}
+					aria-label={t("spaces.rowAction")}
+					data-testid={`project-spaces-action-${project.id}`}
+				>
+					{/* Nerd Font: nf-md-shape_outline (U+F0E76) — the grouping glyph */}
+					<span
+						aria-hidden="true"
+						className="text-base leading-none"
+						style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
+					>
+						{"\u{F0E76}"}
+					</span>
+				</button>
+			)}
 			<button
 				type="button"
 				onClick={(event) => {

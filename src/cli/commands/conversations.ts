@@ -3,6 +3,16 @@ import type { Task, TaskHistoryEntry, TaskStatus } from "../../shared/types";
 import { ALL_STATUSES } from "../../shared/types";
 import { projectSlug } from "../../shared/conversation-search-core";
 import { searchConversations, type EngineTask } from "../../bun/conversation-search";
+import {
+	conversationDumpDir,
+	conversationDumpName,
+	parseWorktreeConversations,
+	taskContainerDir,
+	writeConversationDump,
+} from "../../bun/conversation-parse";
+import { renderHandoff } from "../../shared/conversation-render";
+import { DEFAULT_DUMP_BUDGET, type DumpBudget } from "../../shared/conversation-dump";
+import { atomicWriteFile } from "../../bun/atomic-write";
 import type { ParsedArgs } from "../args";
 import { detectFromWorktreePath, readProjectDirect, resolveProjectId, type CliContext } from "../context";
 import { exitError, exitUsage } from "../output";
@@ -137,6 +147,125 @@ async function searchCmd(args: ParsedArgs, context: CliContext | null): Promise<
 	});
 }
 
+/** Parse a numeric flag, rejecting garbage rather than silently defaulting. */
+function numberFlag(raw: string | undefined, fallback: number, label: string): number {
+	if (raw === undefined) return fallback;
+	const value = Number.parseInt(raw, 10);
+	if (Number.isNaN(value) || value < 0) exitUsage(`${label} must be a non-negative number of characters.`);
+	return value;
+}
+
+/**
+ * Parse this worktree's native agent transcripts into dev3's own conversation
+ * model and write them out as JSON. The native file stays the source of truth —
+ * a dump is a re-derivable cache, stamped with the parser version.
+ */
+async function dumpCmd(args: ParsedArgs, _context: CliContext | null): Promise<void> {
+	rejectUnknownFlags(args, ["raw", "stdout", "latest", "out", "verbatim", "compact", "payload", "action"]);
+
+	const info = detectFromWorktreePath(process.cwd());
+	if (!info) {
+		exitError("Run `dev3 conversations dump` from inside a task worktree.");
+	}
+
+	const { home } = resolveHomes();
+	// Build the worktree path from the detected parts, not from cwd: transcript
+	// stores are keyed on the worktree root, so running from a subdirectory would
+	// otherwise find nothing.
+	const taskContainer = taskContainerDir(info.realDev3Home, info.projectSlug, info.taskShortId);
+	const worktreePath = `${taskContainer}/worktree`;
+	const includeRaw = args.flags.raw === "true";
+	const parsed = parseWorktreeConversations(worktreePath, { home, includeRaw });
+
+	if (parsed.length === 0) {
+		process.stdout.write("No parseable transcripts found for this worktree.\n");
+		return;
+	}
+
+	const selected = args.flags.latest === "true" ? parsed.slice(0, 1) : parsed;
+
+	if (args.flags.stdout === "true") {
+		const payload = selected.length === 1 ? selected[0].conversation : selected.map((p) => p.conversation);
+		process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+		return;
+	}
+
+	const dir = args.flags.out || conversationDumpDir(taskContainer);
+	const budget: DumpBudget = {
+		action: numberFlag(args.flags.action, DEFAULT_DUMP_BUDGET.action, "--action"),
+		payload: numberFlag(args.flags.payload, DEFAULT_DUMP_BUDGET.payload, "--payload"),
+	};
+	const writeOptions = {
+		budget,
+		verbatim: args.flags.verbatim === "true",
+		compact: args.flags.compact === "true",
+	};
+
+	process.stdout.write(`Parsed ${selected.length} conversation(s) → ${dir}\n\n`);
+	for (const { conversation } of selected) {
+		const path = await writeConversationDump(dir, conversationDumpName(conversation), conversation, writeOptions);
+		const s = conversation.stats;
+		process.stdout.write(`${conversation.source}  ${conversation.sessionId ?? "(no session id)"}\n`);
+		process.stdout.write(
+			`    ${s.turns} turns · ${s.events} conversation events (+${s.sessionEvents} session) · ${s.messages} messages · ${s.toolCalls} tool calls · ${s.thinkingBlocks} thinking · ${s.usage.output} out-tokens\n`,
+		);
+		process.stdout.write(`    fidelity: ${conversation.fidelity.level}\n`);
+		for (const warning of conversation.fidelity.warnings) {
+			process.stdout.write(`    ⚠ ${warning}\n`);
+		}
+		process.stdout.write(`    → ${path}\n\n`);
+	}
+}
+
+/**
+ * Retell this task's conversation as one message another agent can be handed.
+ * Prints to stdout so it can be piped straight into `dev3 message`.
+ */
+async function handoffCmd(args: ParsedArgs): Promise<void> {
+	rejectUnknownFlags(args, ["for", "thinking", "tool-output", "turns", "out"]);
+
+	const info = detectFromWorktreePath(process.cwd());
+	if (!info) {
+		exitError("Run `dev3 conversations handoff` from inside a task worktree.");
+	}
+
+	const target = args.flags.for ?? "markdown";
+	if (target !== "markdown" && target !== "claude" && target !== "codex") {
+		exitUsage("--for must be one of: markdown, claude, codex");
+	}
+
+	const { home } = resolveHomes();
+	const taskContainer = taskContainerDir(info.realDev3Home, info.projectSlug, info.taskShortId);
+	const parsed = parseWorktreeConversations(`${taskContainer}/worktree`, { home });
+	if (parsed.length === 0) {
+		exitError("No parseable transcripts found for this worktree.");
+	}
+
+	const toolOutput = args.flags["tool-output"] ? Number.parseInt(args.flags["tool-output"], 10) : undefined;
+	if (toolOutput !== undefined && Number.isNaN(toolOutput)) {
+		exitUsage("--tool-output must be a number of characters (0 drops tool output).");
+	}
+	const turns = args.flags.turns ? Number.parseInt(args.flags.turns, 10) : undefined;
+	if (turns !== undefined && Number.isNaN(turns)) {
+		exitUsage("--turns must be a number of most-recent turns to keep.");
+	}
+
+	// Newest transcript first — the conversation being handed over is the live one.
+	const text = renderHandoff(parsed[0].conversation, {
+		target,
+		includeThinking: args.flags.thinking === "true",
+		toolOutputLimit: toolOutput,
+		maxTurns: turns,
+	});
+
+	if (args.flags.out) {
+		await atomicWriteFile(args.flags.out, text);
+		process.stdout.write(`Wrote ${text.length} characters → ${args.flags.out}\n`);
+		return;
+	}
+	process.stdout.write(text);
+}
+
 export async function handleConversations(
 	subcommand: string | undefined,
 	args: ParsedArgs,
@@ -145,10 +274,14 @@ export async function handleConversations(
 	switch (subcommand) {
 		case "search":
 			return searchCmd(args, context);
+		case "dump":
+			return dumpCmd(args, context);
+		case "handoff":
+			return handoffCmd(args);
 		default:
 			exitUsage(
 				`Unknown subcommand: conversations ${subcommand || "(none)"}` +
-				'\nAvailable: conversations search "<query>"',
+				'\nAvailable: conversations search "<query>", conversations dump, conversations handoff',
 			);
 	}
 }

@@ -21,6 +21,7 @@ import type { RemoteNetInterface } from "../shared/types";
 import { NATIVE_STREAM_SINCE_PARAM, parseSinceParam } from "../shared/native-terminal-stream";
 import { PATHS } from "./electrobun-platform";
 import { createLogger } from "./logger";
+import { isCustomTunnelProviderActive } from "./tunnel-provider";
 import { initSecret, createQrToken, createSessionToken, exchangeQrForSession, refreshSession, revokeSessionToken, verifySessionToken, SESSION_TOKEN_TTL_S } from "./jwt";
 import { getTunnelUrl, getTunnelState, tunnelManager } from "./cloudflare-tunnel";
 import { loadSettingsSync } from "./settings";
@@ -84,11 +85,28 @@ export function checkOrigin(req: Request, requireOrigin = false): boolean {
 	const origin = req.headers.get("origin");
 	if (!origin) return !requireOrigin;
 	const host = req.headers.get("host");
-	if (!host) return false;
+	// A Host-rewriting tunnel proxy (ngrok-style BYO tunnels) sends
+	// `Host: localhost:<port>` and carries the public hostname in
+	// X-Forwarded-Host (first entry if proxies chain). That header is
+	// client-controlled on a direct connection — an attacker setting both it
+	// and Origin would make the check compare a value against itself — so it
+	// is honored ONLY while a custom provider is configured; the default
+	// posture stays Origin === Host (#1498 §3).
+	const forwardedHost = isCustomTunnelProviderActive()
+		? req.headers.get("x-forwarded-host")?.split(",")[0]?.trim() || null
+		: null;
+	if (!host && !forwardedHost) return false;
 	try {
-		const expectedProtocol = requestIsSecure(req) ? "https:" : "http:";
 		const parsed = new URL(origin);
-		return parsed.protocol === expectedProtocol && parsed.host === host;
+		const matchedHost = parsed.host === host || parsed.host === forwardedHost;
+		if (!matchedHost) return false;
+		const forwardedProtocol = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+		if (forwardedProtocol) return parsed.protocol === `${forwardedProtocol}:`;
+		// Public tunnels terminate TLS before forwarding plain HTTP to dev3. A
+		// host without a port is the public side; local/LAN hosts keep the request
+		// URL's scheme check so https://127.0.0.1 cannot masquerade as same-origin.
+		if (parsed.protocol === "https:" && (parsed.host === forwardedHost || !host?.includes(":"))) return true;
+		return parsed.protocol === new URL(req.url).protocol;
 	} catch {
 		return false;
 	}
@@ -500,8 +518,13 @@ async function handleRpcMessage(ws: any, raw: string | ArrayBuffer): Promise<voi
 			return;
 		}
 		try {
+			// Both stamps are on this machine's clock, so the span survives any skew
+			// between the browser and the host. It is what lets the connection-quality
+			// readout say whether a slow round trip was the link or us.
+			const startedAt = performance.now();
 			const result = await requestHandler(packet.method, packet.params);
-			ws.send(JSON.stringify({ type: "response", id: packet.id, success: true, payload: result }));
+			const serverMs = Math.round((performance.now() - startedAt) * 10) / 10;
+			ws.send(JSON.stringify({ type: "response", id: packet.id, success: true, payload: result, serverMs }));
 		} catch (err) {
 			ws.send(JSON.stringify({
 				type: "response", id: packet.id, success: false,
@@ -854,12 +877,19 @@ export function getConnectedClientCount(): number {
 }
 
 /**
- * Whether the app is currently reachable / being used remotely: either the
- * Cloudflare tunnel is connected, or at least one browser client is attached.
- * While true, sleep prevention is forced on regardless of the user setting.
+ * Whether the app is currently reachable / being used remotely: the Cloudflare
+ * tunnel is up (or coming up), or at least one browser client is attached.
+ * While true, sleep prevention is forced on regardless of the user setting, and
+ * the update toast refuses to run its auto-restart countdown.
+ *
+ * The LAN server itself is always listening, so "the server exists" can never be
+ * the signal — it would be permanently true. `starting` counts: the user has just
+ * asked for the tunnel deliberately, and that is the state the header already
+ * paints as remote-on.
  */
 export function isRemoteAccessActive(): boolean {
-	return getTunnelState() === "connected" || rpcClients.size > 0;
+	const tunnel = getTunnelState();
+	return tunnel === "connected" || tunnel === "starting" || rpcClients.size > 0;
 }
 
 /**

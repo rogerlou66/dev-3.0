@@ -2,12 +2,12 @@ import { useState, useRef, useCallback, useEffect, useLayoutEffect, type Dispatc
 import { toast } from "../toast";
 import { confirm } from "../confirm";
 import { createPortal } from "react-dom";
-import type { Task, Project, TaskStatus, PortInfo, ResourceUsage, Label, TaskPRBadgeInfo } from "../../shared/types";
+import type { Task, Project, TaskStatus, PortInfo, ResourceUsage, TaskPRBadgeInfo } from "../../shared/types";
 import LabelChip from "./LabelChip";
 import PriorityBadge from "./PriorityBadge";
 import OpenInMenu from "./OpenInMenu";
 import { formatDate } from "./NoteItem";
-import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, resolveTaskCompareBaseBranch } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, isCoordinatorTask, resolveTaskCompareBaseBranch, taskCompletesManually } from "../../shared/types";
 import InlineRename from "./InlineRename";
 import { getTaskOpenMode, taskClosedHomeRoute, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
@@ -51,6 +51,7 @@ import TaskNotes from "./task-info-panel/TaskNotes";
 import TaskNotesOverlay from "./TaskNotesOverlay";
 import TaskOpenIn from "./task-info-panel/TaskOpenIn";
 import TaskPaneControls from "./task-info-panel/TaskPaneControls";
+import TerminalShortcutsButton from "./task-info-panel/TerminalShortcutsButton";
 import { useTaskAllocatedPorts } from "./task-info-panel/useTaskAllocatedPorts";
 import type { TaskInlineDiffRequest } from "./task-inline-diff";
 import { isTestFile } from "../../shared/test-files";
@@ -86,21 +87,12 @@ const DEFAULT_HEIGHT = 200;
 const MIN_HEIGHT = 80;
 const MAX_RATIO = 0.33;
 
-// Context bar budget: keep the label strip from pushing status/diff off the bar.
-// Extra labels collapse into a "+k" chip; the full list still shows in the
-// expanded metadata grid below.
-const MAX_INLINE_LABELS = 4;
 
 // The 2×2 bar grid is sized by the panel's own width, not the viewport: in split
 // view the board eats most of a 1100px window, so the bars go tight while
-// `useCompact` (1600) still reports "roomy". Below this the label strip folds to
-// its "+k" chip and the branch name clamps harder, keeping both rows on one line.
+// `useCompact` (1600) still reports "roomy". Below this the branch name clamps
+// harder, keeping both rows on one line.
 const TIGHT_PANEL_WIDTH = 1280;
-
-// Below this the Context bar can only keep its identity and primary actions: the
-// label strip and the include-tests toggle drop out (both still readable in the
-// expanded metadata grid / diff viewer) rather than eat the status label.
-const VERY_TIGHT_PANEL_WIDTH = 1000;
 
 // Uniform full-width row used by the narrow-viewport (mobile) actions sheet.
 // The mobile sheet is a curated read/trigger surface — a clean list of rows, not
@@ -181,7 +173,6 @@ function TaskInfoPanel({
 	const panelRef = useRef<HTMLDivElement>(null);
 	const panelWidth = useContainerWidth(panelRef);
 	const tight = panelWidth > 0 && panelWidth < TIGHT_PANEL_WIDTH;
-	const veryTight = panelWidth > 0 && panelWidth < VERY_TIGHT_PANEL_WIDTH;
 	const dragging = useRef(false);
 	const statusTriggerRef = useRef<HTMLButtonElement>(null);
 	const statusMenuRef = useRef<HTMLDivElement>(null);
@@ -232,6 +223,21 @@ function TaskInfoPanel({
 			</button>
 		</Tooltip>
 	) : null;
+	// Lives on the ops row (next to the ports/artifacts chips), immediately left of
+	// the panel collapse chevron — it is a view control, not a session action.
+	const terminalFullscreenButton = (
+		<Tooltip content={terminalFullscreenLabel} detail={terminalFullscreenTooltip}>
+			<button
+				onClick={toggleTerminalFullscreen}
+				className="task-anim flex-shrink-0 p-1 rounded hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
+				aria-label={terminalFullscreenLabel}
+			>
+				{terminalFullscreenActive
+					? <FullscreenExitIcon className="w-3.5 h-3.5" />
+					: <FullscreenEnterIcon className="w-3.5 h-3.5" />}
+			</button>
+		</Tooltip>
+	);
 	const allocatedPorts = useTaskAllocatedPorts(task);
 	const isTaskActive = ACTIVE_STATUSES.includes(task.status);
 	// Narrow viewport renders no TaskGitActions (the desktop git bar), which is
@@ -259,10 +265,6 @@ function TaskInfoPanel({
 			navigate={navigate}
 		/>
 	);
-
-	useEffect(() => {
-		setMetadataBranchState(null);
-	}, [task.id]);
 
 	// Crossing the narrow breakpoint must not strand an open sheet/menu — the
 	// status menu renders as a sheet on narrow and an anchored popover on desktop.
@@ -432,6 +434,7 @@ function TaskInfoPanel({
 
 	async function handleToggleManualCompletion(event: ReactMouseEvent<HTMLButtonElement>) {
 		event.stopPropagation();
+		if (isCoordinatorTask(task)) return;
 		try {
 			const updated = await api.request.setTaskManualCompletion({
 				taskId: task.id,
@@ -511,10 +514,6 @@ function TaskInfoPanel({
 	const activeCustomColumn = task.customColumnId
 		? (project.customColumns ?? []).find((column) => column.id === task.customColumnId)
 		: null;
-	const assignedLabels = (task.labelIds ?? [])
-		.map((id) => (project.labels ?? []).find((item) => item.id === id))
-		.filter(Boolean) as Label[];
-
 	function showDiffFilesPopover() {
 		// Hover pattern — dead on touch, and a tap fires mouseenter with no
 		// mouseleave, so on narrow the popover would stick over the freshly
@@ -562,8 +561,25 @@ function TaskInfoPanel({
 		onOpenInlineDiff({
 			mode: "branch",
 			compareRef: branchMeta?.compareRef,
-			compareLabel: branchMeta?.compareLabel ?? `origin/${resolveTaskCompareBaseBranch(task, project)}`,
+			compareLabel: branchMeta?.compareLabel ?? project.defaultCompareRef ?? resolveTaskCompareBaseBranch(task, project),
 			focusFile,
+		});
+	}
+
+	// The bar's compact diff button already knows which side carries the changes,
+	// so it pins the mode: the viewer's remembered preference would otherwise open
+	// the empty one and read as "the button is broken".
+	function openDiffWhereTheChangesAre(committed: boolean) {
+		if (!onOpenInlineDiff) return;
+		if (!committed) {
+			onOpenInlineDiff({ mode: "uncommitted", pinMode: true });
+			return;
+		}
+		onOpenInlineDiff({
+			mode: "branch",
+			pinMode: true,
+			compareRef: branchMeta?.compareRef,
+			compareLabel: branchMeta?.compareLabel ?? project.defaultCompareRef ?? resolveTaskCompareBaseBranch(task, project),
 		});
 	}
 
@@ -571,7 +587,7 @@ function TaskInfoPanel({
 		? () => onOpenInlineDiff({
 			mode: "branch",
 			compareRef: branchMeta?.compareRef,
-			compareLabel: branchMeta?.compareLabel ?? `origin/${resolveTaskCompareBaseBranch(task, project)}`,
+			compareLabel: branchMeta?.compareLabel ?? project.defaultCompareRef ?? resolveTaskCompareBaseBranch(task, project),
 			focusFirstUnresolvedThread: true,
 		})
 		: undefined;
@@ -584,14 +600,19 @@ function TaskInfoPanel({
 	}
 
 	// On narrow the panel-level hook is the status source; on desktop it is the
-	// TaskGitActions render callback (`metadataBranchState`).
+	// TaskGitActions render callback (`metadataBranchState`). The lifted state
+	// outlives a task switch, so it counts only while it still describes the task
+	// on screen — the child re-reports the new one (from cache, or once fetched).
 	const branchMeta: TaskBranchStatusMeta | null = narrow
 		? {
+			taskId: task.id,
 			branchStatus: narrowGit.branchStatus,
 			compareRef: narrowGit.compareRef || undefined,
 			compareLabel: narrowGit.displayRef,
 		}
-		: metadataBranchState;
+		: metadataBranchState?.taskId === task.id
+			? metadataBranchState
+			: null;
 	const metadataBranchStatus = branchMeta?.branchStatus ?? null;
 	const metadataPrInfo: TaskPRBadgeInfo | null = branchMeta?.prStatus
 		?? (metadataBranchStatus?.prNumber != null
@@ -606,27 +627,36 @@ function TaskInfoPanel({
 				}
 				: null);
 	const allDiffFileStats = metadataBranchStatus?.diffFileStats ?? [];
+	// Per-file stats are what the filter subtracts from. Without them there is
+	// nothing to subtract, so the raw totals stand instead of collapsing to zero.
+	const showRawDiffTotals = includeTests || allDiffFileStats.length === 0;
 	const visibleDiffFileStats = includeTests
 		? allDiffFileStats
 		: allDiffFileStats.filter((entry) => !isTestFile(entry.path));
 	const excludedTestCount = allDiffFileStats.length - visibleDiffFileStats.length;
-	const visibleDiffFiles = includeTests
+	const visibleDiffFiles = showRawDiffTotals
 		? (metadataBranchStatus?.diffFiles ?? 0)
 		: visibleDiffFileStats.length;
-	const visibleDiffInsertions = includeTests
+	const visibleDiffInsertions = showRawDiffTotals
 		? (metadataBranchStatus?.diffInsertions ?? 0)
 		: visibleDiffFileStats.reduce((sum, e) => sum + e.insertions, 0);
-	const visibleDiffDeletions = includeTests
+	const visibleDiffDeletions = showRawDiffTotals
 		? (metadataBranchStatus?.diffDeletions ?? 0)
 		: visibleDiffFileStats.reduce((sum, e) => sum + e.deletions, 0);
 	const diffBadgeTitle = !includeTests && excludedTestCount > 0
 		? t.plural("infoPanel.diffTestsHidden", excludedTestCount)
 		: t("infoPanel.showDiff");
+	// The tests filter is a segment of the diff badge, not a chip of its own: it
+	// only ever modifies these very numbers, and as a neighbour it read as a
+	// second, unrelated action. Same segmented idiom as the status control —
+	// the border owns the group, a hairline splits the two click targets.
+	const showTestsSegment = project.kind !== "virtual" && !narrow && metadataBranchStatus != null && metadataBranchStatus.diffFiles > 0;
 	const diffSummaryBadge = project.kind !== "virtual" && metadataBranchStatus && metadataBranchStatus.diffFiles > 0 ? (
+		<div className="inline-flex items-center rounded-lg bg-elevated border border-edge hover:border-edge-active transition-colors flex-shrink-0">
 		<button
 			type="button"
 			ref={diffFilesTriggerRef}
-			className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-elevated border border-edge text-micro font-mono text-fg-2 flex-shrink-0 cursor-pointer transition-colors hover:bg-elevated-hover"
+			className={`inline-flex items-center gap-1.5 px-2 py-1 text-micro font-mono text-fg-2 cursor-pointer transition-colors hover:bg-elevated-hover ${showTestsSegment ? "rounded-l-lg" : "rounded-lg"}`}
 			onClick={() => openBranchDiff()}
 			onMouseEnter={showDiffFilesPopover}
 			onMouseLeave={hideDiffFilesPopover}
@@ -637,35 +667,71 @@ function TaskInfoPanel({
 			<span>{visibleDiffFiles} {visibleDiffFiles === 1 ? "file" : "files"}</span>
 			<span className="text-success">+{visibleDiffInsertions}</span>
 			<span className="text-danger">−{visibleDiffDeletions}</span>
-			{!includeTests && excludedTestCount > 0 && (
+		</button>
+		{showTestsSegment && (
+			<>
+				<span className="h-4 w-px flex-shrink-0 bg-edge" aria-hidden="true" />
+				<Tooltip content={t("infoPanel.diffIncludeTestsTooltip")} detail={t("ttip.infoPanel.includeTests")}>
+					<button
+						type="button"
+						data-testid="diff-include-tests-toggle"
+						onClick={() => setIncludeTests(!includeTests)}
+						title={!includeTests && excludedTestCount > 0 ? t.plural("infoPanel.diffTestsHidden", excludedTestCount) : undefined}
+						className={`git-anim flex flex-shrink-0 items-center justify-center self-stretch rounded-r-lg px-1.5 transition-colors ${
+							includeTests ? "text-fg-3 hover:bg-elevated-hover hover:text-fg-2" : "bg-accent/10 text-accent hover:bg-accent/20"
+						}`}
+						aria-label={t("infoPanel.diffIncludeTestsAria")}
+						aria-pressed={includeTests}
+					>
+						<IncludeTestsIcon className="w-[0.95rem] h-[0.95rem]" off={!includeTests} />
+					</button>
+				</Tooltip>
+			</>
+		)}
+		</div>
+	) : null;
+	// `diffFiles` is `<compare>...HEAD` — committed work only. A branch whose
+	// changes are all still in the working tree has a diff the user wants to read
+	// and no committed one to count, so the dirty totals decide on their own.
+	const uncommittedInsertions = metadataBranchStatus?.insertions ?? 0;
+	const uncommittedDeletions = metadataBranchStatus?.deletions ?? 0;
+	const hasCommittedDiff = (metadataBranchStatus?.diffFiles ?? 0) > 0;
+	const hasUncommittedDiff = uncommittedInsertions > 0 || uncommittedDeletions > 0;
+	// The narrow bar's counterpart to the wide badge. The wide chip is ~100px and
+	// hides below a 400px container, which on a 390px phone left the diff behind
+	// the kebab entirely — this is the same action at icon width, so it never has
+	// to shed. It steps aside once the wide badge fits, unless the diff is
+	// uncommitted-only: the wide badge counts committed files and renders nothing
+	// then, so at every width this button is the only path to it.
+	const narrowDiffButton = narrow && project.kind !== "virtual" && (hasCommittedDiff || hasUncommittedDiff) ? (
+		<button
+			type="button"
+			data-testid="summary-bar-diff-compact"
+			onClick={() => openDiffWhereTheChangesAre(hasCommittedDiff)}
+			aria-label={t("infoPanel.showDiff")}
+			title={diffBadgeTitle}
+			className={`flex-shrink-0 inline-flex items-center justify-center gap-1.5 rounded-lg border border-edge bg-elevated px-2 min-w-[2.75rem] min-h-[2.75rem] text-micro font-mono text-fg-2 transition-colors hover:bg-elevated-hover ${
+				hasCommittedDiff ? "[@container(min-width:400px)]:hidden" : ""
+			}`}
+		>
+			<span className="text-fg-muted text-sm-plus leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF0CB"}</span>
+			{/* The numbers go before the chip does. A 390px bar already carrying a
+			    variant switcher, status, priority, images and artifacts has ~44px
+			    left — a square and nothing more — while a dirty "+4000 −2000" needs
+			    ~72px, bought by truncating the status label. So the chip stays a
+			    square until the bar can hold the worst case. Only the
+			    uncommitted-only chip has numbers to reveal: the committed one hands
+			    over to the wide badge at 400px. */}
+			{!hasCommittedDiff && (
 				<span
-					className="text-fg-muted text-sm-plus leading-none"
-					style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-					title={t.plural("infoPanel.diffTestsHidden", excludedTestCount)}
+					className="hidden [@container(min-width:440px)]:flex items-center gap-1 tabular-nums"
+					data-testid="summary-bar-diff-compact-numbers"
 				>
-					{"\u{F0912}"}
+					<span className="text-success">+{uncommittedInsertions}</span>
+					<span className="text-danger">−{uncommittedDeletions}</span>
 				</span>
 			)}
 		</button>
-	) : null;
-	const diffIncludeTestsToggle = project.kind !== "virtual" && !veryTight && metadataBranchStatus && metadataBranchStatus.diffFiles > 0 ? (
-		<Tooltip content={t("infoPanel.diffIncludeTestsTooltip")} detail={t("ttip.infoPanel.includeTests")}>
-		<button
-			type="button"
-			data-testid="diff-include-tests-toggle"
-			onClick={() => setIncludeTests(!includeTests)}
-			className={`git-anim inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-micro font-mono flex-shrink-0 transition-colors ${
-				includeTests
-					? "bg-elevated border-edge text-fg-2 hover:bg-elevated-hover"
-					: "bg-accent/10 border-accent/30 text-accent hover:bg-accent/20"
-			}`}
-			aria-label={t("infoPanel.diffIncludeTestsAria")}
-			aria-pressed={includeTests}
-		>
-			{!compact && <span>{includeTests ? t("infoPanel.diffIncludeTests") : t("infoPanel.diffExcludeTests")}</span>}
-			<IncludeTestsIcon className="w-[0.95rem] h-[0.95rem]" />
-		</button>
-		</Tooltip>
 	) : null;
 	const diffFilesPopover = diffFilesHover && metadataBranchStatus && visibleDiffFileStats.length > 0 && createPortal(
 		<div
@@ -721,31 +787,6 @@ function TaskInfoPanel({
 		/>
 	) : null;
 
-	// On a tight panel every inline chip is width the bar does not have — fold the
-	// whole strip into the "+k" chip instead of letting it overrun the next bar.
-	const maxInlineLabels = tight ? 0 : MAX_INLINE_LABELS;
-	const inlineLabels = assignedLabels.slice(0, maxInlineLabels);
-	const overflowLabels = assignedLabels.slice(maxInlineLabels);
-	const labelStrip = assignedLabels.length > 0 && !veryTight ? (
-		<div className="flex items-center gap-1 min-w-0 flex-shrink overflow-hidden">
-			{inlineLabels.map((label) => <LabelChip key={label.id} label={label} size="xs" />)}
-			{overflowLabels.length > 0 && (
-				<span
-					className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-elevated text-fg-3 text-dense font-medium flex-shrink-0"
-					title={overflowLabels.map((label) => label.name).join(", ")}
-					data-testid="label-strip-overflow"
-				>
-					{/* With no chip beside it a bare "+2" is meaningless — the tag glyph
-					    says what is being counted. */}
-					{inlineLabels.length === 0 && (
-						<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F04F9}"}</span>
-					)}
-					{inlineLabels.length === 0 ? overflowLabels.length : `+${overflowLabels.length}`}
-				</span>
-			)}
-		</div>
-	) : null;
-
 	const watchToggleButton = (
 		<Tooltip content={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")} detail={t("ttip.task.watch")}>
 		<button
@@ -757,41 +798,45 @@ function TaskInfoPanel({
 			}`}
 			aria-label={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")}
 		>
+			{/* Icon only, at every width: the accent bell already says "watching", and
+			    the word cost bar space the tags and the status chip need more. The
+			    sentence stays in the tooltip and in the mobile sheet row. */}
 			{task.watched
 				? <WatchingIcon className="w-[0.95rem] h-[0.95rem]" />
 				: <WatchIcon className="w-[0.95rem] h-[0.95rem]" />}
-			{!compact && (
-				<span className="text-micro font-medium">
-					{task.watched ? t("task.watching") : t("task.watch")}
-				</span>
-			)}
 		</button>
 		</Tooltip>
 	);
 
+	// A coordinator owns its completion unconditionally (`taskCompletesManually`),
+	// so the control shows it on and refuses the click instead of offering a toggle
+	// that the lifecycle would ignore.
+	const completionIsForced = isCoordinatorTask(task);
+	const completionIsManual = taskCompletesManually(task);
 	const manualCompletionToggleButton = (
 		<Tooltip
-			content={task.manualCompletion ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
+			content={completionIsForced
+				? t("task.manualCompletionCoordinatorTooltip")
+				: completionIsManual ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
 			detail={t("ttip.task.manualCompletion")}
 		>
 			<button
 				onClick={handleToggleManualCompletion}
-				aria-label={task.manualCompletion ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
-				aria-pressed={task.manualCompletion === true}
+				disabled={completionIsForced}
+				aria-label={completionIsForced
+					? t("task.manualCompletionCoordinatorTooltip")
+					: completionIsManual ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
+				aria-pressed={completionIsManual}
 				className={`task-anim flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors flex-shrink-0 ${
-					task.manualCompletion
+					completionIsManual
 						? "text-accent bg-accent/10 border border-accent/25"
-						: "text-fg-3 hover:text-fg hover:bg-elevated"
-				}`}
+						: "text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
+				} ${completionIsForced ? "cursor-not-allowed" : ""}`}
 			>
-				<CompletionOwnerIcon className="h-[0.95rem] w-[0.95rem]" active={task.manualCompletion} />
-				{/* Always the short label: the full sentence ("I'll complete it myself")
-				    costs ~180px of bar — more in ru/es — for a state the accent icon
-				    already carries. The sentence stays in the tooltip and in the mobile
-				    sheet row. A tight bar drops even the short label. */}
-				{!tight && (
-					<span className="text-micro font-medium">{t("task.manualCompletionShort")}</span>
-				)}
+				{/* Icon only. Even the short "I decide" label cost bar width for a state
+				    the accent icon already carries; the full sentence lives in the
+				    tooltip and in the mobile sheet row. */}
+				<CompletionOwnerIcon className="h-[0.95rem] w-[0.95rem]" active={completionIsManual} />
 			</button>
 		</Tooltip>
 	);
@@ -801,13 +846,18 @@ function TaskInfoPanel({
 	// On narrow the chip is a primary touch target — bump it to ≥44px (§12.6).
 	// On narrow this is the one shrinkable region of a no-wrap bar: a long
 	// custom-column name truncates here instead of pushing the kebab off screen.
+	// Boxed like its neighbours (watch toggle, completion-owner) so the quick-complete
+	// check reads as a segment of the status control and not as a homeless icon: the
+	// border owns the group, the hairline divides the two click targets, and hover
+	// lives on the segments so each one still answers separately.
+	const showQuickComplete = !narrow && !movingStatus && getAllowedTransitions(task.status).includes("completed");
 	const statusDropdownButton = (
-		<div className={`flex items-center rounded-lg hover:bg-elevated transition-colors ${tight || narrow ? "min-w-0 shrink" : "flex-shrink-0"}`}>
+		<div className={`flex items-center rounded-lg border border-edge hover:border-edge-active transition-colors ${tight || narrow ? "min-w-0 shrink" : "flex-shrink-0"}`}>
 			<button
 				ref={statusTriggerRef}
 				onClick={toggleStatusMenu}
 				disabled={movingStatus}
-				className={`flex min-w-0 items-center gap-2 rounded-lg ${narrow ? "px-3 min-h-[2.75rem]" : "px-2.5 py-1"}`}
+				className={`flex min-w-0 items-center gap-2 transition-colors hover:bg-elevated ${showQuickComplete ? "rounded-l-lg" : "rounded-lg"} ${narrow ? "px-3 min-h-[2.75rem]" : "px-2.5 py-1"}`}
 			>
 				{activeCustomColumn ? (
 					<div
@@ -827,24 +877,27 @@ function TaskInfoPanel({
 					<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
 				</svg>
 			</button>
-			{!narrow && !movingStatus && getAllowedTransitions(task.status).includes("completed") && (
-				<Tooltip content={t("pipeline.completeTooltip")} disabled={quickCompleting}>
-					<button
-						data-testid="task-info-quick-complete"
-						onClick={handleQuickComplete}
-						disabled={quickCompleting}
-						aria-label={t("pipeline.completeTooltip")}
-						className={`mr-1 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-success transition-[color,background-color,opacity] ${
-							quickCompleting ? "bg-success/25 opacity-100" : "opacity-60 hover:bg-success/20 hover:opacity-100"
-						}`}
-					>
-						{quickCompleting ? (
-							<span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" />
-						) : (
-							<CompleteCheckIcon className="w-3 h-3" />
-						)}
-					</button>
-				</Tooltip>
+			{showQuickComplete && (
+				<>
+					<span className="h-4 w-px flex-shrink-0 bg-edge" aria-hidden="true" />
+					<Tooltip content={t("pipeline.completeTooltip")} disabled={quickCompleting}>
+						<button
+							data-testid="task-info-quick-complete"
+							onClick={handleQuickComplete}
+							disabled={quickCompleting}
+							aria-label={t("pipeline.completeTooltip")}
+							className={`flex flex-shrink-0 items-center justify-center self-stretch rounded-r-lg px-1.5 text-success transition-[color,background-color,opacity] ${
+								quickCompleting ? "bg-success/25 opacity-100" : "opacity-75 hover:bg-success/20 hover:opacity-100"
+							}`}
+						>
+							{quickCompleting ? (
+								<span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" />
+							) : (
+								<CompleteCheckIcon className="w-3 h-3" />
+							)}
+						</button>
+					</Tooltip>
+				</>
 			)}
 		</div>
 	);
@@ -894,7 +947,7 @@ function TaskInfoPanel({
 		<Tooltip content={t("tmux.spawnExtraAgentDesc")} detail={t("ttip.infoPanel.spawnAgent")}>
 			<button
 				onClick={() => setSpawnModalOpen(true)}
-				className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-success hover:bg-success/15 border border-success/30"
+				className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
 				aria-label={t("tmux.spawnExtraAgentDesc")}
 			>
 				<AddAgentIcon className="w-[1.05rem] h-[1.05rem]" />
@@ -982,16 +1035,16 @@ function TaskInfoPanel({
 	// agent-session controls — never on the board card (a hibernated card is inert
 	// by design, and waking must be an explicit act inside the task).
 	// Amber, not danger: red in this app means "destroys something you cannot get
-	// back", and the neighbouring Bug Hunters button already owns it here. The skull
-	// is the one filled glyph in this bar on purpose — it has to stop the eye before
-	// the tooltip explains that the worktree survives.
+	// back". It is the only coloured button left in this bar, and the skull is its
+	// one filled glyph on purpose — it has to stop the eye before the tooltip
+	// explains that the worktree survives.
 	const hibernateButton = isTaskActive && task.worktreePath && !task.hibernated && !task.preparing && !task.shuttingDown ? (
 		<Tooltip content={t("task.hibernate")} detail={t("task.hibernateHint")}>
 			<button
 				data-testid="task-hibernate-button"
 				onClick={handleHibernate}
 				disabled={hibernating}
-				className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-warning hover:text-warning hover:bg-warning/15 border border-warning/30 disabled:opacity-50"
+				className="task-anim warning-paper flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-warning-strong hover:text-warning-strong hover:bg-warning/15 border border-warning/30 disabled:opacity-50"
 				aria-label={t("task.hibernate")}
 			>
 				{hibernating ? (
@@ -1022,7 +1075,7 @@ function TaskInfoPanel({
 		<Tooltip content={t("bugHunters.buttonTooltip")} detail={t("ttip.infoPanel.bugHunters")}>
 		<button
 			onClick={() => setBugHuntersOpen(true)}
-			className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-danger hover:text-danger hover:bg-danger/15 border border-danger/30"
+			className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
 			aria-label={t("bugHunters.buttonTooltip")}
 		>
 			<FindBugsIcon className="w-[1.05rem] h-[1.05rem]" />
@@ -1035,7 +1088,7 @@ function TaskInfoPanel({
 		<Tooltip content={t("projectSettings.tabWorktree")} detail={t("ttip.infoPanel.worktreeConfig")}>
 			<button
 				onClick={() => navigate({ screen: "project-settings", projectId: project.id, tab: "worktree", worktreeTaskId: task.id })}
-				className="task-anim flex-shrink-0 p-1 rounded hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
+				className="task-anim flex-shrink-0 px-1.5 py-1 rounded border border-edge hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
 				aria-label={t("projectSettings.tabWorktree")}
 			>
 				<WorktreeSettingsIcon className="w-4 h-4" />
@@ -1099,7 +1152,7 @@ function TaskInfoPanel({
 										>
 											<span>{t("task.prBadge", { number: String(metadataPrInfo.number) })}</span>
 											{(metadataPrInfo.unresolvedCount ?? 0) > 0 && (
-												<span className="inline-flex items-center gap-0.5 text-warning no-underline" aria-label={t.plural("task.prUnresolvedComments", metadataPrInfo.unresolvedCount ?? 0)}>
+												<span className="inline-flex items-center gap-0.5 text-warning-strong no-underline" aria-label={t.plural("task.prUnresolvedComments", metadataPrInfo.unresolvedCount ?? 0)}>
 													<span className="leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF086"}</span>
 													<span>{metadataPrInfo.unresolvedCount}</span>
 												</span>
@@ -1262,6 +1315,24 @@ function TaskInfoPanel({
 
 	const height = collapsed ? `${COLLAPSED_HEIGHT_REM}rem` : panelHeight;
 
+	// Ends the Runtime bar (right of Images / Artifacts) instead of sitting in the
+	// panel chrome above: it is the rarest control up there, and crowding it next
+	// to Full screen made the two easy to confuse.
+	const collapseToggleButton = (
+		<Tooltip
+			content={collapsed ? t("infoPanel.expand") : t("infoPanel.collapse")}
+			detail={collapsed ? t("ttip.infoPanel.expand") : t("ttip.infoPanel.collapse")}
+		>
+			<button
+				onClick={toggleCollapsed}
+				className="task-anim flex-shrink-0 p-1 rounded hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
+				aria-label={collapsed ? t("infoPanel.expand") : t("infoPanel.collapse")}
+			>
+				<PanelChevronIcon direction={collapsed ? "down" : "up"} className="w-3.5 h-3.5" />
+			</button>
+		</Tooltip>
+	);
+
 	// Narrow viewport (phone / narrow window): the two dense desktop toolbars do
 	// not fit. Collapse them into a thin summary bar (status + title + diff) and
 	// fold every action + the full details grid into an actions BottomSheet — the
@@ -1282,10 +1353,10 @@ function TaskInfoPanel({
 				<div className="flex flex-nowrap items-center gap-x-2 px-3 py-2 min-h-[3.25rem] min-w-0 [container-type:inline-size]" data-testid="task-summary-bar">
 					{variantSwitcher}
 					{statusDropdownButton}
-					{/* Priority sits with status (Context domain, §5.1); `sm` gives it a
-					    legible chip and a comfortable touch target on a phone (§12.6),
-					    versus the dense `xs` desktop badge. */}
-					<PriorityBadge priority={task.priority} onChange={handleSetPriority} size="sm" className="shrink-0" />
+					{/* Priority sits with status (Context domain, §5.1); `touch` matches the
+					    status control's height so the pair reads as one band and clears the
+					    44px target on a phone (§12.6), versus the dense `xs` desktop badge. */}
+					<PriorityBadge priority={task.priority} onChange={handleSetPriority} size="touch" className="shrink-0" />
 					{/* Agent outputs (images / artifacts) ride the summary bar next to
 					    priority, not only the sheet: they are conditional, and an unread
 					    one has to be seen without opening a menu. Same class as the diff
@@ -1294,6 +1365,7 @@ function TaskInfoPanel({
 						<TaskSharedImages task={task} projectId={project.id} compact touch />
 						<TaskArtifacts task={task} projectId={project.id} compact touch />
 					</span>
+					{narrowDiffButton}
 					{/* Task title intentionally omitted here — it already shows in the
 					    breadcrumb row above (GlobalHeader). Repeating it wasted the whole
 					    bar; the freed space keeps status + priority + diff readable. */}
@@ -1346,11 +1418,14 @@ function TaskInfoPanel({
 							<button
 								type="button"
 								onClick={handleToggleManualCompletion}
-								aria-pressed={task.manualCompletion === true}
-								className={`${SHEET_ROW_CLASS} ${task.manualCompletion ? "border-accent/30 bg-accent/10" : ""}`}
+								disabled={completionIsForced}
+								aria-pressed={completionIsManual}
+								className={`${SHEET_ROW_CLASS} ${completionIsManual ? "border-accent/30 bg-accent/10" : ""} ${completionIsForced ? "cursor-not-allowed opacity-60" : ""}`}
 							>
-								<CompletionOwnerIcon className={`h-5 w-5 shrink-0 ${task.manualCompletion ? "text-accent" : "text-fg-3"}`} active={task.manualCompletion} />
-								<span className="flex-1 text-sm font-medium">{task.manualCompletion ? t("task.manualCompletionEnabled") : t("task.manualCompletion")}</span>
+								<CompletionOwnerIcon className={`h-5 w-5 shrink-0 ${completionIsManual ? "text-accent" : "text-fg-3"}`} active={completionIsManual} />
+								<span className="flex-1 text-sm font-medium">{completionIsForced
+									? t("task.manualCompletionCoordinatorTooltip")
+									: completionIsManual ? t("task.manualCompletionEnabled") : t("task.manualCompletion")}</span>
 							</button>
 
 							{/* The bar may shed the diff badge on a narrow screen, so the diff
@@ -1398,7 +1473,7 @@ function TaskInfoPanel({
 									onClick={() => {
 										setActionsSheetOpen(false);
 										window.dispatchEvent(new CustomEvent("dev3:openImageViewer", {
-											detail: { taskId: task.id, projectId: project.id, images: task.sharedImages, index: (task.sharedImages?.length ?? 1) - 1 },
+											detail: { taskId: task.id, projectId: project.id, images: task.sharedImages },
 										}));
 									}}
 									className={SHEET_ROW_CLASS}
@@ -1474,24 +1549,26 @@ function TaskInfoPanel({
 			{diffFilesPopover}
 			{fileOpenInMenuPortal}
 			{collapsed ? (
-				<div className="flex flex-col h-full px-4 gap-1 justify-center">
+				<div className="flex flex-col h-full px-2 gap-1 justify-center">
 					<div className="flex items-center gap-1.5 min-w-0">
 						{/* Same bar boxing as the expanded rows: the Context bar is the only
 						    shrinkable region, so the Session bar and the pinned chrome to
 						    its right can never be pushed out of the panel. */}
-						<div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+						{/* The four help ids and the HelpSpot mirror the expanded rows below.
+						    They were missing here for as long as this branch existed, and this
+						    is the branch a task screen opens in — so help mode explained the
+						    header and the sidebar and nothing else on it. */}
+						<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.context-bar">
 							{variantSwitcher}
 							{watchToggleButton}
-							{manualCompletionToggleButton}
 							{priorityBadge}
 							{statusDropdownButton}
+							{manualCompletionToggleButton}
 							{diffSummaryBadge}
-							{diffIncludeTestsToggle}
-							{labelStrip}
 						</div>
 						{statusDropdownPortal}
 						<div className="flex-1" />
-						<div className="flex items-center gap-1.5 flex-shrink-0">
+						<div className="flex items-center gap-1.5 flex-shrink-0" data-help-id="inspector.session-bar">
 							{bugHuntersButton}
 							{spawnAgentButton}
 							{sendLaterButton}
@@ -1501,31 +1578,13 @@ function TaskInfoPanel({
 							<TaskPaneControls taskId={task.id} compact={tight} />
 						</div>
 						{worktreeSettingsButton}
+						<HelpSpot topicId="inspector.panel" className="ml-0.5" />
+						<TerminalShortcutsButton taskId={task.id} />
 						{showPanelButton}
-						<Tooltip content={terminalFullscreenLabel} detail={terminalFullscreenTooltip}>
-							<button
-								onClick={toggleTerminalFullscreen}
-								className="task-anim flex-shrink-0 p-1 rounded hover:bg-accent/10 transition-colors text-accent hover:text-accent-emphasis"
-								aria-label={terminalFullscreenLabel}
-							>
-								{terminalFullscreenActive
-									? <FullscreenExitIcon className="w-3.5 h-3.5" />
-									: <FullscreenEnterIcon className="w-3.5 h-3.5" />}
-							</button>
-						</Tooltip>
-						<Tooltip content={t("infoPanel.expand")} detail={t("ttip.infoPanel.expand")}>
-							<button
-								onClick={toggleCollapsed}
-								className="task-anim flex-shrink-0 p-1 rounded hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
-								aria-label={t("infoPanel.expand")}
-							>
-								<PanelChevronIcon direction="down" className="w-3.5 h-3.5" />
-							</button>
-					</Tooltip>
 					</div>
 
 					<div className="flex items-center gap-1.5 min-w-0">
-						<div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+						<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.git-bar" data-tour-anchor="task.git-bar">
 							{project.kind === "virtual" ? (
 								<span className="text-fg-muted text-micro italic flex-shrink-0 truncate">{t("ops.gitUnavailable")}</span>
 							) : (
@@ -1535,9 +1594,7 @@ function TaskInfoPanel({
 									dispatch={dispatch}
 									navigate={navigate}
 									isTaskActive={isTaskActive}
-									showWorktreeCopy
 									showLoading
-									branchNameClassName={`text-fg-3 text-xs font-mono flex-shrink-0 truncate ${veryTight ? "max-w-[4rem]" : tight ? "max-w-[6rem]" : "max-w-[12.5rem]"}`}
 									compact={compact}
 									onBranchStatusChange={setMetadataBranchState}
 									onOpenInlineDiff={onOpenInlineDiff}
@@ -1545,7 +1602,7 @@ function TaskInfoPanel({
 							)}
 						</div>
 						<div className="flex-1" />
-						<div className="flex items-center gap-2 flex-shrink-0">
+						<div className="flex items-center gap-2 flex-shrink-0" data-help-id="inspector.runtime-bar">
 							<TaskOpenIn task={task} project={project} isTaskActive={isTaskActive} showFileBrowser compact={tight} />
 							{project.kind !== "virtual" && (
 								<>
@@ -1556,12 +1613,14 @@ function TaskInfoPanel({
 							<TaskExposedPorts task={task} compact={tight} />
 							<TaskSharedImages task={task} projectId={project.id} compact={tight} />
 							<TaskArtifacts task={task} projectId={project.id} compact={tight} />
+							{terminalFullscreenButton}
+							{collapseToggleButton}
 						</div>
 					</div>
 				</div>
 			) : (
 				<div className="flex flex-col h-full">
-					<div className="flex flex-col px-4">
+					<div className="flex flex-col px-2">
 						<div className="flex items-center gap-1.5 min-w-0 pt-1">
 							{/* `overflow-hidden` is the backstop that keeps a bar's contents
 							    inside its own box: without it the shrink-0 children spill
@@ -1571,13 +1630,11 @@ function TaskInfoPanel({
 							<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.context-bar">
 								{variantSwitcher}
 								{watchToggleButton}
-								{manualCompletionToggleButton}
 								{priorityBadge}
 								{statusDropdownButton}
 								{statusDropdownPortal}
+								{manualCompletionToggleButton}
 								{diffSummaryBadge}
-								{diffIncludeTestsToggle}
-								{labelStrip}
 							</div>
 							<div className="flex-1" />
 							<div className="flex items-center gap-1.5 flex-shrink-0" data-help-id="inspector.session-bar">
@@ -1590,31 +1647,12 @@ function TaskInfoPanel({
 								<TaskPaneControls taskId={task.id} compact={tight} />
 							</div>
 							<HelpSpot topicId="inspector.panel" className="ml-0.5" />
+							<TerminalShortcutsButton taskId={task.id} />
 							{showPanelButton}
-							<Tooltip content={terminalFullscreenLabel} detail={terminalFullscreenTooltip}>
-								<button
-									onClick={toggleTerminalFullscreen}
-									className="task-anim flex-shrink-0 p-1 rounded hover:bg-accent/10 transition-colors text-accent hover:text-accent-emphasis"
-									aria-label={terminalFullscreenLabel}
-								>
-									{terminalFullscreenActive
-										? <FullscreenExitIcon className="w-3.5 h-3.5" />
-										: <FullscreenEnterIcon className="w-3.5 h-3.5" />}
-								</button>
-							</Tooltip>
-							<Tooltip content={t("infoPanel.collapse")} detail={t("ttip.infoPanel.collapse")}>
-								<button
-									onClick={toggleCollapsed}
-									className="task-anim flex-shrink-0 p-1 rounded hover:bg-elevated transition-colors text-fg-3 hover:text-fg"
-									aria-label={t("infoPanel.collapse")}
-								>
-									<PanelChevronIcon direction="up" className="w-3.5 h-3.5" />
-								</button>
-						</Tooltip>
 						</div>
 
 						<div className="flex items-center gap-1.5 min-w-0 pb-1">
-							<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.git-bar">
+							<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.git-bar" data-tour-anchor="task.git-bar">
 								{project.kind === "virtual" ? (
 									<span className="text-fg-muted text-micro italic flex-shrink-0 truncate">{t("ops.gitUnavailable")}</span>
 								) : (
@@ -1624,7 +1662,6 @@ function TaskInfoPanel({
 										dispatch={dispatch}
 										navigate={navigate}
 										isTaskActive={isTaskActive}
-										branchNameClassName={`text-fg-3 text-xs font-mono flex-shrink-0 truncate ${veryTight ? "max-w-[4rem]" : tight ? "max-w-[6rem]" : "max-w-[12.5rem]"}`}
 										compact={compact}
 										onBranchStatusChange={setMetadataBranchState}
 										onOpenInlineDiff={onOpenInlineDiff}
@@ -1643,11 +1680,13 @@ function TaskInfoPanel({
 								<TaskExposedPorts task={task} compact={tight} />
 								<TaskSharedImages task={task} projectId={project.id} compact={tight} />
 								<TaskArtifacts task={task} projectId={project.id} compact={tight} />
+								{terminalFullscreenButton}
+								{collapseToggleButton}
 							</div>
 						</div>
 					</div>
 
-					<div className="flex-1 overflow-auto px-4 pb-2">
+					<div className="flex-1 overflow-auto px-2 pb-2">
 						{taskDetailsBody}
 					</div>
 

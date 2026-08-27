@@ -1,8 +1,6 @@
 // `?inline` forces Vite to emit these as base64 `data:` URLs instead of files
 // served via the `views://` scheme, which cannot satisfy the Range requests
-// WKWebView's media loader issues (decision 057). Web Audio fetches nothing —
-// the bytes are decoded straight out of the base64 payload — but keeping the
-// imports inlined avoids reintroducing a `views://` asset for audio.
+// WKWebView's media loader issues (decision 057).
 import completedSoundUrl from "../assets/sounds/task-completed.mp3?inline";
 import cancelledSoundUrl from "../assets/sounds/task-cancelled.mp3?inline";
 
@@ -13,24 +11,32 @@ export const SOUND_DEFS: Record<TaskSoundStatus, { url: string; volume: number }
 	cancelled: { url: cancelledSoundUrl, volume: 0.7 },
 };
 
-// Task sounds MUST go through Web Audio, never an <audio> element. On macOS,
-// WebKit makes any <audio> longer than 0.95s the system "Now Playing" session
-// (`MediaElementSession::isElementLongEnoughForMainContent`), so our 1.3-1.5s
-// chimes hijacked the hardware media keys from Spotify/Music: Play/Pause
-// replayed the chime instead of resuming the real player (issue #1176). An
-// AudioContext is only Now Playing eligible when the page opts into
-// `navigator.audioSession.type = "playback"`, which we never do — so it can
-// neither steal the keys nor interrupt other audio (it mixes as ambient sound).
-// Chrome behaves the same way: WebAudio is ambient, an <audio> element is not.
-const SOUND_UNLOCK_EVENTS: Array<keyof WindowEventMap> = ["pointerdown", "keydown", "touchstart"];
-const pendingQueue: TaskSoundStatus[] = [];
-const buffers = new Map<TaskSoundStatus, AudioBuffer>();
-const decoding = new Map<TaskSoundStatus, Promise<AudioBuffer | null>>();
+// Task sounds play through an <audio> element, and the chimes are deliberately
+// kept SHORT — under WebKit's 0.95s `isElementLongEnoughForMainContent`
+// threshold, above which macOS promotes a media element to the system "Now
+// Playing" session and the hardware Play/Pause key replays our chime instead of
+// resuming Spotify (issue #1176). Both assets are 0.82s and a test guards that.
+//
+// Web Audio was tried instead (#1192) and is a dead end in the packaged app:
+// in the Electrobun WKWebView an AudioContext reports `running`, advances
+// `currentTime` and starts sources without error while producing NO audible
+// output — measured with a real click, and unchanged after a media element had
+// already played in the same page. `navigator.audioSession.type = "ambient"` is
+// not a way around the Now Playing problem either: verified against live
+// Spotify, the media keys were still taken. Duration is the only lever that
+// works, so it is the one used. See
+// decisions/2026/08/24/task-sounds-back-to-short-audio-elements.md.
+export const NOW_PLAYING_THRESHOLD_SECONDS = 0.95;
 
-let context: AudioContext | null = null;
+const SOUND_UNLOCK_EVENTS: Array<keyof WindowEventMap> = ["pointerdown", "keydown", "touchstart"];
+// A Set, not an array: the same status can be queued twice (the UI declines
+// ownership, the backend then broadcasts its push back to us) and the user must
+// hear one chime, not two.
+const pendingQueue = new Set<TaskSoundStatus>();
+
 let unlockHandlersInstalled = false;
 
-// The completion/cancel sound is played in exactly one place per move:
+// The sound plays in exactly one place per move:
 //
 //  - UI-initiated moves (drag, card menu, info panel, terminal toolbar) play it
 //    locally and instantly via `playTaskCompletionSound`, then tell the backend
@@ -41,13 +47,20 @@ let unlockHandlersInstalled = false;
 //    renderer that played locally, so the backend pushes `taskSound` and
 //    `playTaskSoundFromPush` plays it.
 //
-// Because the two paths are mutually exclusive at the source, no client-side
-// echo de-dup is needed.
+// The two paths are mutually exclusive at the source whenever the UI could
+// actually start playback. When the browser's autoplay policy refuses (desktop
+// Chrome in remote mode, where the push lands long after the click that
+// authorised it) the sound is queued, the UI declines ownership and the push
+// goes out — the queue is a Set, so that push echoing back cannot double the
+// chime.
 
 // Client-side mirror of the `playSoundOnTaskComplete` setting, kept in sync by
 // App.tsx. The bun process also gates its `taskSound` push on the same setting;
 // this lets the UI gate the *immediate* client-side playback without a round-trip.
 let completionSoundEnabled = true;
+// Set once a `play()` call is refused, cleared once one succeeds: the only
+// honest signal we have about whether the next chime will be heard.
+let autoplayBlocked = false;
 
 export function setTaskCompletionSoundEnabled(enabled: boolean): void {
 	completionSoundEnabled = enabled;
@@ -57,164 +70,54 @@ export function setTaskCompletionSoundEnabled(enabled: boolean): void {
  * Play the completion/cancellation sound immediately from the UI (respecting the
  * user setting). Returns true if the UI owns the sound for this move, so the
  * caller can pass `clientPlayedSound` to the backend and suppress the redundant
- * `taskSound` push. Returns false when the sound setting is off (the backend is
- * gated on the same setting, so nothing plays either way).
+ * `taskSound` push. Returns false when the sound setting is off, or when the
+ * last attempt was blocked by autoplay policy and this one can only be queued.
  */
 export function playTaskCompletionSound(status: TaskSoundStatus): boolean {
 	if (!completionSoundEnabled) return false;
+	const owned = !autoplayBlocked;
 	void playTaskSound(status);
-	return true;
+	return owned;
 }
 
 /**
- * Handle a bun `taskSound` push. Only fired for completions no renderer played
- * locally (CLI, branch-merge, agent approval), so it always plays.
+ * Handle a bun `taskSound` push. Fired for completions no renderer played
+ * locally (CLI, branch-merge, agent approval), and for the ones a renderer
+ * could not play.
  */
 export function playTaskSoundFromPush(status: TaskSoundStatus): void {
 	void playTaskSound(status);
 }
 
 /**
- * State of the audio pipeline, for the View → Debug sound probes. Never creates
- * the context — an untouched app must report `none`, not be primed by looking.
+ * State of the audio pipeline, for the View → Debug sound probes. `blocked` is
+ * what actually matters: everything else can look healthy while the browser is
+ * refusing to start playback.
  */
-export function taskSoundDiagnostics(): { context: string; buffers: number; queued: number; enabled: boolean } {
+export function taskSoundDiagnostics(): { blocked: boolean; queued: number; enabled: boolean } {
 	return {
-		context: context?.state ?? "none",
-		buffers: buffers.size,
-		queued: pendingQueue.length,
+		blocked: autoplayBlocked,
+		queued: pendingQueue.size,
 		enabled: completionSoundEnabled,
 	};
 }
 
-function audioContextCtor(): typeof AudioContext | undefined {
-	if (typeof window === "undefined") return undefined;
-	const scoped = window as typeof globalThis & { webkitAudioContext?: typeof AudioContext };
-	return scoped.AudioContext ?? scoped.webkitAudioContext;
-}
-
-// Created lazily, never closed: a long-lived context stays unlocked, so later
-// push-driven sounds (which arrive seconds after any user gesture) can start
-// without another gesture. Constructing it on demand rather than at import also
-// keeps Chrome from logging its "AudioContext was not allowed to start" warning
-// on a page the user has not interacted with yet.
-function ensureContext(): AudioContext | null {
-	if (context) return context;
-	const Ctor = audioContextCtor();
-	if (!Ctor) return null;
-	try {
-		context = new Ctor();
-	} catch (err) {
-		console.warn("[task-sounds] no audio context", { error: String(err) });
-		return null;
-	}
-	return context;
-}
-
-function decodeBytes(url: string): ArrayBuffer {
-	const marker = ";base64,";
-	const at = url.indexOf(marker);
-	if (!url.startsWith("data:") || at === -1) {
-		throw new Error("task sound must be an inlined base64 data: URL");
-	}
-	const binary = atob(url.slice(at + marker.length));
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-	return bytes.buffer;
-}
-
-// Safari/WKWebView only gained promise-based `decodeAudioData` in 14.1 and still
-// supports the callback form; accept whichever the engine hands back.
-function decodeAudioData(ctx: AudioContext, bytes: ArrayBuffer): Promise<AudioBuffer> {
-	return new Promise((resolve, reject) => {
-		const returned = ctx.decodeAudioData(bytes, resolve, reject) as Promise<AudioBuffer> | undefined;
-		if (returned && typeof returned.then === "function") returned.then(resolve, reject);
-	});
-}
-
-function loadBuffer(ctx: AudioContext, status: TaskSoundStatus): Promise<AudioBuffer | null> {
-	const ready = buffers.get(status);
-	if (ready) return Promise.resolve(ready);
-
-	const inFlight = decoding.get(status);
-	if (inFlight) return inFlight;
-
-	const pending = Promise.resolve()
-		.then(() => decodeAudioData(ctx, decodeBytes(SOUND_DEFS[status].url)))
-		.then((buffer) => {
-			buffers.set(status, buffer);
-			return buffer;
-		})
-		.catch((err) => {
-			console.warn("[task-sounds] decode failed", { status, error: String(err) });
-			return null;
-		})
-		.finally(() => {
-			decoding.delete(status);
-		});
-
-	decoding.set(status, pending);
-	return pending;
-}
-
-async function resume(ctx: AudioContext): Promise<boolean> {
-	if (ctx.state === "running") return true;
-	try {
-		await ctx.resume();
-	} catch {
-		// Autoplay policy: the context stays suspended until a user gesture.
-	}
-	// Cast: TS keeps `state` narrowed from the early return above, but `resume()`
-	// is exactly what changes it.
-	return (ctx.state as AudioContextState) === "running";
-}
-
-function startSound(ctx: AudioContext, status: TaskSoundStatus, buffer: AudioBuffer): void {
-	const source = ctx.createBufferSource();
-	source.buffer = buffer;
-	const gain = ctx.createGain();
-	gain.gain.value = SOUND_DEFS[status].volume;
-	source.connect(gain);
-	gain.connect(ctx.destination);
-	// Tear the graph down when the chime finishes so nothing outlives playback.
-	source.onended = () => {
-		source.disconnect();
-		gain.disconnect();
-	};
-	source.start();
-}
-
 function flushPendingQueue(): void {
-	while (pendingQueue.length > 0) {
-		const status = pendingQueue.shift();
-		if (!status) continue;
-		void playTaskSound(status);
-	}
+	const queued = [...pendingQueue];
+	pendingQueue.clear();
+	for (const status of queued) void playTaskSound(status);
 }
 
+// Installed once and never removed: the listeners exist to retry a sound the
+// autoplay policy refused, and that can happen at any point in a session.
 function installUnlockHandlers(): void {
 	if (unlockHandlersInstalled || typeof window === "undefined") return;
 	unlockHandlersInstalled = true;
-
-	const unlock = () => {
-		const ctx = ensureContext();
-		if (!ctx) return;
-		// Decode inside the gesture too, so the first sound needs no round-trip.
-		for (const status of Object.keys(SOUND_DEFS) as TaskSoundStatus[]) {
-			void loadBuffer(ctx, status);
-		}
-		void resume(ctx).then((running) => {
-			if (!running) return;
-			flushPendingQueue();
-			for (const eventName of SOUND_UNLOCK_EVENTS) {
-				window.removeEventListener(eventName, unlock);
-			}
-			unlockHandlersInstalled = false;
-		});
+	const retry = () => {
+		if (pendingQueue.size > 0) flushPendingQueue();
 	};
-
 	for (const eventName of SOUND_UNLOCK_EVENTS) {
-		window.addEventListener(eventName, unlock, { passive: true });
+		window.addEventListener(eventName, retry, { passive: true });
 	}
 }
 
@@ -223,21 +126,23 @@ export function initTaskSoundPlayback(): void {
 }
 
 export async function playTaskSound(status: TaskSoundStatus): Promise<void> {
-	const ctx = ensureContext();
-	if (!ctx) return;
+	if (typeof Audio === "undefined") return;
+	// Arm the retry path first, so a refused sound is not lost.
 	installUnlockHandlers();
 
-	const buffer = await loadBuffer(ctx, status);
-	if (!buffer) return;
-
-	if (!(await resume(ctx))) {
-		pendingQueue.push(status);
-		return;
-	}
+	const def = SOUND_DEFS[status];
+	// A fresh element per play, so two tasks finishing back-to-back overlap
+	// instead of one cutting the other off. Dropped as soon as it ends.
+	const el = new Audio(def.url);
+	el.volume = def.volume;
+	el.addEventListener("ended", () => el.remove(), { once: true });
 
 	try {
-		startSound(ctx, status, buffer);
+		await el.play();
+		autoplayBlocked = false;
 	} catch (err) {
-		console.warn("[task-sounds] playback failed", { status, error: String(err) });
+		autoplayBlocked = true;
+		pendingQueue.add(status);
+		console.warn("[task-sounds] playback refused", { status, error: String(err) });
 	}
 }

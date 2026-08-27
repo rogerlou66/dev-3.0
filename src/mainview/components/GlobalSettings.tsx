@@ -17,9 +17,12 @@ import type {
 	ExternalApp,
 	GlobalSettings as GlobalSettingsType,
 	NativeTerminalAvailability,
+	RemoteTunnelSettings,
+	ShellAvailability,
 	ShortcutOverrides,
 	TerminalPathOpenMode,
 } from "../../shared/types";
+import type { ShellFlavor } from "../../shared/posix-shell";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
 import { invalidateAvailableApps } from "../hooks/useAvailableApps";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
@@ -39,11 +42,12 @@ import AppearanceSettingsSection from "./global-settings/AppearanceSettingsSecti
 import BehaviorSettingsSection from "./global-settings/BehaviorSettingsSection";
 import DeveloperToolsSection from "./global-settings/DeveloperToolsSection";
 import KeyboardSettingsSection from "./global-settings/KeyboardSettingsSection";
+import ModelCatalogSection from "./global-settings/ModelCatalogSection";
 import PxpipeProxySettingsSection from "./global-settings/PxpipeProxySettingsSection";
 import SystemSettingsSection from "./global-settings/SystemSettingsSection";
 import TerminalSettingsSection from "./global-settings/TerminalSettingsSection";
 import WorkspaceSettingsSection from "./global-settings/WorkspaceSettingsSection";
-import type { SettingsSectionId } from "../state";
+import type { SettingsPresetTarget, SettingsSectionId } from "../state";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import {
@@ -69,9 +73,13 @@ type GlobalSettingsUpdater = (
 
 interface PersistOptions {
 	onLocalUpdate?: (next: GlobalSettingsType) => void;
+	tracking?: {
+		setting: string;
+		value: string;
+	};
 }
 
-function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
+function GlobalSettings({ section, preset }: { section?: SettingsSectionId; preset?: SettingsPresetTarget } = {}) {
 	const t = useT();
 	const [locale, setLocale] = useLocale();
 	const injectedThemeState = getWindowInjectedThemeState();
@@ -87,6 +95,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	const [zoomLevel, setZoomLevel] = useState(() => getZoom());
 	const [scrollSpeed, setScrollSpeed] = useState(() => getScrollSpeed());
 	const [cliInstallStatus, setCliInstallStatus] = useState<string | null>(null);
+	const [cliArmedInstance, setCliArmedInstance] = useState<string | null>(null);
 	const [agents, setAgents] = useState<CodingAgent[]>([]);
 	const [globalSettings, setGlobalSettings] = useState<GlobalSettingsType>(
 		DEFAULT_GLOBAL_SETTINGS,
@@ -106,6 +115,9 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		useState<NativeTerminalAvailability | null>(null);
 	const [newTaskTerminalBackend, setNewTaskTerminalBackend] =
 		useState<TerminalBackendIdentity | undefined>(undefined);
+	// Null until the host answers — the shell picker hides rather than claiming a
+	// machine has no zsh before anyone has looked.
+	const [shellAvailability, setShellAvailability] = useState<ShellAvailability | null>(null);
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(() =>
 		normalizeSettingsCategoryId(section),
@@ -115,6 +127,11 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+	// A deep-link that names a preset, held until the agents list has loaded and
+	// the Agents page has actually pointed at it. One-shot: leaving it set would
+	// yank the selection back on every later visit to this screen.
+	const [focusPreset, setFocusPreset] = useState<SettingsPresetTarget | null>(preset ?? null);
+	const clearFocusPreset = useCallback(() => setFocusPreset(null), []);
 	const detailHeadingRef = useRef<HTMLHeadingElement>(null);
 
 	const resetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -210,6 +227,9 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 			.catch(() => {});
 		api.request.getNewTaskTerminalBackend()
 			.then(({ backend }) => setNewTaskTerminalBackend(backend ?? undefined))
+			.catch(() => {});
+		api.request.getShellAvailability()
+			.then(setShellAvailability)
 			.catch(() => {});
 	}, []);
 
@@ -320,6 +340,13 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		[persistSettingChange],
 	);
 
+	const handleAgentLaunchAutoApproveChange = useCallback(
+		(minutes: number) => {
+			persistSettingChange({ agentLaunchAutoApproveMinutes: minutes });
+		},
+		[persistSettingChange],
+	);
+
 	const handleTipsDisabledToggle = useCallback(
 		(disabled: boolean) => {
 			persistSettingChange({ tipsDisabled: disabled });
@@ -330,6 +357,13 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	const handleReviewModePromptChange = useCallback(
 		(prompt: string) => {
 			persistSettingChange({ reviewModePrompt: prompt.trim() ? prompt : undefined });
+		},
+		[persistSettingChange],
+	);
+
+	const handleCoordinatorPromptChange = useCallback(
+		(prompt: string) => {
+			persistSettingChange({ coordinatorPrompt: prompt.trim() ? prompt : undefined });
 		},
 		[persistSettingChange],
 	);
@@ -377,6 +411,41 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		[persistSettingChange],
 	);
 
+	const handleTerminalShellChange = useCallback(
+		(shell: ShellFlavor | undefined) => {
+			persistSettingChange(
+				{ terminalShell: shell },
+				{
+					tracking: {
+						setting: "terminal_shell",
+						value: shell ?? "auto",
+					},
+				},
+			);
+			// The host re-resolves on save; re-read so a missing shell reports its
+			// fallback immediately instead of after a reopen.
+			api.request.getShellAvailability().then(setShellAvailability).catch(() => {});
+		},
+		[persistSettingChange],
+	);
+
+	const handleRemoteTunnelChange = useCallback(
+		(tunnel: RemoteTunnelSettings | undefined) => {
+			persistSettingChange(
+				{ remoteTunnel: tunnel },
+				{ tracking: { setting: "remote_tunnel_provider", value: tunnel?.provider ?? "cloudflare" } },
+			);
+		},
+		[persistSettingChange],
+	);
+
+	const handleRemoteSilentUpdateToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange({ remoteSilentUpdate: enabled });
+		},
+		[persistSettingChange],
+	);
+
 	const handlePreventSleepToggle = useCallback(
 		(enabled: boolean) => {
 			persistSettingChange({ preventSleepWhileRunning: enabled });
@@ -412,6 +481,21 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 		[persistSettingChange],
 	);
 
+	const handleAgentTrafficToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange(
+				{ experimentalAgentTraffic: enabled ? true : undefined },
+				{
+					tracking: {
+						setting: "experimental_agent_traffic",
+						value: String(enabled),
+					},
+				},
+			);
+		},
+		[persistSettingChange],
+	);
+
 	const handlePxpipeProxyToggle = useCallback(
 		(enabled: boolean) => {
 			persistSettingChange({ pxpipeProxyEnabled: enabled ? true : undefined });
@@ -430,6 +514,15 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	useEffect(() => {
 		if (!narrow) setMobileCategory(null);
 	}, [narrow]);
+
+	// A named preset also scrolls the page to the editor that holds it — landing
+	// on the right category and leaving the user to scroll is most of the way to
+	// not having deep-linked at all.
+	useEffect(() => {
+		if (!preset) return;
+		setFocusPreset(preset);
+		setPendingAnchor("agents-editor");
+	}, [preset]);
 
 	useEffect(() => {
 		if (!pendingAnchor || searchQuery.trim()) return;
@@ -564,12 +657,14 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 	const handleInstallDev3Cli = useCallback(async () => {
 		try {
 			setCliInstallStatus(null);
-			const { installedFrom } = await api.request.installDev3Cli();
+			setCliArmedInstance(null);
+			const { installedFrom, selfShimPath, selfInstance } = await api.request.installDev3Cli();
 			setCliInstallStatus(installedFrom);
+			setCliArmedInstance(t("settings.installDev3CliArmed", { shim: selfShimPath, instance: selfInstance }));
 		} catch (error) {
 			setCliInstallStatus(`Error: ${error}`);
 		}
-	}, []);
+	}, [t]);
 
 	function renderCategoryPage(category: SettingsCategoryId): ReactNode {
 		switch (category) {
@@ -595,6 +690,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 						onWatchByDefaultToggle={handleWatchByDefaultToggle}
 						onSuggestCompletingTasksAfterMergeToggle={handleSuggestCompletingTasksAfterMergeToggle}
 						onPrOriginTaskLinkToggle={handlePrOriginTaskLinkToggle}
+						onAgentLaunchAutoApproveChange={handleAgentLaunchAutoApproveChange}
 						prOriginTaskLinkSupported={prOriginTaskLinkSupported}
 						onFocusModeToggle={handleFocusModeToggle}
 						onTaskSortOrderChange={handleTaskSortOrderChange}
@@ -602,6 +698,7 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 						onTipsDisabledToggle={handleTipsDisabledToggle}
 						onTipsReset={handleTipsReset}
 						onReviewModePromptChange={handleReviewModePromptChange}
+						onCoordinatorPromptChange={handleCoordinatorPromptChange}
 					/>
 				);
 			case "keyboard":
@@ -619,8 +716,11 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 						newTaskTerminalBackend={newTaskTerminalBackend}
 						nativeTerminalAvailability={nativeTerminalAvailability}
 						terminalPathOpenMode={globalSettings.terminalPathOpenMode}
+						terminalShell={globalSettings.terminalShell}
+						shellAvailability={shellAvailability}
 						onNewTaskTerminalBackendChange={handleNewTaskTerminalBackendChange}
 						onTerminalPathOpenModeChange={handleTerminalPathOpenModeChange}
+						onTerminalShellChange={handleTerminalShellChange}
 					/>
 				);
 			case "agents":
@@ -634,6 +734,8 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							onDefaultAgentChange={handleDefaultAgentChange}
 							onDefaultConfigChange={handleDefaultConfigChange}
 							onGlobalSettingsChange={setGlobalSettings}
+							focusPreset={focusPreset}
+							onFocusPresetHandled={clearFocusPreset}
 						/>
 						<AgentRateLimitSettingsSection
 							t={t}
@@ -644,6 +746,8 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 				);
 			case "accounts":
 				return <AgentAccountsSection t={t} />;
+			case "models":
+				return <ModelCatalogSection t={t} />;
 			case "workspace":
 				return (
 					<WorkspaceSettingsSection
@@ -664,6 +768,8 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							caffeinateAvailable={caffeinateAvailable}
 							canaryAvailable={canaryAvailable}
 							onUpdateChannelChange={handleUpdateChannelChange}
+							onRemoteTunnelChange={handleRemoteTunnelChange}
+							onRemoteSilentUpdateToggle={handleRemoteSilentUpdateToggle}
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}
 						/>
@@ -676,10 +782,12 @@ function GlobalSettings({ section }: { section?: SettingsSectionId } = {}) {
 							t={t}
 							globalSettings={globalSettings}
 							onTerminalBidiToggle={handleTerminalBidiToggle}
+							onAgentTrafficToggle={handleAgentTrafficToggle}
 						/>
 						<DeveloperToolsSection
 							t={t}
 							cliInstallStatus={cliInstallStatus}
+							cliArmedInstance={cliArmedInstance}
 							onInstallDev3Cli={handleInstallDev3Cli}
 						/>
 					</>

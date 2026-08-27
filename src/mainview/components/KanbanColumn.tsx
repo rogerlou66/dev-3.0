@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type Dispatch } from "react";
-import type { CodingAgent, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus, TipState } from "../../shared/types";
+import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus, TipState } from "../../shared/types";
 import { hexToRgb, getAllowedTransitions } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { useT } from "../i18n";
@@ -38,6 +38,7 @@ interface KanbanColumnProps {
 	bellCounts: Map<string, number>;
 	bellReasons?: Map<string, string[]>;
 	taskPorts: Map<string, PortInfo[]>;
+	taskDevServers: Map<string, DevServerSummary>;
 	taskResourceUsage?: Map<string, ResourceUsage>;
 	activeTaskId?: string;
 	movingTaskIds: Set<string>;
@@ -67,6 +68,8 @@ interface KanbanColumnProps {
 	// name them without leaving the board (issue #222).
 	autoStartEditing?: boolean;
 	onAutoEditConsumed?: () => void;
+	/** No task anywhere on this board — the To Do column then explains the first one. */
+	boardEmpty?: boolean;
 }
 
 function KanbanColumn({
@@ -90,6 +93,7 @@ function KanbanColumn({
 	bellCounts,
 	bellReasons,
 	taskPorts,
+	taskDevServers,
 	taskResourceUsage,
 	activeTaskId,
 	movingTaskIds,
@@ -111,9 +115,13 @@ function KanbanColumn({
 	onRenameColumn,
 	autoStartEditing,
 	onAutoEditConsumed,
+	boardEmpty,
 }: KanbanColumnProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
+	// The New Task button below the list is To Do's alone (see its two render
+	// sites) — the empty-state copy has to agree with that.
+	const ownsAddTask = !isCustomColumn && status === "todo";
 	// ink = text-safe variant of the status colour (lighter themes need a
 	// darker shade to clear APCA |Lc| ≥ 60 on the glass column header).
 	const statusColorsInk = useStatusColorsInk();
@@ -346,7 +354,7 @@ function KanbanColumn({
 								if (e.key === "Enter") e.currentTarget.blur();
 								if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setEditing(false); }
 							}}
-							className="text-fg text-sm font-semibold bg-transparent outline-none border-b border-accent flex-1 min-w-0"
+							className="text-fg text-sm font-semibold bg-transparent outline-none border-b border-accent flex-1 min-w-0 select-text"
 							autoFocus
 						/>
 					) : (
@@ -420,6 +428,7 @@ function KanbanColumn({
 							bellReasons={bellReasons?.get(task.id)}
 							resourceUsage={taskResourceUsage?.get(task.id.slice(0, 8))}
 							ports={taskPorts.get(task.id)}
+							devServer={taskDevServers.get(task.id)}
 							isActiveInSplit={task.id === activeTaskId}
 							isMoving={movingTaskIds.has(task.id)}
 							onSetMoving={onSetMoving}
@@ -452,8 +461,18 @@ function KanbanColumn({
 				)}
 
 				{tasks.length === 0 && !tip && (
-					<div className="text-fg-muted text-xs text-center py-4">
-						<p>{t("kanban.noTasks")}</p>
+					<div className="text-fg-muted text-xs text-center py-4 px-3">
+						{ownsAddTask && boardEmpty ? (
+							<>
+								<p className="text-fg-2 text-sm">{t("kanban.firstTaskTitle")}</p>
+								<p className="mt-1 text-pretty">{t("kanban.firstTaskHint")}</p>
+							</>
+						) : (
+							<>
+								<p>{t("kanban.noTasks")}</p>
+								<p className="mt-1 text-pretty">{t(ownsAddTask ? "kanban.noTasksHint" : "kanban.noTasksHintAgentMoves")}</p>
+							</>
+						)}
 					</div>
 				)}
 
@@ -461,15 +480,16 @@ function KanbanColumn({
 
 			{/* Tip card — pinned to bottom, above the add-task button */}
 			{tip && tipState && onTipChanged && (
-				<div className={`px-3 pb-3 flex-shrink-0 ${footerSeam}`}>
+				<div className={`px-3 pb-3 flex-shrink-0 ${footerSeam}`} data-help-id="tips.card">
 					<TipCard tip={tip} tipState={tipState} onChanged={onTipChanged} />
 				</div>
 			)}
 
 			{/* Add task button (only in To Do column, not custom columns) */}
-			{!isCustomColumn && status === "todo" && (
+			{ownsAddTask && (
 				<div className={`px-3 pb-3 flex-shrink-0 ${tip ? "" : footerSeam}`}>
 					<button
+						data-tour-anchor="board.new-task"
 						onClick={onAddTask}
 						className="w-full text-fg-3 hover:text-accent text-sm font-medium text-center py-2.5 rounded-lg hover:bg-accent/10 border border-dashed border-edge hover:border-accent/30 transition-[color,background-color,border-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96]"
 					>

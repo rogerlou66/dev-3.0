@@ -1,18 +1,20 @@
 import { useMemo } from "react";
 import { marked } from "marked";
-import { renderMarkdownDocument } from "./markdown";
-import { useDiskMarkdownImages } from "./markdown-images";
+import { MarkdownContent, useMarkdownRendererConfig } from "./markdown";
+import { MarkdownImageProvider } from "./markdown-images";
 
 export type MarkdownDiffKind = "context" | "added" | "removed";
 
-export type MarkdownDiffBlock = { kind: MarkdownDiffKind; html: string };
+export type MarkdownDiffBlock = {
+	kind: MarkdownDiffKind;
+	source: string;
+	/** 1-based line this block starts on, in the file side its kind belongs to. */
+	startLine: number;
+};
 
 /** One diffable unit of a markdown document: a top-level block, or a single
  * item of a list (so adding one bullet does not repaint the whole list). */
-type Chunk = { raw: string; listItem: boolean };
-
-/** Joins block HTML for the one-pass image resolve; sanitized HTML has no NULs. */
-const BLOCK_SEPARATOR = "\u0000";
+type Chunk = { raw: string; listItem: boolean; startLine: number };
 
 // LCS is O(old × new); a pathological pair of huge documents would freeze the
 // webview, so past this many cells the renderer falls back to a plain preview.
@@ -20,6 +22,20 @@ const MAX_LCS_CELLS = 4_000_000;
 
 function chunkMarkdown(source: string): Chunk[] {
 	const chunks: Chunk[] = [];
+	// Tokens arrive in document order and their `raw` is verbatim, so a moving
+	// cursor turns each one into a line number without re-lexing.
+	let cursor = 0;
+	let cursorLine = 1;
+	const lineOf = (raw: string): number => {
+		const index = source.indexOf(raw, cursor);
+		if (index < 0) return cursorLine;
+		for (let i = cursor; i < index; i++) {
+			if (source[i] === "\n") cursorLine++;
+		}
+		cursor = index;
+		return cursorLine;
+	};
+
 	for (const token of marked.lexer(source, { gfm: true })) {
 		if (token.type === "space") {
 			continue;
@@ -27,16 +43,26 @@ function chunkMarkdown(source: string): Chunk[] {
 		const items = token.type === "list" ? (token as { items?: { raw: string }[] }).items : undefined;
 		if (items?.length) {
 			for (const item of items) {
-				chunks.push({ raw: item.raw.replace(/\n+$/, ""), listItem: true });
+				const startLine = lineOf(item.raw);
+				chunks.push({ raw: item.raw.replace(/\n+$/, ""), listItem: true, startLine });
 			}
 			continue;
 		}
+		const startLine = lineOf(token.raw);
 		const raw = token.raw.replace(/\n+$/, "");
 		if (raw.trim()) {
-			chunks.push({ raw, listItem: false });
+			chunks.push({ raw, listItem: false, startLine });
 		}
 	}
 	return chunks;
+}
+
+function lineCount(raw: string): number {
+	let lines = 1;
+	for (const character of raw) {
+		if (character === "\n") lines++;
+	}
+	return lines;
 }
 
 /** Longest common subsequence of chunk indices, matching on exact raw text. */
@@ -85,7 +111,7 @@ function diffChunks(oldChunks: Chunk[], newChunks: Chunk[]): Op[] {
 
 /** Consecutive same-kind chunks render as one markdown fragment so runs of list
  * items stay a single list instead of a stack of one-item lists. */
-function groupOps(ops: Op[]): { kind: MarkdownDiffKind; source: string }[] {
+function groupOps(ops: Op[]): MarkdownDiffBlock[] {
 	const groups: { kind: MarkdownDiffKind; chunks: Chunk[] }[] = [];
 	for (const op of ops) {
 		const last = groups[groups.length - 1];
@@ -95,10 +121,19 @@ function groupOps(ops: Op[]): { kind: MarkdownDiffKind; source: string }[] {
 			groups.push({ kind: op.kind, chunks: [op.chunk] });
 		}
 	}
-	return groups.map(({ kind, chunks }) => ({
-		kind,
-		source: chunks.map((chunk) => chunk.raw).join(chunks[0].listItem ? "\n" : "\n\n"),
-	}));
+	return groups.map(({ kind, chunks }) => {
+		// Chunks are rejoined with the exact blank lines that separated them in
+		// the file, so the group's rendered line numbers stay the file's own —
+		// a fixed separator would drift the moment the gap was not one blank line.
+		let source = chunks[0].raw;
+		let line = chunks[0].startLine + lineCount(chunks[0].raw);
+		for (const chunk of chunks.slice(1)) {
+			source += "\n".repeat(Math.max(1, chunk.startLine - line + 1));
+			source += chunk.raw;
+			line = chunk.startLine + lineCount(chunk.raw);
+		}
+		return { kind, source, startLine: chunks[0].startLine };
+	});
 }
 
 /**
@@ -116,35 +151,53 @@ export function buildMarkdownDiffBlocks(oldSource: string, newSource: string): M
 	if (!ops.some((op) => op.kind !== "context")) {
 		return null;
 	}
-	return groupOps(ops).map(({ kind, source }) => ({ kind, html: renderMarkdownDocument(source) }));
+	return groupOps(ops);
 }
 
-export function MarkdownRichDiff({ blocks, imageBaseDir, imageRootDir }: {
+/** File lines carrying a review comment, per side of the diff. */
+export interface MarkdownCommentedLines {
+	oldFile: ReadonlySet<number>;
+	newFile: ReadonlySet<number>;
+}
+
+export function MarkdownRichDiff({ blocks, imageBaseDir, imageRootDir, commentedLines }: {
 	blocks: MarkdownDiffBlock[];
 	/** Directory of the document, so repo-relative images can be read off disk. */
 	imageBaseDir?: string | null;
 	/** Checkout root, for root-relative image paths (`/docs/shot.png`). */
 	imageRootDir?: string | null;
+	/** Set to mark commented blocks in place and make blocks line-addressable. */
+	commentedLines?: MarkdownCommentedLines | null;
 }) {
-	// One resolve pass for the whole diff: the blocks travel as a single string
-	// joined by a separator no HTML can contain, then split back apart.
-	const joined = useMemo(() => blocks.map((block) => block.html).join(BLOCK_SEPARATOR), [blocks]);
-	const resolvedHtml = useDiskMarkdownImages(joined, imageBaseDir, imageRootDir);
-	const htmls = useMemo(() => resolvedHtml.split(BLOCK_SEPARATOR), [resolvedHtml]);
+	const rendererConfig = useMarkdownRendererConfig();
 	return (
 		<div
 			className="dev3-pr-md dev3-md-doc dev3-md-diff min-w-0 text-sm leading-relaxed text-fg"
 			data-testid="markdown-rich-diff"
 		>
-			{blocks.map((block, index) => (
-				<div
-					key={index}
-					className={`dev3-md-diff-block dev3-md-diff-${block.kind}`}
-					data-diff-kind={block.kind}
-					// eslint-disable-next-line react/no-danger -- sanitized in renderMarkdownDocument
-					dangerouslySetInnerHTML={{ __html: htmls[index] ?? block.html }}
-				/>
-			))}
+			<MarkdownImageProvider resetKey={blocks}>
+				{blocks.map((block, index) => (
+					<div
+						key={index}
+						className={`dev3-md-diff-block dev3-md-diff-${block.kind}`}
+						data-diff-kind={block.kind}
+					>
+						<MarkdownContent
+							body={block.source}
+							document
+							imageBaseDir={imageBaseDir}
+							imageRootDir={imageRootDir}
+							rendererConfig={rendererConfig}
+							sourceLines={{
+								lineOffset: block.startLine,
+								commentedLines: block.kind === "removed"
+									? commentedLines?.oldFile
+									: commentedLines?.newFile,
+							}}
+						/>
+					</div>
+				))}
+			</MarkdownImageProvider>
 		</div>
 	);
 }

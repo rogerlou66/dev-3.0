@@ -1,7 +1,7 @@
 import type { TranslationKey } from "./i18n";
 import type { GlobalSettings } from "../shared/types";
 
-/** The seven durable-configuration categories shown by Global Settings. */
+/** The durable-configuration categories shown by Global Settings. */
 export const SETTINGS_CATEGORIES = [
 	{
 		id: "appearance",
@@ -32,6 +32,11 @@ export const SETTINGS_CATEGORIES = [
 		id: "accounts",
 		labelKey: "settings.categoryAccounts",
 		descriptionKey: "settings.categoryAccountsDesc",
+	},
+	{
+		id: "models",
+		labelKey: "settings.categoryModels",
+		descriptionKey: "settings.categoryModelsDesc",
 	},
 	{
 		id: "workspace",
@@ -174,6 +179,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "agent-launch-auto-approve",
+		category: "tasks",
+		titleKey: "settings.agentLaunchAutoApprove",
+		descriptionKey: "settings.agentLaunchAutoApproveDesc",
+		anchor: "agent-launch-auto-approve",
+		globalField: "agentLaunchAutoApproveMinutes",
+		storage: "global",
+	},
+	{
 		id: "pr-origin-task-link",
 		category: "tasks",
 		titleKey: "settings.prOriginTaskLink",
@@ -210,6 +224,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "coordinator-prompt",
+		category: "tasks",
+		titleKey: "settings.coordinatorPrompt",
+		descriptionKey: "settings.coordinatorPromptDesc",
+		anchor: "coordinator-prompt",
+		globalField: "coordinatorPrompt",
+		storage: "global",
+	},
+	{
 		id: "tips",
 		category: "tasks",
 		titleKey: "settings.tipsSection",
@@ -242,6 +265,15 @@ export const SETTINGS_ENTRIES = [
 		descriptionKey: "settings.terminalBackendDesc",
 		anchor: "terminal-backend",
 		storage: "sidecar",
+	},
+	{
+		id: "terminal-shell",
+		category: "terminal",
+		titleKey: "settings.terminalShell",
+		descriptionKey: "settings.terminalShellDesc",
+		anchor: "terminal-shell",
+		globalField: "terminalShell",
+		storage: "global",
 	},
 	{
 		id: "terminal-path-open-mode",
@@ -339,6 +371,24 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "remote-tunnel",
+		category: "system",
+		titleKey: "settings.remoteTunnel",
+		descriptionKey: "settings.remoteTunnelDesc",
+		anchor: "remote-tunnel",
+		globalField: "remoteTunnel",
+		storage: "global",
+	},
+	{
+		id: "remote-silent-update",
+		category: "system",
+		titleKey: "settings.remoteSilentUpdate",
+		descriptionKey: "settings.remoteSilentUpdateDesc",
+		anchor: "remote-silent-update",
+		globalField: "remoteSilentUpdate",
+		storage: "global",
+	},
+	{
 		id: "prevent-sleep",
 		category: "system",
 		titleKey: "settings.preventSleep",
@@ -365,6 +415,14 @@ export const SETTINGS_ENTRIES = [
 		storage: "browser",
 	},
 	{
+		id: "model-catalog",
+		category: "models",
+		titleKey: "catalog.section",
+		descriptionKey: "catalog.sectionDesc",
+		anchor: "model-catalog",
+		storage: "surface",
+	},
+	{
 		id: "token-saving-proxy",
 		category: "system",
 		titleKey: "settings.pxpipeSection",
@@ -380,6 +438,15 @@ export const SETTINGS_ENTRIES = [
 		descriptionKey: "settings.terminalBidiDesc",
 		anchor: "experimental-terminal-bidi",
 		globalField: "experimentalTerminalBidi",
+		storage: "global",
+	},
+	{
+		id: "experimental-agent-traffic",
+		category: "system",
+		titleKey: "settings.agentTraffic",
+		descriptionKey: "settings.agentTrafficDesc",
+		anchor: "experimental-agent-traffic",
+		globalField: "experimentalAgentTraffic",
 		storage: "global",
 	},
 	{
@@ -403,6 +470,11 @@ export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"importShellEnv",
 	"agentsLayoutRevision",
 	"favorites",
+	// One-way discovery flag for the header's `?`, set by opening help mode — not
+	// a preference and deliberately not user-resettable.
+	"helpModeDiscovered",
+	// Which guided tours have already run. Progress, not a preference.
+	"completedTours",
 ] as const satisfies readonly (keyof GlobalSettings)[];
 
 /** Runtime list used by the registry integrity test; the type check catches schema drift. */
@@ -419,25 +491,33 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"agentBinaryPaths",
 	"agentCustomBinaryPaths",
 	"experimentalTerminalBidi",
+	"experimentalAgentTraffic",
 	"playSoundOnTaskComplete",
 	"externalApps",
 	"tipsDisabled",
+	"helpModeDiscovered",
+	"completedTours",
 	"taskOpenMode",
 	"terminalPathOpenMode",
 	"defaultDiffViewMode",
+	"remoteSilentUpdate",
 	"preventSleepWhileRunning",
 	"skipQuitDialog",
 	"importShellEnv",
+	"terminalShell",
 	"focusMode",
 	"agentRateLimitTracking",
 	"watchByDefault",
 	"suggestCompletingTasksAfterMerge",
 	"prOriginTaskLink",
+	"agentLaunchAutoApproveMinutes",
 	"agentsLayoutRevision",
 	"pxpipeProxyEnabled",
+	"remoteTunnel",
 	"favorites",
 	"keyboardShortcuts",
 	"reviewModePrompt",
+	"coordinatorPrompt",
 ] as const satisfies readonly (keyof GlobalSettings)[];
 
 type RegisteredGlobalSettingsField = (typeof SETTINGS_ENTRIES)[number] extends infer Entry

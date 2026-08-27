@@ -127,6 +127,7 @@ function renderColumn(overrides: {
 				onDragStart={vi.fn()}
 				bellCounts={new Map()}
 				taskPorts={new Map()}
+				taskDevServers={new Map()}
 				movingTaskIds={new Set()}
 				onSetMoving={vi.fn()}
 				siblingMap={new Map()}
@@ -177,6 +178,7 @@ function renderBuiltinColumn(overrides: {
 				onDragStart={vi.fn()}
 				bellCounts={new Map()}
 				taskPorts={new Map()}
+				taskDevServers={new Map()}
 				movingTaskIds={new Set()}
 				onSetMoving={vi.fn()}
 				siblingMap={new Map()}
@@ -503,6 +505,7 @@ describe("KanbanColumn — same-column drop is inert", () => {
 					onDragStart={vi.fn()}
 					bellCounts={new Map()}
 					taskPorts={new Map()}
+					taskDevServers={new Map()}
 					movingTaskIds={new Set()}
 					onSetMoving={vi.fn()}
 					siblingMap={new Map()}

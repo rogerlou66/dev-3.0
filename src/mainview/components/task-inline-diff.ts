@@ -1,5 +1,6 @@
 import { resolveTaskCompareBaseBranch, type Project, type Task, type TaskDiffMode } from "../../shared/types";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type Dispatch } from "react";
+import { routeDiffRequest, type AppAction, type Route } from "../state";
 
 export interface TaskInlineDiffRequest {
 	mode: TaskDiffMode;
@@ -9,6 +10,10 @@ export interface TaskInlineDiffRequest {
 	/** Scroll to the first unresolved GitHub review thread once the branch diff
 	 * and the PR comment payload have both loaded (PR status popover deep link). */
 	focusFirstUnresolvedThread?: boolean;
+	/** Open in `mode` even if the user's remembered mode says otherwise. For a
+	 * caller that already knows which mode is non-empty — landing on the stored
+	 * preference would show "No changes to show" for a diff that does exist. */
+	pinMode?: boolean;
 }
 
 /** Build the branch-diff request used by PR popover unresolved-comment links. */
@@ -25,25 +30,35 @@ export function createUnresolvedCommentsDiffRequest(
 	return {
 		mode: "branch",
 		compareRef,
-		compareLabel: compareRef || `origin/${baseBranch}`,
+		compareLabel: compareRef || project.defaultCompareRef || baseBranch,
 		focusFirstUnresolvedThread: true,
 	};
 }
 
-export function useTaskInlineDiffState(taskId?: string) {
-	const [request, setRequest] = useState<TaskInlineDiffRequest | null>(null);
+/**
+ * The diff's open/closed state lives on the route, not in component state, so
+ * opening it is a real navigation step: Back returns to the task and Forward
+ * returns to the diff. Switching tasks drops the diff for free — the new route
+ * simply carries none.
+ */
+export function useTaskInlineDiffState(routeOrTaskId: Route | string, dispatch: Dispatch<AppAction>) {
+	const localTaskId = typeof routeOrTaskId === "string" ? routeOrTaskId : null;
+	const [localRequest, setLocalRequest] = useState<TaskInlineDiffRequest | null>(null);
+	const request = typeof routeOrTaskId === "string" ? localRequest : routeDiffRequest(routeOrTaskId);
 
 	useEffect(() => {
-		setRequest(null);
-	}, [taskId]);
+		if (localTaskId) setLocalRequest(null);
+	}, [localTaskId]);
 
 	const open = useCallback((nextRequest: TaskInlineDiffRequest) => {
-		setRequest(nextRequest);
-	}, []);
+		if (localTaskId) setLocalRequest(nextRequest);
+		else dispatch({ type: "openTaskDiff", request: nextRequest });
+	}, [dispatch, localTaskId]);
 
 	const close = useCallback(() => {
-		setRequest(null);
-	}, []);
+		if (localTaskId) setLocalRequest(null);
+		else dispatch({ type: "closeTaskDiff" });
+	}, [dispatch, localTaskId]);
 
 	return {
 		request,

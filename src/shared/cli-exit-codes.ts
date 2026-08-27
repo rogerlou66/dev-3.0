@@ -11,6 +11,10 @@ export const CLI_EXIT_CODE_TASK_IS_DRAFT = 9;
 export const CLI_EXIT_CODE_LAUNCH_DECLINED = 10;
 export const CLI_EXIT_CODE_DELIVERY_UNCONFIRMED = 11;
 export const CLI_EXIT_CODE_PRUNE_INCOMPLETE = 12;
+export const CLI_EXIT_CODE_ARTIFACT_ASSET_MISSING = 13;
+export const CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND = 14;
+export const CLI_EXIT_CODE_UPDATE_REFUSED = 15;
+export const CLI_EXIT_CODE_INSTANCE_NOT_FOUND = 16;
 
 export const CLI_EXIT_CODE_DEFINITIONS = [
 	{
@@ -85,5 +89,29 @@ export const CLI_EXIT_CODE_DEFINITIONS = [
 		code: CLI_EXIT_CODE_PRUNE_INCOMPLETE,
 		description:
 			"`dev3 doctor --worktrees` was asked to prune and at least one selected directory was NOT reclaimed: it was skipped (its `dev3/task-*` branch is not merged into the base branch and `--force-unmerged` was absent) or the deletion failed. Everything else in the run was still deleted. A report-only run always exits 0.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_ARTIFACT_ASSET_MISSING",
+		code: CLI_EXIT_CODE_ARTIFACT_ASSET_MISSING,
+		description:
+			"`dev3 inline-html` found a local file the HTML references but that does not exist on disk, so the folded page would render broken. Nothing was written; the JSON report lists every missing reference.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND",
+		code: CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND,
+		description:
+			"`dev3 inline-html` found a credential-shaped string (GitHub token, `sk-` key, AWS key id, private-key block) inside the folded page. Nothing was written and the file must not be published until the secret is removed.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_UPDATE_REFUSED",
+		code: CLI_EXIT_CODE_UPDATE_REFUSED,
+		description:
+			"`dev3 update` refused to touch this install and nothing was changed: it is running from source, it is one of the copies dev3 keeps inside `~/.dev3.0` rather than an install — the PATH copy at `<dev3Home>/bin/dev3` that the app rewrites on every launch, or the `remote/rollback/dev3` copy a self-update took aside and a rolled-back server runs from (updating either would write a release tree into dev3's own data directory and leave the real install stale), it is a macOS app bundle the CLI cannot swap, it is Windows (no CLI tarball), or it is a Homebrew cask whose recorded version has drifted from the running one. Distinct from exit 1, which means an update was attempted and failed.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_INSTANCE_NOT_FOUND",
+		code: CLI_EXIT_CODE_INSTANCE_NOT_FOUND,
+		description:
+			"`--instance <selector>` was well-formed but no running instance answers to it — or more than one does (a `seq:<N>` shared by variants, or a `task:` prefix matching two guests). The message lists what IS running. Distinct from exit 2, which means no instance is reachable at all, and from exit 3, which means the selector itself was misspelled. The command never falls back to another instance.",
 	},
 ] as const;

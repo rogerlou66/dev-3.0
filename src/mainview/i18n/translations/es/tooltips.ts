@@ -5,6 +5,7 @@ export const tooltips = {
 		"El historial de navegación funciona como un navegador: cada tablero, tarea y pantalla de ajustes que visitas se convierte en un paso al que puedes volver.",
 	"ttip.header.navForward": "Vuelve a la pantalla de la que acabas de retroceder. El historial guarda tus pantallas recientes en orden.",
 	"ttip.header.switchProject": "Salta directamente al tablero de otro proyecto sin pasar por el panel principal.",
+	"ttip.header.switchVariant": "Esta tarea tiene varias variantes: salta a otro intento sin salir de la pantalla (también \u21e7\u2318[ / \u21e7\u2318]).",
 	"ttip.header.updateReady": "Hay una versión nueva descargada y lista. Haz clic para reiniciar la app y aplicarla.",
 	"ttip.header.quickShell":
 		"Una terminal desechable para comandos rápidos. Corre como tarea scratch en el tablero Operations, así que no toca los worktrees de tus proyectos.",
@@ -40,6 +41,14 @@ export const tooltips = {
 		"Mantiene la tarea abierta y deja la decisión en tus manos. Desactívala cuando la fusión final deba mostrar la sugerencia habitual.",
 	"ttip.task.siblings":
 		"Abre el resumen de variantes para comparar títulos y estados, y cambia a cualquier variante activa.",
+	"ttip.task.devOpen":
+		"El servidor de desarrollo está activo en {ports}. Abre el puerto más bajo en el navegador.",
+	"ttip.task.devStarting":
+		"El servidor de desarrollo arrancó, pero todavía no escucha en ningún puerto.",
+	"ttip.task.devConflict":
+		"Otro proceso ya ocupa {ports}. El script fallará al enlazar hasta que se libere.",
+	"ttip.task.devStop":
+		"Detiene el servidor de desarrollo de esta tarea. No se pierde nada: se reinicia con un clic.",
 	"ttip.task.ports":
 		"Puertos de red asignados a esta tarea. Cada tarea tiene los suyos, así los dev servers paralelos nunca chocan.",
 	"ttip.task.run": "Crea el git worktree, abre la terminal y lanza el agente en esta tarea.",
@@ -66,7 +75,8 @@ export const tooltips = {
 	// Active tasks sidebar
 	"ttip.sidebar.scopeProject": "Mostrar solo las tareas activas de este proyecto.",
 	"ttip.sidebar.scopeGlobal": "Mostrar tareas activas de todos los proyectos — las tarjetas llevan la insignia del proyecto.",
-	"ttip.sidebar.scopeAttention": "Solo tareas esperando tu respuesta — revisiones y preguntas — en todos los proyectos.",
+	"ttip.sidebar.scopeSpace": "Tareas de todos los proyectos que comparten un espacio con este.",
+	"ttip.sidebar.scopeSpaceDisabled": "Este proyecto no está en ningún espacio, no hay nada más amplio que mostrar. Añádelo en la configuración del proyecto o con el botón «Espacios…» en su fila del panel.",
 	"ttip.sidebar.hide": "La terminal ocupa todo el ancho. Recupera el panel con el mismo icono en la esquina superior derecha de la barra de la tarea.",
 	"ttip.filter.funnel": "Filtra la lista por prioridad, estado, etiquetas o agente. Los valores marcados se convierten en tokens del campo de búsqueda.",
 
@@ -81,9 +91,8 @@ export const tooltips = {
 		"tmux: cierra un panel y termina lo que corre dentro. Primero se abre un selector, así eliges exactamente qué panel muere.",
 
 	// Git bar
-	"ttip.git.changeRef": "Cambiar rama de comparación",
-	"ttip.git.refDropdown":
-		"Elige contra qué rama se comparan el diff y los contadores ahead/behind — normalmente la rama base donde harás merge.",
+	"ttip.infoPanel.branchChip":
+		"La rama git de la tarea. Un clic muestra el nombre completo y copias en un clic: la rama, la ruta del worktree y un comando checkout listo.",
 	"ttip.git.commit":
 		"Delega el commit al agente en la terminal de la tarea: revisa los cambios, los prepara y escribe el mensaje. No hace push.",
 	"ttip.git.rebase": "Reaplica los commits de la tarea sobre la rama base más reciente. El diff se mantiene honesto y los conflictos aparecen antes.",

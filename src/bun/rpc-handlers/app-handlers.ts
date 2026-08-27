@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { PATHS, Utils } from "../electrobun-platform";
 import type { AgentSkillInfo, ChangelogEntry, ExternalApp, FolderEntry, FolderListing, Project, SharedArtifact, TipState, UpdatePopoverPreview } from "../../shared/types";
-import { DEFAULT_EXTERNAL_APPS, STUCK_PREPARATION_FETCH_THRESHOLD_MS, extractRepoName } from "../../shared/types";
+import { BUILTIN_OPS_BOARD_NAME, DEFAULT_EXTERNAL_APPS, STUCK_PREPARATION_FETCH_THRESHOLD_MS, extractRepoName } from "../../shared/types";
 import { buildUpdateChangelog, changedKeysFromPaths, changelogEntryKey, countMergedPrs, resolvePrevTag, selectReleaseWindow } from "../../shared/update-changelog";
 import * as data from "../data";
 import * as git from "../git";
@@ -17,12 +17,14 @@ import type { NotificationClickTarget } from "../native-notifications";
 import { BUNDLED_CHANGELOG } from "../changelog-bundled";
 import * as repoConfig from "../repo-config";
 import { DEV3_HOME } from "../paths";
+import { createSandboxProject } from "../sandbox-project";
 import { pathBasename, projectStorageKey } from "../../shared/project-storage-key";
 import { listFilesystemRoots } from "../../shared/filesystem-roots";
 import { listAgentSkills as scanAgentSkills } from "../skills-catalog";
 import { spawn, spawnSync } from "../spawn";
 import { writeSystemClipboard } from "../system-clipboard";
 import { getPushMessage, getUploadedImageExtension, hideAppNative, log, logRendererError, logRendererDiagnostic, setActiveContext, setAppForeground, setStreamerPrivacy, setTerminalFocus } from "./shared";
+import { recordRendererHeartbeat } from "../renderer-watchdog";
 import { applyMenuContext, type MenuContext } from "../../shared/application-menu";
 import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactDownloadFile, sharedArtifactHtmlPath } from "../shared-artifacts";
 import { issueArtifactDownloadTicket } from "../artifact-download-tickets";
@@ -144,7 +146,7 @@ async function getProjects(): Promise<Project[]> {
 	if (!builtinOpsEnsured) {
 		builtinOpsEnsured = true;
 		try {
-			await data.ensureBuiltinOperationsBoard("Operations");
+			await data.ensureBuiltinOperationsBoard(BUILTIN_OPS_BOARD_NAME);
 		} catch (err) {
 			builtinOpsEnsured = false;
 			log.warn("Failed to ensure built-in Operations board (non-fatal)", { error: String(err) });
@@ -318,8 +320,15 @@ async function addProjectImpl(params: { path: string; name?: string }): Promise<
 		} catch (err) {
 			log.warn("Could not detect default branch, keeping 'main'", { error: String(err) });
 		}
-		log.info("← addProject OK", { projectId: project.id, name: project.name });
-		return { ok: true, project };
+		// The renderer keeps whatever this returns until the next getProjects, and
+		// getProjects is not polled — so a raw record left `defaultCompareRef`
+		// unresolved for the whole session and the UI invented `origin/<base>`.
+		const resolved = await repoConfig.resolveProjectConfig(project).catch((err) => {
+			log.warn("Failed to resolve config for the new project", { id: project.id, error: String(err) });
+			return project;
+		});
+		log.info("← addProject OK", { projectId: resolved.id, name: resolved.name });
+		return { ok: true, project: resolved };
 	} catch (err) {
 		log.error("addProject failed", { error: String(err), params });
 		return { ok: false, error: String(err) };
@@ -1039,6 +1048,7 @@ async function copyTerminalSelection(params: { taskId: string; text: string; mou
 export const appHandlers = {
 	logRendererError,
 	logRendererDiagnostic,
+	rendererHeartbeat: recordRendererHeartbeat,
 	quitApp,
 	requestQuit,
 	consumePendingQuitDialog,
@@ -1057,6 +1067,7 @@ export const appHandlers = {
 	listDirectory,
 	listAgentSkills,
 	addProject: addProjectImpl,
+	createSandboxProject,
 	addVirtualProject,
 	cloneAndAddProject,
 	createDirectory,

@@ -1,5 +1,5 @@
-import { parseArgs, resolveFileArgs } from "./args";
-import { detectContext, resolveSocketPath, resolveSocketPathWithRetry, socketDiagnostics } from "./context";
+import { extractInstanceFlag, parseArgs, resolveFileArgs } from "./args";
+import { detectContext, resolveInstanceSocket, resolveSocketPath, resolveSocketPathWithRetry, socketDiagnostics } from "./context";
 import { exitAppNotRunning, exitInternalError, exitUsage } from "./output";
 import { handleProjects } from "./commands/projects";
 import { handleTasks } from "./commands/tasks";
@@ -25,13 +25,17 @@ import { handlePaneExec } from "./commands/pane-exec";
 import { PANE_RUN_VERB } from "../bun/pane-run-store";
 import { handleShowImage } from "./commands/show-image";
 import { handleShowArtifact } from "./commands/show-artifact";
+import { handleArtifactTemplate } from "./commands/artifact-template";
+import { handleInlineHtml } from "./commands/inline-html";
 import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
+import { handleUpdate } from "./commands/update";
 import { TOLERATE_APP_OFFLINE_FLAG } from "../shared/agent-hooks";
 import { BUILD_TIME, BUILD_COMMIT, BUILD_VERSION } from "../shared/build-info.generated";
-import { CLI_EXIT_CODE_SUCCESS } from "../shared/cli-exit-codes";
+import { CLI_EXIT_CODE_INSTANCE_NOT_FOUND, CLI_EXIT_CODE_SUCCESS } from "../shared/cli-exit-codes";
+import { INSTANCE_FLAG, INSTANCE_SELECTOR_SYNTAX, parseInstanceSelector } from "../shared/cli-instance";
 import { installEpipeGuard, isEpipeError } from "./epipe";
 import { resolveHelp } from "./help";
 
@@ -45,7 +49,7 @@ Commands:
                                          (always shows current overview; --notes inlines note bodies, --history shows title/overview change log)
   dev3 task move [--task <id>] --status <status>  Change task status
   dev3 task terminal-backend [--task <id>] [--to tmux|native]  Inspect/switch this task's terminal backend
-  dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off]  Update task fields
+  dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off] [--type coordinator|pr-review|standard]  Update task fields
   dev3 task create --title "..." [--description "..." | --description -]  Create a new task (To Do)
   dev3 note add "..." [--content "..."] [--task <id>] [--source user]  Add note to a task
   dev3 note list [--task <id>]          List notes
@@ -69,6 +73,8 @@ Commands:
   dev3 automations run <id>             Fire an automation now (creates its task)
   dev3 automations templates            List built-in templates
   dev3 conversations search "<query>" [--limit N] [--all-statuses] [--json]  Search past task conversations (completed/cancelled)
+  dev3 conversations dump [--latest] [--stdout]  Parse this task's agent transcripts into JSON
+  dev3 conversations handoff [--for claude|codex]  Retell this conversation as one message for another agent
   dev3 dev-server start [task-id]       Start a task dev server
   dev3 dev-server stop [task-id]        Stop a task dev server
   dev3 dev-server restart [task-id]     Restart a task dev server
@@ -78,6 +84,8 @@ Commands:
   dev3 message "text" [--in <dur> | --at <hh:mm>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later)
   dev3 show-image <path> [--caption "..."] [<path> ...]  Show images (screenshots/renders) in an in-app viewer bound to the task; each --caption annotates the preceding image
   dev3 show-artifact <file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; local CSS, JS, and images are exported as ZIP
+  dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
+  dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
   dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane
   dev3 pane list [--json]                Which terminal backend you are on, which panes exist, which one is yours
   dev3 pane run "<command>" [--below] [--label <name>]  Run a command in a neighbouring pane of your own terminal
@@ -95,6 +103,9 @@ Commands:
                                          (backgrounds by default; manage it with
                                           status / url / restart / logs / stop.
                                           See "dev3 remote --help" for full usage)
+  dev3 update [--check|--dry-run]         Install a newer dev3 (brew or CLI tarball, auto-detected).
+                                         On a box running \`dev3 remote\`, the server does the restart
+                                         itself and keeps its public tunnel URL and your session.
   dev3 gui                               Launch the dev-3.0 desktop app
                                          (Linux: lazily downloads bundle on first run.
                                           See "dev3 gui --help" for full usage)
@@ -113,8 +124,26 @@ or "dev3 <command> <subcommand> --help" (e.g. "dev3 task create --help") for a s
 `;
 
 
+/**
+ * Turn an `--instance` value into a socket path, or leave. A bad spelling is a
+ * usage error; a well-formed selector nothing answers to is its own exit code,
+ * so a script can tell "I asked for the wrong instance" from "no app running".
+ */
+function resolveRequestedInstance(value: string): string {
+	const selector = parseInstanceSelector(value);
+	if (!selector) {
+		exitUsage(`Invalid ${INSTANCE_FLAG} value "${value}". Expected: ${INSTANCE_SELECTOR_SYNTAX}`);
+	}
+	const { socketPath, error } = resolveInstanceSocket(selector);
+	if (socketPath) return socketPath;
+	process.stderr.write(`${error}\n`);
+	process.exit(CLI_EXIT_CODE_INSTANCE_NOT_FOUND);
+}
+
 async function main(): Promise<void> {
-	const rawArgs = process.argv.slice(2);
+	// `--instance` targets the whole invocation, not one command, so it leaves
+	// argv before help routing and per-command flag validation ever see it.
+	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(process.argv.slice(2));
 
 	// Every short print-and-exit command may have its stdout closed early by a
 	// downstream consumer (`dev3 … | head`, `| grep -m1`, quitting a pager).
@@ -155,7 +184,10 @@ async function main(): Promise<void> {
 	const tolerateAppOffline = args.flags[TOLERATE_APP_OFFLINE_FLAG.slice(2)] === "true";
 
 	const context = detectContext();
-	let socketPath = resolveSocketPath();
+	// An explicit selector wins over DEV3_CLI_SOCKET, which wins over discovery.
+	// It never falls back: silently reaching a different instance than the one
+	// the human named is the whole confusion this flag exists to end.
+	let socketPath = instanceValue === null ? resolveSocketPath() : resolveRequestedInstance(instanceValue);
 
 	// Commands that work without the app running
 	if (command === "current") {
@@ -202,6 +234,11 @@ async function main(): Promise<void> {
 		// or not running, so it never touches the socket.
 		return await handleDoctor(args);
 	}
+	if (command === "inline-html") {
+		// Pure local file transform (fold a multi-file report into one HTML) —
+		// runs before publishing an artifact and needs no app or socket.
+		return await handleInlineHtml(rawArgs.slice(1));
+	}
 	if (command === "conversations") {
 		// Read-only search over local transcript files — no app/socket needed.
 		return await handleConversations(subcommand, args, context);
@@ -210,6 +247,12 @@ async function main(): Promise<void> {
 		// `dev3 remote` IS the app in headless mode — it must not require a
 		// running instance socket. It starts its own CLI socket once up.
 		return await handleRemote(subcommand, args);
+	}
+	if (command === "update") {
+		// Install a newer dev3. Needs no socket of its own: it either hands the job
+		// to a running headless server (found via the remote lifecycle state file,
+		// not socket discovery) or replaces the files itself.
+		return await handleUpdate(args);
 	}
 	if (command === "gui") {
 		// `dev3 gui` launches the desktop app (mac) or the bundled launcher
@@ -274,6 +317,8 @@ async function main(): Promise<void> {
 				return await handleShowImage(rawArgs.slice(1), socketPath, context);
 			case "show-artifact":
 				return await handleShowArtifact(rawArgs.slice(1), socketPath, context);
+			case "artifact-template":
+				return await handleArtifactTemplate(args, socketPath, context);
 			case "peek":
 				return await handlePeek(args, socketPath, context);
 			case "pane":

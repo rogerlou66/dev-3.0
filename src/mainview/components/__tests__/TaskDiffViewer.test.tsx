@@ -453,6 +453,9 @@ describe("TaskDiffViewer", () => {
 			updateChannel: "stable",
 		});
 		localStorage.clear();
+		// Most cases here assert against every fixture file, so they opt into
+		// tests being included — the shipped default excludes them.
+		localStorage.setItem("dev3-diff-include-tests-v1", "1");
 		document.documentElement.dataset.theme = "dark";
 		// Lock the screen width to a wide external-monitor size so the "auto"
 		// default deterministically resolves to "split". Individual tests can
@@ -865,10 +868,10 @@ describe("TaskDiffViewer", () => {
 			</I18nProvider>,
 		);
 
-		const checkbox = await screen.findByRole("checkbox", { name: /include tests/i });
-		expect(checkbox).toBeChecked();
-		await user.click(checkbox);
-		expect(checkbox).not.toBeChecked();
+		const toggle = await screen.findByTestId("diff-toolbar-include-tests-segment");
+		expect(toggle).toHaveAttribute("aria-pressed", "true");
+		await user.click(toggle);
+		expect(toggle).toHaveAttribute("aria-pressed", "false");
 
 		// Badge must read "Showing 2 of 3" — 1 code file + 1 skipped binary visible, 1 test file hidden.
 		// Regression: previously rendered "Showing 2 of 1" because the total excluded skipped files.
@@ -1479,7 +1482,7 @@ describe("TaskDiffViewer", () => {
 		expect(screen.getByText("2/2 Read")).toBeInTheDocument();
 
 		// Step 2: toggle "Include tests" OFF — only the production file is visible.
-		await user.click(screen.getByTestId("diff-toolbar-include-tests").querySelector("input")!);
+		await user.click(screen.getByTestId("diff-toolbar-include-tests-segment"));
 		expect(screen.getByText("1/1 Read")).toBeInTheDocument();
 
 		// Step 3: with the test file hidden, click "Mark all unread".
@@ -1488,7 +1491,7 @@ describe("TaskDiffViewer", () => {
 
 		// Step 4: toggle "Include tests" back ON — the previously hidden test
 		// file must also be unread now (this was the bug: it stayed "1/2 Read").
-		await user.click(screen.getByTestId("diff-toolbar-include-tests").querySelector("input")!);
+		await user.click(screen.getByTestId("diff-toolbar-include-tests-segment"));
 		expect(screen.getByText("0/2 Read")).toBeInTheDocument();
 	});
 
@@ -2937,6 +2940,8 @@ describe("TaskDiffViewer narrow viewport", () => {
 			updateChannel: "stable",
 		});
 		localStorage.clear();
+		// Narrow cases assert the full fixture totals, so tests stay included.
+		localStorage.setItem("dev3-diff-include-tests-v1", "1");
 		document.documentElement.dataset.theme = "dark";
 		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
 		Object.defineProperty(window.screen, "availWidth", { configurable: true, value: 390 });
@@ -3541,6 +3546,28 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 		});
 	});
 
+	it("honours pinMode over the stored mode preference", async () => {
+		localStorage.setItem("dev3-inline-diff-mode-v1", "branch");
+		render(
+			<I18nProvider>
+				<TaskDiffViewer
+					task={prTask}
+					project={project}
+					request={{ mode: "uncommitted", pinMode: true }}
+					onBack={vi.fn()}
+				/>
+			</I18nProvider>,
+		);
+
+		// The caller knows the changes are uncommitted; the remembered "branch"
+		// would have opened an empty diff.
+		await waitFor(() => {
+			expect(vi.mocked(api.request.getTaskDiff)).toHaveBeenLastCalledWith(
+				expect.objectContaining({ mode: "uncommitted" }),
+			);
+		});
+	});
+
 	describe("markdown preview", () => {
 		function markdownFilePayload(file: Partial<TaskDiffResponse["files"][number]>): TaskDiffResponse {
 			return {
@@ -3675,6 +3702,91 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			const preview = await screen.findByTestId("diff-md-preview");
 			expect(preview.textContent).toContain("Nothing to preview");
 			expect(within(preview).queryByTestId("markdown-document")).toBeNull();
+		});
+
+		/** Selects the whole text of a rendered block and tells the document about it. */
+		function selectBlock(element: Element) {
+			const range = document.createRange();
+			range.selectNodeContents(element);
+			const selection = window.getSelection()!;
+			selection.removeAllRanges();
+			selection.addRange(range);
+			act(() => {
+				document.dispatchEvent(new Event("selectionchange"));
+			});
+		}
+
+		function blockByText(preview: HTMLElement, text: string): Element {
+			const blocks = [...preview.querySelectorAll("[data-md-line-start]")];
+			const found = blocks.find((block) => block.textContent?.includes(text));
+			if (!found) throw new Error(`no line-stamped block containing ${text}`);
+			return found;
+		}
+
+		it("offers no comment button until prose is selected", async () => {
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			expect(within(preview).queryByTestId("md-preview-add-comment")).toBeNull();
+
+			selectBlock(blockByText(preview, "bold"));
+
+			expect(within(preview).getByTestId("md-preview-add-comment")).toBeInTheDocument();
+		});
+
+		it("anchors a comment made from the preview onto the selected source lines", async () => {
+			const user = userEvent.setup();
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			selectBlock(blockByText(preview, "bold"));
+			await user.click(within(preview).getByTestId("md-preview-add-comment"));
+
+			// The composer names the range it will comment on: line 3 of the new file.
+			expect(screen.getByText(/New line 3/)).toBeInTheDocument();
+			await user.type(screen.getByPlaceholderText("Leave a comment on this line..."), "tighten this");
+			await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+			const list = await screen.findByTestId("md-preview-comments");
+			expect(list.textContent).toContain("tighten this");
+			expect(list.textContent).toContain("1 comment on this file");
+			// And the block itself is marked, so the comment is visible in place.
+			expect(blockByText(preview, "bold").className).toContain("dev3-md-commented");
+		});
+
+		it("comments the old side when the selection sits in a removed block", async () => {
+			const user = userEvent.setup();
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			selectBlock(blockByText(preview, "Old"));
+			await user.click(within(preview).getByTestId("md-preview-add-comment"));
+
+			expect(screen.getByText(/Old line 1/)).toBeInTheDocument();
+		});
+
+		it("keeps a preview comment in the review export", async () => {
+			const user = userEvent.setup();
+			const writeText = vi.fn().mockResolvedValue(undefined);
+			vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			selectBlock(blockByText(preview, "bold"));
+			await user.click(within(preview).getByTestId("md-preview-add-comment"));
+			await user.type(screen.getByPlaceholderText("Leave a comment on this line..."), "from the preview");
+			await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+			await user.click(await screen.findByRole("button", { name: /^Copy$/i }));
+			await waitFor(() => {
+				expect(writeText).toHaveBeenCalled();
+			});
+			const copied = writeText.mock.calls[writeText.mock.calls.length - 1]?.[0];
+			expect(copied).toContain("from the preview");
 		});
 
 		it("flips a previewed markdown file back to source when a search hit lands in it", async () => {

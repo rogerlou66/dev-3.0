@@ -105,15 +105,19 @@ export function lineToText(line: CellLine): string {
 export interface LogicalLineRow {
 	/** Absolute buffer row. */
 	y: number;
-	/** Cell-exact row text (length === row length). */
+	/** This row's slice of the logical line (one UTF-16 unit per cell). */
 	text: string;
 	/** Offset of this row's first char within the logical line text. */
 	offset: number;
+	/** Screen column of this row's first char (band start). */
+	x0: number;
 }
 
 export interface LogicalLine {
 	text: string;
 	rows: LogicalLineRow[];
+	/** At least one row seam was a geometric guess, not a terminal wrap flag. */
+	guessed: boolean;
 }
 
 // Bound reassembly work for pathological single logical lines (minified JSON
@@ -123,26 +127,199 @@ const MAX_LOGICAL_ROWS = 40;
 export type BufferLineReader = (y: number) => CellLine | undefined;
 
 /**
- * Stitch the soft-wrapped logical line containing buffer row `y` back into
- * one string, remembering each row's offset so match indices map back to
- * buffer coordinates.
+ * A column range owned by one tmux pane, inclusive on both ends. Rows are
+ * stitched per band, never across a pane border.
  */
-export function getLogicalLine(getLine: BufferLineReader, y: number): LogicalLine | undefined {
-	if (!getLine(y)) return undefined;
-	let startY = y;
-	while (startY > 0 && y - startY < MAX_LOGICAL_ROWS && getLine(startY)?.isWrapped) startY--;
+interface Band {
+	left: number;
+	right: number;
+}
+
+// tmux draws pane borders with box-drawing verticals (UTF-8 mode, which the app
+// always runs in). Nothing on either side of one belongs to the same text flow.
+const VERTICAL_SEPARATORS = new Set(["│", "┃", "║", "╎", "╏", "┆", "┇", "┊", "┋"]);
+
+// Both sides of a row seam must look like path text before a full row is
+// stitched onto the next one without a wrap flag — prose lines end in a space
+// or a period, so they stay separate.
+const SEAM_CHAR = /[\w.@%+,=/\\~-]/;
+
+const MIN_BAND_WIDTH = 3;
+
+// How far the upper row's last character may sit from the band's right edge and
+// still count as "cut off by the width". TUIs that reflow themselves (Claude
+// Code, most agent CLIs) break a couple of columns short of the real edge.
+const MAX_WRAP_SLACK = 4;
+
+// A self-reflowing TUI indents its continuation rows to line up under the
+// content; anything deeper than this is a new block, not a continuation.
+const MAX_CONTINUATION_INDENT = 12;
+
+// What tells a wrapped path fragment apart from a wrapped sentence.
+const PATH_SEPARATOR = /[/\\.]/;
+
+function bandsOf(text: string): Band[] {
+	const bands: Band[] = [];
+	let left = 0;
+	for (let x = 0; x <= text.length; x++) {
+		if (x === text.length || VERTICAL_SEPARATORS.has(text[x]!)) {
+			if (x - left >= MIN_BAND_WIDTH) bands.push({ left, right: x - 1 });
+			left = x + 1;
+		}
+	}
+	return bands;
+}
+
+interface RowInfo {
+	y: number;
+	text: string;
+	isWrapped: boolean;
+	bands: Band[];
+}
+
+/** Per-pass memo so one viewport repaint reads each buffer row exactly once. */
+export interface RowCache {
+	rows: Map<number, RowInfo | undefined>;
+	/** Finished logical lines, keyed by every row they cover (`y:left:right`). */
+	lines: Map<string, LogicalLine>;
+}
+
+export function createRowCache(): RowCache {
+	return { rows: new Map(), lines: new Map() };
+}
+
+function readRow(getLine: BufferLineReader, y: number, cache: RowCache): RowInfo | undefined {
+	const hit = cache.rows.get(y);
+	if (hit !== undefined || cache.rows.has(y)) return hit;
+	const line = y >= 0 ? getLine(y) : undefined;
+	const text = line ? lineToText(line) : "";
+	const info = line ? { y, text, isWrapped: line.isWrapped, bands: bandsOf(text) } : undefined;
+	cache.rows.set(y, info);
+	return info;
+}
+
+function hasBand(row: RowInfo, band: Band): boolean {
+	return row.bands.some((b) => b.left === band.left && b.right === band.right);
+}
+
+/** The seam between two stitched rows: last used column above, first below. */
+interface Seam {
+	upperEnd: number;
+	lowerStart: number;
+	/** True when the terminal's own wrap flag proved it — not a geometric guess. */
+	flagged: boolean;
+}
+
+function lastNonSpace(text: string, band: Band): number {
+	for (let x = band.right; x >= band.left; x--) if (text[x] !== " ") return x;
+	return -1;
+}
+
+function firstNonSpace(text: string, band: Band): number {
+	for (let x = band.left; x <= band.right; x++) if (text[x] !== " ") return x;
+	return -1;
+}
+
+/** The run of path characters ending at (or starting at) a seam column. */
+function tokenEndingAt(text: string, left: number, end: number): string {
+	let x = end;
+	while (x >= left && SEAM_CHAR.test(text[x]!)) x--;
+	return text.slice(x + 1, end + 1);
+}
+
+function tokenStartingAt(text: string, start: number, right: number): string {
+	let x = start;
+	while (x <= right && SEAM_CHAR.test(text[x]!)) x++;
+	return text.slice(start, x);
+}
+
+/**
+ * Does `upper` continue into `lower` inside `band`?
+ *
+ * The wrap flag is authoritative when it is there, but it is missing for three
+ * cases that matter: rows already in ghostty-web's scrollback (its buffer
+ * hardcodes `isWrapped: false` for them), any tmux window with a vertical
+ * split (tmux redraws each pane row by row, so the terminal never sees a wrap),
+ * and TUIs that reflow their own output — Claude Code emits a real newline plus
+ * an indent, so there is no wrap to see at all. Those fall back to geometry:
+ * the upper row runs out at the band's right edge, the lower row starts with a
+ * modest indent, and both sides of the seam read as path text.
+ *
+ * Returns the columns the seam joins, so the trailing padding and the leading
+ * indent are dropped when the rows are concatenated.
+ */
+function seamBetween(upper: RowInfo, lower: RowInfo, band: Band): Seam | null {
+	if (!hasBand(upper, band) || !hasBand(lower, band)) return null;
+	const fullWidth = band.left === 0 && band.right === upper.text.length - 1;
+	if (fullWidth && lower.isWrapped) return { upperEnd: band.right, lowerStart: band.left, flagged: true };
+	const upperEnd = lastNonSpace(upper.text, band);
+	const lowerStart = firstNonSpace(lower.text, band);
+	if (upperEnd < 0 || lowerStart < 0) return null;
+	if (band.right - upperEnd > MAX_WRAP_SLACK) return null;
+	if (lowerStart - band.left > MAX_CONTINUATION_INDENT) return null;
+	const upperToken = tokenEndingAt(upper.text, band.left, upperEnd);
+	const lowerToken = tokenStartingAt(lower.text, lowerStart, band.right);
+	if (!upperToken || !lowerToken) return null;
+	// Prose wraps too; only a seam where one side already looks like a path is
+	// worth guessing at, and a path fragment that wide always carries a
+	// separator or a dot.
+	if (!PATH_SEPARATOR.test(upperToken) && !PATH_SEPARATOR.test(lowerToken)) return null;
+	return { upperEnd, lowerStart, flagged: false };
+}
+
+function buildLogicalLine(getLine: BufferLineReader, row: RowInfo, band: Band, cache: RowCache): LogicalLine {
+	let startY = row.y;
+	while (startY > 0 && row.y - startY < MAX_LOGICAL_ROWS) {
+		const above = readRow(getLine, startY - 1, cache);
+		const current = readRow(getLine, startY, cache);
+		if (!above || !current || !seamBetween(above, current, band)) break;
+		startY--;
+	}
 	const rows: LogicalLineRow[] = [];
 	let text = "";
+	let from = band.left;
+	let guessed = false;
 	for (let rowY = startY; rowY - startY < MAX_LOGICAL_ROWS; rowY++) {
-		const line = getLine(rowY);
-		if (!line) break;
-		if (rowY > startY && !line.isWrapped) break;
-		const rowText = lineToText(line);
-		rows.push({ y: rowY, text: rowText, offset: text.length });
-		text += rowText;
-		if (!getLine(rowY + 1)?.isWrapped) break;
+		const current = readRow(getLine, rowY, cache);
+		if (!current) break;
+		const next = readRow(getLine, rowY + 1, cache);
+		const seam = next ? seamBetween(current, next, band) : null;
+		const to = seam ? seam.upperEnd : band.right;
+		const slice = current.text.slice(from, to + 1);
+		rows.push({ y: rowY, text: slice, offset: text.length, x0: from });
+		text += slice;
+		if (!seam) break;
+		if (!seam.flagged) guessed = true;
+		from = seam.lowerStart;
 	}
-	return { text, rows };
+	return { text, rows, guessed };
+}
+
+/**
+ * Reassemble the text flows that pass through buffer row `y` — one per column
+ * band, so a vertically split tmux window yields one logical line per pane.
+ * Each row remembers its offset and its start column, so match indices map
+ * back to buffer coordinates.
+ */
+export function getLogicalLines(getLine: BufferLineReader, y: number, cache: RowCache = createRowCache()): LogicalLine[] {
+	const row = readRow(getLine, y, cache);
+	if (!row) return [];
+	const lines: LogicalLine[] = [];
+	for (const band of row.bands) {
+		// One logical line can cover the whole viewport (an unbroken wall of
+		// paths in a split pane). Building it once per row it covers would make
+		// a repaint quadratic in the row count, so it is memoised for every row
+		// it owns as soon as it is built.
+		const key = `${y}:${band.left}:${band.right}`;
+		const hit = cache.lines.get(key);
+		const line = hit ?? buildLogicalLine(getLine, row, band, cache);
+		if (line.rows.length === 0) continue;
+		if (!hit) {
+			for (const covered of line.rows) cache.lines.set(`${covered.y}:${band.left}:${band.right}`, line);
+		}
+		lines.push(line);
+	}
+	return lines;
 }
 
 export interface BufferRange {
@@ -150,20 +327,25 @@ export interface BufferRange {
 	end: { x: number; y: number };
 }
 
-/** Map an inclusive [start, end] index range in the logical line to buffer coordinates. */
-export function mapRangeToBuffer(rows: LogicalLineRow[], start: number, end: number): BufferRange | undefined {
-	const locate = (idx: number): { x: number; y: number } | undefined => {
-		for (const row of rows) {
-			if (idx >= row.offset && idx < row.offset + row.text.length) {
-				return { x: idx - row.offset, y: row.y };
-			}
-		}
-		return undefined;
-	};
-	const startPos = locate(start);
-	const endPos = locate(end);
-	if (!startPos || !endPos) return undefined;
-	return { start: startPos, end: endPos };
+/**
+ * Map an inclusive [start, end] index range in the logical line to ONE range
+ * per buffer row it covers. Single-row ranges keep both hover hit-testing and
+ * the underline overlay exact: ghostty's `isPositionInLink` treats a multi-row
+ * range as spanning whole rows, which in a vertically split window would claim
+ * the neighbouring pane's columns too.
+ */
+export function mapRangeToBuffer(rows: LogicalLineRow[], start: number, end: number): BufferRange[] {
+	const segments: BufferRange[] = [];
+	for (const row of rows) {
+		const rowStart = Math.max(start, row.offset);
+		const rowEnd = Math.min(end, row.offset + row.text.length - 1);
+		if (rowStart > rowEnd) continue;
+		segments.push({
+			start: { x: row.x0 + rowStart - row.offset, y: row.y },
+			end: { x: row.x0 + rowEnd - row.offset, y: row.y },
+		});
+	}
+	return segments;
 }
 
 const RESOLVE_CACHE_TTL_MS = 10_000;
@@ -249,34 +431,76 @@ export function createFilePathLinkProvider(options: FilePathLinkProviderOptions)
 	interface RowLink {
 		target: ResolvedTerminalPath;
 		candidate: PathCandidate;
-		range: BufferRange;
+		/** One range per buffer row the candidate covers. */
+		segments: BufferRange[];
 	}
 
-	function computeLinks(y: number): { links: RowLink[]; rowYs: number[] } {
-		const logical = getLogicalLine((row) => options.term.buffer.active.getLine(row), y);
-		if (!logical) return { links: [], rowYs: [y] };
-		const candidates = findPathCandidates(logical.text);
+	/**
+	 * Stitching rows is a guess, so it must never cost a link: a wrongly merged
+	 * token ("a.ts" + "b.ts") resolves to nothing and would swallow both real
+	 * paths. Every row of a multi-row logical line is therefore scanned on its
+	 * own as well, and its candidates are kept wherever the stitched read
+	 * produced no link over those cells.
+	 */
+	function computeLinks(y: number, cache?: RowCache, done?: Set<LogicalLine>): RowLink[] {
+		const logicalLines = getLogicalLines((row) => options.term.buffer.active.getLine(row), y, cache).filter(
+			(line) => !done?.has(line),
+		);
+		for (const line of logicalLines) done?.add(line);
 		const links: RowLink[] = [];
-		for (const candidate of candidates) {
-			const target = cachedTarget(candidate.cleanPath);
-			if (!target) continue;
-			const range = mapRangeToBuffer(logical.rows, candidate.start, candidate.end);
-			if (!range) continue;
-			links.push({ target, candidate, range });
+		const claimed = new Map<number, [number, number][]>();
+		const claim = (segments: BufferRange[]) => {
+			for (const segment of segments) {
+				const spans = claimed.get(segment.start.y) ?? [];
+				spans.push([segment.start.x, segment.end.x]);
+				claimed.set(segment.start.y, spans);
+			}
+		};
+		const isFree = (range: BufferRange) =>
+			!(claimed.get(range.start.y) ?? []).some(([from, to]) => range.start.x <= to && range.end.x >= from);
+		for (const logical of logicalLines) {
+			for (const candidate of findPathCandidates(logical.text)) {
+				const target = cachedTarget(candidate.cleanPath);
+				if (!target) continue;
+				const segments = mapRangeToBuffer(logical.rows, candidate.start, candidate.end);
+				if (segments.length === 0) continue;
+				claim(segments);
+				links.push({ target, candidate, segments });
+			}
 		}
-		return { links, rowYs: logical.rows.map((row) => row.y) };
+		for (const logical of logicalLines) {
+			if (!logical.guessed || logical.rows.length < 2) continue;
+			for (const row of logical.rows) {
+				for (const candidate of findPathCandidates(row.text)) {
+					const range = {
+						start: { x: row.x0 + candidate.start, y: row.y },
+						end: { x: row.x0 + candidate.end, y: row.y },
+					};
+					if (!isFree(range)) continue;
+					const target = cachedTarget(candidate.cleanPath);
+					if (!target) continue;
+					claim([range]);
+					links.push({ target, candidate, segments: [range] });
+				}
+			}
+		}
+		return links;
 	}
 
 	return {
 		provideLinks(y, callback) {
 			try {
-				const links: ILink[] = computeLinks(y).links.map(({ target, candidate, range }) => ({
-					text: candidate.raw,
-					range,
-					activate: (event) => {
-						if (event.ctrlKey || event.metaKey) options.onActivate(target, event, candidate.line);
-					},
-				}));
+				// One ILink per row segment: ghostty hit-tests a multi-row range as
+				// whole rows, which would claim a split window's other pane.
+				const links: ILink[] = computeLinks(y).flatMap(({ target, candidate, segments }) =>
+					segments.map((range) => ({
+						text: candidate.raw,
+						range,
+						activate: (event: MouseEvent) => {
+							if (event.ctrlKey || event.metaKey) options.onActivate(target, event, candidate.line);
+						},
+					})),
+				);
 				callback(links.length > 0 ? links : undefined);
 			} catch {
 				callback(undefined);
@@ -284,14 +508,24 @@ export function createFilePathLinkProvider(options: FilePathLinkProviderOptions)
 		},
 		linksForRows(ys) {
 			const ranges: BufferRange[] = [];
-			// A logical line spans several rows; once processed, skip its siblings.
-			const covered = new Set<number>();
+			// A logical line spans several rows, so a link surfaces once per row it
+			// covers; dedupe by range instead of skipping rows, whose other column
+			// bands may still hold links of their own. `done` keeps the scan itself
+			// off a line already handled — a viewport-sized logical line would
+			// otherwise be re-scanned once per row it covers.
+			const seen = new Set<string>();
+			const cache = createRowCache();
+			const done = new Set<LogicalLine>();
 			for (const y of ys) {
-				if (covered.has(y)) continue;
 				try {
-					const { links, rowYs } = computeLinks(y);
-					for (const { range } of links) ranges.push(range);
-					for (const rowY of rowYs) covered.add(rowY);
+					for (const { segments } of computeLinks(y, cache, done)) {
+						for (const range of segments) {
+							const key = `${range.start.y}:${range.start.x}:${range.end.x}`;
+							if (seen.has(key)) continue;
+							seen.add(key);
+							ranges.push(range);
+						}
+					}
 				} catch {
 					// skip unreadable rows
 				}

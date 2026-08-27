@@ -24,6 +24,19 @@ vi.mock("../data", () => ({
 	getProject: vi.fn(),
 	getTask: vi.fn(),
 	updateTask: vi.fn(async () => undefined),
+	loadProjects: vi.fn(async () => []),
+	loadVirtualProjects: vi.fn(async () => []),
+}));
+
+vi.mock("../task-aux-panes", () => ({
+	openAuxPane: vi.fn(async () => ({ backend: "tmux", paneId: "%9" })),
+	auxPaneTitle: vi.fn((purpose: string) => purpose),
+	AuxPaneUnavailableError: class extends Error {},
+	closeAuxPane: vi.fn(),
+	replaceAuxPanes: vi.fn(),
+	splitTaskPane: vi.fn(),
+	auxPaneMarker: vi.fn(() => ""),
+	findAuxPane: vi.fn(async () => null),
 }));
 
 vi.mock("../pty-server", () => ({
@@ -34,6 +47,7 @@ vi.mock("../pty-server", () => ({
 	createSession: vi.fn(),
 	createNativeTaskSession: vi.fn(async () => undefined),
 	destroySession: vi.fn(),
+	destroySessionAwaited: vi.fn(async () => undefined),
 	capturePane: vi.fn(),
 	listPaneIds: vi.fn(async () => ["%1"]),
 	tmuxSessionExists: vi.fn(async () => true),
@@ -120,6 +134,8 @@ vi.mock("../../shared/agent-adapters/registry", () => ({
 vi.mock("../agent-prompt", () => ({ markAgentPane: vi.fn() }));
 vi.mock("../temp-paths", () => ({
 	dev3TaskTempPath: vi.fn((taskId: string, name?: string) => (name ? `/tmp/dev3/${taskId}/${name}` : `/tmp/dev3/${taskId}`)),
+	setupExitCodePath: vi.fn((taskId: string) => `/tmp/dev3/${taskId}/setup-exit`),
+	clearSetupExitCode: vi.fn(),
 }));
 
 vi.mock("../repo-config", () => ({ resolveProjectEnv: vi.fn(async () => ({})) }));
@@ -132,6 +148,8 @@ vi.mock("../port-pool", () => ({
 
 vi.mock("../port-scanner", () => ({
 	buildProcessTree: vi.fn(async () => new Map<number, number[]>()),
+	clearDevServerSummaryForTask: vi.fn(),
+	schedulePortScanSoon: vi.fn(),
 	clearPortDataForTask: vi.fn(),
 	collectDescendants: vi.fn(() => []),
 	collectTaskPids: vi.fn(async () => new Set<number>()),
@@ -173,6 +191,9 @@ vi.mock("../rpc-handlers/shared-pure", () => ({
 	buildAgentRetryWrapper: vi.fn(() => "#!/bin/bash\n# retry\n"),
 	buildCmdScript: vi.fn(() => "#!/bin/bash\n"),
 	buildSetupStartupWrapper: vi.fn(() => "#!/bin/bash\n# startup\n"),
+	buildSetupRerunScript: vi.fn(() => "#!/bin/bash\n# rerun\n"),
+	generatedScriptLaunch: vi.fn((p: string) => ({ executable: "/bin/zsh", argv: [p] })),
+	generatedScriptName: vi.fn((base: string) => `${base}.sh`),
 	buildEnvExports: vi.fn(() => []),
 	buildScriptRunnerCommand: vi.fn((scriptPath: string) => `/bin/zsh ${scriptPath}`),
 	buildTaskLifecycleEnv: vi.fn((_p: Project, task: Task) => ({ DEV3_TASK_ID: task.id })),
@@ -188,11 +209,21 @@ vi.mock("../rpc-handlers/settings-config", () => ({
 	resolveOperationalProjectConfig: vi.fn(async () => ({ devScript: "", portCount: 0 })),
 }));
 
+vi.mock("../setup-failure-watch", () => ({
+	watchSetupFailure: vi.fn(),
+	stopSetupFailureWatch: vi.fn(),
+}));
+
+import * as data from "../data";
+import * as watch from "../setup-failure-watch";
 import * as pty from "../pty-server";
+import { setupExitCodePath } from "../temp-paths";
 import * as sharedPure from "../rpc-handlers/shared-pure";
+import * as settingsConfig from "../rpc-handlers/settings-config";
+import * as auxPanes from "../task-aux-panes";
 import { tmux } from "../tmux";
 
-const { launchTaskPty } = await import("../rpc-handlers/tmux-pty");
+const { launchTaskPty, tmuxPtyHandlers } = await import("../rpc-handlers/tmux-pty");
 
 // ---- Fixtures ----
 
@@ -355,6 +386,147 @@ describe("setup-script wrapper — one flavour per backend", () => {
 		expect(pty.createNativeTaskSession).toHaveBeenCalledTimes(1);
 		expect(pty.createSession).not.toHaveBeenCalled();
 		expect(tmuxCalls()).toEqual([]);
+	});
+
+	// Writing that file is the wrapper's ONLY way to report a failed setupScript,
+	// and the path is not derivable inside the pure builder.
+	it("hands the wrapper the exit-code path to write", async () => {
+		const task = makeTask();
+		await launchTaskPty(setupProject(), task, WORKTREE, null, null, true);
+
+		const args = vi.mocked(sharedPure.buildSetupStartupWrapper).mock.calls[0][0];
+		expect(args.setupExitPath).toBe(setupExitCodePath(task.id));
+	});
+
+	// The app that launched is the only process that can act on the verdict, so
+	// it watches the file itself instead of waiting to be pinged.
+	it("watches for the setup verdict, and only when setup runs", async () => {
+		const task = makeTask();
+		await launchTaskPty(setupProject(), task, WORKTREE, null, null, true);
+		expect(vi.mocked(watch.watchSetupFailure)).toHaveBeenCalledWith(task.id, expect.any(Function));
+
+		vi.mocked(watch.watchSetupFailure).mockClear();
+		await launchTaskPty(setupProject(), makeTask(), WORKTREE, null, null, false);
+		expect(vi.mocked(watch.watchSetupFailure)).not.toHaveBeenCalled();
+	});
+
+	// The pane can only raise the card if the watcher's callback both persists the
+	// code and pushes the task — this is the exact link that failed silently when
+	// the report went out through the CLI.
+	it("persists and pushes the verdict when the watcher fires", async () => {
+		const task = makeTask();
+		vi.mocked(data.updateTask).mockResolvedValue({ ...task, setupFailedExitCode: 127 } as Task);
+		await launchTaskPty(setupProject(), task, WORKTREE, null, null, true);
+
+		const push = vi.fn();
+		vi.mocked(sharedPure.getPushMessage).mockReturnValue(push);
+		const onFailure = vi.mocked(watch.watchSetupFailure).mock.calls[0][1];
+		await onFailure(127);
+
+		expect(vi.mocked(data.updateTask)).toHaveBeenCalledWith(
+			expect.anything(),
+			task.id,
+			{ setupFailedExitCode: 127, setupFailedAgentRunning: true },
+		);
+		expect(push).toHaveBeenCalledWith(
+			"taskUpdated",
+			expect.objectContaining({ task: expect.objectContaining({ setupFailedExitCode: 127 }) }),
+		);
+	});
+
+	// A relaunch must not leave the previous launch's timer running.
+	it("stops any previous watch before launching", async () => {
+		const task = makeTask();
+		await launchTaskPty(setupProject(), task, WORKTREE, null, null, true);
+		expect(vi.mocked(watch.stopSetupFailureWatch)).toHaveBeenCalledWith(task.id);
+	});
+
+	// A launch is the answer to the previous run's verdict — including the "start
+	// anyway" relaunch, which would otherwise re-show the card it came from.
+	it("clears a previous setup failure before launching", async () => {
+		await launchTaskPty(setupProject(), makeTask({ setupFailedExitCode: 127 }), WORKTREE, null, null, true);
+
+		expect(vi.mocked(data.updateTask)).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.any(String),
+			{ setupFailedExitCode: null, setupFailedAgentRunning: null },
+		);
+	});
+
+	// Which offer the pane may make hangs entirely on this flag: a parallel tmux
+	// launch splits the agent pane BEFORE setup, so a failure finds it alive and
+	// "start the agent anyway" would destroy a working session.
+	it("records that the agent was already running for a parallel tmux launch", async () => {
+		const task = makeTask({ terminalBackend: "tmux" });
+		await launchTaskPty(setupProject({ setupScriptLaunchMode: "parallel" }), task, WORKTREE, null, null, true);
+
+		const onFailure = vi.mocked(watch.watchSetupFailure).mock.calls[0][1];
+		vi.mocked(data.updateTask).mockClear();
+		await onFailure(1);
+
+		expect(vi.mocked(data.updateTask)).toHaveBeenCalledWith(
+			expect.anything(),
+			task.id,
+			{ setupFailedExitCode: 1, setupFailedAgentRunning: true },
+		);
+	});
+
+	it("records that the agent never started for a blocking tmux launch", async () => {
+		const task = makeTask({ terminalBackend: "tmux" });
+		await launchTaskPty(setupProject({ setupScriptLaunchMode: "blocking" }), task, WORKTREE, null, null, true);
+
+		const onFailure = vi.mocked(watch.watchSetupFailure).mock.calls[0][1];
+		vi.mocked(data.updateTask).mockClear();
+		await onFailure(1);
+
+		expect(vi.mocked(data.updateTask)).toHaveBeenCalledWith(
+			expect.anything(),
+			task.id,
+			{ setupFailedExitCode: 1, setupFailedAgentRunning: false },
+		);
+	});
+
+	// The re-run computes the same answer the launch did instead of reading the
+	// task back — a dismissal clears the flag, and reading it there made every
+	// re-run failure claim the agent had never started.
+	it("re-run recomputes whether the agent is running rather than reading it back", async () => {
+		const task = makeTask({ terminalBackend: "tmux", setupFailedAgentRunning: null });
+		const project = setupProject({ setupScriptLaunchMode: "parallel" });
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(settingsConfig.resolveOperationalProjectConfig).mockResolvedValue({
+			setupScript: "bun install\n", setupScriptLaunchMode: "parallel", env: {}, devScript: "", portCount: 0,
+		} as never);
+
+		await tmuxPtyHandlers.rerunSetupScript({ taskId: task.id });
+
+		const onFailure = vi.mocked(watch.watchSetupFailure).mock.calls[vi.mocked(watch.watchSetupFailure).mock.calls.length - 1][1];
+		vi.mocked(data.updateTask).mockClear();
+		await onFailure(1);
+
+		expect(vi.mocked(data.updateTask)).toHaveBeenCalledWith(
+			expect.anything(),
+			task.id,
+			{ setupFailedExitCode: 1, setupFailedAgentRunning: true },
+		);
+	});
+
+	// The whole point of a re-run is that the session survives it.
+	it("re-run opens its own pane and never restarts the session", async () => {
+		const task = makeTask({ terminalBackend: "tmux" });
+		const project = setupProject();
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(settingsConfig.resolveOperationalProjectConfig).mockResolvedValue({
+			setupScript: "bun install\n", setupScriptLaunchMode: "parallel", env: {}, devScript: "", portCount: 0,
+		} as never);
+
+		await tmuxPtyHandlers.rerunSetupScript({ taskId: task.id });
+
+		expect(vi.mocked(auxPanes.openAuxPane)).toHaveBeenCalledWith(
+			expect.objectContaining({ purpose: "setupRerun" }),
+		);
+		expect(pty.destroySessionAwaited).not.toHaveBeenCalled();
 	});
 
 	it("asks for the tmux flavour for an unmarked task", async () => {

@@ -8,13 +8,16 @@ import HelpSpot from "./HelpSpot";
 import { openFolderPicker, openFolderPickerMulti } from "../folder-picker";
 import { toast } from "../toast";
 import { useFocusTrap } from "../utils/useFocusTrap";
+import ProjectSpacesField from "./ProjectSpacesField";
 
 interface AddProjectModalProps {
 	dispatch: Dispatch<AppAction>;
 	onClose: () => void;
+	/** Pre-selected space memberships when the flow started from a space. */
+	initialSpaceIds?: string[];
 }
 
-function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
+function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModalProps) {
 	const t = useT();
 	const trapRef = useFocusTrap<HTMLDivElement>();
 	const [kind, setKind] = useState<"git" | "operations">("git");
@@ -29,8 +32,20 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 	const [initializing, setInitializing] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [cloneOutput, setCloneOutput] = useState<string[]>([]);
+	const [pendingSpaceIds, setPendingSpaceIds] = useState<string[]>(initialSpaceIds ?? []);
 	const cloneProgressIdRef = useRef<string | null>(null);
 	const urlInputRef = useRef<HTMLInputElement>(null);
+
+	// Membership is applied after the project exists; failures only toast —
+	// the project itself was created fine.
+	async function applyPendingSpaces(projectId: string) {
+		if (pendingSpaceIds.length === 0) return;
+		try {
+			await api.request.setProjectSpaces({ projectId, spaceIds: pendingSpaceIds });
+		} catch (err) {
+			toast.error(t("spaces.failedUpdate", { error: String(err) }), { source: "dashboard" });
+		}
+	}
 
 	useEffect(() => {
 		function onCloneProgress(e: Event) {
@@ -80,6 +95,7 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 					const result = await api.request.addProject({ path: folder });
 					if (result.ok) {
 						dispatch({ type: "addProject", project: result.project });
+						void applyPendingSpaces(result.project.id);
 						anySucceeded = true;
 					} else {
 						errors.push(`${name}: ${result.error}`);
@@ -123,6 +139,7 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 			const result = await api.request.initAndAddProject({ path: folder });
 			if (result.ok) {
 				dispatch({ type: "addProject", project: result.project });
+				void applyPendingSpaces(result.project.id);
 				onClose();
 			} else {
 				setError(result.error);
@@ -171,6 +188,7 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 			});
 			if (result.ok) {
 				dispatch({ type: "addProject", project: result.project });
+				void applyPendingSpaces(result.project.id);
 				onClose();
 			} else {
 				setError(result.error);
@@ -216,13 +234,14 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 				aria-modal="true"
 				aria-labelledby="add-project-dialog-title"
 				tabIndex={-1}
-				className="bg-overlay border border-edge rounded-2xl shadow-2xl w-[32.5rem] p-6 space-y-5 outline-none"
+				// The Clone tab is ~690px tall now; a short window has no scroll of its own here.
+				className="bg-overlay border border-edge rounded-2xl shadow-2xl w-[32.5rem] max-h-[90vh] overflow-y-auto p-6 space-y-5 outline-none"
 			>
 				<div className="flex items-center gap-1.5">
 					<h2 id="add-project-dialog-title" className="text-fg text-lg font-semibold">
 						{t("addProject.title")}
 					</h2>
-					<HelpSpot topicId="modal.add-project" />
+					<HelpSpot topicId="modal.add-project" className="w-5 h-5 text-base" />
 				</div>
 
 				{/* Kind toggle: Git repository | Operations */}
@@ -264,6 +283,14 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 					</div>
 				) : (
 				<>
+				{/* Blast-radius copy (bible §10): standing, not dismissible — over half the
+				    userbase point this at a work monorepo and ask what it writes first.
+				    Two lines, deliberately. Longer copy is its own way of scaring people off. */}
+				<div className="bg-raised border border-edge rounded-xl px-3 py-2.5 space-y-1.5 text-fg-3 text-xs leading-5">
+					<p>{t("addProject.safetyBase")}</p>
+					<p>{t("addProject.safetyBranch")}</p>
+				</div>
+
 				{/* Tabs */}
 				<div className="flex gap-1 p-1 bg-raised rounded-xl">
 					<button
@@ -406,6 +433,12 @@ function AddProjectModal({ dispatch, onClose }: AddProjectModalProps) {
 						)}
 					</div>
 				)}
+
+				{/* Optional space memberships, applied after the project is created */}
+				<div className="flex items-center gap-3">
+					<span className="text-fg-2 text-sm font-medium flex-shrink-0">{t("spaces.fieldLabel")}</span>
+					<ProjectSpacesField mode="deferred" value={pendingSpaceIds} onChange={setPendingSpaceIds} />
+				</div>
 				</>
 				)}
 

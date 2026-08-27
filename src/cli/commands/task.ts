@@ -1,5 +1,5 @@
 import type { CliResponse, Task, TaskStatus, TaskHistoryEntry, TaskNote } from "../../shared/types";
-import { STATUS_LABELS, ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DRAFT_TASK_ACTIVATION_ERROR, getTaskTitle, getTaskOverview, normalizePriority } from "../../shared/types";
+import { STATUS_LABELS, ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DRAFT_TASK_ACTIVATION_ERROR, TASK_TYPES, getTaskTitle, getTaskOverview, normalizePriority, normalizeTaskType, taskCompletesManually } from "../../shared/types";
 import { CLI_EXIT_CODE_COMPLETION_DECLINED, CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT } from "../../shared/cli-exit-codes";
 import { CODEX_STOP_HOOK_FLAG, CODEX_STOP_HOOK_SUCCESS_JSON, TOLERATE_APP_OFFLINE_FLAG } from "../../shared/agent-hooks";
 import { sendRequest } from "../socket-client";
@@ -105,7 +105,18 @@ function printTask(task: Task, opts: ShowTaskOptions = {}): void {
 	fields.push(["Updated:", formatDate(task.updatedAt)]);
 	if (task.movedAt) fields.push(["Moved:", formatDate(task.movedAt)]);
 	if (task.notes && task.notes.length > 0) fields.push(["Notes:", String(task.notes.length)]);
-	if (task.manualCompletion === true) fields.push(["Manual completion:", "on"]);
+	if (task.taskType) {
+		fields.push([
+			"Type:",
+			task.taskType === "coordinator"
+				? "coordinator — manages other tasks, never auto-completes, sorts above every priority"
+				: task.taskType === "pr-review"
+					? "pr-review — reviews someone else's changes on this branch"
+					: task.taskType,
+		]);
+	}
+	// A coordinator owns its completion whether or not the flag is set.
+	if (taskCompletesManually(task)) fields.push(["Manual completion:", "on"]);
 
 	printDetail(fields);
 
@@ -201,10 +212,10 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 }
 
 async function updateTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
-	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "force"]);
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "type", "force"]);
 	const taskId = resolveTaskId(args, context);
 	if (!taskId) {
-		exitUsage("Usage: dev3 task update <id|--task id|--task-id id|--id id> [--title '...'] [--description '...'] [--priority P0..P4] [--manual-completion on|off]");
+		exitUsage("Usage: dev3 task update <id|--task id|--task-id id|--id id> [--title '...'] [--description '...'] [--priority P0..P4] [--manual-completion on|off] [--type coordinator|pr-review|standard]");
 	}
 
 	const params: Record<string, unknown> = { taskId };
@@ -241,20 +252,47 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		}
 		params.manualCompletion = normalized === "on";
 	}
+	const rawType = args.flags.type;
+	if (rawType !== undefined) {
+		const value = rawType.trim().toLowerCase();
+		if (value === "standard" || value === "none" || value === "") params.taskType = null;
+		else if (normalizeTaskType(value)) params.taskType = normalizeTaskType(value);
+		else exitUsage(`--type must be one of ${TASK_TYPES.join(", ")} or standard (got "${rawType}")`);
+	}
 	if (args.flags.force === "true") {
 		params.force = true;
 	}
 
-	if (params.title === undefined && params.description === undefined && params.priority === undefined && rawManualCompletion === undefined) {
-		exitUsage("Provide --title, --description, --priority, or --manual-completion to update");
+	if (
+		params.title === undefined
+		&& params.description === undefined
+		&& params.priority === undefined
+		&& rawManualCompletion === undefined
+		&& rawType === undefined
+	) {
+		exitUsage("Provide --title, --description, --priority, --manual-completion, or --type to update");
 	}
 
 	const resp = await sendRequest(socketPath, "task.update", params);
 	if (!resp.ok) exitError(resp.error || "Failed to update task");
 
-	const result = resp.data as Task | { task: Task; titlePreserved?: boolean };
+	const result = resp.data as Task | { task: Task; titlePreserved?: boolean; roleDelivery?: string };
 	const task = "task" in result ? result.task : result;
 	const titlePreserved = "task" in result ? Boolean(result.titlePreserved) : false;
+	// A role change is only real once the agent behind the badge has been told, so
+	// say plainly which of the three answers the backend could give.
+	const roleDelivery = "task" in result ? result.roleDelivery : undefined;
+	if (roleDelivery) {
+		const role = task.taskType ?? "standard";
+		const note = roleDelivery === "delivered"
+			? `told the running agent it is now ${role}`
+			: roleDelivery === "unconfirmed"
+				? `sent the role change to the running agent, but the backend cannot confirm it landed — check the pane before relying on it`
+				: roleDelivery === "no-session"
+					? `no running agent to tell; it reads the new role from the description when it starts`
+					: `could NOT tell the running agent — it will keep behaving as before until you paste the new role in yourself`;
+		process.stderr.write(`Role: ${role} — ${note}.\n`);
+	}
 	if (titlePreserved) {
 		process.stderr.write(
 			`Note: title preserved — task ${task.id.slice(0, 8)} has a user-edited title that the CLI will not overwrite. Pass --force to override.\n`,
@@ -353,7 +391,8 @@ interface LaunchApprovalOutcome {
 	approved: boolean;
 	seq?: number;
 	title?: string;
-	replyCommand?: string;
+	/** One entry per task that started, in variant order; length 1 for a plain launch. */
+	launched?: Array<{ variantIndex: number | null; replyCommand: string }>;
 }
 
 function isLaunchApprovalOutcome(data: unknown): data is LaunchApprovalOutcome {
@@ -390,9 +429,26 @@ function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: bool
 		process.stdout.write(CODEX_STOP_HOOK_SUCCESS_JSON);
 		return;
 	}
+	const launched = outcome.launched ?? [];
+	const fallback = `dev3 message --task seq:${outcome.seq} "your message"`;
+	if (launched.length > 1) {
+		// The user turned one launch into a variant group. Every sibling shares
+		// `seq:<N>`, so that handle is ambiguous and each address is per-task —
+		// hand out all of them rather than picking one and looking like the only.
+		const rows = launched
+			.map((entry, i) => `  variant #${entry.variantIndex ?? i + 1}  ${entry.replyCommand}`)
+			.join("\n");
+		process.stdout.write(
+			`User approved — seq:${outcome.seq} is starting as ${launched.length} variants: ${outcome.title ?? ""}\n` +
+			`They all share seq:${outcome.seq}, so address each one by its own id:\n` +
+			`${rows}\n` +
+			"They are independent agents on the same prompt. Each knows you started it and reports back to this task.\n",
+		);
+		return;
+	}
 	process.stdout.write(
 		`User approved — task seq:${outcome.seq} is starting: ${outcome.title ?? ""}\n` +
-		`Talk to it with: ${outcome.replyCommand ?? `dev3 message --task seq:${outcome.seq} "your message"`}\n` +
+		`Talk to it with: ${launched[0]?.replyCommand ?? fallback}\n` +
 		"It knows you started it and will report back to this task.\n",
 	);
 }
@@ -477,6 +533,37 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	process.stdout.write(`Moved task ${task.id.slice(0, 8)} → ${displayStatus}\n`);
 }
 
+/**
+ * `dev3 task open [<id>]` — bring the running app to the front on a task, the
+ * CLI twin of clicking a `dev3://task/<id>` link (and it works on every OS,
+ * because nothing here needs a registered URL scheme).
+ */
+async function openTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project"]);
+	const taskId = resolveTaskId(args, context);
+	if (!taskId) {
+		exitUsage("Usage: dev3 task open <id|--task id|--task-id id|--id id> (or run inside a worktree)");
+	}
+
+	const params: Record<string, unknown> = { taskId };
+	const projectId = resolveProjectId(args.flags.project, context);
+	if (projectId) params.projectId = projectId;
+
+	const resp = await sendRequest(socketPath, "task.open", params);
+	if (!resp.ok) exitError(resp.error || "Failed to open the task");
+
+	const data = resp.data as { taskId: string; delivered: boolean; reopened?: boolean };
+	if (!data.delivered) {
+		process.stdout.write("App is running but has no window to navigate — nothing was opened.\n");
+		return;
+	}
+	process.stdout.write(
+		data.reopened
+			? `Opening a window on task ${data.taskId.slice(0, 8)}.\n`
+			: `Opened task ${data.taskId.slice(0, 8)} in the app.\n`,
+	);
+}
+
 interface TerminalBackendReport {
 	taskId: string;
 	backend: "tmux" | "native";
@@ -544,6 +631,8 @@ export async function handleTask(
 			return updateTask(args, socketPath, context);
 		case "move":
 			return moveTask(args, socketPath, context);
+		case "open":
+			return openTask(args, socketPath, context);
 		case "terminal-backend":
 			return taskTerminalBackend(args, socketPath, context);
 		case "list":
@@ -553,7 +642,7 @@ export async function handleTask(
 		default:
 			exitUsage(
 				`Unknown subcommand: task ${subcommand || "(none)"}` +
-				"\nAvailable: task show, task create, task update, task move, task terminal-backend",
+				"\nAvailable: task show, task create, task update, task move, task open, task terminal-backend",
 			);
 	}
 }

@@ -31,14 +31,38 @@ vi.mock("../../spawn", () => ({
 	spawn: vi.fn(),
 }));
 
+// The suffix fallback indexes a base with `git ls-files`; the fixtures below are
+// plain temp dirs, so the listing is served from this fake instead of git.
+const gitFiles: Record<string, string[]> = {};
+const runGit = vi.fn(async (_cmd: string[], cwd: string) => {
+	const files = gitFiles[cwd];
+	if (!files) return { ok: false, stdout: "", stderr: "not a git repository" };
+	return { ok: true, stdout: files.join("\0"), stderr: "" };
+});
+vi.mock("../../git", () => ({ run: (...args: unknown[]) => runGit(...(args as [string[], string])) }));
+
 import { terminalPathHandlers as appHandlers } from "../terminal-paths";
 
 beforeAll(() => {
 	mkdirSync(join(worktree, "src"), { recursive: true });
+	mkdirSync(join(worktree, "docs", "components"), { recursive: true });
+	mkdirSync(join(worktree, "a"), { recursive: true });
+	mkdirSync(join(worktree, "b"), { recursive: true });
 	mkdirSync(projectDir, { recursive: true });
 	writeFileSync(join(worktree, "src", "index.ts"), "export {};\n");
+	writeFileSync(join(worktree, "docs", "architecture.md"), "# arch\n");
+	writeFileSync(join(worktree, "docs", "components", "scout.md"), "# scout\n");
+	writeFileSync(join(worktree, "a", "dup.md"), "a\n");
+	writeFileSync(join(worktree, "b", "dup.md"), "b\n");
 	writeFileSync(join(projectDir, "readme.md"), "# hi\n");
 	writeFileSync(join(tmp, "notes.txt"), "hello\n");
+	gitFiles[worktree] = [
+		"src/index.ts",
+		"docs/architecture.md",
+		"docs/components/scout.md",
+		"a/dup.md",
+		"b/dup.md",
+	];
 });
 
 afterAll(() => {
@@ -102,6 +126,47 @@ describe("resolveTerminalPaths", () => {
 		});
 		expect(resolved["/etc/hosts"]).toBeNull();
 		expect(resolved[`${"../".repeat(12)}etc/hosts`]).toBeNull();
+	});
+
+	it("resolves a bare filename to the one nested file whose path ends with it", async () => {
+		const { resolved } = await appHandlers.resolveTerminalPaths({
+			taskId: "task-1",
+			projectId: "proj-1",
+			paths: ["architecture.md", "components/scout.md"],
+		});
+		expect(resolved["architecture.md"]).toEqual({
+			path: join(worktree, "docs", "architecture.md"),
+			kind: "file",
+		});
+		expect(resolved["components/scout.md"]).toEqual({
+			path: join(worktree, "docs", "components", "scout.md"),
+			kind: "file",
+		});
+	});
+
+	it("leaves an ambiguous suffix unresolved rather than guessing a file", async () => {
+		const { resolved } = await appHandlers.resolveTerminalPaths({
+			taskId: "task-1",
+			projectId: "proj-1",
+			// dup.md exists twice; "cout.md" is a suffix but not at a segment boundary.
+			paths: ["dup.md", "cout.md", "./architecture.md", "../docs/architecture.md"],
+		});
+		expect(resolved["dup.md"]).toBeNull();
+		expect(resolved["cout.md"]).toBeNull();
+		expect(resolved["./architecture.md"]).toBeNull();
+		expect(resolved["../docs/architecture.md"]).toBeNull();
+	});
+
+	it("reuses the file index across calls instead of listing per candidate", async () => {
+		// Warm, then assert the second call adds no listing of its own.
+		await appHandlers.resolveTerminalPaths({ taskId: "task-1", projectId: "proj-1", paths: ["architecture.md"] });
+		const before = runGit.mock.calls.length;
+		await appHandlers.resolveTerminalPaths({
+			taskId: "task-1",
+			projectId: "proj-1",
+			paths: ["architecture.md", "components/scout.md", "nowhere.md"],
+		});
+		expect(runGit.mock.calls.length).toBe(before);
 	});
 
 	it("relative paths resolve to null without a project context", async () => {

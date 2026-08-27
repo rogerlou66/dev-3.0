@@ -18,7 +18,7 @@ export default {
 	app: {
 		name: "dev-3.0",
 		identifier: "dev3.electrobun.dev",
-		version: "1.45.1",
+		version: "1.48.1",
 		// Inbound deep links: `dev3://task/<id>`, `dev3://project/<id>`,
 		// `dev3://new-task?project=<id>&text=<…>`. Electrobun writes CFBundleURLTypes
 		// into Info.plist; macOS only registers it when the app lives in
@@ -75,6 +75,10 @@ export default {
 			// Bundled self-contained tmux + license notices (empty dir on Linux and
 			// on dev machines without a local tmux build) — see decisions/2026/07/16/bundle-tmux-macos.md.
 			"dist/tmux": "tmux",
+			// Pinned proxy sidecar for the model catalog + its licence notices (empty
+			// dir when scripts/fetch-bifrost.ts never ran — the app then says the
+			// catalog is unavailable instead of crashing).
+			"dist/bifrost": "bifrost",
 		},
 		linux: {
 			bundleCEF: false,

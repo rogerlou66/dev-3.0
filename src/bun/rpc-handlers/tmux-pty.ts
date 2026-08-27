@@ -1,15 +1,18 @@
 import { existsSync, realpathSync } from "node:fs";
-import type { AgentHooksIntegration, ColumnAgentConfig, DevServerStatus, PaneSessionEntry, PermissionMode, PortInfo, Project, Task, TmuxLayout, TmuxSessionInfo } from "../../shared/types";
+import type { AgentFamily, ColumnAgentConfig, DevServerStatus, PaneSessionEntry, PermissionMode, PortInfo, Project, PtyThroughputStats, Task, TmuxLayout, TmuxSessionInfo } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
 import * as data from "../data";
+import * as git from "../git";
 import * as pty from "../pty-server";
 import * as agents from "../agents";
 import { getAgentAdapter } from "../../shared/agent-adapters/registry";
 import * as portPool from "../port-pool";
 import * as repoConfig from "../repo-config";
-import { buildProcessTree, clearPortDataForTask, collectDescendants, collectTaskPids, findPortHolders, getLsofOutput, getPortsForTask, getSessionPanePids, parseLsofOutput, scanTaskPorts, waitForPortsFree } from "../port-scanner";
+import { buildProcessTree, clearDevServerSummaryForTask, clearPortDataForTask, collectDescendants, collectTaskPids, findPortHolders, getLsofOutput, getPortsForTask, getSessionPanePids, parseLsofOutput, scanTaskPorts, schedulePortScanSoon, waitForPortsFree } from "../port-scanner";
+import { classifyAgainstStartSnapshot, clearDevServerStart, mergePortInfos, recordDevServerStart } from "../dev-server-ports";
 import { getPidCwd, terminatePidsVerified } from "../process-reaper";
 import { getResourceUsage } from "../resource-monitor";
+import { throughputSnapshot } from "../pty-throughput";
 import { loadSettings, recordFavoriteUsages } from "../settings";
 import { getUserShell } from "../shell-env";
 import { agentBinaryPathOverride } from "../executable";
@@ -42,7 +45,8 @@ import {
 	validAltClickPanes,
 } from "../tmux";
 import { markAgentPane } from "../agent-prompt";
-import { dev3TaskTempPath } from "../temp-paths";
+import { clearSetupExitCode, dev3TaskTempPath, setupExitCodePath } from "../temp-paths";
+import { stopSetupFailureWatch, watchSetupFailure } from "../setup-failure-watch";
 import { taskTerminalBackendIdentity } from "../task-terminal-backend";
 import {
 	focusNativeTaskPane,
@@ -67,7 +71,7 @@ import {
 	type AuxPaneHandle,
 	type AuxPanePlacement,
 } from "../task-aux-panes";
-import { getPushMessage, isActive, buildAgentEnv, buildAgentRetryWrapper, buildCmdScript, buildSetupStartupWrapper, buildScriptRunnerCommand, buildTaskLifecycleEnv, generatedScriptLaunch, generatedScriptName, log, resolveBinaryPath, writeLaunchScript } from "./shared-pure";
+import { getPushMessage, isActive, buildAgentEnv, buildAgentRetryWrapper, buildCmdScript, buildSetupRerunScript, buildSetupStartupWrapper, buildScriptRunnerCommand, buildTaskLifecycleEnv, generatedScriptLaunch, generatedScriptName, log, resolveBinaryPath, writeLaunchScript } from "./shared-pure";
 import { assertPosixLaunchDialect, launchDialect } from "../../shared/platform-launch";
 import { buildDevServerScript } from "../dev-server-script";
 import { resolveOperationalProjectConfig } from "./settings-config";
@@ -297,6 +301,10 @@ export async function killDevServerSession(
 	}
 	if (foreignHolders.length > 0) {
 		log.warn("Assigned ports held by foreign processes — not killing", { taskId: taskId.slice(0, 8), foreignHolders });
+		// Classify while the snapshot is still here: a holder published for THIS
+		// dev server (a container runtime daemon) usually survives the stop, and
+		// the next start must not read it back as a squatter.
+		classifyAgainstStartSnapshot(taskId, foreignHolders, true);
 	}
 
 	if (native) {
@@ -319,6 +327,8 @@ export async function killDevServerSession(
 		log.warn("Assigned ports still held after teardown", { taskId: taskId.slice(0, 8), stuckHolders });
 	}
 	clearPortDataForTask(taskId);
+	clearDevServerStart(taskId);
+	refreshBoardDevServer(taskId);
 	log.info("Killed dev server session", {
 		taskId: taskId.slice(0, 8),
 		...(opId ? { opId } : {}),
@@ -327,6 +337,16 @@ export async function killDevServerSession(
 		leftovers: leftovers.length,
 		stuckPorts: stuckHolders.map((h) => h.port),
 	});
+}
+
+/**
+ * Re-read this task's dev server for the Kanban board on the next tick. The
+ * board is fed by the 10-second port poller, which is far too slow to answer a
+ * click the user just made.
+ */
+function refreshBoardDevServer(taskId: string): void {
+	clearDevServerSummaryForTask(taskId);
+	schedulePortScanSoon();
 }
 
 async function buildDevServerStatus(task: Task, projectId: string, hasDevScript: boolean, socket?: string): Promise<DevServerStatus> {
@@ -366,6 +386,7 @@ async function buildDevServerStatus(task: Task, projectId: string, hasDevScript:
 			assignedPorts,
 			ports: [],
 			devPorts: [],
+			publishedPorts: [],
 			portConflicts: [],
 			tmuxError: err.message,
 		};
@@ -392,19 +413,27 @@ async function buildDevServerStatus(task: Task, projectId: string, hasDevScript:
 			: await collectTaskPids(resolvedSocket, devSession)
 		: new Set<number>();
 	const devPorts = running && lsofOutput ? parseLsofOutput(lsofOutput, devTreePids) : [];
-	// An assigned pool port bound by a PID outside the dev-server tree is a
-	// conflict: either a foreign squatter, or (when stopped) a leftover that
-	// will make the next start crash-loop on bind.
-	const portConflicts = lsofOutput
+	// An assigned pool port bound by a PID outside the dev-server tree is either
+	// the dev server's port published on its behalf (a container runtime daemon
+	// owns every published port — it is never a descendant of the pane) or a
+	// foreign squatter that will make the devScript crash-loop on bind. The
+	// pre-start snapshot tells them apart.
+	const foreignHolders = lsofOutput
 		? (await findPortHolders(assignedPorts, lsofOutput)).filter((holder) => !devTreePids.has(holder.pid))
 		: [];
+	const { published: publishedPorts, conflicts: portConflicts } = classifyAgainstStartSnapshot(
+		task.id,
+		foreignHolders,
+		running,
+	);
 	const ports = running
 		? await (async () => {
 			const cached = getPortsForTask(task.id);
-			if (cached.length > 0) return cached;
+			if (cached.length > 0) return mergePortInfos(cached, publishedPorts);
 			// The fallback scan walks a tmux session; a native task has none, so its
 			// dev-port scan above is already the whole answer.
-			return native ? devPorts : scanTaskPorts(resolvedSocket, taskSession, lsofOutput);
+			const scanned = native ? devPorts : await scanTaskPorts(resolvedSocket, taskSession, lsofOutput);
+			return mergePortInfos(scanned, publishedPorts);
 		})()
 		: [];
 	const resourceUsage = running ? getResourceUsage(task.id) : undefined;
@@ -424,6 +453,7 @@ async function buildDevServerStatus(task: Task, projectId: string, hasDevScript:
 		assignedPorts,
 		ports,
 		devPorts,
+		publishedPorts,
 		portConflicts,
 		resourceUsage,
 	};
@@ -499,6 +529,7 @@ async function ensureAgentTrust(
 	resolvedBaseCmd: string,
 	accountId?: string | null,
 	foreignCode?: boolean,
+	family?: AgentFamily,
 ): Promise<void> {
 	// A worktree standing on someone else's branch gets nothing pre-granted: its
 	// committed `.claude/settings.json` hooks and `.mcp.json` servers must face the
@@ -512,7 +543,7 @@ async function ensureAgentTrust(
 	// (decision 124). Every adapter includes "claude" first — dev3 has always
 	// registered the worktree in ~/.claude.json (harmless superset + MCP
 	// pre-approval) for every agent — then any agent-native trust (codex/gemini).
-	for (const kind of getAgentAdapter(resolvedBaseCmd).trustKinds) {
+	for (const kind of getAgentAdapter(resolvedBaseCmd, family).trustKinds) {
 		try {
 			if (kind === "claude") await agents.ensureClaudeTrust(worktreePath, projectPath, accountId);
 			else if (kind === "codex") await agents.ensureCodexTrust(worktreePath);
@@ -535,7 +566,7 @@ async function applyAgentHooksToCommand(
 	options?: {
 		stopTarget?: Task["status"];
 		permissionMode?: PermissionMode;
-		integration?: AgentHooksIntegration;
+		family?: AgentFamily;
 	},
 ): Promise<string> {
 	try {
@@ -617,6 +648,16 @@ export async function launchTaskPty(
 		skipSessionPersist,
 	});
 
+	// Any launch supersedes the previous run's setup verdict — including the
+	// "start anyway" relaunch, which is itself the answer to that verdict.
+	if (task.setupFailedExitCode != null) {
+		await data.updateTask(project, task.id, { setupFailedExitCode: null, setupFailedAgentRunning: null });
+		task.setupFailedExitCode = null;
+		task.setupFailedAgentRunning = null;
+	}
+	stopSetupFailureWatch(task.id);
+	clearSetupExitCode(task.id);
+
 	const ctx: agents.TemplateContext = {
 		taskTitle: task.title,
 		taskDescription: task.description,
@@ -629,7 +670,7 @@ export async function launchTaskPty(
 	let extraEnv: Record<string, string>;
 	let resolvedBaseCmd = "";
 	let resolvedPermissionMode: PermissionMode | undefined;
-	let resolvedHooksIntegration: AgentHooksIntegration | undefined;
+	let resolvedAgentFamily: AgentFamily | undefined;
 	let mainPaneEntry: NonNullable<Task["sessionState"]>["panes"][number] | null = null;
 
 	try {
@@ -658,7 +699,7 @@ export async function launchTaskPty(
 			extraEnv = resolved.extraEnv;
 			resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
 			resolvedPermissionMode = resolved.config?.permissionMode;
-			resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+			resolvedAgentFamily = resolved.agentFamily;
 		} else {
 			log.info("Resolving command for project", { projectName: project.name });
 			const resolved = await agents.resolveCommandForProject(
@@ -673,20 +714,21 @@ export async function launchTaskPty(
 			extraEnv = resolved.extraEnv;
 			resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
 			resolvedPermissionMode = resolved.config?.permissionMode;
-			resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+			resolvedAgentFamily = resolved.agentFamily;
 		}
 
 		// Persist session state as pane[0] for the main agent pane.
 		// Skip when reconnecting to an existing tmux session (sessionState is already correct).
 		if (!skipSessionPersist) {
 			const effectiveSessionId = resume ? sessionId
-				: (agents.supportsPreAssignedSessionId(resolvedBaseCmd) ? freshSessionId : null);
+				: (agents.supportsPreAssignedSessionId(resolvedBaseCmd, resolvedAgentFamily) ? freshSessionId : null);
 			const paneEntry = {
 				agentCmd: resolvedBaseCmd,
 				sessionId: effectiveSessionId ?? null,
 				agentId: agentId ?? task.agentId,
 				configId: configId ?? task.configId,
 				accountId: task.accountId,
+				agentFamily: resolvedAgentFamily,
 			};
 			mainPaneEntry = paneEntry;
 			const sessionState = { panes: [paneEntry] };
@@ -766,13 +808,13 @@ export async function launchTaskPty(
 		}
 	}
 
-	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, task.accountId, task.foreignCode);
+	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, task.accountId, task.foreignCode, resolvedAgentFamily);
 
 	const stopTarget = project.autoReviewEnabled ? "review-by-ai" : "review-by-user";
 	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
 		stopTarget,
 		permissionMode: resolvedPermissionMode,
-		integration: resolvedHooksIntegration,
+		family: resolvedAgentFamily,
 	});
 
 	const nativeBackend = taskTerminalBackendIdentity(task) === "native";
@@ -796,10 +838,23 @@ export async function launchTaskPty(
 			shellPath: userShell,
 			nativeBackend,
 			launchMode: setupScriptLaunchMode,
+			setupExitPath: setupExitCodePath(task.id),
 		});
 		await writeLaunchScript(startupPath, startupScript);
 		tmuxCmd = buildScriptRunnerCommand(startupPath, { shellPath: userShell });
 		isSetupWrapper = true;
+		// Which offer the pane may make is decided HERE, where the wrapper's shape is
+		// known — a parallel tmux launch has already split the agent pane above, so a
+		// later failure finds it alive. Native ignores launchMode and always gates.
+		const agentRunning = !nativeBackend && setupScriptLaunchMode === "parallel";
+		// Only this process can see the wrapper's verdict — see setup-failure-watch.
+		watchSetupFailure(task.id, async (exitCode) => {
+			const updated = await data.updateTask(project, task.id, {
+				setupFailedExitCode: exitCode,
+				setupFailedAgentRunning: agentRunning,
+			});
+			getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		});
 	}
 
 	const runScriptPath = dev3TaskTempPath(task.id, `run${dialect.scriptExtension}`);
@@ -920,7 +975,10 @@ export async function launchColumnAgent(
 
 	const { agentId, configId, prompt: rawPrompt } = agentConfig;
 	const baseBranch = task.baseBranch || project.defaultBaseBranch || "main";
-	const prompt = rawPrompt.replace(/\{baseBranch\}/g, `origin/${baseBranch}`);
+	// `{baseBranch}` becomes the ref this task is actually compared against — a
+	// column agent told to diff against `origin/<base>` in a repo with no remote
+	// reviews nothing at all.
+	const prompt = rawPrompt.replace(/\{baseBranch\}/g, await git.resolveCompareRef(project.path, baseBranch));
 
 	log.info("launchColumnAgent START", {
 		taskId: task.id.slice(0, 8),
@@ -944,7 +1002,7 @@ export async function launchColumnAgent(
 	let extraEnv: Record<string, string>;
 	let resolvedBaseCmd = "";
 	let resolvedPermissionMode: PermissionMode | undefined;
-	let resolvedHooksIntegration: AgentHooksIntegration | undefined;
+	let resolvedAgentFamily: AgentFamily | undefined;
 
 	try {
 		const resolved = await agents.resolveCommandForAgent(agentId, configId, ctx, { skipSystemPrompt: true });
@@ -952,16 +1010,16 @@ export async function launchColumnAgent(
 		extraEnv = resolved.extraEnv;
 		resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
 		resolvedPermissionMode = resolved.config?.permissionMode;
-		resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+		resolvedAgentFamily = resolved.agentFamily;
 	} catch (err) {
 		log.error("launchColumnAgent: failed to resolve command", { error: String(err) });
 		throw err;
 	}
-	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, undefined, task.foreignCode);
+	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, undefined, task.foreignCode, resolvedAgentFamily);
 	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
 		stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
 		permissionMode: resolvedPermissionMode,
-		integration: resolvedHooksIntegration,
+		family: resolvedAgentFamily,
 	});
 
 	const env = {
@@ -1060,6 +1118,9 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 		// The start still proceeds (the script may not use the squatted port) —
 		// the conflict is logged here and returned in the status' portConflicts.
 		const preStartConflicts = await findPortHolders(devPorts);
+		// The snapshot is what later lets status tell "published for this dev
+		// server by a container runtime" from "squatted by something else".
+		recordDevServerStart(task.id, devPorts, preStartConflicts);
 		if (preStartConflicts.length > 0) {
 			log.warn("Assigned ports already in use before dev-server start", {
 				taskId: task.id.slice(0, 8),
@@ -1109,6 +1170,7 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 				...(params.opId ? { opId: params.opId } : {}),
 				paneId: handle.paneId,
 			});
+			refreshBoardDevServer(params.taskId);
 			return buildDevServerStatus(task, project.id, !!resolved.devScript.trim(), socket);
 		}
 
@@ -1182,6 +1244,7 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 			devSession,
 			viewerPaneId,
 		});
+		refreshBoardDevServer(params.taskId);
 		return buildDevServerStatus(task, project.id, !!resolved.devScript.trim(), socket);
 	} catch (err) {
 		log.error("runDevServer FAILED", {
@@ -1240,7 +1303,7 @@ export async function stopDevServer(params: { taskId: string; projectId: string;
 					.then(clearPaneBorder)
 					.catch((err) => log.error("Deferred self-hosted dev-server teardown failed", { error: String(err) }));
 			}, SELF_HOSTED_STOP_ACK_MS);
-			return { ...status, running: false, viewerPaneId: null, panePids: [], devPorts: [], resourceUsage: undefined };
+			return { ...status, running: false, viewerPaneId: null, panePids: [], devPorts: [], publishedPorts: [], resourceUsage: undefined };
 		}
 
 		await killDevServerSession(task, socket, task.worktreePath, opId);
@@ -1560,7 +1623,13 @@ async function markTerminalAttached(project: Project, task: Task): Promise<void>
  * (decision 189). Returns null to let the agent pick its own latest session.
  */
 function resolveResumeTarget(task: Task, pane: PaneSessionEntry, label: string): string | null {
-	const target = resolveResumableSessionId(pane.agentCmd, task.worktreePath ?? "", pane.sessionId);
+	const target = resolveResumableSessionId(
+		pane.agentCmd,
+		task.worktreePath ?? "",
+		pane.sessionId,
+		undefined,
+		pane.agentFamily ?? undefined,
+	);
 	if (target.substituted) {
 		log.warn("Stored session id has no transcript — resuming the newest conversation instead", {
 			taskId: task.id.slice(0, 8),
@@ -1636,21 +1705,24 @@ async function resumeTask(params: { taskId: string }): Promise<string> {
 					if (paneResume) cmdOpts.sessionId = paneResume;
 					let resumeCmd: string;
 					let resumeBaseCmd = pane.agentCmd;
-					let resumeHooksIntegration: AgentHooksIntegration | undefined;
+					// The pane's own snapshot is the fallback: without an agent record
+					// there is nothing but the command string, and guessing the CLI from
+					// a renamed binary is exactly what broke resume.
+					let resumeAgentFamily: AgentFamily | undefined = pane.agentFamily ?? undefined;
 					let extraEnv: Record<string, string> = {};
 					if (pane.agentId) {
 						const resolved = await agents.resolveCommandForAgent(pane.agentId, pane.configId, ctx, cmdOpts);
 						resumeCmd = resolved.command;
 						extraEnv = resolved.extraEnv;
 						resumeBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || pane.agentCmd;
-						resumeHooksIntegration = resolved.agent?.hooksIntegration;
+						resumeAgentFamily = resolved.agentFamily ?? resumeAgentFamily;
 					} else {
-						resumeCmd = agents.buildResumeCommand(pane.agentCmd, paneResume ?? undefined) ?? pane.agentCmd;
+						resumeCmd = agents.buildResumeCommand(pane.agentCmd, paneResume ?? undefined, resumeAgentFamily) ?? pane.agentCmd;
 					}
-					await ensureAgentTrust(task.worktreePath, project.path, resumeBaseCmd, pane.accountId, task.foreignCode);
+					await ensureAgentTrust(task.worktreePath, project.path, resumeBaseCmd, pane.accountId, task.foreignCode, resumeAgentFamily);
 					resumeCmd = await applyAgentHooksToCommand(task.worktreePath, resumeBaseCmd, resumeCmd, {
 						stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
-						integration: resumeHooksIntegration,
+						family: resumeAgentFamily,
 					});
 					const scriptPath = dev3TaskTempPath(params.taskId, `resume-pane-${i}.sh`);
 					await writeLaunchScript(scriptPath, buildCmdScript(resumeCmd, extraEnv, { keepShell: true }));
@@ -1724,6 +1796,78 @@ async function restartTask(params: { taskId: string }): Promise<string> {
 	const url = `ws://localhost:${pty.getPtyPort()}?session=${params.taskId}`;
 	log.info("← restartTask", { url });
 	return url;
+}
+
+/** Forget a setup verdict and tell every viewer, so the notice cannot come back. */
+async function clearSetupFailure(project: Project, task: Task): Promise<void> {
+	stopSetupFailureWatch(task.id);
+	clearSetupExitCode(task.id);
+	const updated = await data.updateTask(project, task.id, { setupFailedExitCode: null, setupFailedAgentRunning: null });
+	getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+}
+
+async function dismissSetupFailure(params: { taskId: string }): Promise<void> {
+	log.info("→ dismissSetupFailure", { taskId: params.taskId.slice(0, 8) });
+	const { task, project } = await findTaskAcrossProjects(params.taskId);
+	if (!task || !project) throw new Error(`Cannot dismiss: task ${params.taskId} not found`);
+	await clearSetupFailure(project, task);
+}
+
+async function rerunSetupScript(params: { taskId: string }): Promise<void> {
+	log.info("→ rerunSetupScript", { taskId: params.taskId.slice(0, 8) });
+	const { task, project } = await findTaskAcrossProjects(params.taskId);
+	if (!task || !project) throw new Error(`Cannot re-run setup: task ${params.taskId} not found`);
+	if (!task.worktreePath) throw new Error("Task has no worktree");
+
+	const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
+	if (!resolved.setupScript.trim()) throw new Error("No setup script configured");
+
+	const prefix = dev3TaskTempPath(task.id);
+	const ext = launchDialect().scriptExtension;
+	const setupPath = `${prefix}-setup${ext}`;
+	const rerunPath = `${prefix}-setup-rerun${ext}`;
+	await writeLaunchScript(setupPath, resolved.setupScript + "\n");
+
+	// Clear BEFORE the pane opens: the click is the answer to the old verdict, and
+	// the fresh watch below is what brings the notice back if this run fails too.
+	await clearSetupFailure(project, task);
+
+	const shellPath = getUserShell();
+	await writeLaunchScript(rerunPath, buildSetupRerunScript({ setupPath, shellPath, setupExitPath: setupExitCodePath(task.id) }));
+
+	const env = {
+		...(resolved.env ?? {}),
+		...buildTaskLifecycleEnv(project, task, task.worktreePath),
+	};
+	const ports = portPool.getPortAssignments(task.id);
+	if (ports.length > 0) Object.assign(env, portPool.buildPortEnv(ports));
+
+	// A re-run starts no agent, so the answer is the same one the launch computed —
+	// and it must be recomputed rather than read back from the task, which a
+	// dismissal may already have cleared.
+	const agentRunning = taskTerminalBackendIdentity(task) !== "native"
+		&& (resolved.setupScriptLaunchMode ?? "parallel") === "parallel";
+	watchSetupFailure(task.id, async (exitCode) => {
+		const updated = await data.updateTask(project, task.id, {
+			setupFailedExitCode: exitCode,
+			setupFailedAgentRunning: agentRunning,
+		});
+		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+	});
+
+	const handle = await openAuxPane({
+		task,
+		purpose: "setupRerun",
+		placement: "below",
+		size: "35%",
+		cwd: task.worktreePath,
+		env,
+		socket: task.tmuxSocket ?? DEFAULT_TMUX_SOCKET,
+		title: auxPaneTitle("setupRerun"),
+		tmuxCommand: buildScriptRunnerCommand(rerunPath, { shellPath }),
+		nativeLaunch: generatedScriptLaunch(rerunPath),
+	});
+	log.info("← rerunSetupScript done", { taskId: params.taskId.slice(0, 8), paneId: handle.paneId });
 }
 
 async function getProjectPtyUrl(params: { projectId: string }): Promise<string> {
@@ -2489,7 +2633,7 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 	let tmuxCmd: string;
 	let extraEnv: Record<string, string>;
 	let resolvedBaseCmd = "";
-	let resolvedHooksIntegration: AgentHooksIntegration | undefined;
+	let resolvedAgentFamily: AgentFamily | undefined;
 	let launchedAgentId = params.agentId;
 	let launchedConfigId = params.configId;
 
@@ -2503,7 +2647,7 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 		tmuxCmd = resolved.command;
 		extraEnv = resolved.extraEnv;
 		resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
-		resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+		resolvedAgentFamily = resolved.agentFamily;
 		launchedAgentId = resolved.agent?.id ?? params.agentId;
 		launchedConfigId = resolved.config?.id ?? params.configId;
 	} else {
@@ -2518,7 +2662,7 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 		tmuxCmd = resolved.command;
 		extraEnv = resolved.extraEnv;
 		resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
-		resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+		resolvedAgentFamily = resolved.agentFamily;
 		launchedAgentId = resolved.agent?.id ?? null;
 		launchedConfigId = resolved.config?.id ?? null;
 	}
@@ -2526,10 +2670,10 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 	// Register trust / re-patch the agent's config before spawning. The primary
 	// task launch does this; without it a spawned Codex pane runs against a stale
 	// config.toml and crashes on the legacy-profile check (see ensureAgentTrust).
-	await ensureAgentTrust(task.worktreePath, project.path, resolvedBaseCmd, params.accountId, task.foreignCode);
+	await ensureAgentTrust(task.worktreePath, project.path, resolvedBaseCmd, params.accountId, task.foreignCode, resolvedAgentFamily);
 	tmuxCmd = await applyAgentHooksToCommand(task.worktreePath, resolvedBaseCmd, tmuxCmd, {
 		stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
-		integration: resolvedHooksIntegration,
+		family: resolvedAgentFamily,
 	});
 
 	const env: Record<string, string> = {
@@ -2585,10 +2729,11 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 	const paneEntry = {
 		paneId: newPaneId,
 		agentCmd: resolvedBaseCmd,
-		sessionId: agents.supportsPreAssignedSessionId(resolvedBaseCmd) ? freshSessionId : null,
+		sessionId: agents.supportsPreAssignedSessionId(resolvedBaseCmd, resolvedAgentFamily) ? freshSessionId : null,
 		agentId: launchedAgentId,
 		configId: launchedConfigId,
 		accountId: params.accountId,
+		agentFamily: resolvedAgentFamily,
 	};
 	const existingPanes = task.sessionState?.panes ?? [];
 	try {
@@ -2624,20 +2769,22 @@ function sleep(ms: number): Promise<void> {
 // getDefaultTaskCompareRef (src/mainview/components/task-info-panel/useTaskBranchStatus.ts)
 // so the lightbox path honors the project's configured compare ref instead of
 // always assuming origin/<base>.
-export function resolveBugHunterCompareRef(task: Task, project: Project): string {
+export async function resolveBugHunterCompareRef(task: Task, project: Project): Promise<string> {
 	const projectBaseBranch = project.defaultBaseBranch || "main";
 	const taskBaseBranch = task.baseBranch || projectBaseBranch;
 	// Task forked from a non-default base → compare against that local branch.
 	if (taskBaseBranch !== projectBaseBranch) return taskBaseBranch;
 	if (project.defaultCompareRef) return project.defaultCompareRef;
 	if (project.defaultCompareRefMode === "local") return taskBaseBranch;
-	return `origin/${taskBaseBranch}`;
+	// Nothing configured: ask git rather than assume a remote, which would send the
+	// hunters at `git merge-base origin/<base> HEAD` in a repo that has no origin.
+	return git.resolveCompareRef(project.path, taskBaseBranch);
 }
 
-export function buildBugHunterPrompt(task: Task, project: Project, baseCmd = ""): string {
-	const ref = resolveBugHunterCompareRef(task, project);
+export async function buildBugHunterPrompt(task: Task, project: Project, baseCmd = "", family?: AgentFamily): Promise<string> {
+	const ref = await resolveBugHunterCompareRef(task, project);
 	const branch = task.branchName || "HEAD";
-	const prefix = agents.skillInvocationPrefix(baseCmd);
+	const prefix = agents.skillInvocationPrefix(baseCmd, family);
 	return (
 		`${prefix}dev3-bug-hunter ` +
 		`You are a read-only helper inside a task owned by the main agent. ` +
@@ -2672,7 +2819,7 @@ async function spawnSingleBugHunterPane(opts: {
 	configId: string | null;
 	accountId?: string | null;
 	split: { placement: AuxPanePlacement; size: string; tmuxTarget: string; nativeAnchor?: string };
-}): Promise<{ handle: AuxPaneHandle; baseCmd: string }> {
+}): Promise<{ handle: AuxPaneHandle; baseCmd: string; agentFamily: AgentFamily | undefined }> {
 	const ctx: agents.TemplateContext = {
 		taskTitle: "",
 		taskDescription: "",
@@ -2687,7 +2834,7 @@ async function spawnSingleBugHunterPane(opts: {
 	let tmuxCmd: string;
 	let extraEnv: Record<string, string>;
 	let resolvedBaseCmd = "";
-	let resolvedHooksIntegration: AgentHooksIntegration | undefined;
+	let resolvedAgentFamily: AgentFamily | undefined;
 	let launchedAgentId = opts.agentId;
 	let launchedConfigId = opts.configId;
 	if (opts.agentId) {
@@ -2695,7 +2842,7 @@ async function spawnSingleBugHunterPane(opts: {
 		tmuxCmd = resolved.command;
 		extraEnv = resolved.extraEnv;
 		resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
-		resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+		resolvedAgentFamily = resolved.agentFamily;
 		launchedAgentId = resolved.agent?.id ?? opts.agentId;
 		launchedConfigId = resolved.config?.id ?? opts.configId;
 	} else {
@@ -2710,17 +2857,17 @@ async function spawnSingleBugHunterPane(opts: {
 		tmuxCmd = resolved.command;
 		extraEnv = resolved.extraEnv;
 		resolvedBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || "";
-		resolvedHooksIntegration = resolved.agent?.hooksIntegration;
+		resolvedAgentFamily = resolved.agentFamily;
 		launchedAgentId = resolved.agent?.id ?? null;
 		launchedConfigId = resolved.config?.id ?? null;
 	}
 
 	// Same trust/config-ensure the primary launch does — a Codex bug-hunter pane
 	// otherwise launches against a stale config.toml and crashes.
-	await ensureAgentTrust(opts.worktreePath, opts.project.path, resolvedBaseCmd, opts.accountId, opts.task.foreignCode);
+	await ensureAgentTrust(opts.worktreePath, opts.project.path, resolvedBaseCmd, opts.accountId, opts.task.foreignCode, resolvedAgentFamily);
 	tmuxCmd = await applyAgentHooksToCommand(opts.worktreePath, resolvedBaseCmd, tmuxCmd, {
 		stopTarget: opts.project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
-		integration: resolvedHooksIntegration,
+		family: resolvedAgentFamily,
 	});
 
 	const env: Record<string, string> = {
@@ -2759,10 +2906,11 @@ async function spawnSingleBugHunterPane(opts: {
 		const paneEntry = {
 			paneId: handle.paneId,
 			agentCmd: resolvedBaseCmd,
-			sessionId: agents.supportsPreAssignedSessionId(resolvedBaseCmd) ? freshSessionId : null,
+			sessionId: agents.supportsPreAssignedSessionId(resolvedBaseCmd, resolvedAgentFamily) ? freshSessionId : null,
 			agentId: launchedAgentId,
 			configId: launchedConfigId,
 			accountId: opts.accountId,
+			agentFamily: resolvedAgentFamily,
 		};
 		try {
 			const freshTask = await data.getTask(opts.project, opts.task.id);
@@ -2776,7 +2924,7 @@ async function spawnSingleBugHunterPane(opts: {
 		}
 	}
 
-	return { handle, baseCmd: resolvedBaseCmd };
+	return { handle, baseCmd: resolvedBaseCmd, agentFamily: resolvedAgentFamily };
 }
 
 /**
@@ -2909,6 +3057,7 @@ async function spawnBugHuntersInTask(params: { taskId: string; projectId: string
 	});
 	if (first.handle.paneId) handles.push(first.handle);
 	const resolvedBaseCmd = first.baseCmd;
+	const resolvedHunterFamily = first.agentFamily;
 
 	// Subsequent hunters: split the right column vertically off the previous
 	// hunter's pane. tmux needs an explicit -p per split so the whole right column
@@ -2989,7 +3138,7 @@ async function spawnBugHuntersInTask(params: { taskId: string; projectId: string
 	// After the agents have had time to boot, paste the branch-scoped bug-hunter
 	// slash command into each pane. The scope clause is mandatory: hunters must
 	// only inspect files changed in this branch, never the whole codebase.
-	const prompt = buildBugHunterPrompt(task, project, resolvedBaseCmd);
+	const prompt = await buildBugHunterPrompt(task, project, resolvedBaseCmd, resolvedHunterFamily);
 
 	// The agent keeps the keyboard: a hunter pane became active on every split, and
 	// the main agent must not lose input just because hunters started.
@@ -3103,7 +3252,19 @@ export async function handlePaneExited(taskId: string, _exitedPaneId: string): P
 	}
 }
 
+/**
+ * What the PTY server read versus what it managed to send, per live session.
+ *
+ * Read by the Debug → Terminal Performance overlay, which otherwise only sees
+ * what the renderer already processed and so cannot tell a quiet shell from a
+ * backlog. See `pty-throughput.ts`.
+ */
+function terminalPtyStats(): { sessions: Record<string, PtyThroughputStats> } {
+	return { sessions: throughputSnapshot() };
+}
+
 export const tmuxPtyHandlers = {
+	terminalPtyStats,
 	runDevServer,
 	checkDevServer,
 	stopDevServer,
@@ -3130,4 +3291,6 @@ export const tmuxPtyHandlers = {
 	spawnBugHuntersInTask,
 	resumeTask,
 	restartTask,
+	rerunSetupScript,
+	dismissSetupFailure,
 };

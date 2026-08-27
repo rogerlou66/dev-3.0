@@ -89,6 +89,7 @@ export const MENU_ACTIONS = {
 	viewportLab: "viewport-lab",
 	nativePaneLayoutLab: "native-pane-layout-lab",
 	updatePopoverPreview: "update-popover-preview",
+	terminalPerfOverlay: "terminal-perf-overlay",
 	debugPlaySoundCompleted: "debug-play-sound-completed",
 	debugPlaySoundCancelled: "debug-play-sound-cancelled",
 	debugPushSoundCompleted: "debug-push-sound-completed",
@@ -182,6 +183,7 @@ export const MENU_ACTIONS = {
 	helpDocumentation: "help-documentation",
 	helpKeyboardShortcuts: "help-keyboard-shortcuts",
 	helpExplainScreen: "help-explain-screen",
+	viewAgentTrafficLog: "view-agent-traffic-log",
 	helpReportBug: "help-report-bug",
 	helpGithub: "help-github",
 	helpDiagnostics: "help-diagnostics",
@@ -330,12 +332,19 @@ export interface MenuContext {
 	hasProject: boolean;
 	/** A terminal is visible on screen (task / project-terminal). */
 	hasTerminal: boolean;
+	/**
+	 * The agent-traffic beta is on. Unlike the three above this HIDES its items
+	 * rather than greying them: an off feature must leave no trace, and a
+	 * permanently disabled row is a trace.
+	 */
+	agentTrafficEnabled?: boolean;
 }
 
 export const EMPTY_MENU_CONTEXT: MenuContext = {
 	hasTask: false,
 	hasProject: false,
 	hasTerminal: false,
+	agentTrafficEnabled: false,
 };
 
 const REQUIRES_TASK: ReadonlySet<MenuAction> = new Set<MenuAction>([
@@ -480,6 +489,12 @@ function item(spec: Item): ApplicationMenuItemConfig {
 }
 
 const SEP: ApplicationMenuItemConfig = { type: "separator" };
+
+/** The traffic-log row, present only while the beta flag is on (View and Help). */
+function agentTrafficItems(): ApplicationMenuItemConfig[] {
+	if (!currentContext.agentTrafficEnabled) return [];
+	return [item({ label: "Agent Traffic Log (⇧⌘M)", action: MENU_ACTIONS.viewAgentTrafficLog })];
+}
 
 function appMenu(): ApplicationMenuItemConfig {
 	return {
@@ -637,6 +652,7 @@ function viewMenu(): ApplicationMenuItemConfig {
 			item({ label: "Show Productivity Stats", action: MENU_ACTIONS.viewStats }),
 			item({ label: "Show Changelog", action: MENU_ACTIONS.viewChangelog }),
 			item({ label: "Show Tips", action: MENU_ACTIONS.viewTips }),
+			...agentTrafficItems(),
 			item({ label: "Keyboard Shortcuts (⌘/)", action: MENU_ACTIONS.helpKeyboardShortcuts }),
 			SEP,
 			item({ label: "Zoom In", action: MENU_ACTIONS.zoomIn, accelerator: "=" }),
@@ -661,6 +677,7 @@ function viewMenu(): ApplicationMenuItemConfig {
 					item({ label: "Viewport Lab", action: MENU_ACTIONS.viewportLab }),
 					item({ label: "Native Pane Layout Lab", action: MENU_ACTIONS.nativePaneLayoutLab }),
 					item({ label: "Update Popover Preview", action: MENU_ACTIONS.updatePopoverPreview }),
+					item({ label: "Terminal Performance (Toggle)", action: MENU_ACTIONS.terminalPerfOverlay }),
 					SEP,
 					// Task-sound probes. The two "client" items call the exact function
 					// every board/panel/toolbar move calls; the "backend push" item goes
@@ -840,6 +857,7 @@ function helpMenu(): ApplicationMenuItemConfig {
 		submenu: [
 			item({ label: "dev-3.0 Documentation", action: MENU_ACTIONS.helpDocumentation }),
 			item({ label: "Explain This Screen (⇧⌘/)", action: MENU_ACTIONS.helpExplainScreen }),
+			...agentTrafficItems(),
 			item({ label: "Keyboard Shortcuts (⌘/)", action: MENU_ACTIONS.helpKeyboardShortcuts }),
 			item({ label: "Tmux Cheat Sheet", action: MENU_ACTIONS.termCheatSheet }),
 			SEP,

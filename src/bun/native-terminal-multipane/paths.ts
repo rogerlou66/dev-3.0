@@ -13,6 +13,8 @@
 
 import { join } from "node:path";
 import { isValidSessionId } from "../native-terminal-registry/paths";
+// From `shared/` rather than through `../paths`, which 45 suites mock by name.
+import { resolveDev3Home } from "../../shared/dev3-home";
 
 export const NATIVE_MULTIPANE_DIR_ENV = "DEV3_NATIVE_MULTIPANE_DIR";
 
@@ -20,9 +22,7 @@ export const NATIVE_MULTIPANE_DIR_ENV = "DEV3_NATIVE_MULTIPANE_DIR";
 export function multipaneRootDir(): string {
 	const explicit = process.env[NATIVE_MULTIPANE_DIR_ENV];
 	if (explicit) return explicit;
-	const dev3Home =
-		process.env.DEV3_HOME || `${process.env.HOME || process.env.USERPROFILE || "/tmp"}/.dev3.0`;
-	return join(dev3Home, "native-multipane");
+	return join(resolveDev3Home(), "native-multipane");
 }
 
 // Max 56 chars: a real coordinator id is `dev3-task-<uuid>` (46 chars), and the

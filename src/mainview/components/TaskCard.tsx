@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useLayoutEffect, type Dispatch } from "react";
 import { toast } from "../toast";
 import { createPortal } from "react-dom";
-import type { CodingAgent, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isTaskDisconnected } from "../../shared/types";
+import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isCoordinatorTask, isTaskDisconnected } from "../../shared/types";
 import { getTaskOpenMode, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { confirm } from "../confirm";
@@ -28,6 +28,7 @@ import TaskCardRail from "./TaskCardRail";
 import StatusMenuPortal from "./StatusMenuPortal";
 import { useStatusMenu } from "../hooks/useStatusMenu";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useMobile } from "../hooks/useMobile";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import ScheduleMessageModal from "./ScheduleMessageModal";
 import ScheduledMessagesChip from "./ScheduledMessagesChip";
@@ -86,6 +87,7 @@ interface TaskCardProps {
 	/** Accumulated attention reasons (from `dev3 attention`), shown in the hover preview. */
 	bellReasons?: string[];
 	ports?: PortInfo[];
+	devServer?: DevServerSummary;
 	isActiveInSplit?: boolean;
 	isMoving?: boolean;
 	onSetMoving?: (taskId: string, isMoving: boolean) => void;
@@ -101,10 +103,11 @@ interface TaskCardProps {
 	compact?: boolean;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false }: TaskCardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	const isMobile = useMobile();
 	const [moving, setMoving] = useState(false);
 	const [quickCompleting, setQuickCompleting] = useState(false);
 	const [cancellingPreparation, setCancellingPreparation] = useState(false);
@@ -113,6 +116,8 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const [detailOpen, setDetailOpen] = useState(false);
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const pickerAnchorRef = useRef<HTMLButtonElement>(null);
+	/** Mobile has no "+ Add label" button, so the picker anchors to the chip row. */
+	const labelRowRef = useRef<HTMLDivElement>(null);
 
 	const groupMembers = task.groupId && siblingMap
 		? (siblingMap.get(task.groupId) ?? [])
@@ -161,6 +166,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// Its session died with the app (force quit, reboot). Nothing was lost, but
 	// nothing is running either — the card must not pass for live work.
 	const isDisconnected = isTaskDisconnected(task);
+	const isCoordinator = isCoordinatorTask(task);
 	const isCancelled = task.status === "cancelled";
 	const needsInput = task.status === "user-questions";
 	const isActive = ACTIVE_STATUSES.includes(task.status);
@@ -530,7 +536,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const REVIEW_BADGE: Record<NonNullable<TaskPRBadgeInfo["reviewState"]>, { glyph: string | null; square?: boolean; cls: string; key: TranslationKey }> = {
 		approved: { glyph: null, square: true, cls: "text-success bg-success/10 hover:bg-success/20", key: "task.review.approved" },
 		changes_requested: { glyph: "", cls: "text-danger bg-danger/10 hover:bg-danger/20", key: "task.review.changesRequested" },
-		commented: { glyph: "", cls: "text-warning bg-warning/10 hover:bg-warning/20", key: "task.review.commented" },
+		commented: { glyph: "", cls: "text-warning-strong bg-warning/10 hover:bg-warning/20", key: "task.review.commented" },
 	};
 	const reviewMeta = prInfo?.reviewState ? REVIEW_BADGE[prInfo.reviewState] : null;
 	const reviewBadge = reviewMeta ? (
@@ -574,7 +580,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					e.stopPropagation();
 					window.open(prInfo.url, "_blank");
 				}}
-				className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 font-mono text-dense font-semibold leading-none text-warning transition-colors hover:bg-warning/20"
+				className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 font-mono text-dense font-semibold leading-none text-warning-strong transition-colors hover:bg-warning/20"
 				aria-label={t.plural("task.prUnresolvedComments", unresolvedCount)}
 			>
 				<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF086"}</span>
@@ -770,6 +776,73 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		);
 	}
 
+	// ---- The dev-server split control ---------------------------------------
+	// Left half opens the lowest port, right half stops. A stopped server has
+	// nothing to open and nothing to stop, so the control disappears instead of
+	// sitting there inert and pulling the eye across the whole board.
+	const devPort = devServer?.ports[0] ?? null;
+	const devConflict = (devServer?.conflictPorts.length ?? 0) > 0;
+	// Running with nothing listening yet is a server still booting — the only
+	// honest reading, and it needs no extra state from the backend.
+	const devStarting = devServer?.running === true && devPort === null;
+	const devTone = devServer?.running
+		? devStarting
+			? "border-warning/40 bg-warning/10 text-warning"
+			: "border-success/30 bg-success/10 text-success"
+		: "border-danger/40 bg-danger/10 text-danger";
+	const devLabel = devServer?.running
+		? devStarting ? t("task.devStarting") : `:${devPort}`
+		: t("task.devPortBusy");
+	const devDetail = devServer?.running
+		? devStarting
+			? t("ttip.task.devStarting")
+			: t("ttip.task.devOpen", { ports: devServer.ports.map((p) => `:${p}`).join(" ") })
+		: t("ttip.task.devConflict", { ports: devServer?.conflictPorts.map((p) => `:${p}`).join(" ") ?? "" });
+
+	const devServerControl = isActive && devServer && (devServer.running || devConflict) ? (
+		<span
+			data-testid="task-card-dev-control"
+			data-dev-state={devServer.running ? (devStarting ? "starting" : "running") : "conflict"}
+			className={`flex h-6 flex-shrink-0 items-center overflow-hidden rounded-lg border ${devTone}`}
+		>
+			<Tooltip content={devLabel} detail={devDetail}>
+				<button
+					onClick={(e) => {
+						e.stopPropagation();
+						if (devPort !== null) window.open(`http://localhost:${devPort}`, "_blank");
+					}}
+					className="flex h-full items-center gap-1 px-1 font-mono text-dense transition-colors hover:bg-fg/5 disabled:cursor-default"
+					aria-label={devPort !== null ? t("task.devOpenAria", { port: String(devPort) }) : devLabel}
+					disabled={devPort === null}
+				>
+					{devStarting
+						? <span className="h-1.5 w-1.5 flex-shrink-0 animate-spin rounded-[1px] border border-current border-t-transparent" />
+						: <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full bg-current ${devServer.running ? "motion-safe:animate-pulse" : ""}`} />}
+					{devLabel}
+				</button>
+			</Tooltip>
+			{/* Danger INK on a hover tint, never a fill: stopping a dev server loses
+			    nothing, so it must not read as an error from across the room. */}
+			<Tooltip content={t("task.devStop")} detail={t("ttip.task.devStop")}>
+				<button
+					onClick={async (e) => {
+						e.stopPropagation();
+						try {
+							await api.request.stopDevServer({ taskId: task.id, projectId: project.id });
+						} catch (err) {
+							toast.error(t("task.devStopFailed", { error: String(err) }));
+						}
+					}}
+					className="flex h-full items-center border-l border-current/20 px-1 text-danger transition-colors hover:bg-danger/15 disabled:opacity-40"
+					aria-label={t("task.devStop")}
+					disabled={isDisabled || !devServer.running}
+				>
+					<span className="h-1.5 w-1.5 bg-current" />
+				</button>
+			</Tooltip>
+		</span>
+	) : null;
+
 	const watchButton = (
 		<Tooltip content={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")} detail={t("ttip.task.watch")}>
 			<button
@@ -795,7 +868,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				<span className="text-xs leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>
 					{task.watched ? "\u{F009A}" : "\u{F0F1C}"}
 				</span>
-				<span className="text-micro">{task.watched ? t("task.watching") : t("task.watch")}</span>
+				{!devServerControl && <span className="text-micro">{task.watched ? t("task.watching") : t("task.watch")}</span>}
 			</button>
 		</Tooltip>
 	);
@@ -806,6 +879,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			data-task-id={task.id}
 			data-hint-id={task.id}
 			data-help-id="board.task-card"
+			data-tour-anchor={ACTIVE_STATUSES.includes(task.status) ? "board.running-task" : undefined}
 			data-needs-input={needsInput || undefined}
 				draggable={!isDisabled && !detailOpen && !isHibernated}
 				onDragStart={handleDragStart}
@@ -813,7 +887,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			onContextMenu={handleContextMenu}
 			onMouseEnter={handleCardMouseEnter}
 			onMouseLeave={handleCardMouseLeave}
-			className={`group relative flex flex-col overflow-hidden glass-card rounded-xl transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out border ${isDraft ? "border-dashed border-edge-active" : isActiveInSplit ? "border-accent ring-2 ring-accent/70 shadow-lg shadow-accent/20" : "border-transparent"} ${
+			className={`group relative flex flex-col overflow-hidden glass-card rounded-xl transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out border ${isDraft ? "border-dashed border-edge-active" : isActiveInSplit ? "border-accent ring-2 ring-accent/70 shadow-lg shadow-accent/20" : isCoordinator ? "border-dashed task-card-coordinator" : "border-transparent"} ${
 				isActive || isCompleted || isCancelled
 					? "cursor-pointer hover:-translate-y-0.5 hover:shadow-card-hover"
 					: "cursor-grab active:cursor-grabbing hover:-translate-y-0.5 hover:shadow-card-hover"
@@ -954,6 +1028,28 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				)}
 				<NativeBackendMark task={task} className="w-3.5 h-3.5 flex-shrink-0" testId="task-card-native-backend" />
 				<ForeignCodeMark task={task} className="w-3.5 h-3.5 flex-shrink-0" testId="task-card-foreign-code" />
+				{isCoordinator && (
+					<Tooltip content={t("task.coordinatorBadge")} detail={t("task.coordinatorHint")}>
+						<span
+							data-testid="task-card-coordinator-badge"
+							className="flex-shrink-0 rounded border border-dashed border-success/60 px-1.5 py-0.5 text-dense font-semibold uppercase tracking-[0.06em] text-success-strong"
+						>
+							{t("task.coordinatorBadge")}
+						</span>
+					</Tooltip>
+				)}
+				{/* A PR review is an ordinary task with a job, so it is named and not
+				    boxed — no border, nothing that competes with the coordinator's. */}
+				{task.taskType === "pr-review" && (
+					<Tooltip content={t("task.prReviewBadge")} detail={t("task.prReviewHint")}>
+						<span
+							data-testid="task-card-pr-review-badge"
+							className="flex-shrink-0 text-dense font-semibold uppercase tracking-[0.06em] text-fg-3"
+						>
+							{t("task.prReviewBadge")}
+						</span>
+					</Tooltip>
+				)}
 				{isDraft && (
 					<Tooltip content={t("task.draftBadge")} detail={t("task.draftHint")}>
 						<span
@@ -1062,6 +1158,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 							const assignedLabels = taskLabelIds
 								.map((id) => projectLabels.find((l) => l.id === id))
 								.filter(Boolean) as typeof projectLabels;
+							const showDescriptionAffordance = hasLongDescription && !isTodo;
+
+							if (isMobile && assignedLabels.length === 0 && !showDescriptionAffordance) return null;
 
 							async function removeLabel(labelId: string) {
 								try {
@@ -1094,7 +1193,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 							return (
 								<div className="mt-2 flex min-h-[1.125rem] items-start gap-2">
-								<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+								<div ref={labelRowRef} className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
 									{assignedLabels.map((label) => (
 										<LabelChip
 											key={label.id}
@@ -1110,27 +1209,29 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 											}}
 										/>
 									))}
-									<button
-										ref={pickerAnchorRef}
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											setPickerOpen(true);
-										}}
-										className="flex flex-shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-fg-3 opacity-0 transition-[opacity,color,background-color,transform] duration-150 ease-out group-hover:opacity-70 hover:!opacity-100 hover:bg-fg/8 hover:text-fg motion-safe:active:scale-[0.96]"
-									>
-										<svg className="w-2.5 h-2.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-											<path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-										</svg>
-										<span className="text-dense font-medium leading-none">Add label</span>
-									</button>
-									{pickerOpen && pickerAnchorRef.current && (
+									{!isMobile && (
+										<button
+											ref={pickerAnchorRef}
+											type="button"
+											onClick={(e) => {
+												e.stopPropagation();
+												setPickerOpen(true);
+											}}
+											className="flex flex-shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-fg-3 opacity-0 transition-[opacity,color,background-color,transform] duration-150 ease-out group-hover:opacity-70 hover:!opacity-100 hover:bg-fg/8 hover:text-fg motion-safe:active:scale-[0.96]"
+										>
+											<svg className="w-2.5 h-2.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+												<path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+											</svg>
+											<span className="text-dense font-medium leading-none">Add label</span>
+										</button>
+									)}
+									{pickerOpen && (pickerAnchorRef.current ?? labelRowRef.current) && (
 										<LabelPicker
 											project={project}
 											dispatch={dispatch}
 											taskId={task.id}
 											onClose={() => setPickerOpen(false)}
-											anchorEl={pickerAnchorRef.current}
+											anchorEl={(pickerAnchorRef.current ?? labelRowRef.current)!}
 											selectedIds={taskLabelIds}
 											onToggle={toggleLabel}
 										/>
@@ -1138,7 +1239,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 								</div>
 								{/* The description affordance rides the label row instead of
 								    claiming a row of its own — it was ~20px on most cards. */}
-								{hasLongDescription && !isTodo && (
+								{showDescriptionAffordance && (
 									<Tooltip content={t("task.showDescription")} detail={t("ttip.task.showDescription")}>
 										<button
 											onClick={handleShowDescription}
@@ -1189,6 +1290,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 									</button>
 								</Tooltip>
 							)}
+							{!compact && devServerControl}
 							{!compact && watchButton}
 							<div className="flex-1" />
 							{!compact && isActive && (

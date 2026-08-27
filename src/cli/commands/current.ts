@@ -3,6 +3,7 @@ import type { Task } from "../../shared/types";
 import { STATUS_LABELS, getTaskTitle } from "../../shared/types";
 import { detectContext, detectContextDiagnostics, readProjectDirect, readTaskDirect, type ProjectDirect } from "../context";
 import { sendRequest } from "../socket-client";
+import { spaceFields } from "../spaces";
 import { printDetail, exitError } from "../output";
 import { BUILD_TIME, BUILD_COMMIT, BUILD_VERSION } from "../../shared/build-info.generated";
 
@@ -83,6 +84,7 @@ export async function handleCurrent(socketPath: string | null, opts: { brief?: b
 				if (task.customColumnId) fields.push(["Custom Column:", task.customColumnId.slice(0, 8)]);
 				if (task.branchName) fields.push(["Branch:", task.branchName]);
 				if (task.worktreePath) fields.push(["Worktree:", task.worktreePath]);
+				fields.push(...spaceFields(context.projectId));
 
 				printDetail(fields);
 
@@ -145,6 +147,7 @@ export async function handleCurrent(socketPath: string | null, opts: { brief?: b
 		const offlineBranch = (worktreePath ? liveBranchName(worktreePath) : null) ?? (task.branchName as string | undefined);
 		if (offlineBranch) fields.push(["Branch:", offlineBranch]);
 		if (worktreePath) fields.push(["Worktree:", worktreePath]);
+		fields.push(...spaceFields(context.projectId));
 
 		fields.push(["", ""]);
 		fields.push(["(offline)", "App not running — showing cached data"]);

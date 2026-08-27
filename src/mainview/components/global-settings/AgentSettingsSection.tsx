@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
 	AgentCheckResult,
 	AgentConfiguration,
-	AgentHooksIntegration,
+	AgentFamily,
 	BedrockGeo,
 	CodingAgent,
 	EffortLevel,
@@ -13,7 +13,7 @@ import type {
 	ProviderSettings,
 } from "../../../shared/types";
 import { LLM_PROVIDER } from "../../../shared/types";
-import { autoHooksFamily, isKnownAgentCommand } from "../../../shared/agent-adapters/hook-families";
+import { agentKey, autoAgentFamily, isKnownAgentCommand, SELECTABLE_AGENT_FAMILIES } from "../../../shared/agent-adapters/families";
 import { randomUUID } from "../../uuid";
 import { ListEditor } from "../ListEditor";
 import AgentConfigPicker from "../AgentConfigPicker";
@@ -21,9 +21,12 @@ import Select, { type SelectOption } from "../Select";
 import { confirm } from "../../confirm";
 import { toast } from "../../toast";
 import { api } from "../../rpc";
-import type { TFunction } from "../../i18n";
+import { openFilePicker } from "../../folder-picker";
+import type { TFunction, TranslationKey } from "../../i18n";
 import { buildPickerGroups, getModeLeafLabel, getModelGroupLabel, type PickerGroup } from "../../utils/agentPicker";
 import { useToggleFavorite } from "../../hooks/useToggleFavorite";
+import PresetModelRoles from "./PresetModelRoles";
+import { useModelCatalog } from "../../hooks/useModelCatalog";
 import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
 import {
@@ -33,98 +36,8 @@ import {
 	getProviderDefinition,
 	providersForAgent,
 } from "../../../shared/llm-provider";
-import { buildCommandPreview, moveItem } from "./utils";
-
-const ARROW_UP_GLYPH = "\uF062";
-const ARROW_DOWN_GLYPH = "\uF063";
-const GRIP_GLYPH = "\u{F01DB}";
-
-function ReorderControls({
-	dragHandleProps,
-	canMoveUp,
-	canMoveDown,
-	onMoveUp,
-	onMoveDown,
-	dragTitle,
-	upTitle,
-	downTitle,
-	size = "sm",
-}: {
-	dragHandleProps: {
-		draggable: boolean;
-		onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
-		onDragEnd: () => void;
-	};
-	canMoveUp: boolean;
-	canMoveDown: boolean;
-	onMoveUp: () => void;
-	onMoveDown: () => void;
-	dragTitle: string;
-	upTitle: string;
-	downTitle: string;
-	size?: "sm" | "md";
-}) {
-	const fontSize = size === "md" ? "text-sm" : "text-xs";
-	const gripSize = size === "md" ? "text-base" : "text-sm";
-	const padding = size === "md" ? "p-1.5" : "p-1";
-	return (
-		<div className="flex items-center gap-0.5 shrink-0">
-			<button
-				type="button"
-				onClick={(event) => event.stopPropagation()}
-				draggable={dragHandleProps.draggable}
-				onDragStart={dragHandleProps.onDragStart}
-				onDragEnd={dragHandleProps.onDragEnd}
-				className={`${padding} rounded text-fg-muted hover:text-fg hover:bg-elevated transition-colors cursor-grab active:cursor-grabbing`}
-				title={dragTitle}
-				aria-label={dragTitle}
-			>
-				<span
-					className={`${gripSize} leading-none`}
-					style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-				>
-					{GRIP_GLYPH}
-				</span>
-			</button>
-			<button
-				type="button"
-				onClick={(event) => {
-					event.stopPropagation();
-					onMoveUp();
-				}}
-				className={`${padding} rounded text-fg-muted hover:text-fg hover:bg-elevated transition-colors disabled:opacity-30 disabled:hover:text-fg-muted disabled:hover:bg-transparent`}
-				title={upTitle}
-				aria-label={upTitle}
-				disabled={!canMoveUp}
-			>
-				<span
-					className={`${fontSize} leading-none`}
-					style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-				>
-					{ARROW_UP_GLYPH}
-				</span>
-			</button>
-			<button
-				type="button"
-				onClick={(event) => {
-					event.stopPropagation();
-					onMoveDown();
-				}}
-				className={`${padding} rounded text-fg-muted hover:text-fg hover:bg-elevated transition-colors disabled:opacity-30 disabled:hover:text-fg-muted disabled:hover:bg-transparent`}
-				title={downTitle}
-				aria-label={downTitle}
-				disabled={!canMoveDown}
-			>
-				<span
-					className={`${fontSize} leading-none`}
-					style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-				>
-					{ARROW_DOWN_GLYPH}
-				</span>
-			</button>
-		</div>
-	);
-}
+import { buildCommandPreview } from "./utils";
+import type { SettingsPresetTarget } from "../../state";
 
 /** One star, recoloured per state: outline = not a favorite, filled = favorite.
  *  Inline SVG rather than a Nerd Font glyph, which renders as tofu until the
@@ -155,6 +68,12 @@ interface AgentSettingsSectionProps {
 	onDefaultConfigChange: (configId: string) => void;
 	/** Fresh settings after a favorite toggle, so the stars re-render. */
 	onGlobalSettingsChange: (settings: GlobalSettings) => void;
+	/** A preset a deep-link wants shown: selected, revealed on narrow viewports,
+	 *  and scrolled into view inside the list's own scroll box. */
+	focusPreset?: SettingsPresetTarget | null;
+	/** Fired once the target has been applied — or once it is certain the preset
+	 *  no longer exists — so the caller can drop it. */
+	onFocusPresetHandled?: () => void;
 }
 
 /** What the library's one detail pane is showing: the agent itself, or one of
@@ -169,6 +88,8 @@ export default function AgentSettingsSection({
 	onDefaultAgentChange,
 	onDefaultConfigChange,
 	onGlobalSettingsChange,
+	focusPreset,
+	onFocusPresetHandled,
 }: AgentSettingsSectionProps) {
 	const toggleFavorite = useToggleFavorite(onGlobalSettingsChange);
 	const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
@@ -176,6 +97,7 @@ export default function AgentSettingsSection({
 	const [presetQuery, setPresetQuery] = useState("");
 	/** Narrow viewports show one pane at a time; wide ones show both. */
 	const [narrowShowsEditor, setNarrowShowsEditor] = useState(false);
+	const [scrollToConfigId, setScrollToConfigId] = useState<string | null>(null);
 	const [agentAvailability, setAgentAvailability] = useState<AgentCheckResult[]>(
 		[],
 	);
@@ -192,7 +114,6 @@ export default function AgentSettingsSection({
 	const defaultAgentConfigs = selectedDefaultAgent?.configurations || [];
 
 	const activeAgent = agents.find((agent) => agent.id === activeAgentId) ?? agents[0];
-	const activeAgentIndex = activeAgent ? agents.indexOf(activeAgent) : -1;
 	const availability = agentAvailability.find((item) => item.agentId === activeAgent?.id);
 	const selectedPreset = selection.kind === "preset"
 		? activeAgent?.configurations.find((config) => config.id === selection.configId)
@@ -216,6 +137,37 @@ export default function AgentSettingsSection({
 	useEffect(() => {
 		loadAgentAvailability();
 	}, [loadAgentAvailability]);
+
+	// Point the library at the preset a deep-link named. The agents arrive from
+	// an RPC, so an empty list means "not loaded yet" — waiting is the difference
+	// between landing on the preset and landing on whatever was selected before.
+	useEffect(() => {
+		if (!focusPreset || agents.length === 0) return;
+		const agent = agents.find((item) => item.id === focusPreset.agentId);
+		const config = agent?.configurations.find((item) => item.id === focusPreset.configId);
+		if (agent && config) {
+			setActiveAgentId(agent.id);
+			setSelection({ kind: "preset", configId: config.id });
+			// A filter left over from an earlier visit can hide the very row this
+			// jump exists to show.
+			setPresetQuery("");
+			setNarrowShowsEditor(true);
+			setScrollToConfigId(config.id);
+		}
+		// Deleted preset: nothing to select, and the page it lives on is already
+		// open — the jump is spent either way.
+		onFocusPresetHandled?.();
+	}, [agents, focusPreset, onFocusPresetHandled]);
+
+	// Runs after the row has rendered under its (possibly cleared) filter.
+	// `nearest` scrolls the list's own box; `start` would drag the whole settings
+	// page along with it.
+	useEffect(() => {
+		if (!scrollToConfigId) return;
+		const row = document.querySelector(`[data-preset-row="${scrollToConfigId}"]`) as HTMLElement | null;
+		row?.scrollIntoView?.({ block: "nearest" });
+		setScrollToConfigId(null);
+	}, [scrollToConfigId, groups]);
 
 	function persistAgents(updated: CodingAgent[]) {
 		// Persistence is immediate (§8) — a rejected write used to vanish silently.
@@ -341,31 +293,6 @@ export default function AgentSettingsSection({
 		setSelection({ kind: "agent" });
 	}
 
-	function moveAgent(agentId: string, direction: -1 | 1) {
-		const fromIndex = agents.findIndex((agent) => agent.id === agentId);
-		if (fromIndex === -1) return;
-		const toIndex = fromIndex + direction;
-		if (toIndex < 0 || toIndex >= agents.length) return;
-		persistAgents(moveItem(agents, fromIndex, toIndex));
-	}
-
-	function moveConfig(agentId: string, configId: string, direction: -1 | 1) {
-		const updated = agents.map((agent) => {
-			if (agent.id !== agentId) return agent;
-			const fromIndex = agent.configurations.findIndex(
-				(config) => config.id === configId,
-			);
-			if (fromIndex === -1) return agent;
-			const toIndex = fromIndex + direction;
-			if (toIndex < 0 || toIndex >= agent.configurations.length) return agent;
-			return {
-				...agent,
-				configurations: moveItem(agent.configurations, fromIndex, toIndex),
-			};
-		});
-		persistAgents(updated);
-	}
-
 	return (
 		<SettingsSection title={t("settings.categoryAgents")} helpTopicId="settings.agents">
 			<SettingsEntry anchor="default-agent">
@@ -406,6 +333,7 @@ export default function AgentSettingsSection({
 						<ConfigPreviewCard
 							config={selectedConfig}
 							agentBaseCommand={selectedDefaultAgent?.baseCommand ?? ""}
+							agentFamily={selectedDefaultAgent?.agentFamily}
 							t={t}
 							llmProvider={selectedDefaultAgent?.llmProvider}
 							providerConfig={selectedDefaultAgent?.providerConfig}
@@ -517,6 +445,7 @@ export default function AgentSettingsSection({
 													key={config.id}
 													type="button"
 													role="option"
+													data-preset-row={config.id}
 													aria-selected={isSelected}
 													onClick={() => selectPreset(config.id)}
 													className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-sm transition-colors border ${
@@ -525,12 +454,12 @@ export default function AgentSettingsSection({
 															: "border-transparent text-fg-2 hover:bg-elevated-hover hover:text-fg"
 													}`}
 												>
-													<span className={isFavorite ? "text-warning" : "text-transparent"}>
+													<span className={isFavorite ? "text-warning-strong" : "text-transparent"}>
 														<StarIcon filled={isFavorite} />
 													</span>
 													<span className="flex-1 min-w-0 truncate">{getModeLeafLabel(config)}</span>
 													{config.requiresPxpipeProxy ? (
-														<span className="text-warning text-micro shrink-0">{t("settings.presetNeedsProxy")}</span>
+														<span className="text-warning-strong text-micro shrink-0">{t("settings.presetNeedsProxy")}</span>
 													) : null}
 													{activeAgent.defaultConfigId === config.id ? (
 														<span className="text-accent text-micro shrink-0">{t("settings.defaultBadge")}</span>
@@ -567,17 +496,10 @@ export default function AgentSettingsSection({
 									)}
 									onToggleFavorite={() => toggleFavorite(activeAgent.id, selectedPreset.id)}
 									canDelete={activeAgent.configurations.length > 1}
-									canMoveUp={activeAgent.configurations.indexOf(selectedPreset) > 0}
-									canMoveDown={
-										activeAgent.configurations.indexOf(selectedPreset) <
-										activeAgent.configurations.length - 1
-									}
 									onChange={(patch) => updateConfig(activeAgent.id, selectedPreset.id, patch)}
 									onDuplicate={() => addConfig(activeAgent.id, selectedPreset)}
 									onMakeDefault={() => updateAgent(activeAgent.id, { defaultConfigId: selectedPreset.id })}
 									onDelete={() => deleteConfig(activeAgent.id, selectedPreset)}
-									onMoveUp={() => moveConfig(activeAgent.id, selectedPreset.id, -1)}
-									onMoveDown={() => moveConfig(activeAgent.id, selectedPreset.id, 1)}
 								/>
 							) : (
 								<AgentPane
@@ -587,8 +509,6 @@ export default function AgentSettingsSection({
 									customPath={agentCustomPaths[activeAgent.id] ?? ""}
 									copied={agentCopiedId === activeAgent.id}
 									saving={agentSavingId === activeAgent.id}
-									canMoveUp={activeAgentIndex > 0}
-									canMoveDown={activeAgentIndex < agents.length - 1}
 									onCustomPathChange={(path) =>
 										setAgentCustomPaths((current) => ({ ...current, [activeAgent.id]: path }))
 									}
@@ -613,8 +533,6 @@ export default function AgentSettingsSection({
 										setAgentSavingId(null);
 									}}
 									onChange={(patch) => updateAgent(activeAgent.id, patch)}
-									onMoveUp={() => moveAgent(activeAgent.id, -1)}
-									onMoveDown={() => moveAgent(activeAgent.id, 1)}
 									onDelete={() => deleteAgent(activeAgent)}
 								/>
 							)}
@@ -653,23 +571,20 @@ export default function AgentSettingsSection({
 function ConfigPreviewCard({
 	config,
 	agentBaseCommand,
+	agentFamily,
 	t,
 	llmProvider,
 	providerConfig,
 }: {
 	config: AgentConfiguration;
 	agentBaseCommand: string;
+	agentFamily?: AgentFamily;
 	t: TFunction;
 	llmProvider?: LlmProvider;
 	providerConfig?: ProviderConfig;
 }) {
 	const tags: { label: string; value: string }[] = [];
-	const cmdName = (
-		config.baseCommandOverride ||
-		agentBaseCommand ||
-		""
-	).split("/").pop() ?? "";
-	const isCodex = cmdName === "codex";
+	const isCodex = agentKey(config.baseCommandOverride || agentBaseCommand || "", agentFamily) === "codex";
 
 	if (config.model) {
 		tags.push({ label: t("settings.configModel"), value: config.model });
@@ -705,7 +620,7 @@ function ConfigPreviewCard({
 		});
 	}
 
-	const { command, envLine } = buildCommandPreview(agentBaseCommand, config, llmProvider, providerConfig);
+	const { command, envLine } = buildCommandPreview(agentBaseCommand, config, llmProvider, providerConfig, agentFamily);
 
 	return (
 		<div className="mt-3 bg-base border border-edge rounded-xl p-3 space-y-2">
@@ -811,15 +726,11 @@ function PresetEditor({
 	isDefault,
 	isFavorite,
 	canDelete,
-	canMoveUp,
-	canMoveDown,
 	onChange,
 	onDuplicate,
 	onMakeDefault,
 	onToggleFavorite,
 	onDelete,
-	onMoveUp,
-	onMoveDown,
 }: {
 	t: TFunction;
 	agent: CodingAgent;
@@ -827,17 +738,21 @@ function PresetEditor({
 	isDefault: boolean;
 	isFavorite: boolean;
 	canDelete: boolean;
-	canMoveUp: boolean;
-	canMoveDown: boolean;
 	onChange: (patch: Partial<AgentConfiguration>) => void;
 	onDuplicate: () => void;
 	onMakeDefault: () => void;
 	onToggleFavorite: () => void;
 	onDelete: () => void;
-	onMoveUp: () => void;
-	onMoveDown: () => void;
 }) {
-	const preview = buildCommandPreview(agent.baseCommand, config, agent.llmProvider, agent.providerConfig);
+	const catalog = useModelCatalog();
+	const preview = buildCommandPreview(
+		agent.baseCommand,
+		config,
+		agent.llmProvider,
+		agent.providerConfig,
+		agent.agentFamily,
+		catalog ?? undefined,
+	);
 	const baseCommandName = agent.baseCommand.split("/").pop() ?? agent.baseCommand;
 	const modelOptions: SelectOption[] = modelsForAgent(agent).map((model) => ({ value: model, label: model }));
 	const filterHint = t("settings.selectFilterHint");
@@ -865,8 +780,8 @@ function PresetEditor({
 
 	return (
 		<div className="space-y-3">
-			{/* Title owns its own row: five actions plus the reorder pair cannot share
-			    one line with a preset name inside a settings pane. */}
+			{/* Title owns its own row: five actions cannot share one line with a
+			    preset name inside a settings pane. */}
 			<div>
 				<div className="min-w-0">
 					<p className="text-fg text-sm font-semibold truncate">{getModeLeafLabel(config)}</p>
@@ -875,16 +790,6 @@ function PresetEditor({
 					</p>
 				</div>
 				<div className="flex flex-wrap items-center gap-1.5 mt-2">
-					<ReorderControls
-						dragHandleProps={{ draggable: false, onDragStart: () => {}, onDragEnd: () => {} }}
-						canMoveUp={canMoveUp}
-						canMoveDown={canMoveDown}
-						onMoveUp={onMoveUp}
-						onMoveDown={onMoveDown}
-						dragTitle={t("settings.dragConfig")}
-						upTitle={t("settings.moveConfigUp")}
-						downTitle={t("settings.moveConfigDown")}
-					/>
 					<button
 						type="button"
 						onClick={onToggleFavorite}
@@ -892,7 +797,7 @@ function PresetEditor({
 						title={isFavorite ? t("settings.favoriteRemoveHint") : t("settings.favoriteAddHint")}
 						className={`px-2.5 py-1 rounded-lg border text-xs flex items-center gap-1.5 transition-colors ${
 							isFavorite
-								? "bg-warning/10 border-warning/30 text-warning hover:bg-warning/15"
+								? "bg-warning/10 border-warning/30 text-warning-strong hover:bg-warning/15"
 								: "bg-elevated border-edge text-fg-2 hover:text-fg hover:border-edge-active"
 						}`}
 					>
@@ -1000,6 +905,16 @@ function PresetEditor({
 				</Field>
 			</div>
 
+			{/* Model roles sit with the model, not under "Advanced": they decide which
+			    model actually runs, which is the preset's headline meaning. */}
+			<PresetModelRoles
+				t={t}
+				baseCommand={baseCommandName}
+				config={config}
+				catalog={catalog}
+				onChange={onChange}
+			/>
+
 			<div>
 				<p className="block text-fg-2 text-xs font-semibold mb-1.5">{t("settings.commandPreview")}</p>
 				<CommandPreview command={preview.command} envLine={preview.envLine} />
@@ -1055,10 +970,10 @@ function PresetEditor({
 }
 
 /** The agent itself: install state, identity, backend, order, removal. */
-/** Which lifecycle hooks this agent's worktrees get, and a warning when the base
- *  command is one dev3 cannot recognize — the case that used to fail in silence:
- *  no hooks means the task never moves between columns on its own. */
-function HooksIntegrationField({
+/** Which agent CLI this command actually is, and a warning when the base command
+ *  is one dev3 cannot recognize — the case that used to fail in silence: an
+ *  unrecognized command loses hooks, session resume and the dev3 protocol. */
+function AgentFamilyField({
 	t,
 	agent,
 	onChange,
@@ -1067,33 +982,29 @@ function HooksIntegrationField({
 	agent: CodingAgent;
 	onChange: (patch: Partial<CodingAgent>) => void;
 }) {
-	const familyLabel = (family: AgentHooksIntegration) =>
-		family === "claude" ? t("settings.hooksClaude") : family === "codex" ? t("settings.hooksCodex") : t("settings.hooksNone");
+	const familyLabel = (family: AgentFamily) =>
+		family === "none" ? t("settings.familyNone") : t(`settings.family.${family}` as TranslationKey);
 	const options: SelectOption[] = [
-		{ value: "", label: t("settings.hooksAuto", { family: familyLabel(autoHooksFamily(agent.baseCommand)) }) },
-		{ value: "claude", label: t("settings.hooksClaude") },
-		{ value: "codex", label: t("settings.hooksCodex") },
-		{ value: "none", label: t("settings.hooksNone") },
+		{ value: "", label: t("settings.familyAuto", { family: familyLabel(autoAgentFamily(agent.baseCommand)) }) },
+		...SELECTABLE_AGENT_FAMILIES.map((family) => ({ value: family, label: familyLabel(family) })),
 	];
-	const unrecognized = !agent.hooksIntegration && !isKnownAgentCommand(agent.baseCommand);
+	const unrecognized = !agent.agentFamily && !isKnownAgentCommand(agent.baseCommand);
 
 	return (
 		<div className="space-y-2">
-			<Field label={t("settings.hooksIntegration")} htmlFor={`agent-hooks-${agent.id}`} hint={t("settings.hooksHint")}>
+			<Field label={t("settings.agentFamily")} htmlFor={`agent-family-${agent.id}`} hint={t("settings.familyHint")}>
 				<Select
-					id={`agent-hooks-${agent.id}`}
-					value={agent.hooksIntegration ?? ""}
+					id={`agent-family-${agent.id}`}
+					value={agent.agentFamily ?? ""}
 					options={options}
-					onChange={(next) =>
-						onChange({ hooksIntegration: next ? (next as AgentHooksIntegration) : undefined })
-					}
+					onChange={(next) => onChange({ agentFamily: next ? (next as AgentFamily) : undefined })}
 				/>
 			</Field>
 			{unrecognized ? (
 				<div className="p-3 rounded-lg bg-warning/5 border border-warning/20 space-y-1" role="status">
-					<p className="text-warning text-xs font-medium">{t("settings.hooksMissingTitle")}</p>
+					<p className="text-warning-strong text-xs font-medium">{t("settings.familyMissingTitle")}</p>
 					<p className="text-fg-3 text-xs">
-						{t("settings.hooksMissingBody", { command: agent.baseCommand || "—" })}
+						{t("settings.familyMissingBody", { command: agent.baseCommand || "—" })}
 					</p>
 				</div>
 			) : null}
@@ -1108,14 +1019,10 @@ function AgentPane({
 	customPath,
 	copied,
 	saving,
-	canMoveUp,
-	canMoveDown,
 	onCustomPathChange,
 	onCopyInstall,
 	onSavePath,
 	onChange,
-	onMoveUp,
-	onMoveDown,
 	onDelete,
 }: {
 	t: TFunction;
@@ -1124,14 +1031,10 @@ function AgentPane({
 	customPath: string;
 	copied: boolean;
 	saving: boolean;
-	canMoveUp: boolean;
-	canMoveDown: boolean;
 	onCustomPathChange: (path: string) => void;
 	onCopyInstall: (command: string) => void;
 	onSavePath: () => void;
 	onChange: (patch: Partial<CodingAgent>) => void;
-	onMoveUp: () => void;
-	onMoveDown: () => void;
 	onDelete: () => void;
 }) {
 	return (
@@ -1143,17 +1046,6 @@ function AgentPane({
 						{t.plural("settings.presetCount", agent.configurations.length)}
 					</p>
 				</div>
-				<ReorderControls
-					dragHandleProps={{ draggable: false, onDragStart: () => {}, onDragEnd: () => {} }}
-					canMoveUp={canMoveUp}
-					canMoveDown={canMoveDown}
-					onMoveUp={onMoveUp}
-					onMoveDown={onMoveDown}
-					dragTitle={t("settings.dragAgent")}
-					upTitle={t("settings.moveAgentUp")}
-					downTitle={t("settings.moveAgentDown")}
-					size="md"
-				/>
 			</div>
 
 			{availability ? (
@@ -1180,7 +1072,7 @@ function AgentPane({
 								<div>
 									<p className="text-fg-3 text-xs mb-1">{t("settings.agentInstallHint")}</p>
 									<div className="flex items-center gap-1.5">
-										<code className="text-warning bg-warning/10 px-2 py-1 rounded text-xs font-mono">
+										<code className="text-warning-strong bg-warning/10 px-2 py-1 rounded text-xs font-mono">
 											{availability.installCommand}
 										</code>
 										<button
@@ -1221,6 +1113,17 @@ function AgentPane({
 									/>
 									<button
 										type="button"
+										onClick={() => {
+											void openFilePicker({ initialPath: customPath.trim() || null })
+												.then((picked) => { if (picked) onCustomPathChange(picked); });
+										}}
+										aria-label={t("folderPicker.browseAria", { name: agent.baseCommand })}
+										className="px-2.5 py-1 rounded border border-edge text-fg-2 text-xs font-medium hover:bg-elevated hover:text-fg transition-colors shrink-0"
+									>
+										{t("folderPicker.browse")}
+									</button>
+									<button
+										type="button"
 										onClick={onSavePath}
 										disabled={!customPath.trim() || saving}
 										className="px-2.5 py-1 rounded bg-accent-fill text-white text-xs font-medium hover:bg-accent-fill-hover disabled:opacity-50 transition-colors shrink-0"
@@ -1259,11 +1162,12 @@ function AgentPane({
 				</Field>
 			</div>
 
-			<HooksIntegrationField t={t} agent={agent} onChange={onChange} />
+			<AgentFamilyField t={t} agent={agent} onChange={onChange} />
 
 			<ProviderSelector
 				t={t}
 				baseCommand={agent.baseCommand}
+				agentFamily={agent.agentFamily}
 				provider={agent.llmProvider ?? "anthropic"}
 				providerConfig={agent.providerConfig}
 				models={modelsForAgent(agent)}
@@ -1380,6 +1284,7 @@ function modelsForAgent(agent: CodingAgent): string[] {
 function ProviderSelector({
 	t,
 	baseCommand,
+	agentFamily,
 	provider,
 	providerConfig,
 	models,
@@ -1387,20 +1292,20 @@ function ProviderSelector({
 }: {
 	t: TFunction;
 	baseCommand: string;
+	agentFamily?: AgentFamily;
 	provider: LlmProvider;
 	providerConfig: ProviderConfig | undefined;
 	models: string[];
 	onChange: (patch: Partial<CodingAgent>) => void;
 }) {
-	const options = providersForAgent(baseCommand);
+	const options = providersForAgent(baseCommand, agentFamily);
 	const setProvider = (next: LlmProvider) => onChange({ llmProvider: next });
 
 	// Mirror the launcher: only a backend registered for THIS agent's command
 	// applies (same guard as agentProvider in agents.ts); a stale id — e.g. after
 	// the base command was edited — renders and behaves as the native default.
 	const def = getProviderDefinition(provider);
-	const cmdName = baseCommand.split("/").pop() ?? "";
-	const activeDef = def && def.agentCommand === cmdName ? def : undefined;
+	const activeDef = def && def.agentCommand === agentKey(baseCommand, agentFamily) ? def : undefined;
 	const effectiveProvider = activeDef ? provider : LLM_PROVIDER.Native;
 	const settings = activeDef ? providerConfig?.[activeDef.id] : undefined;
 	const geo = settings?.geo ?? DEFAULT_BEDROCK_GEO;

@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { RequirementCheckResult } from "../../shared/types";
 import { useT } from "../i18n";
 import { api } from "../rpc";
+import { openFilePicker } from "../folder-picker";
 
 interface Props {
 	results: RequirementCheckResult[];
@@ -23,6 +24,14 @@ export default function RequirementsCheck({ results, checking, onRefresh, onRefr
 		setCopiedId(id);
 		setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 2000);
 	}, []);
+
+	const handleBrowse = useCallback(async (reqId: string) => {
+		const picked = await openFilePicker({ initialPath: customPaths[reqId]?.trim() || null });
+		if (!picked) return;
+		setCustomPaths((prev) => ({ ...prev, [reqId]: picked }));
+		setPathErrors((prev) => ({ ...prev, [reqId]: false }));
+		inputRefs.current[reqId]?.focus();
+	}, [customPaths]);
 
 	const handleSetCustomPath = useCallback(async (reqId: string) => {
 		const path = customPaths[reqId]?.trim();
@@ -67,7 +76,7 @@ export default function RequirementsCheck({ results, checking, onRefresh, onRefr
 							>
 							<span className="mt-0.5 text-lg leading-none">
 								{req.installed ? (
-									<span className="text-green-400">&#10003;</span>
+									<span className="text-success">&#10003;</span>
 								) : (
 									<span className="text-danger">&#10007;</span>
 								)}
@@ -83,7 +92,7 @@ export default function RequirementsCheck({ results, checking, onRefresh, onRefr
 									<span
 										className={`text-xs px-1.5 py-0.5 rounded ${
 											req.installed
-												? "bg-green-400/15 text-green-400"
+												? "bg-success/15 text-success"
 												: req.optional
 													? "bg-yellow-400/15 text-yellow-400"
 													: "bg-danger/15 text-danger"
@@ -127,7 +136,7 @@ export default function RequirementsCheck({ results, checking, onRefresh, onRefr
 												)}
 											</button>
 											{copiedId === req.id && (
-												<span className="text-green-400 text-xs">
+												<span className="text-success text-xs">
 													{t("requirements.copied")}
 												</span>
 											)}
@@ -161,6 +170,14 @@ export default function RequirementsCheck({ results, checking, onRefresh, onRefr
 													placeholder={`/path/to/${req.name.toLowerCase()}`}
 													className={`flex-1 bg-base border rounded px-2 py-1 text-xs font-mono text-fg placeholder:text-fg-muted focus:border-accent ${hasPathError ? "border-danger" : "border-edge"}`}
 												/>
+												<button
+													type="button"
+													onClick={() => void handleBrowse(req.id)}
+													aria-label={t("folderPicker.browseAria", { name: req.name })}
+													className="px-2.5 py-1 rounded border border-edge text-fg-2 text-xs font-medium hover:bg-elevated hover:text-fg transition-colors shrink-0"
+												>
+													{t("folderPicker.browse")}
+												</button>
 												<button
 													type="button"
 													onClick={() => handleSetCustomPath(req.id)}

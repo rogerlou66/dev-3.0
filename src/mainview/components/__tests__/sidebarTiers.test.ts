@@ -246,59 +246,6 @@ describe("groupTasksIntoTiers — empty tiers", () => {
 });
 
 // ============================================================
-// Attention scope — filter + priority sort, single flat tier
-// ============================================================
-
-describe("groupTasksIntoTiers — attention scope", () => {
-	it("keeps only tasks needing the user and returns a single flat NEEDS YOU tier", () => {
-		const tasks = [
-			makeTask({ id: "working", status: "in-progress" }),
-			makeTask({ id: "ai", status: "review-by-ai" }),
-			makeTask({ id: "review", status: "review-by-user" }),
-			makeTask({ id: "question", status: "user-questions" }),
-			makeTask({ id: "pr-cold", status: "review-by-colleague" }),
-			makeTask({ id: "pr-hot", status: "review-by-colleague" }),
-		];
-		const tiers = groupTasksIntoTiers(tasks, ctx({ scope: "attention" }));
-		expect(kinds(tiers)).toEqual(["needs-you"]);
-		expect(tiers[0].key).toBe("attention");
-		expect(ids(tiers[0].tasks).sort()).toEqual(["pr-cold", "pr-hot", "question", "review"]);
-	});
-
-	it("sorts the attention tier by priority band, then oldest movedAt", () => {
-		const tasks = [
-			makeTask({ id: "p2-old", status: "review-by-user", priority: "P2", movedAt: "2025-01-01T00:00:00Z" }),
-			makeTask({ id: "p0", status: "user-questions", priority: "P0", movedAt: "2025-05-01T00:00:00Z" }),
-			makeTask({ id: "p2-new", status: "review-by-user", priority: "P2", movedAt: "2025-02-01T00:00:00Z" }),
-		];
-		const tiers = groupTasksIntoTiers(tasks, ctx({ scope: "attention" }));
-		// P0 leads (even though newest); within P2 the older movedAt wins.
-		expect(ids(tiers[0].tasks)).toEqual(["p0", "p2-old", "p2-new"]);
-	});
-
-	it("never produces custom or waiting tiers in attention scope, even with custom columns present", () => {
-		const tasks = [
-			makeTask({ id: "review", status: "review-by-user" }),
-			makeTask({ id: "working", status: "in-progress" }),
-		];
-		const tiers = groupTasksIntoTiers(tasks, ctx({
-			scope: "attention",
-			orderedCustomColumns: [{ projectId: "p1", columnId: "onhold" }],
-		}));
-		expect(kinds(tiers)).toEqual(["needs-you"]);
-		expect(ids(tiers[0].tasks)).toEqual(["review"]);
-	});
-
-	it("returns an empty array when nothing needs the user", () => {
-		const tasks = [
-			makeTask({ id: "working", status: "in-progress" }),
-			makeTask({ id: "ai", status: "review-by-ai" }),
-		];
-		expect(groupTasksIntoTiers(tasks, ctx({ scope: "attention" }))).toEqual([]);
-	});
-});
-
-// ============================================================
 // Purity — the input array is not mutated
 // ============================================================
 

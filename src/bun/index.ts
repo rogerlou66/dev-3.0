@@ -6,7 +6,8 @@ import Electrobun, {
 	Utils,
 } from "electrobun/bun";
 import { startDisplayWatch } from "./display-watch";
-import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell } from "./rpc-handlers";
+import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell, getActiveContext } from "./rpc-handlers";
+import { startRendererWatchdog } from "./renderer-watchdog";
 import {
 	checkForUpdateWithChannel,
 	getLocalVersion,
@@ -324,7 +325,7 @@ log.info("CLI socket server ready", { path: cliSocketPath });
 
 // Side-effect: starts the PTY WebSocket server (dynamic import so PATH is patched first)
 const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds } = await import("./pty-server");
-const { startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
+const { setNativeDevServerProbe, startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
 const { startResourceMonitor, stopResourceMonitor } = await import("./resource-monitor");
 const { startRateLimitMonitor, stopRateLimitMonitor } = await import("./rate-limit-monitor");
 
@@ -482,6 +483,15 @@ import("./port-tunnels").then(({ setPortTunnelsPushHook }) => {
 // sync I/O, GC pauses, runaway regex).
 startLoopMonitor();
 
+// The renderer half of the same idea: a wedged window cannot report itself, so we
+// judge the silence between its heartbeats from here. See renderer-watchdog.ts.
+startRendererWatchdog({
+	context: () => {
+		const { projectId, taskId } = getActiveContext();
+		return { activeProject: projectId?.slice(0, 8) ?? null, activeTask: taskId?.slice(0, 8) ?? null };
+	},
+});
+
 // Reconcile persisted lifecycle hints before background activity starts.
 await rehydrateTaskLifecycles();
 
@@ -490,6 +500,17 @@ startMergeDetectionPoller();
 
 // Start background PR detection poller (auto-moves review-by-user → review-by-colleague)
 startPRDetectionPoller();
+
+// The board's dev-server read needs the native aux pane, which lives behind
+// `bun:ffi` — injected here instead of imported by the poller (see
+// `setNativeDevServerProbe`).
+setNativeDevServerProbe(async (task, socket) => {
+	const { taskTerminalBackendIdentity } = await import("./task-terminal-backend");
+	if (taskTerminalBackendIdentity(task) !== "native") return null;
+	const { auxPaneAlive, nativeAuxPaneShellPid } = await import("./task-aux-panes");
+	const alive = await auxPaneAlive(task, "devServer", socket);
+	return { alive, rootPid: alive ? await nativeAuxPaneShellPid(task, "devServer") : null };
+});
 
 // Start background port scan poller (detects listening TCP ports per task)
 startPortScanPoller(
@@ -519,6 +540,15 @@ startResourceMonitor((name, payload) => {
 		log.error("Failed to push resource usage update", { error: String(err) });
 	}
 });
+
+// Bring the model-catalog proxy up before anything asks for it, so an agent
+// launched right after boot does not wait on a cold start. Detached and delayed
+// for the same reason as the scan below: the first paint comes first.
+setTimeout(() => {
+	import("./model-sidecar")
+		.then(({ autostartModelSidecar }) => autostartModelSidecar())
+		.catch((err) => log.warn("Model proxy autostart could not be scheduled", { error: String(err) }));
+}, 1500);
 
 // Report processes earlier versions leaked out of finished task worktrees. Detect
 // only, never kill: ending a user's process needs a click (PRODUCT_UX_BIBLE §12.6).
@@ -682,6 +712,9 @@ function runGlobalQuitCleanup(): void {
 	// would orphan tunnels (and trycloudflare quotas) on app exit.
 	import("./port-tunnels").then(({ cleanupAllTunnels }) => cleanupAllTunnels()).catch(() => { /* shutdown — best-effort */ });
 	try { stopTunnel(); } catch (err) { log.warn("stopTunnel failed", { error: String(err) }); }
+	// The model-catalog proxy dies with the app — an orphan would keep holding a
+	// loopback port and the user's provider keys in memory.
+	import("./model-sidecar").then(({ stopModelSidecar }) => stopModelSidecar()).catch(() => { /* shutdown — best-effort */ });
 }
 
 // Terminal/OS signals (Ctrl+C in `bun run dev`, kill, shutdown) bypass the

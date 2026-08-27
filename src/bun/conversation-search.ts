@@ -138,36 +138,56 @@ const claudeLocator: TranscriptLocator = {
 
 // ---- codex: date-bucketed rollouts; cwd lives in the SessionMeta header line ----
 
+/**
+ * Every store a Codex rollout can land in. The default `~/.codex/sessions` is only
+ * one of them: dev3's own agent accounts point `CODEX_HOME` at
+ * `~/.dev3.0/agent-accounts/codex/<accountId>/`, so a session launched from a task
+ * writes there and is invisible to a scan of the home store. Missing directories
+ * are normal — a machine has whichever ones it has.
+ */
+function codexSessionRoots(home: string): string[] {
+	const roots = [`${home}/.codex/sessions`];
+	const accounts = `${home}/.dev3.0/agent-accounts/codex`;
+	try {
+		for (const entry of readdirSync(accounts)) roots.push(`${accounts}/${entry}/sessions`);
+	} catch {
+		// No agent accounts configured.
+	}
+	return roots.filter((root) => existsSync(root));
+}
+
 const codexLocator: TranscriptLocator = {
 	kind: "codex",
 	buildIndex(home) {
-		const root = `${home}/.codex/sessions`;
-		if (!existsSync(root)) return null;
 		const index: WorktreeIndex = new Map();
-		let entries: string[];
-		try {
-			entries = readdirSync(root, { recursive: true }) as string[];
-		} catch {
-			return null;
-		}
-		for (const rel of entries) {
-			if (!rel.endsWith(".jsonl")) continue;
-			const file = `${root}/${rel}`;
-			const header = readFirstLine(file);
-			if (!header) continue;
-			let cwd: unknown;
+		let scanned = false;
+		for (const root of codexSessionRoots(home)) {
+			let entries: string[];
 			try {
-				const payload = (JSON.parse(header) as Record<string, unknown>).payload as Record<string, unknown> | undefined;
-				cwd = payload?.cwd;
+				entries = readdirSync(root, { recursive: true }) as string[];
 			} catch {
 				continue;
 			}
-			if (typeof cwd !== "string") continue;
-			const list = index.get(cwd);
-			if (list) list.push(file);
-			else index.set(cwd, [file]);
+			scanned = true;
+			for (const rel of entries) {
+				if (!rel.endsWith(".jsonl")) continue;
+				const file = `${root}/${rel}`;
+				const header = readFirstLine(file);
+				if (!header) continue;
+				let cwd: unknown;
+				try {
+					const payload = (JSON.parse(header) as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+					cwd = payload?.cwd;
+				} catch {
+					continue;
+				}
+				if (typeof cwd !== "string") continue;
+				const list = index.get(cwd);
+				if (list) list.push(file);
+				else index.set(cwd, [file]);
+			}
 		}
-		return index;
+		return scanned ? index : null;
 	},
 	filesForWorktree(worktreePath, _home, index) {
 		return index?.get(worktreePath) ?? [];
@@ -255,6 +275,28 @@ const geminiLocator: TranscriptLocator = {
 
 /** Registered locators — every agent whose store maps to a single task (variant isolation). */
 const LOCATORS: TranscriptLocator[] = [claudeLocator, codexLocator, geminiLocator];
+
+/** One transcript file found on disk, tagged with the agent whose store held it. */
+export interface TranscriptFile {
+	kind: string;
+	path: string;
+}
+
+/**
+ * Every transcript file belonging to one worktree, across all locators. Shared
+ * with the conversation parser so discovery lives in exactly one place — a new
+ * locator here is immediately visible to both search and parsing.
+ */
+export function transcriptFilesForWorktree(worktreePath: string, home: string = homedir()): TranscriptFile[] {
+	const found: TranscriptFile[] = [];
+	for (const locator of LOCATORS) {
+		const index = locator.buildIndex ? locator.buildIndex(home) : null;
+		for (const path of locator.filesForWorktree(worktreePath, home, index)) {
+			found.push({ kind: locator.kind, path });
+		}
+	}
+	return found;
+}
 
 export interface EngineTask {
 	id: string;

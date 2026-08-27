@@ -30,9 +30,20 @@ import { PrConversationBlock } from "./pr-review/PrConversationBlock";
 import { GithubThreadView, OutdatedThreadsGroup, type ThreadSendState } from "./pr-review/GithubThreadView";
 import { buildThreadFixPrompt, groupGithubThreadsByFile, isLineRenderedInDiff, locateThread, partitionThreadsForDiff } from "./pr-review/mapping";
 import { MarkdownDocument } from "./pr-review/markdown";
-import { MarkdownRichDiff, useMarkdownDiffBlocks } from "./pr-review/markdown-diff";
+import {
+	MarkdownRichDiff,
+	useMarkdownDiffBlocks,
+	type MarkdownCommentedLines,
+	type MarkdownDiffBlock,
+} from "./pr-review/markdown-diff";
+import {
+	resolveMarkdownSelection,
+	revealMarkdownLine,
+	type MarkdownSelectionAnchor,
+} from "./pr-review/markdown-source-lines";
 import { isTestFile } from "../../shared/test-files";
 import { useIncludeTestsInDiff } from "../utils/includeTestsInDiff";
+import { IncludeTestsIcon } from "./task-info-panel/GitIcons";
 import { requireDeliveredAgentMessage } from "../agent-message-delivery";
 import "@git-diff-view/react/styles/diff-view-pure.css";
 import "./TaskDiffViewer.css";
@@ -92,10 +103,11 @@ function writePreferredDiffMode(mode: TaskDiffMode): void {
 
 function applyPreferredDiffMode(request: TaskInlineDiffRequest): TaskInlineDiffRequest {
 	// When the caller pinpoints a specific file (e.g. clicked from the branch-diff list)
-	// or the first unresolved GitHub thread (which only anchors in branch mode), honor
-	// their intent — the target may not exist in another mode. Otherwise, use the
-	// user's last selection (or uncommitted as the new default).
-	if (request.focusFile || request.focusFirstUnresolvedThread) {
+	// or the first unresolved GitHub thread (which only anchors in branch mode), or pins
+	// the mode because it knows which one is non-empty, honor their intent — the target
+	// may not exist in another mode. Otherwise, use the user's last selection (or
+	// uncommitted as the new default).
+	if (request.focusFile || request.focusFirstUnresolvedThread || request.pinMode) {
 		return request;
 	}
 	const preferred = readPreferredDiffMode();
@@ -885,6 +897,292 @@ function InlineCommentComposer({
 	);
 }
 
+interface MarkdownPreviewThreadEntry {
+	side: InlineCommentSideKey;
+	lineNumber: number;
+	thread: InlineDiffCommentThread;
+}
+
+/** Every local thread on the file, ordered the way the document reads. */
+function collectMarkdownPreviewThreads(comments: InlineDiffCommentFileData): MarkdownPreviewThreadEntry[] {
+	const entries: MarkdownPreviewThreadEntry[] = [];
+	for (const side of ["newFile", "oldFile"] as const) {
+		for (const [line, slot] of Object.entries(comments[side])) {
+			if (slot.data.comments.length > 0) {
+				entries.push({ side, lineNumber: Number(line), thread: slot.data });
+			}
+		}
+	}
+	return entries.sort((left, right) => left.lineNumber - right.lineNumber
+		|| left.side.localeCompare(right.side));
+}
+
+function commentedLinesBySide(comments: InlineDiffCommentFileData): MarkdownCommentedLines {
+	const build = (slots: Record<string, { data: InlineDiffCommentThread }>): Set<number> => {
+		const lines = new Set<number>();
+		for (const slot of Object.values(slots)) {
+			for (const comment of slot.data.comments) {
+				for (let line = comment.startLine; line <= comment.endLine; line++) {
+					lines.add(line);
+				}
+			}
+		}
+		return lines;
+	};
+	return { oldFile: build(comments.oldFile), newFile: build(comments.newFile) };
+}
+
+/** A plain-document preview shows the only side that exists for that change. */
+function getMarkdownPreviewSide(file: TaskDiffFile): InlineCommentSideKey {
+	return file.status === "deleted" ? "oldFile" : "newFile";
+}
+
+interface MarkdownPreviewSelection extends MarkdownSelectionAnchor {
+	/** Selection end, in coordinates of the preview container. */
+	top: number;
+	left: number;
+}
+
+/**
+ * The markdown rendered preview as a review surface: selecting prose raises an
+ * `Add comment` button (a rendered document has no gutter to hover), and the
+ * file's existing comments render underneath so a new one is never invisible.
+ */
+function MarkdownPreviewReview({
+	file,
+	blocks,
+	previewSource,
+	imageBaseDir,
+	imageRootDir,
+	comments,
+	githubThreadCount,
+	onShowSourceDiff,
+	onAddComment,
+	onAddAndSendComment,
+	editingCommentId,
+	onStartEditComment,
+	onCancelEditComment,
+	onSaveEditComment,
+	onDeleteComment,
+	onSendComment,
+	sendingCommentIds,
+	registerCommentRef,
+}: {
+	file: TaskDiffFile;
+	blocks: MarkdownDiffBlock[] | null;
+	previewSource: string;
+	imageBaseDir: string | null;
+	imageRootDir: string | null | undefined;
+	comments: InlineDiffCommentFileData;
+	githubThreadCount: number;
+	onShowSourceDiff: () => void;
+	onAddComment: TaskDiffFileSectionProps["onAddComment"];
+	onAddAndSendComment: TaskDiffFileSectionProps["onAddAndSendComment"];
+	editingCommentId: string | null;
+	onStartEditComment: (commentId: string) => void;
+	onCancelEditComment: () => void;
+	onSaveEditComment: (commentId: string, body: string) => void;
+	onDeleteComment: (commentId: string) => void;
+	onSendComment: (commentId: string) => void;
+	sendingCommentIds: Record<string, boolean>;
+	registerCommentRef: (commentId: string, element: HTMLDivElement | null) => void;
+}) {
+	const t = useT();
+	const containerRef = useRef<HTMLDivElement | null>(null);
+	const [selection, setSelection] = useState<MarkdownPreviewSelection | null>(null);
+	const [composerAnchor, setComposerAnchor] = useState<MarkdownPreviewSelection | null>(null);
+	const commentedLines = useMemo(() => commentedLinesBySide(comments), [comments]);
+	const threads = useMemo(() => collectMarkdownPreviewThreads(comments), [comments]);
+	const documentSide = getMarkdownPreviewSide(file);
+
+	// The button follows the live selection; the composer, once open, keeps the
+	// range it was opened with even after the browser drops the highlight.
+	useEffect(() => {
+		function readSelection() {
+			const container = containerRef.current;
+			if (!container) return;
+			const active = window.getSelection();
+			const anchor = resolveMarkdownSelection(container, active);
+			if (!anchor || !active) {
+				setSelection(null);
+				return;
+			}
+			const rects = active.getRangeAt(0).getClientRects();
+			const last = rects[rects.length - 1] ?? active.getRangeAt(0).getBoundingClientRect();
+			const host = container.getBoundingClientRect();
+			setSelection({ ...anchor, top: last.bottom - host.top, left: Math.max(0, last.left - host.left) });
+		}
+		document.addEventListener("selectionchange", readSelection);
+		return () => document.removeEventListener("selectionchange", readSelection);
+	}, []);
+
+	// A file whose preview is toggled off and on again must not resurrect a stale
+	// composer for a range the user can no longer see.
+	useEffect(() => {
+		setComposerAnchor(null);
+		setSelection(null);
+	}, [file.id]);
+
+	const active = composerAnchor;
+	const closeComposer = () => {
+		setComposerAnchor(null);
+		setSelection(null);
+		window.getSelection()?.removeAllRanges();
+	};
+
+	function revealLine(line: number) {
+		const container = containerRef.current;
+		if (container) revealMarkdownLine(container, line);
+	}
+
+	return (
+		<div className="px-4 py-4" data-testid="diff-md-preview">
+			{/* The open composer overhangs this file's section, and a later sibling
+			    section would paint over it: the raised z-index makes the preview its
+			    own stacking context so the card stays on top and clickable. */}
+			<div ref={containerRef} className={active ? "relative z-20" : "relative"}>
+				{previewSource.trim()
+					? blocks
+						? (
+							<MarkdownRichDiff
+								blocks={blocks}
+								imageBaseDir={imageBaseDir}
+								imageRootDir={imageRootDir}
+								commentedLines={commentedLines}
+							/>
+						)
+						: (
+							<MarkdownDocument
+								body={previewSource}
+								imageBaseDir={imageBaseDir}
+								imageRootDir={imageRootDir}
+								sourceLines={{ lineOffset: 1, commentedLines: commentedLines[documentSide] }}
+							/>
+						)
+					: <div className="text-sm text-fg-muted">{t("infoPanel.diffMdPreviewEmpty")}</div>}
+
+				{selection && !active && (
+					<button
+						type="button"
+						data-testid="md-preview-add-comment"
+						// Held on mousedown: the click itself would clear the selection first.
+						onMouseDown={(event) => {
+							event.preventDefault();
+							setComposerAnchor(selection);
+						}}
+						onClick={() => setComposerAnchor(selection)}
+						style={{ top: `${selection.top + 6}px`, left: `${selection.left}px` }}
+						className="absolute z-10 inline-flex h-8 items-center gap-1.5 rounded-md border border-edge bg-overlay px-2.5 text-xs font-semibold text-fg shadow-lg transition-colors hover:border-edge-active hover:bg-elevated-hover"
+					>
+						<span
+							aria-hidden="true"
+							className="text-sm-plus leading-none"
+							style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
+						>
+							{"\uf075"}
+						</span>
+						<span>{t("infoPanel.diffCommentSubmit")}</span>
+					</button>
+				)}
+
+				{active && (
+					<div
+						style={{ top: `${active.top + 6}px` }}
+						className="absolute left-0 z-10 w-[min(34rem,100%)] overflow-hidden rounded-lg border border-edge bg-overlay shadow-2xl"
+					>
+						<InlineCommentComposer
+							filePath={file.displayPath}
+							side={active.side}
+							startLine={active.startLine}
+							endLine={active.endLine}
+							onCancel={closeComposer}
+							onSubmit={(body) => {
+								onAddComment({
+									fileId: file.id,
+									side: active.side,
+									startLine: active.startLine,
+									endLine: active.endLine,
+									body,
+								});
+								closeComposer();
+							}}
+							onSubmitAndSend={(body) => {
+								onAddAndSendComment({
+									fileId: file.id,
+									side: active.side,
+									startLine: active.startLine,
+									endLine: active.endLine,
+									body,
+								});
+								closeComposer();
+							}}
+						/>
+					</div>
+				)}
+			</div>
+
+			{threads.length > 0 && (
+				<section className="mt-6 space-y-2 border-t border-edge pt-4" data-testid="md-preview-comments">
+					<h4 className="text-xs font-semibold text-fg-2">
+						{t.plural("infoPanel.diffMdPreviewCommentCount", threads.length)}
+					</h4>
+					{threads.map((entry) => (
+						<div key={`${entry.side}:${entry.lineNumber}`} className="rounded-lg border border-edge bg-base/60">
+							{/* The thread already prints its own line label, so this row is
+							    the action, not a second copy of it. */}
+							<button
+								type="button"
+								onClick={() => revealLine(entry.lineNumber)}
+								aria-label={t("infoPanel.diffMdPreviewRevealAt", {
+									location: formatInlineCommentLineLabel(
+										t,
+										entry.side,
+										entry.thread.comments[0]?.startLine ?? entry.lineNumber,
+										entry.lineNumber,
+									),
+								})}
+								className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-micro text-fg-3 transition-colors hover:text-accent"
+							>
+								<span
+									aria-hidden="true"
+									className="leading-none"
+									style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
+								>
+									{""}
+								</span>
+								<span>{t("infoPanel.diffMdPreviewReveal")}</span>
+							</button>
+							<InlineCommentThreadView
+								thread={entry.thread}
+								side={entry.side}
+								lineNumber={entry.lineNumber}
+								registerCommentRef={registerCommentRef}
+								editingCommentId={editingCommentId}
+								onStartEdit={onStartEditComment}
+								onCancelEdit={onCancelEditComment}
+								onSaveEdit={onSaveEditComment}
+								onDeleteComment={onDeleteComment}
+								onSendComment={onSendComment}
+								sendingCommentIds={sendingCommentIds}
+							/>
+						</div>
+					))}
+				</section>
+			)}
+
+			{githubThreadCount > 0 && (
+				<button
+					type="button"
+					onClick={onShowSourceDiff}
+					className="mt-4 text-xs text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:decoration-accent"
+				>
+					{t.plural("infoPanel.diffMdPreviewGithubThreads", githubThreadCount)}
+				</button>
+			)}
+		</div>
+	);
+}
+
 function hashText(value: string): string {
 	let hash = 5381;
 	for (let i = 0; i < value.length; i++) {
@@ -1624,7 +1922,7 @@ function TaskDiffFileSection({
 							<span
 								data-testid="diff-exec-config-badge"
 								data-help-id="diff.exec-config"
-								className="inline-flex flex-shrink-0 items-center gap-1 px-1.5 py-0.5 rounded-md border text-micro font-bold bg-warning/10 text-warning border-warning/25"
+								className="inline-flex flex-shrink-0 items-center gap-1 px-1.5 py-0.5 rounded-md border text-micro font-bold bg-warning/10 text-warning-strong border-warning/25"
 							>
 								<span aria-hidden>⚠</span>
 								{/* The word costs the file name ~39px. Under ~28rem of pane it
@@ -1755,13 +2053,26 @@ function TaskDiffFileSection({
 
 			{expanded && (
 				showMdPreview ? (
-					<div className="px-4 py-4" data-testid="diff-md-preview">
-						{mdPreviewSource.trim()
-							? mdDiffBlocks
-								? <MarkdownRichDiff blocks={mdDiffBlocks} imageBaseDir={mdImageBaseDir} imageRootDir={worktreePath} />
-								: <MarkdownDocument body={mdPreviewSource} imageBaseDir={mdImageBaseDir} imageRootDir={worktreePath} />
-							: <div className="text-sm text-fg-muted">{t("infoPanel.diffMdPreviewEmpty")}</div>}
-					</div>
+					<MarkdownPreviewReview
+						file={file}
+						blocks={mdDiffBlocks}
+						previewSource={mdPreviewSource}
+						imageBaseDir={mdImageBaseDir}
+						imageRootDir={worktreePath}
+						comments={comments}
+						githubThreadCount={githubThreads?.length ?? 0}
+						onShowSourceDiff={onToggleMdPreview}
+						onAddComment={onAddComment}
+						onAddAndSendComment={onAddAndSendComment}
+						editingCommentId={editingCommentId}
+						onStartEditComment={onStartEditComment}
+						onCancelEditComment={onCancelEditComment}
+						onSaveEditComment={onSaveEditComment}
+						onDeleteComment={onDeleteComment}
+						onSendComment={onSendComment}
+						sendingCommentIds={sendingCommentIds}
+						registerCommentRef={registerCommentRef}
+					/>
 				) : buildError ? (
 					<div className="px-4 py-5 text-sm text-danger">{buildError}</div>
 				) : diffFile ? (
@@ -3432,6 +3743,30 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		);
 	}
 
+	/** Icon-only form of the same toggle, nested inside the summary chip. */
+	function renderTestsSegment() {
+		return (
+			<>
+				<span className="h-4 w-px shrink-0 bg-edge" aria-hidden="true" />
+				<button
+					type="button"
+					data-testid="diff-toolbar-include-tests-segment"
+					onClick={() => setIncludeTests(!includeTests)}
+					aria-label={t("infoPanel.diffIncludeTestsAria")}
+					aria-pressed={includeTests}
+					title={hiddenTestCount > 0 || includeTests
+						? t("infoPanel.diffIncludeTestsTooltip")
+						: t("infoPanel.diffIncludeTestsTooltipNoTests")}
+					className={`flex shrink-0 items-center justify-center self-stretch rounded-r-md px-1.5 transition-colors ${
+						includeTests ? "text-fg-3 hover:bg-elevated-hover hover:text-fg-2" : "bg-accent/10 text-accent hover:bg-accent/20"
+					}`}
+				>
+					<IncludeTestsIcon className="w-[0.95rem] h-[0.95rem]" off={!includeTests} />
+				</button>
+			</>
+		);
+	}
+
 	function renderInfoChips() {
 		if (!payload) return null;
 		const binaryCount = visibleSkippedFiles.filter((f) => f.reason === "binary").length;
@@ -3447,7 +3782,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					</span>
 				)}
 				{payload.fallbackReason === "no-upstream" && (
-					<span className="px-2 py-1 rounded-md bg-warning/10 text-warning border border-warning/25 text-micro">
+					<span className="px-2 py-1 rounded-md bg-warning/10 text-warning-strong border border-warning/25 text-micro">
 						{t("infoPanel.diffFallbackNoUpstream", { ref: payload.compareLabel })}
 					</span>
 				)}
@@ -3561,7 +3896,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 						className={`inline-flex h-7 shrink-0 items-center rounded-md border px-2 text-micro font-mono ${
 							searchMatches.length > 0
 								? "border-edge bg-base text-fg-2"
-								: "border-warning/25 bg-warning/10 text-warning"
+								: "border-warning/25 bg-warning/10 text-warning-strong"
 						}`}
 					>
 						{searchStatusLabel}
@@ -3705,25 +4040,18 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					</div>
 					{payload && (
 						<>
+							{/* The tests filter is a segment of this readout, not a chip beside
+							    it: it only ever changes these numbers. */}
 							<span
-								className="hidden shrink-0 [@container(min-width:1000px)]:inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-raised text-fg-2 border border-edge text-micro font-mono"
+								className="hidden shrink-0 [@container(min-width:820px)]:inline-flex items-stretch rounded-md bg-raised border border-edge hover:border-edge-active transition-colors"
 								data-testid="diff-toolbar-summary"
 							>
-								<span>{t.plural("infoPanel.diffFileCount", visibleSummary.files)}</span>
-								<span className="text-success">+{visibleSummary.insertions}</span>
-								<span className="text-danger">−{visibleSummary.deletions}</span>
-								{!includeTests && hiddenTestCount > 0 && (
-									<span
-										className="text-fg-muted text-sm-plus leading-none"
-										style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-										title={t.plural("infoPanel.diffTestsHidden", hiddenTestCount)}
-									>
-										{"\u{F0912}"}
-									</span>
-								)}
-							</span>
-							<span className="hidden [@container(min-width:820px)]:contents">
-								{renderTestsToggle()}
+								<span className="inline-flex items-center gap-1.5 px-2 py-1 text-micro font-mono text-fg-2">
+									<span>{t.plural("infoPanel.diffFileCount", visibleSummary.files)}</span>
+									<span className="text-success">+{visibleSummary.insertions}</span>
+									<span className="text-danger">−{visibleSummary.deletions}</span>
+								</span>
+								{renderTestsSegment()}
 							</span>
 							<span className="hidden [@container(min-width:1120px)]:contents">
 								{renderInfoChips()}
@@ -4078,9 +4406,19 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					</div>
 				)}
 
-				{!error && !isBusy && payload && visibleFiles.length === 0 && visibleSkippedFiles.length === 0 && hiddenTestCount === 0 && renderState(
-					t("infoPanel.diffNoChanges"),
-					t("infoPanel.diffNoChangesBody"),
+				{/* An empty diff means "nothing changed" only when the comparison ran.
+				    A compare ref that is not in this repo produces the same emptiness
+				    and must say so instead. */}
+				{!error && !isBusy && payload && visibleFiles.length === 0 && visibleSkippedFiles.length === 0 && hiddenTestCount === 0 && (
+					payload.fallbackReason === "missing-compare-ref"
+						? renderState(
+							t("infoPanel.diffMissingCompareRef"),
+							t("infoPanel.diffMissingCompareRefBody", { ref: payload.compareLabel }),
+						)
+						: renderState(
+							t("infoPanel.diffNoChanges"),
+							t("infoPanel.diffNoChangesBody"),
+						)
 				)}
 
 				{!error && !isBusy && payload && (
@@ -4212,7 +4550,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 											<span className={`shrink-0 px-1.5 py-0.5 rounded-md border text-dense ${
 												skipped.reason === "binary"
 													? "bg-accent/10 text-accent border-accent/25"
-													: "bg-warning/10 text-warning border-warning/25"
+													: "bg-warning/10 text-warning-strong border-warning/25"
 											}`}>
 												{skipped.reason === "binary"
 													? t("infoPanel.diffSkippedReasonBinary")

@@ -15,6 +15,24 @@ let rpcConnectionState: RpcConnectionState = "connected";
 // recovery (re-open socket) before the user has to hard-reload the page.
 let reconnectImpl: (() => void) | null = null;
 
+/**
+ * One timed round trip of the cheapest request there is, through the transport
+ * every other request already uses. Wired by the browser transport only: the
+ * desktop bridge is a loopback socket where the number would be noise, and the
+ * connection-quality readout it feeds is remote-only anyway.
+ *
+ * `serverMs` is the host-side span the server stamps on the response envelope —
+ * the part of the wait that is ours rather than the network's.
+ */
+export type RoundTripProbe = () => Promise<{ rttMs: number; serverMs: number | null }>;
+
+let roundTripImpl: RoundTripProbe | null = null;
+
+/** Null on the desktop bridge, which does not measure itself. */
+export function getRoundTripProbe(): RoundTripProbe | null {
+	return roundTripImpl;
+}
+
 function setRpcState(state: RpcConnectionState): void {
 	rpcConnectionState = state;
 	try {
@@ -55,6 +73,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	taskUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", { detail: payload })),
 	taskRemoved: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskRemoved", { detail: payload })),
 	projectUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectUpdated", { detail: payload })),
+	spacesUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:spacesUpdated", { detail: payload })),
 	taskSound: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskSound", { detail: payload })),
 	ptyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:ptyDied", { detail: payload })),
 	projectPtyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectPtyDied", { detail: payload })),
@@ -68,6 +87,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	agentRequestResolved: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentRequestResolved", { detail: payload })),
 	updateAvailable: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateAvailable", { detail: payload })),
 	portsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:portsUpdated", { detail: payload })),
+	devServerUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:devServerUpdated", { detail: payload })),
 	exposedPortsChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:exposedPortsChanged", { detail: payload })),
 	resourceUsageUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:resourceUsageUpdated", { detail: payload })),
 	systemMemoryUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:systemMemoryUpdated", { detail: payload })),
@@ -77,6 +97,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	columnAgentFailed: (payload) => window.dispatchEvent(new CustomEvent("rpc:columnAgentFailed", { detail: payload })),
 	taskPreparationFailed: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskPreparationFailed", { detail: payload })),
 	globalSettingsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:globalSettingsUpdated", { detail: payload })),
+	agentsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentsUpdated", { detail: payload })),
 	openTaskFromNotification: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", { detail: payload })),
 	openDeepLink: (payload) => window.dispatchEvent(new CustomEvent("rpc:openDeepLink", { detail: payload })),
 	cliToast: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliToast", { detail: payload })),
@@ -371,6 +392,8 @@ function initBrowserApi(): ApiShape {
 		reject: (e: Error) => void;
 		packet: string;
 		sent: boolean;
+		/** Set only by the round-trip probe, which wants the envelope's server span. */
+		onServerSpan?: (serverMs: number | null) => void;
 	}>();
 
 	function rejectSentRequests(error: Error) {
@@ -397,6 +420,7 @@ function initBrowserApi(): ApiShape {
 				const entry = pending.get(packet.id);
 				if (entry) {
 					pending.delete(packet.id);
+					entry.onServerSpan?.(typeof packet.serverMs === "number" ? packet.serverMs : null);
 					if (packet.success) {
 						entry.resolve(packet.payload);
 					} else {
@@ -492,7 +516,7 @@ function initBrowserApi(): ApiShape {
 
 	session.start();
 
-	function rpcRequest(method: string, params: any): Promise<any> {
+	function rpcRequest(method: string, params: any, onServerSpan?: (serverMs: number | null) => void): Promise<any> {
 		return new Promise((resolve, reject) => {
 			const id = ++requestId;
 			const timeout = setTimeout(() => {
@@ -512,6 +536,7 @@ function initBrowserApi(): ApiShape {
 				reject: (e: Error) => { clearTimeout(timeout); reject(e); },
 				packet,
 				sent: false,
+				onServerSpan,
 			};
 			pending.set(id, entry);
 
@@ -521,6 +546,19 @@ function initBrowserApi(): ApiShape {
 			}
 		});
 	}
+
+	// A probe on a socket that is not open would time out and be recorded as a
+	// loss, which is a claim about the link the transport state already makes
+	// better (the connection pill owns that case).
+	roundTripImpl = async () => {
+		if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+			throw new Error("RPC socket not open");
+		}
+		let serverMs: number | null = null;
+		const startedAt = performance.now();
+		await rpcRequest("ping", undefined, (span) => { serverMs = span; });
+		return { rttMs: Math.round((performance.now() - startedAt) * 10) / 10, serverMs };
+	};
 
 	// ── Browser-side overrides for native-only methods ──────────────
 	const browserOverrides: Record<string, (params: any) => Promise<any>> = {

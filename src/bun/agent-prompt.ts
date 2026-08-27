@@ -1,6 +1,9 @@
 import type { PaneSessionEntry, Task } from "../shared/types";
 import type { PaneInputOutcome, PaneInputStage } from "../shared/pane-input";
+import { type AgentPromptDelivery, agentPromptHeld } from "../shared/agent-prompt-delivery";
+import type { AgentPromptEpilogue } from "./agent-prompt-delivery";
 import { sendPaneInput } from "./pane-input";
+import { agentMessageHoldKey, holdAgentMessage } from "./agent-message-hold";
 import { DEFAULT_TMUX_SOCKET, tmux, taskSessionName, PANE_ID_FORMAT, TMUX_AGENT_PANE_OPTION, TMUX_LAST_AGENT_PANE_OPTION } from "./tmux";
 import { createLogger } from "./logger";
 
@@ -177,6 +180,73 @@ function agentPromptStages(prompt: string): PaneInputStage[] {
 	];
 }
 
+/** The text-only program a held message's own paste is delivered as. */
+function agentMessageTextStages(prompt: string): PaneInputStage[] {
+	return [{ steps: [{ kind: "text", text: prompt }] }];
+}
+
+/**
+ * The submit-only program the Enter that ends a burst is delivered as. Separate from
+ * the text because the seam caps a program's in-band delays at two seconds
+ * ({@link PANE_INPUT_LIMITS}) and the quiet window is many times that.
+ */
+function agentPromptSubmitStages(): PaneInputStage[] {
+	return [{ steps: [{ kind: "key", key: "enter" }] }];
+}
+
+/**
+ * Hold a whole `dev3 message` for `paneId`: nothing is typed now, so nothing can land
+ * in the middle of the line the user is writing.
+ *
+ * Text and Enter are separate deliveries against FRESH pins, taken when the hold
+ * releases, so a pane that dies inside the window fails them and says so instead of
+ * typing into its successor. The Enter follows only when a text provably landed — an
+ * Enter into an unknown input box would submit whatever is sitting in it.
+ */
+function holdAgentMessageForPane(
+	task: Task,
+	paneId: string,
+	prompt: string,
+	epilogue?: AgentPromptEpilogue,
+): AgentPromptDelivery {
+	const context = { taskId: task.id.slice(0, 8), paneId };
+	const delayMs = holdAgentMessage(
+		agentMessageHoldKey("tmux", task.id, paneId),
+		{
+			deliver: async () => {
+				const text = await sendPaneInput(task, paneId, agentMessageTextStages(prompt), { idPrefix: "agent-prompt" });
+				if (text.status !== "delivered") {
+					log.warn("held agent message text did not land", { ...context, status: text.status });
+				}
+				return text.status === "delivered";
+			},
+			...(epilogue
+				? {
+					epilogue: async () => {
+						const trailer = await epilogue();
+						if (!trailer) return false;
+						const sent = await sendPaneInput(
+							task,
+							paneId,
+							agentMessageTextStages(`\n${trailer}`),
+							{ idPrefix: "agent-epilogue" },
+						);
+						return sent.status === "delivered";
+					},
+				}
+				: {}),
+			submit: async () => {
+				const submit = await sendPaneInput(task, paneId, agentPromptSubmitStages(), { idPrefix: "agent-submit" });
+				if (submit.status !== "delivered") {
+					log.warn("held agent message submit did not land", { ...context, status: submit.status });
+				}
+			},
+		},
+		context,
+	);
+	return agentPromptHeld(delayMs);
+}
+
 /** The verdict for a prompt that never found a pane to aim at. */
 function noTargetPane(detail: string): PaneInputOutcome {
 	return {
@@ -218,6 +288,48 @@ export async function sendPromptToAgentPane(
 	const targetPane = await resolveAgentPromptTargetPane(tmuxSession, socket, agentPanes);
 	if (!targetPane) return noTargetPane(`no agent pane could be resolved in ${tmuxSession}`);
 	return sendPaneInput(task, targetPane, agentPromptStages(prompt), { idPrefix: "agent-prompt" });
+}
+
+/**
+ * Hold a `dev3 message` for the task's agent pane. Resolution happens NOW, so a task
+ * with no agent pane is refused while its sender is still listening; the typing itself
+ * happens when the pane goes quiet.
+ */
+export async function holdMessageForAgentPane(
+	task: Task,
+	prompt: string,
+	agentPanes: PaneSessionEntry[] | undefined,
+	epilogue?: AgentPromptEpilogue,
+): Promise<AgentPromptDelivery> {
+	const { tmuxSession, socket } = tmuxRouting(task);
+	const targetPane = await resolveAgentPromptTargetPane(tmuxSession, socket, agentPanes);
+	if (!targetPane) {
+		return {
+			status: "not-delivered",
+			reason: "pane-absent",
+			detail: `no agent pane could be resolved in ${tmuxSession}`,
+		};
+	}
+	return holdAgentMessageForPane(task, targetPane, prompt, epilogue);
+}
+
+/**
+ * Hold a `dev3 message` for one concrete pane id (the `{ kind: "pane" }` scheduled
+ * target). Liveness is checked now rather than only at the pin: a message held for a
+ * pane that is already gone would fail silently long after its sender walked away.
+ */
+export async function holdMessageForPane(
+	task: Task,
+	paneId: string,
+	prompt: string,
+	epilogue?: AgentPromptEpilogue,
+): Promise<AgentPromptDelivery> {
+	const { tmuxSession, socket } = tmuxRouting(task);
+	const live = await listLivePaneIds(tmuxSession, socket);
+	if (!live.includes(paneId)) {
+		return { status: "not-delivered", reason: "pane-absent", detail: `pane ${paneId} is not live in ${tmuxSession}` };
+	}
+	return holdAgentMessageForPane(task, paneId, prompt, epilogue);
 }
 
 /**

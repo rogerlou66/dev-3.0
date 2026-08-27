@@ -1010,16 +1010,8 @@ export async function createWorktree(
 	}
 
 	if (existingBranch) {
-		// Check if this is a remote tracking ref (origin/xxx, yanive/xxx, etc.)
-		const isRemoteRef = (await run(
-			["git", "rev-parse", "--verify", `refs/remotes/${existingBranch}`],
-			project.path,
-		)).ok;
-
-		// For remote refs, extract local branch name by stripping the remote prefix
-		const resolvedBranch = isRemoteRef
-			? existingBranch.slice(existingBranch.indexOf("/") + 1)
-			: existingBranch;
+		const resolvedBranch = await localBranchNameForRef(project.path, existingBranch);
+		const isRemoteRef = resolvedBranch !== existingBranch;
 
 		log.info("Creating worktree from existing branch", {
 			wtPath, existingBranch, resolvedBranch, isRemoteRef, taskId: task.id,
@@ -1252,13 +1244,50 @@ export async function detectDefaultCompareRef(
 	return promise;
 }
 
+/**
+ * The ONE answer to "what does this task compare against, and what does an action
+ * run against". An explicit choice (the user's `vs … ▾` override, or the project's
+ * configured compare ref) always wins; otherwise ask git, which knows whether
+ * `origin/<base>` exists at all.
+ *
+ * Every caller goes through here — reading a status AND running a rebase or a
+ * merge check. Spelling `origin/${baseBranch}` at a call site is what shipped the
+ * Rebase button that announced the local base and then ran `git rebase
+ * origin/master` in a repo with no remote (`fatal: invalid upstream`).
+ */
+export async function resolveCompareRef(
+	projectPath: string,
+	baseBranch: string,
+	explicit?: string,
+): Promise<string> {
+	if (explicit) return explicit;
+	try {
+		return await detectDefaultCompareRef(projectPath, baseBranch);
+	} catch (err) {
+		log.warn("Compare-ref detection failed, comparing against the local base branch", {
+			projectPath, baseBranch, error: String(err),
+		});
+		return baseBranch;
+	}
+}
+
+/**
+ * Does this repo have an `origin` remote at all? A project added from a local
+ * folder has none, and then every `origin/...` ref, `git push`, and `gh` call is
+ * a dead end. Callers use it to make the absence explicit instead of letting a
+ * missing ref look like "no changes".
+ */
+export async function hasOriginRemote(projectPath: string): Promise<boolean> {
+	return (await listRemotes(projectPath)).includes("origin");
+}
+
 async function detectDefaultCompareRefUncached(
 	projectPath: string,
 	baseBranch: string,
 ): Promise<string> {
-	const hasOriginRemote = (await listRemotes(projectPath)).includes("origin");
+	const originPresent = await hasOriginRemote(projectPath);
 	const remoteBaseRef = `origin/${baseBranch}`;
-	const remoteBaseExists = hasOriginRemote && await refExists(projectPath, remoteBaseRef);
+	const remoteBaseExists = originPresent && await refExists(projectPath, remoteBaseRef);
 	const localBaseExists = await refExists(projectPath, baseBranch);
 	if (baseBranch === "main" || baseBranch === "master") {
 		if (remoteBaseExists) {
@@ -1274,7 +1303,7 @@ async function detectDefaultCompareRefUncached(
 	// main clone's local base branch, so the local one goes stale and diffs lie.
 	if (remoteBaseExists) return remoteBaseRef;
 
-	if (hasOriginRemote) {
+	if (originPresent) {
 		for (const branchName of ["main", "master"]) {
 			const remoteRef = `origin/${branchName}`;
 			if (await refExists(projectPath, remoteRef)) return remoteRef;
@@ -1471,6 +1500,32 @@ export async function isForeignBranchRef(projectPath: string, existingBranch?: s
 }
 
 /**
+ * The plain branch name behind a ref a task starts on: `origin/feat/x` and the
+ * fork remote's `arditti/feat/x` both become `feat/x`, a local name is returned
+ * untouched. Keyed off `refs/remotes/<ref>` existing rather than off the first
+ * slash, because `feat/x` is itself a legal local branch name.
+ */
+export async function localBranchNameForRef(projectPath: string, ref: string): Promise<string> {
+	const isRemoteRef = (await run(["git", "rev-parse", "--verify", `refs/remotes/${ref}`], projectPath)).ok;
+	return isRemoteRef ? ref.slice(ref.indexOf("/") + 1) : ref;
+}
+
+/**
+ * Who wrote the tip of a ref and what they called it — the fallback identity for
+ * a review task whose branch has no pull request to name it. `%an` is the commit
+ * author's own name, so a fork branch still names its real author.
+ */
+export async function refAuthorAndSubject(
+	projectPath: string,
+	ref: string,
+): Promise<{ author: string | null; subject: string | null }> {
+	const result = await run(["git", "log", "-1", "--format=%an%x00%s", ref], projectPath, { timeoutMs: 10_000 });
+	if (!result.ok) return { author: null, subject: null };
+	const [author, subject] = result.stdout.split("\0");
+	return { author: author?.trim() || null, subject: subject?.trim() || null };
+}
+
+/**
  * Fetch the branch a task actually compares against. A fork-review base is
  * stored remote-qualified (`arditti/feat/x`) and resolves to
  * `refs/remotes/arditti/feat/x`, so fetching it from `origin` fails with
@@ -1542,6 +1597,17 @@ export async function pullOrigin(
 export async function getOriginUrl(projectPath: string): Promise<string | null> {
 	const result = await run(["git", "remote", "get-url", "origin"], projectPath);
 	return result.ok ? result.stdout : null;
+}
+
+/**
+ * The sha a ref currently points at, or null when the ref is absent. Used to bake
+ * an explicit `--force-with-lease=<branch>:<sha>` value: the bare form leases
+ * against whatever remote-tracking ref is on disk, which may be stale, and a stale
+ * lease silently overwrites a push nobody fetched.
+ */
+export async function resolveRef(repoPath: string, ref: string): Promise<string | null> {
+	const result = await run(["git", "rev-parse", "--verify", `${ref}^{commit}`], repoPath);
+	return result.ok && result.stdout ? result.stdout.trim() : null;
 }
 
 /**
@@ -1972,6 +2038,33 @@ export async function getBehindOriginCount(
 	return parseInt(result.stdout, 10) || 0;
 }
 
+/**
+ * Full messages of the commits this branch adds on top of `baseRef`, oldest
+ * first. Feeds the squash-merge commit message, so it reads `%B` (subject AND
+ * body) and separates records with NUL — a commit body contains blank lines and
+ * anything printable, so no textual delimiter is safe.
+ *
+ * An unresolvable `baseRef` yields `[]` rather than the whole history: the caller
+ * then falls back to the task title, which is far better than pasting every
+ * commit message in the repo into one subject.
+ *
+ * `--no-merges` drops "Merge branch 'main' into feature" — it describes an
+ * integration step, never the work being landed.
+ */
+export async function listBranchCommitMessages(
+	worktreePath: string,
+	baseRef: string,
+): Promise<string[]> {
+	const mergeBase = await run(["git", "merge-base", baseRef, "HEAD"], worktreePath);
+	if (!mergeBase.ok || !mergeBase.stdout) return [];
+	const log = await run(
+		["git", "log", "--reverse", "--no-merges", "--format=%B%x00", `${mergeBase.stdout}..HEAD`],
+		worktreePath,
+	);
+	if (!log.ok) return [];
+	return log.stdout.split("\0").map((m) => m.trim()).filter((m) => m.length > 0);
+}
+
 export async function getUpstreamRef(
 	worktreePath: string,
 ): Promise<string | null> {
@@ -2090,6 +2183,18 @@ export async function getTaskDiff(
 		};
 	}
 
+	/**
+	 * A compare ref that is not in the repo makes `git diff` fail, and a failed
+	 * diff arrives here as an empty one — "no changes to show" for a comparison
+	 * that never happened. Checked only when the diff came back empty, so the
+	 * normal path pays nothing.
+	 */
+	const withMissingRefCheck = async (result: TaskDiffResponse): Promise<TaskDiffResponse> => {
+		if (result.files.length > 0 || result.skippedFiles.length > 0 || result.summary.files > 0) return result;
+		if (await refExists(worktreePath, defaultCompareRef)) return result;
+		return { ...result, fallbackReason: "missing-compare-ref", summary: { files: 0, insertions: 0, deletions: 0 } };
+	};
+
 	if (mode === "unpushed") {
 		const upstreamRef = await getUpstreamRef(worktreePath);
 		if (upstreamRef) {
@@ -2145,7 +2250,7 @@ export async function getTaskDiff(
 			{ kind: "ref", ref: "HEAD" },
 			numstat,
 		);
-		return {
+		return withMissingRefCheck({
 			mode,
 			compareRef: defaultCompareRef,
 			compareLabel: defaultCompareLabel,
@@ -2157,7 +2262,7 @@ export async function getTaskDiff(
 				deletions: summary.deletions,
 			},
 			...filesResult,
-		};
+		});
 	}
 
 	const branchEntries = await listDiffEntries(worktreePath, [`${defaultCompareRef}...HEAD`]);
@@ -2172,7 +2277,7 @@ export async function getTaskDiff(
 		{ kind: "ref", ref: "HEAD" },
 		numstat,
 	);
-	return {
+	return withMissingRefCheck({
 		mode,
 		compareRef: defaultCompareRef,
 		compareLabel: defaultCompareLabel,
@@ -2184,7 +2289,7 @@ export async function getTaskDiff(
 			deletions: summary.deletions,
 		},
 		...filesResult,
-	};
+	});
 }
 
 /** How many output lines a clone progress update carries to the UI. */

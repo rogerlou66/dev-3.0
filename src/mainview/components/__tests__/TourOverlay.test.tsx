@@ -1,0 +1,329 @@
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import TourOverlay from "../TourOverlay";
+import { I18nProvider } from "../../i18n";
+import type { Tour } from "../../tour";
+
+/**
+ * The engine's contract: it advances on an anchor appearing, it must NOT
+ * re-advance the instant you press Back, its button presses the real control,
+ * everything else on screen is shielded, and losing the anchor says so instead
+ * of ending the tour. Timing behaviour throughout, so the clock is fake and
+ * jsdom's zero-sized rects are given real numbers.
+ */
+
+const TOUR: Tour = {
+	id: "test-tour",
+	titleKey: "tour.firstTask.title",
+	steps: [
+		{ id: "one", anchor: "a", titleKey: "tour.firstTask.newTask.title", bodyKey: "tour.firstTask.newTask.body", action: "click-anchor" },
+		{ id: "two", anchor: "b", titleKey: "tour.firstTask.prompt.title", bodyKey: "tour.firstTask.prompt.body", advanceOn: "manual" },
+	],
+};
+
+/** A step that waits on a choice only the user can make: an advance anchor, no action. */
+const WAITING_TOUR: Tour = {
+	id: "waiting-tour",
+	titleKey: "tour.firstTask.title",
+	steps: [
+		{ id: "pick", anchor: "a", titleKey: "tour.firstTask.launch.title", bodyKey: "tour.firstTask.launch.body", advanceOn: "b" },
+		{ id: "done", anchor: "b", titleKey: "tour.firstTask.review.title", bodyKey: "tour.firstTask.review.body", advanceOn: "manual" },
+	],
+};
+
+/** Three steps, so "resync forwards" can be told apart from "resync anywhere". */
+const THREE_STEP_TOUR: Tour = {
+	id: "three-step-tour",
+	titleKey: "tour.firstTask.title",
+	steps: [
+		{ id: "first", anchor: "a", titleKey: "tour.firstTask.newTask.title", bodyKey: "tour.firstTask.newTask.body", advanceOn: "manual" },
+		{ id: "middle", anchor: "b", titleKey: "tour.firstTask.prompt.title", bodyKey: "tour.firstTask.prompt.body", advanceOn: "manual" },
+		{ id: "last", anchor: "c", titleKey: "tour.firstTask.review.title", bodyKey: "tour.firstTask.review.body", advanceOn: "manual" },
+	],
+};
+
+/** A step whose anchor arrives only when the agent produces it. */
+const PENDING_TOUR: Tour = {
+	id: "pending-tour",
+	titleKey: "tour.firstTask.title",
+	steps: [
+		{ id: "watch", anchor: "a", titleKey: "tour.firstTask.terminal.title", bodyKey: "tour.firstTask.terminal.body", advanceOn: "manual" },
+		{ id: "report", anchor: "b", titleKey: "tour.firstTask.artifact.title", bodyKey: "tour.firstTask.artifact.body", advanceOn: "manual", waitsForAnchor: true },
+	],
+};
+
+const anchors: HTMLElement[] = [];
+
+/** happy-dom measures everything as 0×0, which the overlay reads as "no anchor". */
+function anchor(id: string): HTMLElement {
+	const el = document.createElement("div");
+	anchors.push(el);
+	el.setAttribute("data-tour-anchor", id);
+	el.getBoundingClientRect = () => ({ top: 10, left: 10, width: 100, height: 20, bottom: 30, right: 110, x: 10, y: 10, toJSON: () => ({}) }) as DOMRect;
+	document.body.appendChild(el);
+	return el;
+}
+
+function renderTour(
+	stepIndex: number,
+	handlers: { onStepChange?: (i: number) => void; onExit?: (done: boolean) => void } = {},
+	tour: Tour = TOUR,
+) {
+	return render(
+		<I18nProvider>
+			<TourOverlay
+				tour={tour}
+				stepIndex={stepIndex}
+				onStepChange={handlers.onStepChange ?? (() => {})}
+				onExit={handlers.onExit ?? (() => {})}
+			/>
+		</I18nProvider>,
+	);
+}
+
+/** Push the overlay's polling loop forward by `ms` of fake time. */
+function tick(ms: number) {
+	act(() => { vi.advanceTimersByTime(ms); });
+}
+
+describe("TourOverlay", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => {
+		vi.useRealTimers();
+		// Only our own nodes — wiping the whole body steals the portal container
+		// React unmounts into and turns cleanup into a DOMException.
+		while (anchors.length > 0) anchors.pop()?.remove();
+	});
+
+	it("rings the step's anchor and names the step", () => {
+		anchor("a");
+		renderTour(0);
+		expect(screen.getByTestId("tour-ring")).toBeInTheDocument();
+		expect(screen.getByTestId("tour-overlay")).toHaveAttribute("data-tour-step", "one");
+		expect(screen.getByText("1/2")).toBeInTheDocument();
+	});
+
+	it("shields the screen around the anchor, leaving the anchor itself clickable", () => {
+		anchor("a");
+		renderTour(0);
+		for (const band of ["top", "bottom", "left", "right"]) {
+			expect(screen.getByTestId(`tour-shield-${band}`)).toBeInTheDocument();
+		}
+		expect(screen.queryByTestId("tour-shield-all")).not.toBeInTheDocument();
+	});
+
+	it("shields the whole viewport when there is no anchor to spare", () => {
+		renderTour(0);
+		expect(screen.getByTestId("tour-shield-all")).toBeInTheDocument();
+		expect(screen.queryByTestId("tour-shield-top")).not.toBeInTheDocument();
+	});
+
+	it("presses the real control instead of faking progress", () => {
+		const el = anchor("a");
+		const clicked = vi.fn();
+		el.addEventListener("click", clicked);
+		const onStepChange = vi.fn();
+		renderTour(0, { onStepChange });
+
+		fireEvent.click(screen.getByTestId("tour-next"));
+		expect(clicked).toHaveBeenCalled();
+		// The step ends when the DOM says so, never because the button was pressed.
+		expect(onStepChange).not.toHaveBeenCalled();
+	});
+
+	it("has no button at all on a step waiting for the user's own choice", () => {
+		anchor("a");
+		renderTour(0, {}, WAITING_TOUR);
+		expect(screen.queryByTestId("tour-next")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tour-waiting")).toBeInTheDocument();
+	});
+
+	it("advances on its own once the next step's anchor appears", () => {
+		anchor("a");
+		const onStepChange = vi.fn();
+		renderTour(0, { onStepChange });
+		tick(200);
+		expect(onStepChange).not.toHaveBeenCalled();
+
+		anchor("b");
+		tick(200);
+		expect(onStepChange).toHaveBeenCalledWith(1);
+	});
+
+	it("does not re-advance when the target is already on screen (Back stays usable)", () => {
+		anchor("a");
+		anchor("b");
+		const onStepChange = vi.fn();
+		renderTour(0, { onStepChange });
+		tick(1000);
+		// `b` was never observed absent, so auto-advance is unarmed: this is the
+		// state right after pressing Back out of step two.
+		expect(onStepChange).not.toHaveBeenCalled();
+	});
+
+	/** `lost` is only reachable when NOT ONE step's anchor is on screen — with any
+	 *  of them visible the overlay resyncs to it instead. */
+	function lostState(): boolean {
+		return screen.getByTestId("tour-overlay").getAttribute("data-tour-lost") === "true";
+	}
+
+	it("says it lost the thread instead of ending the tour", () => {
+		const el = anchor("a");
+		const onExit = vi.fn();
+		renderTour(0, { onExit });
+		tick(200);
+		expect(lostState()).toBe(false);
+
+		el.remove();
+		tick(1000);
+		expect(lostState()).toBe(false);
+		tick(2000);
+		expect(lostState()).toBe(true);
+		expect(onExit).not.toHaveBeenCalled();
+		// Nowhere to restart to, so leaving is the only offer — and it is a choice.
+		expect(screen.queryByTestId("tour-next")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tour-skip")).toBeInTheDocument();
+	});
+
+	it("recovers on its own when the anchor comes back", () => {
+		const el = anchor("a");
+		renderTour(0);
+		el.remove();
+		tick(3000);
+		expect(lostState()).toBe(true);
+
+		anchor("a");
+		tick(200);
+		expect(lostState()).toBe(false);
+	});
+
+	it("reports a completed tour from the last step's button", () => {
+		anchor("b");
+		const onExit = vi.fn();
+		renderTour(1, { onExit });
+		fireEvent.click(screen.getByTestId("tour-next"));
+		expect(onExit).toHaveBeenCalledWith(true);
+	});
+
+	it("reports skipping as not completed", () => {
+		anchor("a");
+		const onExit = vi.fn();
+		renderTour(0, { onExit });
+		fireEvent.click(screen.getByTestId("tour-skip"));
+		expect(onExit).toHaveBeenCalledWith(false);
+	});
+
+	it("keeps the card reachable while no anchor is on screen", () => {
+		renderTour(0);
+		expect(screen.queryByTestId("tour-ring")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tour-next")).toBeInTheDocument();
+		expect(screen.getByTestId("tour-skip")).toBeInTheDocument();
+	});
+
+	it("offers Back over an explanation whose screen is still up", () => {
+		anchor("a");
+		anchor("b");
+		renderTour(1, {}, WAITING_TOUR);
+		tick(200);
+		expect(screen.getByTestId("tour-back")).toBeInTheDocument();
+	});
+
+	it("never offers Back onto a step that pressed a real control", () => {
+		anchor("a");
+		anchor("b");
+		// TOUR's first step has `action: "click-anchor"`: the app moved, so there is
+		// nothing to step back onto even though the anchor is still measurable.
+		renderTour(1);
+		tick(200);
+		expect(screen.queryByTestId("tour-back")).not.toBeInTheDocument();
+	});
+
+	it("hides Back once the previous step's screen is gone", () => {
+		const el = anchor("a");
+		anchor("b");
+		renderTour(1, {}, WAITING_TOUR);
+		tick(200);
+		expect(screen.getByTestId("tour-back")).toBeInTheDocument();
+
+		el.remove();
+		tick(200);
+		expect(screen.queryByTestId("tour-back")).not.toBeInTheDocument();
+	});
+
+	it("re-finds its place at the furthest step on screen instead of giving up", () => {
+		anchor("b");
+		const onStepChange = vi.fn();
+		const onExit = vi.fn();
+		// Step one's own anchor never appears, but step two's is on screen: the app
+		// is further along than the tour thinks, so follow it rather than stalling.
+		renderTour(0, { onStepChange, onExit }, WAITING_TOUR);
+		tick(3000);
+		expect(onStepChange).toHaveBeenCalledWith(1);
+		expect(onExit).not.toHaveBeenCalled();
+	});
+
+	it("resyncs forwards, never back to the first anchor it can see", () => {
+		// The board's New Task button stays measurable under every modal, so a naive
+		// "first visible anchor" would drag the user back to step one.
+		anchor("a");
+		anchor("c");
+		const onStepChange = vi.fn();
+		renderTour(1, { onStepChange }, THREE_STEP_TOUR);
+		tick(3000);
+		expect(onStepChange).toHaveBeenCalledWith(2);
+		expect(onStepChange).not.toHaveBeenCalledWith(0);
+	});
+
+	it("waits for an anchor the agent has yet to produce, without giving up on it", () => {
+		// The artifact panel only exists once the agent publishes a report, which takes
+		// as long as the work does. Neither lost nor a resync may fire meanwhile.
+		anchor("a");
+		const onStepChange = vi.fn();
+		const onExit = vi.fn();
+		renderTour(1, { onStepChange, onExit }, PENDING_TOUR);
+		tick(5000);
+		expect(lostState()).toBe(false);
+		expect(onStepChange).not.toHaveBeenCalled();
+		expect(onExit).not.toHaveBeenCalled();
+		expect(screen.getByTestId("tour-pending")).toBeInTheDocument();
+		// Next would skip the very thing the step exists to show.
+		expect(screen.queryByTestId("tour-next")).not.toBeInTheDocument();
+		// And nothing is shielded: live QA caught the agent asking for permission
+		// while the tour covered the whole screen, so the answer could not be typed.
+		expect(screen.queryByTestId("tour-shield-all")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("tour-shield-top")).not.toBeInTheDocument();
+
+		anchor("b");
+		tick(200);
+		expect(screen.queryByTestId("tour-pending")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tour-next")).toBeInTheDocument();
+	});
+
+	it("flashes the ring instead of pressing a disabled control", () => {
+		// Merge stays disabled until the agent has committed. A click that silently
+		// does nothing reads as the card being broken, so say so with the ring.
+		const el = anchor("a") as HTMLElement & { disabled?: boolean };
+		const clicked = vi.fn();
+		el.addEventListener("click", clicked);
+		el.setAttribute("aria-disabled", "true");
+		renderTour(0);
+
+		fireEvent.click(screen.getByTestId("tour-next"));
+		expect(clicked).not.toHaveBeenCalled();
+		expect(screen.getByTestId("tour-ring").className).toContain("ring-4");
+	});
+
+	it("ends as completed when the LAST step's anchor goes away", () => {
+		// The tour's last step is the merge-completion dialog: pressing Complete task
+		// closes it. That is the ending, not a lost thread.
+		const el = anchor("b");
+		const onExit = vi.fn();
+		const onStepChange = vi.fn();
+		renderTour(1, { onExit, onStepChange });
+		tick(200);
+		el.remove();
+		tick(3000);
+		expect(onExit).toHaveBeenCalledWith(true);
+		expect(onStepChange).not.toHaveBeenCalled();
+	});
+});

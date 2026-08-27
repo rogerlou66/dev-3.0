@@ -27,11 +27,13 @@ import { ensureDev3CliSymlink } from "./cli-self-install";
 import { applyFullShellEnvToProcess, getUserShell, resolveShellEnv } from "./shell-env";
 import { startSocketServer, stopSocketServer } from "./cli-socket-server";
 import { startRemoteAccessServer, pushToBrowserClients, getServerPort, getAccessUrl } from "./remote-access-server";
-import { startTunnel, stopTunnel, isCloudflaredAvailable, getTunnelUrl } from "./cloudflare-tunnel";
+import { startTunnel, stopTunnel, isTunnelBinaryAvailable, getTunnelUrl } from "./cloudflare-tunnel";
 import { renderHeadlessBanner, startQrAutoRefresh, stopQrAutoRefresh, markQrConsumed, printExposedPortsLive } from "./remote-console";
-import { writeRemoteState, clearRemoteStateIfOwnedBy } from "./remote-state";
+import { writeRemoteState, clearRemoteStateIfOwnedBy, readRemoteHandoff, readRemoteState, carriedOverState } from "./remote-state";
 import { BUILD_TIME, BUILD_VERSION } from "../shared/build-info.generated";
 import { rehydrateTaskLifecycles } from "./lifecycle/rehydrate";
+import { startSelfUpdateWatch, stopSelfUpdateWatch } from "./self-update-watch";
+import { VIEWS_DIR_AUTO_ENV } from "./self-update";
 
 const log = createLogger("headless");
 
@@ -65,6 +67,69 @@ log.info("Log files", { dir: getLogPath() });
 // it should always be available on a Homebrew install.
 const wantTunnel = process.env.DEV3_REMOTE_NO_TUNNEL !== "1";
 
+// ── Inherit the port and the tunnel from a server we are replacing ──
+//
+// A self-update restart must be invisible from the browser, and the quick tunnel
+// is what makes that hard: its `*.trycloudflare.com` hostname is random per
+// cloudflared process and the session cookie is bound to that host. So the dying
+// server leaves its still-running cloudflared alive, records it, and we re-bind
+// the SAME port and adopt the SAME process — the URL and the session both survive
+// and the browser's own reconnect backoff restores the session with no user action.
+//
+// The port comes from the record rather than a flag on purpose: a box started
+// without --port picked a random one, and cloudflared is pointed at exactly that.
+// If we cannot have it back, the tunnel is worthless and gets killed (below).
+// Read BEFORE the state file is rewritten below, or the explanation is lost.
+const carriedOver = carriedOverState(readRemoteState());
+let handoff = readRemoteHandoff();
+// AN EXPLICIT PORT OUTRANKS A LEFTOVER RECORD. A handoff survives whenever a
+// successor died before writing its own state, and taking its port unconditionally
+// meant the next ordinary start — a systemd unit or a Docker CMD carrying
+// `--port 8080` that the host maps — silently bound something else, breaking the
+// mapping with nothing but an info log to explain it.
+const requestedPort = Number(process.env.DEV3_REMOTE_PORT || 0);
+if (handoff && requestedPort > 0 && requestedPort !== handoff.port) {
+	log.warn("Discarding a handoff that disagrees with the port this start was given", {
+		handoffPort: handoff.port,
+		requestedPort,
+	});
+	if (handoff.tunnel) {
+		try { process.kill(handoff.tunnel.pid, "SIGTERM"); } catch { /* already gone */ }
+	}
+	handoff = null;
+}
+if (handoff) {
+	log.info("Found a handoff from the server we are replacing", {
+		fromPid: handoff.fromPid,
+		port: handoff.port,
+		tunnelPid: handoff.tunnel?.pid ?? null,
+	});
+	if (await isPortFree(handoff.port)) {
+		process.env.DEV3_REMOTE_PORT = String(handoff.port);
+	} else {
+		// Someone else took the port while we were starting. The inherited tunnel
+		// points at THAT port, so it would now proxy a stranger — kill it and start
+		// clean on a random port. The public URL is lost; the box is not.
+		log.warn("Handoff port is occupied — discarding the handoff and starting fresh", { port: handoff.port });
+		if (handoff.tunnel) {
+			try { process.kill(handoff.tunnel.pid, "SIGTERM"); } catch { /* already gone */ }
+		}
+		handoff = null;
+	}
+}
+
+/** Can we bind `port` right now? Answered by actually binding it, then letting go. */
+async function isPortFree(port: number): Promise<boolean> {
+	const net = await import("node:net");
+	return new Promise((resolve) => {
+		const probe = net.createServer();
+		probe.once("error", () => resolve(false));
+		probe.listen({ port, host: "0.0.0.0" }, () => {
+			probe.close(() => resolve(true));
+		});
+	});
+}
+
 // ── Resolve DEV3_VIEWS_DIR if not already set ──
 // remote-access-server uses PATHS.VIEWS_FOLDER (backed by DEV3_VIEWS_DIR env in
 // headless mode) to serve the Vite build. We probe a few common layouts:
@@ -92,6 +157,10 @@ if (!process.env.DEV3_VIEWS_DIR) {
 	for (const candidate of candidates) {
 		if (existsSync(resolve(candidate, "index.html"))) {
 			process.env.DEV3_VIEWS_DIR = candidate;
+			// Mark it as OUR guess, not an operator's choice: a self-update restart must
+			// not pass this path to the successor (a brew upgrade puts the new build in a
+			// new keg), so `spawnDetached` blanks it when this marker is present.
+			process.env[VIEWS_DIR_AUTO_ENV] = "1";
 			log.info("DEV3_VIEWS_DIR resolved", { dir: candidate });
 			break;
 		}
@@ -241,6 +310,11 @@ try {
 		logFile: process.env.DEV3_REMOTE_LOG_FILE || null,
 		startedAt: new Date().toISOString(),
 		version: BUILD_VERSION,
+		// The handoff is consumed — clear it so a later restart cannot re-adopt a
+		// tunnel that is long dead by then. `lastUpdate` is deliberately CARRIED
+		// FORWARD, together with the self-update attempt counter — see `carriedOverState`.
+		handoff: null,
+		...carriedOver,
 	});
 	log.info("Remote lifecycle state written", { port: getServerPort(), pid: process.pid });
 } catch (err) {
@@ -248,16 +322,45 @@ try {
 }
 
 // ── Cloudflare tunnel (default-on; opt out with --no-tunnel → DEV3_REMOTE_NO_TUNNEL=1) ──
-if (wantTunnel) {
-	if (!isCloudflaredAvailable()) {
-		console.error("\n[dev3 remote] `cloudflared` is not installed — skipping public tunnel.");
-		console.error("              On Homebrew: `brew install cloudflared`.");
+// An inherited cloudflared with nobody to own it must not be left running: this
+// process was started with --no-tunnel, so nothing here would ever stop it.
+if (handoff?.tunnel && !wantTunnel) {
+	log.info("Inherited a tunnel but this server runs with --no-tunnel — stopping it", {
+		pid: handoff.tunnel.pid,
+	});
+	try { process.kill(handoff.tunnel.pid, "SIGTERM"); } catch { /* already gone */ }
+}
+
+if (wantTunnel && handoff?.tunnel) {
+	// Inherited tunnel: same hostname, same session cookie, no new cloudflared.
+	const { adoptMainTunnel } = await import("./cloudflare-tunnel");
+	adoptMainTunnel({ ...handoff.tunnel, targetPort: getServerPort() });
+	console.log(`[dev3 remote] Kept the tunnel from the previous build: ${handoff.tunnel.url}`);
+} else if (wantTunnel) {
+	if (!isTunnelBinaryAvailable()) {
+		console.error("\n[dev3 remote] The tunnel binary is not installed — skipping public tunnel.");
+		console.error("              Built-in provider: `brew install cloudflared`. A custom tunnel");
+		console.error("              command is configured in Settings → System → Tunnel provider.");
 		console.error("              Or pass --no-tunnel to silence this warning.\n");
 	} else {
-		console.log("[dev3 remote] Starting Cloudflare tunnel...");
+		console.log("[dev3 remote] Starting public tunnel...");
 		const tunnelUrl = await startTunnel(getServerPort());
 		if (tunnelUrl) {
 			console.log(`[dev3 remote] Tunnel ready: ${tunnelUrl}`);
+			// The predecessor stopped a stable-hostname tunnel expecting this one to
+			// land on the same URL. Say so either way: an equal URL means every open
+			// browser session survived the update, a different one means the QR is stale.
+			if (handoff?.stableTunnelUrl) {
+				const survived = handoff.stableTunnelUrl === tunnelUrl;
+				log.info("Compared the respawned tunnel against the URL the previous build served", {
+					expected: handoff.stableTunnelUrl,
+					actual: tunnelUrl,
+					sessionsSurvived: survived,
+				});
+				if (!survived) {
+					console.error("[dev3 remote] The tunnel hostname changed across the restart — re-scan the QR to reconnect.");
+				}
+			}
 		} else {
 			console.error("[dev3 remote] Tunnel failed to start — falling back to local-only URL");
 		}
@@ -348,6 +451,14 @@ startResourceMonitor((name, payload) => {
 	pushToBrowserClients(name, payload);
 });
 
+// ── Self-update watch ──
+// A headless box is the one place where "there is an update, press restart" never
+// gets pressed — nobody opens a terminal on it. This checks on the same 30-minute
+// cadence as the GUI and installs the update itself once the box is quiet.
+startSelfUpdateWatch((name, payload) => {
+	pushToBrowserClients(name, payload);
+});
+
 // ── Agent rate-limit monitor (Claude dump / Codex rollouts + monthly credits) ──
 startRateLimitMonitor((name, payload) => {
 	pushToBrowserClients(name, payload);
@@ -420,6 +531,7 @@ function shutdown(signal: string): void {
 	stopPortScanPoller();
 	stopResourceMonitor();
 	stopRateLimitMonitor();
+	stopSelfUpdateWatch();
 	stopSocketServer();
 	clearRemoteStateIfOwnedBy(process.pid);
 	cleanupAllTunnels();

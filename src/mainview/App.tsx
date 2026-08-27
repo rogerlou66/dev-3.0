@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, routeTaskId, projectIdForRoute, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type Route, type SettingsSectionId } from "./state";
+import { useAppState, routeTaskId, projectIdForRoute, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
 import { useT, useLocale } from "./i18n";
@@ -8,7 +8,7 @@ import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import type { AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
@@ -41,10 +41,16 @@ import ProductivityStatsView from "./components/ProductivityStatsView";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
 import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
+import AgentTrafficLog from "./components/agent-traffic/AgentTrafficLog";
+import { noteTrafficArrival } from "./agent-traffic";
+import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "./agent-traffic-events";
+import { getAgentTrafficEnabled, syncAgentTrafficFromGlobalSettings } from "./agent-traffic-flag";
+import { useAgentTrafficEnabled } from "./hooks/useAgentTrafficEnabled";
 import StuckPreparationPopover from "./components/StuckPreparationPopover";
 import FolderPickerHost from "./components/FolderPickerModal";
 import KeyboardShortcutsModal, { type ShortcutsTab } from "./components/KeyboardShortcutsModal";
 import UpdatePopoverSimulatorModal from "./components/UpdatePopoverSimulatorModal";
+import RemoteAccessDialog from "./components/RemoteAccessDialog";
 import RemoteAccessExposedPorts from "./components/RemoteAccessExposedPorts";
 import { ConfirmHost, confirm } from "./confirm";
 import AgentLaunchRequestModal from "./components/AgentLaunchRequestModal";
@@ -67,7 +73,10 @@ import TaskImageViewer from "./components/TaskImageViewer";
 import TaskArtifactViewer from "./components/TaskArtifactViewer";
 import HintOverlay from "./components/HintOverlay";
 import HelpOverlay from "./components/HelpOverlay";
-import { HELP_LINK_ACTION_EVENT, type HelpLinkAction } from "./help";
+import TourOverlay from "./components/TourOverlay";
+import { HELP_ATTRACTOR_DISMISS_EVENT, HELP_LINK_ACTION_EVENT, type HelpLinkAction } from "./help";
+import { FIRST_TASK_TOUR_ID, TOUR_START_EVENT, startTour, tourById } from "./tour";
+import { SANDBOX_FIRST_PROMPT } from "../shared/sandbox-prompts";
 import BootstrapScreen, { type BootPhase } from "./components/BootstrapScreen";
 import DiagnosticsPanel from "./components/DiagnosticsPanel";
 import StatusDock from "./components/StatusDock";
@@ -90,7 +99,11 @@ type RemoteAccessQRData = {
 	qrDataUrl: string;
 	accessUrl: string;
 	tunnelState: string;
-	cloudflaredInstalled: boolean;
+	tunnelBinaryInstalled: boolean;
+	/** Which provider serves the public tunnel; absent ⇒ built-in Cloudflare. */
+	tunnelProvider?: "cloudflare" | "custom" | "misconfigured";
+	/** Why the last main-tunnel start failed (e.g. "command-not-found"). */
+	tunnelFailureReason?: string | null;
 	interfaces?: RemoteNetInterface[];
 	selectedHost?: string;
 };
@@ -239,6 +252,7 @@ function App() {
 	const rpcState = useRpcStatus();
 	// In-UI diagnostics viewer (opened from the floating indicator / menu).
 	const [showDiagnostics, setShowDiagnostics] = useState(false);
+	const [trafficLogOpen, setTrafficLogOpen] = useState(false);
 
 	// Listen for menu actions routed from the bun side. Any menu item that the
 	// renderer is responsible for arrives here as `rpc:menuAction` with
@@ -289,6 +303,10 @@ function App() {
 	// Context that drives which menu items apply, derived from the current route.
 	// Used both to grey out native-menu items (pushed to bun below) and to build
 	// the browser-mode React menu bar (`AppMenuBar`).
+	// Read through the hook rather than `globalSettings` (declared further down):
+	// the flag also has to reach registries that are not components, so the module
+	// mirror is the single source and this just re-renders when it flips.
+	const agentTrafficOn = useAgentTrafficEnabled();
 	const menuContext = useMemo(() => {
 		const r = state.route;
 		const hasProject = workspaceTaskTarget !== null || r.screen === "project" || r.screen === "task" || r.screen === "project-terminal" || r.screen === "project-settings";
@@ -379,6 +397,8 @@ function App() {
 	// GitHub CLI availability warning
 	const [ghWarning, setGhWarning] = useState<{ notInstalled: boolean } | null>(null);
 	const [showAddProjectModal, setShowAddProjectModal] = useState(false);
+	// Spaces a project created from a space flow should join on creation.
+	const [addProjectSpaceIds, setAddProjectSpaceIds] = useState<string[]>([]);
 	const [openAddProjectOnDashboard, setOpenAddProjectOnDashboard] = useState(false);
 	const [showProjectSwitch, setShowProjectSwitch] = useState(false);
 	const [workspaceBoardRequest, setWorkspaceBoardRequest] = useState(0);
@@ -408,7 +428,10 @@ function App() {
 	const [createTaskInitialText, setCreateTaskInitialText] = useState<string>("");
 	const [launchModal, setLaunchModal] = useState<{ task: Task; targetStatus: TaskStatus; project: Project } | null>(null);
 	// Lightbox for images an agent surfaced via `dev3 show-image`, bound to a task.
-	const [imageViewer, setImageViewer] = useState<{ taskId: string; images: SharedImage[]; index: number } | null>(null);
+	// `newIds` freezes which images were unread at open time: opening marks them
+	// read, so without the snapshot the "these three are new" highlight would
+	// vanish on the same tick. It only ever grows while the viewer stays open.
+	const [imageViewer, setImageViewer] = useState<{ taskId: string; images: SharedImage[]; index: number; newIds: string[] } | null>(null);
 	const [filePreview, setFilePreview] = useState<OpenFilePreviewDetail | null>(null);
 	// `standalone` requests come from surfaces with no workspace pane to dock into
 	// (the archived task modal) and are hosted as an overlay here instead.
@@ -425,6 +448,34 @@ function App() {
 			.then((task) => dispatch({ type: "updateTask", task }))
 			.catch((error) => console.error("Failed to mark shared items read:", error));
 	}, [dispatch]);
+	/**
+	 * Single entry point for the shared-images lightbox. Marks the batch read,
+	 * remembers which ids were new, and — unless the caller picked a specific
+	 * image — opens on the FIRST unread one so a batch of three is read in the
+	 * order the agent published it. Re-opening while the viewer is already up for
+	 * that task keeps the user's position and only widens the highlight.
+	 */
+	const openImageViewer = useCallback((
+		projectId: string,
+		taskId: string,
+		images: SharedImage[],
+		index?: number,
+	) => {
+		const unreadIds = images.filter((image) => image.isUnread).map((image) => image.id);
+		const firstUnread = images.findIndex((image) => image.isUnread);
+		markSharedItemsRead(projectId, taskId, "images", images);
+		setImageViewer((prev) => {
+			if (prev?.taskId === taskId) {
+				return { ...prev, images, newIds: [...new Set([...prev.newIds, ...unreadIds])] };
+			}
+			return {
+				taskId,
+				images,
+				index: index ?? (firstUnread >= 0 ? firstUnread : images.length - 1),
+				newIds: unreadIds,
+			};
+		});
+	}, [markSharedItemsRead]);
 	const closeArtifactViewer = useCallback(() => {
 		setArtifactViewer(null);
 		requestAnimationFrame(() => {
@@ -467,13 +518,95 @@ function App() {
 	// sound, shortcut rebinds, terminal BiDi). Without it they stay at the
 	// hardcoded defaults until the user opens Settings — which re-enabled the
 	// completion sound on every launch for users who had turned it off (#1337).
+	// Guarded on by the guided tour: acting on default settings would replay a
+	// finished tour on every launch.
+	const [settingsLoaded, setSettingsLoaded] = useState(false);
 	useEffect(() => {
 		let alive = true;
 		api.request.getGlobalSettings()
-			.then((next) => { if (alive) setGlobalSettings(next); })
+			.then((next) => { if (alive) { setGlobalSettings(next); setSettingsLoaded(true); } })
 			.catch(() => {});
 		return () => { alive = false; };
 	}, []);
+
+	// The header's `?` wears a dismissible callout on the main screens until help
+	// mode has been opened once. Recorded here rather than at each entry point, so
+	// the shortcut, the menu, the palette, a HelpCard link and the button itself
+	// all count as discovery. One-way — never written back to false.
+	const markHelpDiscovered = useCallback(() => {
+		setGlobalSettings((prev) => {
+			if (prev.helpModeDiscovered) return prev;
+			const next = { ...prev, helpModeDiscovered: true };
+			api.request.saveGlobalSettings(next).catch(() => {});
+			return next;
+		});
+	}, []);
+
+	useEffect(() => {
+		if (helpMode) markHelpDiscovered();
+	}, [helpMode, markHelpDiscovered]);
+
+	// ── Guided tours ──
+	// Owned here rather than by a screen: a tour walks across the board, two modals
+	// and the task screen, so anything mounted per-screen would unmount mid-step.
+	const [tour, setTour] = useState<{ id: string; step: number } | null>(null);
+
+	// Only walking to the end counts as done. Waving it off does not: the tour is
+	// offered again on an empty sandbox board, which is the one place it belongs,
+	// and a user who left because they were curious elsewhere gets it back.
+	const finishTour = useCallback((tourId: string, completed: boolean) => {
+		setTour(null);
+		if (!completed) return;
+		setGlobalSettings((prev) => {
+			if (prev.completedTours?.includes(tourId)) return prev;
+			const next = { ...prev, completedTours: [...(prev.completedTours ?? []), tourId] };
+			api.request.saveGlobalSettings(next).catch(() => {});
+			return next;
+		});
+	}, []);
+
+	useEffect(() => {
+		function onStart(e: Event) {
+			const id = (e as CustomEvent<string>).detail;
+			if (tourById(id)) setTour({ id, step: 0 });
+		}
+		window.addEventListener(TOUR_START_EVENT, onStart);
+		return () => window.removeEventListener(TOUR_START_EVENT, onStart);
+	}, []);
+
+	// Landing on an EMPTY sandbox board starts the walkthrough — again on every
+	// visit until it is walked to the end, because that board exists for nothing
+	// else and a newcomer who dropped out cannot be expected to know how to ask for
+	// it back. After it is finished, help mode's "Walk me through the first task"
+	// is the way in. Guards: settings must have loaded, the board must be empty
+	// ("your board is empty" is a lie next to a task the user made), and the
+	// project must be the sandbox.
+	const sandboxRouteProjectId = state.route.screen === "project" ? state.route.projectId : null;
+	const currentProjectIsEmpty = state.currentProjectTasks.length === 0;
+	const routeProject = state.projects.find((candidate) => candidate.id === sandboxRouteProjectId);
+	const onSandboxBoard = !!routeProject?.sandbox;
+	useEffect(() => {
+		if (!settingsLoaded || tour || !onSandboxBoard || !currentProjectIsEmpty) return;
+		if (globalSettings.completedTours?.includes(FIRST_TASK_TOUR_ID)) return;
+		startTour(FIRST_TASK_TOUR_ID);
+	}, [settingsLoaded, tour, onSandboxBoard, currentProjectIsEmpty, globalSettings.completedTours]);
+
+	const activeTour = tour ? tourById(tour.id) : undefined;
+	const activeTourStep = activeTour?.steps[tour?.step ?? 0];
+
+	// A step's declared effect, run when the step opens. The registry stays data;
+	// the doing lives here, where the state it touches already is.
+	useEffect(() => {
+		if (activeTourStep?.effect === "prefill-sandbox-prompt") setCreateTaskInitialText(SANDBOX_FIRST_PROMPT);
+	}, [activeTourStep]);
+
+	// Closing the callout counts too: the user has seen the button named, so
+	// nagging them again would be the point of the flag missed.
+	useEffect(() => {
+		function onDismiss() { markHelpDiscovered(); }
+		window.addEventListener(HELP_ATTRACTOR_DISMISS_EVENT, onDismiss);
+		return () => window.removeEventListener(HELP_ATTRACTOR_DISMISS_EVENT, onDismiss);
+	}, [markHelpDiscovered]);
 
 	// Mirror the completion-sound setting into the task-sounds module so the UI
 	// can gate its instant client-side playback without a round-trip.
@@ -735,8 +868,12 @@ function App() {
 	// surface needs a navigate prop threaded through it.
 	useEffect(() => {
 		function onOpenSettingsSection(e: Event) {
-			const section = (e as CustomEvent<SettingsSectionId>).detail;
-			navigate({ screen: "settings", section });
+			const detail = (e as CustomEvent<OpenSettingsSectionDetail>).detail;
+			if (typeof detail === "string") {
+				navigate({ screen: "settings", section: detail });
+				return;
+			}
+			navigate({ screen: "settings", section: detail.section, preset: detail.preset });
 		}
 		window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpenSettingsSection);
 		return () => window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpenSettingsSection);
@@ -1169,6 +1306,14 @@ function App() {
 				e.preventDefault();
 				e.stopPropagation();
 				setShortcutsModal((s) => (s.open ? { ...s, open: false } : { open: true, tab: "app" }));
+			} else if (matchesShortcut(e, "agent-traffic-log") && getAgentTrafficEnabled()) {
+				// The traffic log is an overlay over any screen, so the shortcut toggles
+				// it from wherever the user is — including a focused terminal. Read
+				// through the module getter so the beta flag needs no effect re-bind.
+				e.preventDefault();
+				e.stopPropagation();
+				if (showQuitDialog) return;
+				setTrafficLogOpen((open) => !open);
 			} else if (matchesShortcut(e, "help-mode")) {
 				// Help mode ("Explain this screen"): every data-help-id zone gets an (i)
 				// badge with a HelpCard. Sibling of the shortcuts reference overlay.
@@ -1444,6 +1589,12 @@ function App() {
 		syncTerminalBidiFromGlobalSettings(globalSettings);
 	}, [globalSettings]);
 
+	// Same shape for the agent-traffic beta: registries outside React (the keymap,
+	// the palette, the tip pool) read the module mirror, so it is fed here.
+	useEffect(() => {
+		syncAgentTrafficFromGlobalSettings(globalSettings);
+	}, [globalSettings]);
+
 	useEffect(() => {
 		function onProjectUpdated(e: Event) {
 			const { project } = (e as CustomEvent).detail;
@@ -1538,10 +1689,29 @@ function App() {
 				taskId,
 				onClick: () => openTaskFromNotification(taskId, projectId),
 			});
+			// The header readout and the traffic log read the persisted log, not this
+			// push — the row on disk carries the full body and the delivery verdict,
+			// which the preview does not. So the arrival only triggers a re-read.
+			// No reader while the beta is off, so no re-read either — the toast above
+			// is unaffected and keeps working exactly as before.
+			if (!getAgentTrafficEnabled()) return;
+			noteTrafficArrival(projectId);
+			if (fromProjectId && fromProjectId !== projectId) noteTrafficArrival(fromProjectId);
 		}
 		window.addEventListener("rpc:agentMessage", onAgentMessage);
 		return () => window.removeEventListener("rpc:agentMessage", onAgentMessage);
 	}, [openTaskFromNotification, t]);
+
+	// Everything that opens the traffic log goes through one event: the header
+	// readout, the native View menu and the command palette all fire it.
+	useEffect(() => {
+		function onOpen() {
+			if (!getAgentTrafficEnabled()) return;
+			setTrafficLogOpen(true);
+		}
+		window.addEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
+		return () => window.removeEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
+	}, []);
 
 	// Cmd/Ctrl+Click on a file path in any terminal (preview mode).
 	useEffect(() => {
@@ -1584,8 +1754,7 @@ function App() {
 			const alreadyOpenForTask = imageViewerRef.current?.taskId === taskId;
 
 			if (alreadyOpenForTask || (viewingThisTask && autoOpen && foreground)) {
-				markSharedItemsRead(projectId, taskId, "images", images);
-				setImageViewer({ taskId, images, index: images.length - 1 });
+				openImageViewer(projectId, taskId, images);
 				return;
 			}
 
@@ -1596,8 +1765,7 @@ function App() {
 				context,
 				onClick: () => {
 					openTaskFromNotification(taskId, projectId);
-					markSharedItemsRead(projectId, taskId, "images", images);
-					setImageViewer({ taskId, images, index: images.length - 1 });
+					openImageViewer(projectId, taskId, images);
 				},
 			});
 		}
@@ -1615,12 +1783,11 @@ function App() {
 				index?: number;
 			};
 			if (!taskId || !projectId || !images?.length) return;
-			markSharedItemsRead(projectId, taskId, "images", images);
-			setImageViewer({ taskId, images, index: index ?? images.length - 1 });
+			openImageViewer(projectId, taskId, images, index);
 		}
 		window.addEventListener("dev3:openImageViewer", onOpenViewer);
 		return () => window.removeEventListener("dev3:openImageViewer", onOpenViewer);
-	}, [markSharedItemsRead]);
+	}, [openImageViewer]);
 
 	useEffect(() => {
 		function onCliShowArtifact(e: Event) {
@@ -1699,6 +1866,15 @@ function App() {
 		}
 		window.addEventListener("rpc:portsUpdated", onPortsUpdated);
 		return () => window.removeEventListener("rpc:portsUpdated", onPortsUpdated);
+	}, [dispatch]);
+
+	// Listen for dev-server state, which the board's dev control renders
+	useEffect(() => {
+		function onDevServerUpdated(e: Event) {
+			dispatch({ type: "setDevServer", summary: (e as CustomEvent).detail });
+		}
+		window.addEventListener("rpc:devServerUpdated", onDevServerUpdated);
+		return () => window.removeEventListener("rpc:devServerUpdated", onDevServerUpdated);
 	}, [dispatch]);
 
 	// Listen for resource usage updates
@@ -1886,7 +2062,7 @@ function App() {
 	const respondToLaunchRequest = useCallback((
 		requestId: string,
 		approved: boolean,
-		launch?: { agentId: string | null; configId: string | null; accountId?: string | null },
+		launch?: AgentLaunchChoice,
 	) => {
 		setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
 		api.request.respondToAgentLaunchRequest({
@@ -2241,6 +2417,26 @@ function App() {
 		});
 	}, [applyRemoteQR]);
 
+	const closeRemoteQR = useCallback(() => {
+		setRemoteQR(null);
+		setRemoteUrlCopyState("idle");
+		setTunnelStarting(false);
+	}, []);
+
+	// Tear the public tunnel down and fall back to the local-network QR. Shared by
+	// the toggle and the explicit Stop button so both paths behave identically.
+	const stopRemoteTunnel = useCallback(() => {
+		setTunnelWanted(false);
+		setTunnelStarting(false);
+		setRemoteAccessActive(false);
+		api.request.stopTunnel().then(() => {
+			api.request.getRemoteAccessQR({ tunnel: false }).then((res) => {
+				applyRemoteQR(res);
+				setQrCountdown(25);
+			}).catch(() => {});
+		}).catch(() => {});
+	}, [applyRemoteQR]);
+
 	// Listen for the Remote Access open request (header button, kebab, native menu)
 	useEffect(() => {
 		function onShowRemoteQR(e: Event) {
@@ -2251,7 +2447,7 @@ function App() {
 			setQrConsumed(false); // Reset consumed state when opening fresh QR
 			// A share-intent open auto-starts the public tunnel in the background
 			// rather than blocking the modal on the handshake.
-			if (detail.autoStartTunnel && detail.cloudflaredInstalled && detail.tunnelState === "idle") {
+			if (detail.autoStartTunnel && detail.tunnelBinaryInstalled && detail.tunnelState === "idle") {
 				startRemoteTunnel();
 				return;
 			}
@@ -2370,13 +2566,18 @@ function App() {
 	// Requirements check failed \u2014 a real, actionable screen; keep it ahead of the
 	// generic bootstrap loader.
 	if (reqStatus === "failed") {
+		// The host has to come along: this screen returns early, and its "Browse…"
+		// button would otherwise queue a picker request nothing ever renders.
 		return (
-			<RequirementsCheck
-				results={reqResults}
-				checking={reqChecking}
-				onRefresh={checkRequirements}
-				onRefreshResults={refreshResults}
-			/>
+			<>
+				<RequirementsCheck
+					results={reqResults}
+					checking={reqChecking}
+					onRefresh={checkRequirements}
+					onRefreshResults={refreshResults}
+				/>
+				<FolderPickerHost />
+			</>
 		);
 	}
 
@@ -2441,7 +2642,7 @@ function App() {
 	// nothing until the tunnel hostname lands.
 	const tunnelUrlPending = remoteQR !== null
 		&& tunnelWanted
-		&& remoteQR.cloudflaredInstalled
+		&& remoteQR.tunnelBinaryInstalled
 		&& (tunnelStarting || remoteQR.tunnelState === "starting");
 	const remoteCopyLabel = qrConsumed
 		? "remote.copyUrl"
@@ -2462,6 +2663,7 @@ function App() {
 						route={route}
 						projects={state.projects}
 						tasks={state.currentProjectTasks}
+						agents={agents}
 						navigate={navigate}
 						goBack={() => dispatch({ type: "goBack" })}
 						goForward={() => dispatch({ type: "goForward" })}
@@ -2473,6 +2675,8 @@ function App() {
 						updateDownloadStatus={updateDownloadStatus}
 						remoteAccessAvailable={!isElectrobun}
 						remoteAccessActive={remoteAccessActive}
+						helpDiscovered={globalSettings.helpModeDiscovered}
+						tourRunning={!!tour}
 					/>
 					{ghWarning && (
 						<GhWarningBanner
@@ -2518,7 +2722,20 @@ function App() {
 				/>
 			)}
 			{hintMode && <HintOverlay onExit={() => setHintMode(false)} />}
-			{helpMode && <HelpOverlay onExit={() => setHelpMode(false)} />}
+			{helpMode && (
+				<HelpOverlay
+					onExit={() => setHelpMode(false)}
+					onRunTour={onSandboxBoard ? () => { setHelpMode(false); startTour(FIRST_TASK_TOUR_ID); } : undefined}
+				/>
+			)}
+			{activeTour && tour && !helpMode && (
+				<TourOverlay
+					tour={activeTour}
+					stepIndex={tour.step}
+					onStepChange={(step) => setTour({ id: activeTour.id, step })}
+					onExit={(completed) => finishTour(activeTour.id, completed)}
+				/>
+			)}
 			{showProjectSwitch && (
 				<ProjectQuickSwitchModal
 					projects={quickSwitch.projects}
@@ -2553,7 +2770,11 @@ function App() {
 			{showAddProjectModal && (
 				<AddProjectModal
 					dispatch={dispatch}
-					onClose={() => setShowAddProjectModal(false)}
+					initialSpaceIds={addProjectSpaceIds}
+					onClose={() => {
+						setShowAddProjectModal(false);
+						setAddProjectSpaceIds([]);
+					}}
 				/>
 			)}
 			{createTaskProject && (
@@ -2675,18 +2896,9 @@ function App() {
 				</div>
 			)}
 			{remoteQR && (
-				<div
-					className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-					onMouseDown={(e) => {
-						if (e.target === e.currentTarget) {
-							setRemoteQR(null);
-							setRemoteUrlCopyState("idle");
-							setTunnelStarting(false);
-						}
-					}}
-				>
-					<div className="bg-overlay border border-edge rounded-2xl shadow-2xl w-[28rem] p-6 space-y-4 text-center">
-						<h2 className="text-fg text-lg font-semibold">{t("remote.title")}</h2>
+				<RemoteAccessDialog titleId="remote-access-dialog-title" onClose={closeRemoteQR}>
+					<>
+						<h2 id="remote-access-dialog-title" className="text-fg text-lg font-semibold">{t("remote.title")}</h2>
 						<p className="text-fg-2 text-sm">{t("remote.subtitle")}</p>
 						<div className="flex justify-center relative">
 							{tunnelUrlPending ? (
@@ -2768,29 +2980,56 @@ function App() {
 									onChange={(e) => {
 										const want = e.target.checked;
 										setTunnelWanted(want);
-										if (want && remoteQR.cloudflaredInstalled && remoteQR.tunnelState === "idle") {
+										if (want && remoteQR.tunnelBinaryInstalled && remoteQR.tunnelState === "idle") {
 											startRemoteTunnel();
 										} else if (!want && remoteQR.tunnelState === "connected") {
-											setRemoteAccessActive(false);
-											api.request.stopTunnel().then(() => {
-												api.request.getRemoteAccessQR({ tunnel: false }).then((res) => {
-													applyRemoteQR(res);
-													setQrCountdown(25);
-												}).catch(() => {});
-											}).catch(() => {});
+											stopRemoteTunnel();
 										}
 									}}
 									className="accent-accent w-4 h-4"
 								/>
-								<span className="text-fg text-sm">{t("remote.anywhereToggle")}</span>
+								<span className="text-fg text-sm">
+									{t(remoteQR.tunnelProvider === "cloudflare" || !remoteQR.tunnelProvider ? "remote.anywhereToggle" : "remote.anywhereToggleCustom")}
+								</span>
 							</label>
 
-							{tunnelWanted && !remoteQR.cloudflaredInstalled && (
+							{tunnelWanted && !remoteQR.tunnelBinaryInstalled && remoteQR.tunnelProvider === "misconfigured" && (
+								<div className="text-left space-y-2">
+									<p className="text-danger text-xs font-medium">{t("remote.customTunnelEmpty")}</p>
+									<p className="text-fg-2 text-xs">{t("remote.customTunnelEmptyHint")}</p>
+									<div className="flex items-center gap-4">
+										<button
+											type="button"
+											data-testid="remote-tunnel-settings-link"
+											onClick={() => {
+												closeRemoteQR();
+												navigate({ screen: "settings", section: "system" });
+											}}
+											className="text-xs text-accent hover:text-accent-emphasis transition-colors"
+										>
+											{t("remote.tunnelSettingsLink")}
+										</button>
+										<button
+											type="button"
+											onClick={() => {
+												api.request.getRemoteAccessQR({ tunnel: tunnelWanted }).then((res) => {
+													applyRemoteQR(res);
+												}).catch(() => {});
+											}}
+											className="text-xs text-accent hover:text-accent-emphasis transition-colors"
+										>
+											{t("remote.recheckTunnelBinary")}
+										</button>
+									</div>
+								</div>
+							)}
+
+							{tunnelWanted && !remoteQR.tunnelBinaryInstalled && remoteQR.tunnelProvider !== "custom" && remoteQR.tunnelProvider !== "misconfigured" && (
 								<div className="text-left space-y-2">
 									<p className="text-danger text-xs font-medium">{t("remote.cloudflaredNotFound")}</p>
 									<p className="text-fg-2 text-xs">{t("remote.cloudflaredInstallHint")}</p>
 									<div className="flex items-center gap-2">
-										<code className="flex-1 text-warning bg-warning/10 px-3 py-2 rounded text-xs font-mono break-all select-all">
+										<code className="flex-1 text-warning-strong bg-warning/10 px-3 py-2 rounded text-xs font-mono break-all select-all">
 											{CLOUDFLARED_INSTALL_CMD}
 										</code>
 										<button
@@ -2824,12 +3063,12 @@ function App() {
 										}}
 										className="text-xs text-accent hover:text-accent-emphasis transition-colors"
 									>
-										{t("remote.recheckCloudflared")}
+										{t("remote.recheckTunnelBinary")}
 									</button>
 								</div>
 							)}
 
-							{tunnelWanted && remoteQR.cloudflaredInstalled && (tunnelStarting || remoteQR.tunnelState === "starting") && (
+							{tunnelWanted && remoteQR.tunnelBinaryInstalled && (tunnelStarting || remoteQR.tunnelState === "starting") && (
 								<div className="flex items-center gap-2">
 									<div className="w-3 h-3 rounded-full bg-accent animate-pulse" />
 									<span className="text-fg-3 text-xs">{t("remote.tunnelStarting")}</span>
@@ -2838,28 +3077,57 @@ function App() {
 
 							{tunnelWanted && remoteQR.tunnelState === "connected" && (
 								<div className="flex items-center gap-2">
-									<div className="w-2 h-2 rounded-full bg-green-400" />
-									<span className="text-green-400 text-xs">{t("remote.tunnelConnected")}</span>
+									<div className="w-2 h-2 rounded-full bg-success" />
+									<span className="text-success text-xs">{t("remote.tunnelConnected")}</span>
+									<button
+										type="button"
+										data-testid="remote-stop-tunnel"
+										onClick={stopRemoteTunnel}
+										title={t("remote.stopTunnelHint")}
+										className="ml-auto min-h-6 px-2 py-1.5 rounded-lg border border-edge text-fg-2 text-xs hover:text-fg hover:bg-elevated hover:border-edge-active transition-[color,background-color,border-color,transform] active:scale-[0.96]"
+									>
+										{t("remote.stopTunnel")}
+									</button>
 								</div>
 							)}
 
-							{tunnelWanted && remoteQR.tunnelState === "connected" && (
+							{tunnelWanted && remoteQR.tunnelState === "connected" && remoteQR.tunnelProvider !== "custom" && (
 								<div className="flex items-start gap-2 rounded-lg bg-warning/10 border border-warning/20 px-2.5 py-2 text-left">
 									<span
 										aria-hidden="true"
-										className="text-warning text-sm leading-none mt-px shrink-0"
+										className="text-warning-strong text-sm leading-none mt-px shrink-0"
 										style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
 									>
 										{"\uF071"}
 									</span>
-									<p className="text-warning/90 text-xs leading-snug">{t("remote.tunnelPropagationHint")}</p>
+									<p className="text-warning-strong/90 text-xs leading-snug">{t("remote.tunnelPropagationHint")}</p>
 								</div>
 							)}
 
 							{tunnelWanted && remoteQR.tunnelState === "failed" && (
-								<div className="flex items-center gap-2">
-									<div className="w-2 h-2 rounded-full bg-danger" />
-									<span className="text-danger text-xs">{t("remote.tunnelFailed")}</span>
+								<div className="text-left space-y-2">
+									<div className="flex items-center gap-2">
+										<div className="w-2 h-2 rounded-full bg-danger" />
+										<span className="text-danger text-xs">
+											{t(remoteQR.tunnelFailureReason === "command-not-found" ? "remote.customTunnelNotFound" : "remote.tunnelFailed")}
+										</span>
+									</div>
+									{remoteQR.tunnelFailureReason === "command-not-found" && (
+										<>
+											<p className="text-fg-2 text-xs">{t("remote.customTunnelNotFoundHint")}</p>
+											<button
+												type="button"
+												data-testid="remote-tunnel-settings-link-failed"
+												onClick={() => {
+													closeRemoteQR();
+													navigate({ screen: "settings", section: "system" });
+												}}
+												className="text-xs text-accent hover:text-accent-emphasis transition-colors"
+											>
+												{t("remote.tunnelSettingsLink")}
+											</button>
+										</>
+									)}
 								</div>
 							)}
 						</div>
@@ -2909,14 +3177,14 @@ function App() {
 							</button>
 							<button
 								type="button"
-								onClick={() => { setRemoteQR(null); setRemoteUrlCopyState("idle"); setTunnelStarting(false); }}
+								onClick={closeRemoteQR}
 								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
 							>
 								{t("remote.close")}
 							</button>
 						</div>
-					</div>
-				</div>
+					</>
+				</RemoteAccessDialog>
 			)}
 			<StuckPreparationPopover tasks={effectiveTasks} />
 			<FolderPickerHost />
@@ -2949,6 +3217,7 @@ function App() {
 					taskId={imageViewer.taskId}
 					images={imageViewer.images}
 					initialIndex={imageViewer.index}
+					newIds={imageViewer.newIds}
 					onClose={() => setImageViewer(null)}
 				/>
 			)}
@@ -2985,6 +3254,20 @@ function App() {
 			{/* Toasts are transient feedback, not immersive chrome; notification toasts
 			    must remain clickable so their handler can exit fullscreen first. */}
 			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} />
+			{/* Agent traffic log — an overlay over any screen (the nav budget is spent),
+			    opened from the header readout, ⇧⌘M, the View menu and the palette. */}
+			{/* The flag also closes an open log, so switching the beta off mid-session
+			    does not leave an overlay nothing can reach any more. */}
+			{trafficLogOpen && agentTrafficOn && (
+				<AgentTrafficLog
+					projectId={projectIdForRoute(route)}
+					onClose={() => setTrafficLogOpen(false)}
+					onOpenTask={(taskId, projectId) => {
+						setTrafficLogOpen(false);
+						openTaskFromNotification(taskId, projectId);
+					}}
+				/>
+			)}
 		</div>
 	);
 
@@ -2994,10 +3277,11 @@ function App() {
 		if (!taskId || !projectId) return null;
 		return (
 			<TaskWorkspaceView
-				projectId={projectId}
-				taskId={taskId}
-				tasks={workspaceTaskTarget?.tasks ?? state.currentProjectTasks}
-				projects={state.projects}
+					projectId={projectId}
+					taskId={taskId}
+					tasks={workspaceTaskTarget?.tasks ?? state.currentProjectTasks}
+					projects={state.projects}
+					route={route.screen === "task" ? route : undefined}
 				navigate={workspaceTaskTarget ? navigateFromWorkspace : navigate}
 				dispatch={workspaceTaskTarget ? workspaceDispatch : dispatch}
 				navigationGuardRef={navigationGuardRef}
@@ -3034,10 +3318,12 @@ function App() {
 						projects={state.projects}
 						tasks={state.currentProjectTasks}
 						dispatch={dispatch}
+						route={state.route}
 						navigate={navigate}
 						bellCounts={state.bellCounts}
 						bellReasons={state.bellReasons}
 						taskPorts={state.taskPorts}
+						taskDevServers={state.taskDevServers}
 						taskResourceUsage={state.taskResourceUsage}
 						activeTaskId={route.activeTaskId}
 						taskView={route.taskView}
@@ -3069,6 +3355,7 @@ function App() {
 						taskId={route.taskId}
 						tasks={state.currentProjectTasks}
 						projects={state.projects}
+						route={state.route}
 						navigate={navigate}
 						dispatch={dispatch}
 						navigationGuardRef={navigationGuardRef}
@@ -3094,7 +3381,7 @@ function App() {
 					/>
 				);
 			case "settings":
-				return <GlobalSettings section={route.section} />;
+				return <GlobalSettings section={route.section} preset={route.preset} />;
 			case "changelog":
 				return (
 					<Changelog

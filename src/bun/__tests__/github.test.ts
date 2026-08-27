@@ -593,4 +593,148 @@ describe("github", () => {
 			expect(spawnMock.mock.calls.length).toBe(callsAfterFirst);
 		});
 	});
+
+	/**
+	 * These two strings are gh's own, copied from a live run. The check exists
+	 * because the OBVIOUS implementation — match github.com in the remote URL —
+	 * is wrong in the field: an SSH config alias hides the host, so
+	 * `git@github.com-personal:owner/repo` (the two-accounts setup this repo
+	 * itself uses) reads as "not GitHub" while gh resolves it fine.
+	 */
+	describe("isNotAGitHubRepoError", () => {
+		const PROJECT = { githubAuthHost: "github.com", githubAuthLogin: "h0x91b" };
+
+		it("recognises gh's refusal on a non-GitHub remote", async () => {
+			const { isNotAGitHubRepoError } = await import("../github");
+			expect(isNotAGitHubRepoError({
+				stderr: "none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`",
+			})).toBe(true);
+			expect(isNotAGitHubRepoError({ stdout: "no git remotes found" })).toBe(true);
+		});
+
+		it("does NOT claim non-GitHub for any other failure", async () => {
+			const { isNotAGitHubRepoError } = await import("../github");
+			// Every one of these must leave the PR button alone: killing a working
+			// button is worse than one wasted agent turn.
+			for (const stderr of [
+				"",
+				"error connecting to api.github.com",
+				"gh: command timed out",
+				"gh auth login required",
+				"HTTP 502: Bad gateway",
+				"could not resolve host",
+			]) {
+				expect(isNotAGitHubRepoError({ stderr })).toBe(false);
+			}
+		});
+
+		/** `gh repo view` answering whatever the case under test needs, past the auth handshake. */
+		function mockGhRepoView(stdout: string, stderr = "", exitCode = 0) {
+			whichMock.mockResolvedValue("/opt/homebrew/bin/gh");
+			spawnMock.mockImplementation((cmd: string[]) => {
+				if (cmd.join(" ") === "gh auth status --json hosts") {
+					return fakeProc(JSON.stringify({
+						hosts: { "github.com": [{ login: "h0x91b", host: "github.com", active: true, state: "success" }] },
+					}));
+				}
+				if (cmd[1] === "auth" && cmd[2] === "token") return fakeProc("secret-token\n");
+				return fakeProc(stdout, stderr, exitCode);
+			});
+		}
+
+		it("treats a successful gh call as GitHub", async () => {
+			mockGhRepoView('{"nameWithOwner":"h0x91b/dev-3.0"}');
+			const { isGitHubRepo } = await import("../github");
+			await expect(isGitHubRepo(PROJECT, "/tmp/wt")).resolves.toBe(true);
+		});
+
+		it("reports not-GitHub when gh says the remotes are not GitHub", async () => {
+			mockGhRepoView("", "none of the git remotes configured for this repository point to a known GitHub host.", 1);
+			const { isGitHubRepo } = await import("../github");
+			await expect(isGitHubRepo(PROJECT, "/tmp/wt")).resolves.toBe(false);
+		});
+
+		/** A blip must not disable the button — the whole point of the polarity. */
+		it("stays GitHub when gh fails for any other reason", async () => {
+			mockGhRepoView("", "HTTP 502: Bad gateway", 1);
+			const { isGitHubRepo } = await import("../github");
+			await expect(isGitHubRepo(PROJECT, "/tmp/wt")).resolves.toBe(true);
+		});
+
+		describe("findOpenPullRequest", () => {
+			it("returns the PR gh listed for the branch", async () => {
+				mockGhRepoView(JSON.stringify([{ number: 1475, url: "https://github.com/h0x91b/dev-3.0/pull/1475" }]));
+				const { findOpenPullRequest } = await import("../github");
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "dev3/t")).resolves.toEqual({
+					pr: { number: 1475, url: "https://github.com/h0x91b/dev-3.0/pull/1475", title: null, author: null },
+					isGitHub: true,
+				});
+			});
+
+			// The two fields a review task is named after. A GitHub display name is
+			// optional, so the login has to carry the naming when it is missing.
+			it("prefers the author's display name and falls back to the login", async () => {
+				const { findOpenPullRequest } = await import("../github");
+				mockGhRepoView(JSON.stringify([
+					{ number: 1, url: "u", title: "Pin tmux", author: { login: "h0x91b", name: "Arseny Pavlenko" } },
+				]));
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "b")).resolves.toMatchObject({
+					pr: { title: "Pin tmux", author: "Arseny Pavlenko" },
+				});
+
+				mockGhRepoView(JSON.stringify([{ number: 1, url: "u", title: "", author: { login: "h0x91b", name: "" } }]));
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "b")).resolves.toMatchObject({
+					pr: { title: null, author: "h0x91b" },
+				});
+
+				mockGhRepoView(JSON.stringify([{ number: 1, url: "u" }]));
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "b")).resolves.toMatchObject({
+					pr: { title: null, author: null },
+				});
+			});
+
+			// Three different gh answers, one meaning for the caller: no PR. Merge reads
+			// this to choose its route, so "could not tell" must never read as "there is one".
+			it("reports no PR for an empty list, a failure, and unparsable output", async () => {
+				const { findOpenPullRequest } = await import("../github");
+				for (const [stdout, stderr, code] of [["[]", "", 0], ["", "gh: not found", 1], ["not json", "", 0]] as const) {
+					mockGhRepoView(stdout, stderr, code);
+					const probe = await findOpenPullRequest(PROJECT, "/tmp/wt", "dev3/t");
+					expect(probe.pr).toBeNull();
+				}
+			});
+
+			it("carries gh's non-GitHub verdict, and asks nothing without a branch", async () => {
+				mockGhRepoView("", "none of the git remotes configured for this repository point to a known GitHub host.", 1);
+				const { findOpenPullRequest } = await import("../github");
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "dev3/t")).resolves.toEqual({ pr: null, isGitHub: false });
+
+				spawnMock.mockClear();
+				await expect(findOpenPullRequest(PROJECT, "/tmp/wt", "")).resolves.toEqual({ pr: null, isGitHub: true });
+				expect(spawnMock).not.toHaveBeenCalled();
+			});
+		});
+
+		describe("merge method", () => {
+			// `gh pr merge` with no method flag PROMPTS when several are allowed, which in
+			// a headless call is a hang — so a method is always chosen here.
+			it("prefers squash, then a merge commit, then rebase", async () => {
+				const { pickMergeMethod } = await import("../github");
+				expect(pickMergeMethod({ squash: true, merge: true, rebase: true })).toBe("squash");
+				expect(pickMergeMethod({ merge: true, rebase: true })).toBe("merge");
+				expect(pickMergeMethod({ rebase: true })).toBe("rebase");
+				// Nothing allowed is not a real GitHub answer — it means the read failed.
+				expect(pickMergeMethod({})).toBe("squash");
+			});
+
+			it("reads the repo's allowed methods, and falls back when it cannot", async () => {
+				mockGhRepoView(JSON.stringify({ squashMergeAllowed: false, mergeCommitAllowed: true, rebaseMergeAllowed: true }));
+				const { resolveMergeMethod } = await import("../github");
+				await expect(resolveMergeMethod(PROJECT, "/tmp/wt")).resolves.toBe("merge");
+
+				mockGhRepoView("", "HTTP 502: Bad gateway", 1);
+				await expect(resolveMergeMethod(PROJECT, "/tmp/wt")).resolves.toBe("squash");
+			});
+		});
+	});
 });
