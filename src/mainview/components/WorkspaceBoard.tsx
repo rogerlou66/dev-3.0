@@ -419,7 +419,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 						{showDropBefore && <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />}
 						{showDropAfter && <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />}
 						<div className="sticky left-0 z-10 bg-base/90 px-3 py-3">
-							<div className="flex items-start gap-1">
+							<div className="flex items-center gap-1">
 								<span
 									role="presentation"
 									draggable={dragEnabled}
@@ -434,7 +434,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 										setProjectDropTarget(null);
 									}}
 									title={dragEnabled ? t("dashboard.reorderProject") : undefined}
-									className={`-ml-1 rounded-lg p-1 text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
+									className={`-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
 								>
 									<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F01DB}"}</span>
 								</span>
