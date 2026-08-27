@@ -165,6 +165,7 @@ function renderCard(
 		siblingMap?: Map<string, Task[]>;
 		onEditDraft?: (task: Task) => void;
 		onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
+		compact?: boolean;
 	},
 ) {
 	return render(
@@ -186,12 +187,55 @@ function renderCard(
 				siblingMap={opts?.siblingMap}
 				onEditDraft={opts?.onEditDraft}
 				onOpenWorkspaceTask={opts?.onOpenWorkspaceTask}
+				compact={opts?.compact}
 			/>
 		</I18nProvider>,
 	);
 }
 
 describe("TaskCard", () => {
+	describe("workspace-board compact presentation", () => {
+		it("keeps the title to one truncated line and does not let the rail label set card height", () => {
+			renderCard(makeTask({ status: "review-by-user", title: "A very long task title that cannot fit inside one compact card" }), { compact: true });
+
+			expect(screen.getByTestId("task-card-title")).toHaveClass("truncate", "whitespace-nowrap");
+			expect(screen.getByTestId("task-card-title")).not.toHaveClass("line-clamp-2");
+			expect(within(screen.getByTestId("task-card-rail")).queryByText("REVIEW")).not.toBeInTheDocument();
+		});
+
+		it("shows full title plus the latest update without requesting a terminal preview", async () => {
+			vi.useFakeTimers();
+			mockedApi.request.getTerminalPreview.mockResolvedValue("tiny terminal snapshot");
+			renderCard(makeTask({
+				status: "in-progress",
+				worktreePath: "/tmp/wt",
+				title: "A complete task title",
+				overview: "The agent's latest useful update.",
+			}), { compact: true });
+
+			const card = document.querySelector<HTMLElement>('[data-task-id="t1"]')!;
+			await act(async () => {
+				fireEvent.mouseEnter(card);
+				await vi.advanceTimersByTimeAsync(350);
+			});
+
+			const summary = screen.getByTestId("workspace-task-summary-preview");
+			expect(summary).toHaveTextContent("A complete task title");
+			expect(summary).toHaveTextContent("The agent's latest useful update.");
+			expect(mockedApi.request.getTerminalPreview).not.toHaveBeenCalled();
+			expect(summary).not.toHaveTextContent("tiny terminal snapshot");
+			vi.useRealTimers();
+		});
+
+		it("keeps compact signal badges on one clipped row", () => {
+			renderCard(makeTask({ status: "completed" }), {
+				compact: true,
+				prInfo: { number: 42, url: "https://github.com/test/repo/pull/42", unresolvedCount: 3 },
+			});
+			expect(screen.getByTestId("task-card-signals")).toHaveClass("flex-nowrap", "overflow-hidden");
+		});
+	});
+
 	it("lets a workspace host open an active task without route navigation", async () => {
 		const navigate = vi.fn();
 		const onOpenWorkspaceTask = vi.fn();

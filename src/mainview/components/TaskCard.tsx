@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, type Dispatch } from "rea
 import { toast } from "../toast";
 import { createPortal } from "react-dom";
 import type { CodingAgent, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskTitle, isTaskDisconnected } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isTaskDisconnected } from "../../shared/types";
 import { getTaskOpenMode, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { confirm } from "../confirm";
@@ -37,6 +37,30 @@ import Tooltip from "./Tooltip";
 import TaskShutdownOverlay from "./TaskShutdownOverlay";
 import TaskPrStatusPopover from "./TaskPrStatusPopover";
 import { summarizeMergeability, type PRMergeabilityReason } from "../../shared/pr-status";
+
+const SUMMARY_PREVIEW_WIDTH = 360;
+const SUMMARY_PREVIEW_HEIGHT = 190;
+const SUMMARY_PREVIEW_PAD = 8;
+const SUMMARY_PREVIEW_DELAY = 300;
+
+function compactSummaryEnabled(): boolean {
+	if (typeof window === "undefined") return true;
+	const coarse = window.matchMedia?.("(hover: none), (pointer: coarse)")?.matches ?? false;
+	return !coarse && window.innerWidth >= CAROUSEL_MAX_WIDTH;
+}
+
+function compactSummaryPosition(anchor: DOMRect) {
+	let left = anchor.right + SUMMARY_PREVIEW_PAD;
+	let top = anchor.top;
+	if (left + SUMMARY_PREVIEW_WIDTH > window.innerWidth - SUMMARY_PREVIEW_PAD) {
+		left = anchor.left - SUMMARY_PREVIEW_WIDTH - SUMMARY_PREVIEW_PAD;
+	}
+	if (left < SUMMARY_PREVIEW_PAD) left = SUMMARY_PREVIEW_PAD;
+	if (top + SUMMARY_PREVIEW_HEIGHT > window.innerHeight - SUMMARY_PREVIEW_PAD) {
+		top = window.innerHeight - SUMMARY_PREVIEW_HEIGHT - SUMMARY_PREVIEW_PAD;
+	}
+	return { left, top: Math.max(SUMMARY_PREVIEW_PAD, top) };
+}
 
 /** Deferred-time glyph: the scheduled-launch badge and the "send later" menu row. */
 function ClockIcon({ className }: { className?: string }) {
@@ -97,6 +121,19 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const preview = useTerminalPreview();
 	const cardRef = useRef<HTMLDivElement>(null);
 	const suppressOpenUntilRef = useRef(0);
+	const summaryPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const [summaryPreviewPos, setSummaryPreviewPos] = useState<{ left: number; top: number } | null>(null);
+	const latestUpdate = getTaskOverview(task) ?? (bellReasons?.length ? bellReasons[bellReasons.length - 1] : null);
+
+	function closeSummaryPreview() {
+		if (summaryPreviewTimerRef.current) clearTimeout(summaryPreviewTimerRef.current);
+		summaryPreviewTimerRef.current = null;
+		setSummaryPreviewPos(null);
+	}
+
+	useEffect(() => () => {
+		if (summaryPreviewTimerRef.current) clearTimeout(summaryPreviewTimerRef.current);
+	}, []);
 
 	// Ports popover state
 	const [portsPopoverOpen, setPortsPopoverOpen] = useState(false);
@@ -345,6 +382,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 	function handleClick() {
 		if (Date.now() < suppressOpenUntilRef.current) return;
+		closeSummaryPreview();
 		// A still-preparing task is `isDisabled` (no drag, dimmed) but must remain
 		// openable so the main view can show its loading state instead of leaving
 		// the previously-active task's terminal on screen.
@@ -398,6 +436,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		e.preventDefault();
 		e.stopPropagation();
 		preview.close();
+		closeSummaryPreview();
 		setCtxMenuPos({ top: e.clientY, left: e.clientX });
 		setCtxMenuOpen(true);
 	}
@@ -405,6 +444,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	function handleDragStart(e: React.DragEvent) {
 		suppressOpenUntilRef.current = Date.now() + 1_000;
 		preview.close();
+		closeSummaryPreview();
 		e.dataTransfer.setData("text/plain", task.id);
 		e.dataTransfer.effectAllowed = "move";
 		onDragStartProp(task.id);
@@ -549,12 +589,25 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	}
 
 	function handleCardMouseEnter() {
+		if (compact) {
+			if (menuOpen || isShuttingDown || !compactSummaryEnabled() || !cardRef.current) return;
+			if (summaryPreviewTimerRef.current) clearTimeout(summaryPreviewTimerRef.current);
+			summaryPreviewTimerRef.current = setTimeout(() => {
+				if (!cardRef.current?.isConnected) return;
+				setSummaryPreviewPos(compactSummaryPosition(cardRef.current.getBoundingClientRect()));
+			}, SUMMARY_PREVIEW_DELAY);
+			return;
+		}
 		if (!isActive || menuOpen || isShuttingDown) return;
 		if (!cardRef.current) return;
 		preview.handlers.onMouseEnter(task.id, cardRef.current);
 	}
 
 	function handleCardMouseLeave() {
+		if (compact) {
+			closeSummaryPreview();
+			return;
+		}
 		preview.handlers.onMouseLeave();
 	}
 
@@ -848,9 +901,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			{/* IDENTITY — one line, full card width: which task is this and who runs it.
 			    Full width is the point: the rail starts a row lower so the agent and
 			    config string get the whole card instead of 182px next to a rail. */}
-			<div
-				data-testid="task-card-identity"
-				className="flex min-w-0 items-center gap-1.5 border-b border-edge py-1.5 pl-1.5 pr-2.5"
+				<div
+					data-testid="task-card-identity"
+					className={`flex min-w-0 items-center gap-1.5 border-b border-edge pl-1.5 pr-2.5 ${compact ? "py-1" : "py-1.5"}`}
 			>
 				<PriorityBadge priority={task.priority} onChange={handleSetPriority} />
 				<span className="flex-shrink-0 font-mono text-micro font-semibold text-accent">
@@ -969,15 +1022,17 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					completing={quickCompleting}
 					onOpenMenu={statusMenu.toggle}
 					onComplete={handleQuickComplete}
-					menuTriggerRef={statusMenu.triggerRef}
-					touch={narrow}
-				/>
+						menuTriggerRef={statusMenu.triggerRef}
+						touch={narrow}
+						autoLabel={compact}
+					/>
 
-				<div className={`flex min-w-0 flex-1 flex-col ${compact ? "px-2 pt-2" : "px-3 pt-2.5"}`}>
+					<div className={`flex min-w-0 flex-1 flex-col ${compact ? "px-2 pt-1.5" : "px-3 pt-2.5"}`}>
 					{/* CONTENT */}
 					<div>
 						<div
-							className={`break-words text-sm font-medium leading-relaxed text-fg ${compact ? "line-clamp-2" : "line-clamp-3"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
+							data-testid="task-card-title"
+							className={`text-sm font-medium text-fg ${compact ? "truncate whitespace-nowrap leading-snug" : "line-clamp-3 break-words leading-relaxed"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
 							onClick={handleTitleClick}
 							title={isTodo && hasLongDescription ? task.description : undefined}
 						>
@@ -1107,7 +1162,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						{signalGroups.length > 0 && (
 							<div
 								data-testid="task-card-signals"
-								className="flex min-w-0 flex-wrap items-center gap-1.5 px-2.5 py-1.5"
+								className={`flex min-w-0 items-center gap-1.5 ${compact ? "flex-nowrap overflow-hidden px-2 py-1" : "flex-wrap px-2.5 py-1.5"}`}
 							>
 								{signalGroups.flatMap((group, i) => (i === 0 ? [group] : [<span key={`d${i}`}>{groupDivider}</span>, group]))}
 							</div>
@@ -1267,7 +1322,27 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				document.body,
 			)}
 
-			<TerminalPreviewPopover
+			{compact && summaryPreviewPos && createPortal(
+				<div
+					data-testid="workspace-task-summary-preview"
+					className="pointer-events-none fixed z-50 w-[22.5rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-edge-active bg-overlay shadow-2xl shadow-black/50"
+					style={{ left: summaryPreviewPos.left, top: summaryPreviewPos.top }}
+				>
+					<div className="border-b border-edge px-3 py-2.5">
+						<div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.fullTitle")}</div>
+						<div className="mt-1 line-clamp-3 break-words text-sm font-semibold leading-snug text-fg streamer-private">{displayTitle}</div>
+					</div>
+					<div className="px-3 py-2.5">
+						<div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.latestUpdate")}</div>
+						<p className={`mt-1 line-clamp-5 whitespace-pre-wrap break-words text-xs leading-relaxed ${latestUpdate ? "text-fg-2" : "italic text-fg-muted"}`}>
+							{latestUpdate ?? t("workspaceCard.noLatestUpdate")}
+						</p>
+					</div>
+				</div>,
+				document.body,
+			)}
+
+			{!compact && <TerminalPreviewPopover
 				{...preview.state}
 				taskId={task.id}
 				projectId={project.id}
@@ -1275,7 +1350,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				userOverview={task.userOverview ?? null}
 				description={task.description}
 				attentionReasons={bellReasons}
-			/>
+			/>}
 		</div>
 	);
 }

@@ -50,7 +50,7 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Proyectos",
 	"help.dashboard.workspaceBoard.title": "Tablero global",
-	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. Crea desde la celda Por hacer de cada proyecto y haz clic en una tarea activa para abrir su espacio de trabajo sin abandonar el tablero.",
+	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. Crea desde la celda Por hacer de cada proyecto y haz clic en una tarea activa para abrir su espacio de trabajo sin abandonar el tablero. El título compacto usa una línea; pasa el cursor para ver el título completo y la última actualización.",
 	"help.dashboard.workspaceTaskOverlay.title": "Espacio de trabajo sobre el tablero",
 	"help.dashboard.workspaceTaskOverlay.body": "El inspector completo y el terminal del agente flotan sobre el tablero global. Haz clic en el tablero atenuado alrededor o ciérralo para volver a la misma posición; también puedes abrir la tarea a página completa.",
 	"help.dashboard.projects.body":

@@ -56,7 +56,7 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Projects",
 	"help.dashboard.workspaceBoard.title": "Workspace board",
-	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Create from a project's To Do cell; moves stay inside that project, and click any active task to open its coding workspace without leaving the board.",
+	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Create from a project's To Do cell; moves stay inside that project, and click any active task to open its coding workspace without leaving the board. Compact titles stay on one line; hover a card for the complete title and latest update.",
 	"help.dashboard.workspaceTaskOverlay.title": "Task workspace over the board",
 	"help.dashboard.workspaceTaskOverlay.body": "The full task inspector and coding terminal float above the workspace board. Click the dimmed board around it or Close to return to the exact board position, or open the task full page when you want to leave the cross-project view.",
 	"help.dashboard.projects.body":
