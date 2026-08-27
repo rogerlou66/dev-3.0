@@ -99,6 +99,7 @@ function Dashboard({ projects, dispatch, navigate, bellCounts, onOpenAddProject,
 						bellCounts={bellCounts}
 						onOpenCreateTask={onOpenCreateTask}
 						onOpenWorkspaceTask={onOpenWorkspaceTask}
+						onReorderProjects={handleReorderProjects}
 					/> : <ActivityOverview
 						projects={projects}
 						dispatch={dispatch}

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type DragEvent } from "react";
 import type { CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
-import { getAllowedTransitions, getTaskTitle, orderProjectsForDisplay } from "../../shared/types";
+import { getAllowedTransitions, getTaskTitle, isBuiltinOpsProject, orderProjectsForDisplay } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { getTaskOpenMode } from "../state";
 import { useT, statusKey } from "../i18n";
@@ -25,13 +25,15 @@ interface WorkspaceBoardProps {
 	bellCounts: Map<string, number>;
 	onOpenCreateTask: (projectId: string) => void;
 	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
+	onReorderProjects?: (projectIds: string[]) => void | Promise<void>;
 }
 
 const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
 const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
+type ProjectDropSide = "before" | "after";
 
-function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenWorkspaceTask }: WorkspaceBoardProps) {
+function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenWorkspaceTask, onReorderProjects }: WorkspaceBoardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -46,6 +48,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	const [loading, setLoading] = useState(true);
 	const [loadErrors, setLoadErrors] = useState<string[]>([]);
 	const [dragged, setDragged] = useState<{ projectId: string; taskId: string; status: TaskStatus } | null>(null);
+	const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+	const [projectDropTarget, setProjectDropTarget] = useState<{ projectId: string; side: ProjectDropSide } | null>(null);
 	const [movingTaskIds, setMovingTaskIds] = useState<Set<string>>(new Set());
 	const [expandedCompletedProjects, setExpandedCompletedProjects] = useState<Set<string>>(new Set());
 	const [launchModal, setLaunchModal] = useState<{ task: Task; project: Project; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
@@ -99,7 +103,11 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	}, []);
 
 	useEffect(() => {
-		const clearDrag = () => setDragged(null);
+		const clearDrag = () => {
+			setDragged(null);
+			setDraggedProjectId(null);
+			setProjectDropTarget(null);
+		};
 		window.addEventListener("dragend", clearDrag);
 		return () => window.removeEventListener("dragend", clearDrag);
 	}, []);
@@ -118,6 +126,49 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		}
 		return next;
 	}, [allTasks]);
+
+	function reorderProject(sourceProjectId: string, targetProjectId: string, side: ProjectDropSide) {
+		if (!onReorderProjects || sourceProjectId === targetProjectId) return;
+		const source = orderedProjects.find((project) => project.id === sourceProjectId);
+		const target = orderedProjects.find((project) => project.id === targetProjectId);
+		if (!source || !target || source.kind === "virtual" || isBuiltinOpsProject(target)) return;
+		const projectIds = orderedProjects.map((project) => project.id);
+		projectIds.splice(projectIds.indexOf(sourceProjectId), 1);
+		const targetIndex = projectIds.indexOf(targetProjectId);
+		projectIds.splice(side === "after" ? targetIndex + 1 : targetIndex, 0, sourceProjectId);
+		void onReorderProjects(projectIds);
+	}
+
+	function moveProjectByStep(projectId: string, step: -1 | 1) {
+		const index = orderedProjects.findIndex((project) => project.id === projectId);
+		const target = orderedProjects[index + step];
+		if (!target) return;
+		reorderProject(projectId, target.id, step < 0 ? "before" : "after");
+	}
+
+	function handleProjectDragOver(event: DragEvent<HTMLElement>, projectId: string) {
+		if (!draggedProjectId || draggedProjectId === projectId) return;
+		const target = orderedProjects.find((project) => project.id === projectId);
+		if (!target || isBuiltinOpsProject(target)) return;
+		event.preventDefault();
+		event.dataTransfer.dropEffect = "move";
+		const rect = event.currentTarget.getBoundingClientRect();
+		setProjectDropTarget({
+			projectId,
+			side: event.clientY > rect.top + rect.height / 2 ? "after" : "before",
+		});
+	}
+
+	function handleProjectDrop(event: DragEvent<HTMLElement>, projectId: string) {
+		if (!draggedProjectId) return;
+		event.preventDefault();
+		const rect = event.currentTarget.getBoundingClientRect();
+		const side: ProjectDropSide = event.clientY > rect.top + rect.height / 2 ? "after" : "before";
+		const sourceProjectId = draggedProjectId;
+		setDraggedProjectId(null);
+		setProjectDropTarget(null);
+		reorderProject(sourceProjectId, projectId, side);
+	}
 
 	const updateLocalTask = useCallback((task: Task) => {
 		setTasksByProject((previous) => {
@@ -282,15 +333,39 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		count: orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0),
 		element: (
 			<div className="h-full w-full overflow-y-auto rounded-xl border border-edge bg-base/30 p-2">
-				{orderedProjects.map((project) => {
+				{orderedProjects.map((project, projectIndex) => {
 					const projectTasks = tasksByProject.get(project.id) ?? [];
 					const siblingMap = new Map<string, Task[]>();
 					for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
 					const cellTasks = tasksForCell(project, column);
 					const available = isColumnAvailable(project, column) || cellTasks.length > 0;
+					const cannotReorder = project.kind === "virtual";
+					const hasPinnedBuiltin = orderedProjects.length > 0 && isBuiltinOpsProject(orderedProjects[0]);
+					const cannotMoveUp = projectIndex === 0 || (hasPinnedBuiltin && projectIndex === 1) || cannotReorder;
+					const cannotMoveDown = projectIndex === orderedProjects.length - 1 || cannotReorder;
 					return (
 						<section key={project.id} className="mb-3 rounded-lg border border-edge bg-raised/30 p-2" aria-label={project.name}>
-							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mb-2 block w-full truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
+							<div className="mb-2 flex items-center gap-1">
+								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
+								<button
+									type="button"
+									onClick={() => moveProjectByStep(project.id, -1)}
+									disabled={!onReorderProjects || cannotMoveUp}
+									aria-label={t("dashboard.moveProjectUp")}
+									className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"
+								>
+									<span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF062"}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => moveProjectByStep(project.id, 1)}
+									disabled={!onReorderProjects || cannotMoveDown}
+									aria-label={t("dashboard.moveProjectDown")}
+									className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"
+								>
+									<span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF063"}</span>
+								</button>
+							</div>
 							<div className="space-y-2">
 								{cellTasks.length > 0
 									? visibleTasksForCell(project, column, cellTasks).map((task) => renderTaskCard(project, task, siblingMap))
@@ -319,15 +394,57 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2 py-3"><span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.04em] text-fg">{columnLabel(column)}</span>{count > 0 && <span className="ml-auto rounded-full bg-fg/8 px-1.5 text-dense text-fg-3">{count}</span>}</div>;
 				})}
 			</div>
-			{orderedProjects.map((project) => {
+			{orderedProjects.map((project, projectIndex) => {
 				const projectTasks = tasksByProject.get(project.id) ?? [];
 				const siblingMap = new Map<string, Task[]>();
 				for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
+				const cannotReorder = project.kind === "virtual";
+				const dragEnabled = !!onReorderProjects && !cannotReorder;
+				const isDragged = draggedProjectId === project.id;
+				const showDropBefore = projectDropTarget?.projectId === project.id && projectDropTarget.side === "before";
+				const showDropAfter = projectDropTarget?.projectId === project.id && projectDropTarget.side === "after";
+				const hasPinnedBuiltin = orderedProjects.length > 0 && isBuiltinOpsProject(orderedProjects[0]);
+				const cannotMoveUp = projectIndex === 0 || (hasPinnedBuiltin && projectIndex === 1) || cannotReorder;
+				const cannotMoveDown = projectIndex === orderedProjects.length - 1 || cannotReorder;
 				return (
-					<section key={project.id} className="grid min-h-36 border-b border-edge" style={{ gridTemplateColumns: `10rem repeat(${columns.length}, minmax(0, 1fr))` }} aria-label={project.name}>
+					<section
+						key={project.id}
+						className={`relative grid min-h-36 border-b border-edge transition-opacity ${isDragged ? "opacity-60" : ""}`}
+						style={{ gridTemplateColumns: `10rem repeat(${columns.length}, minmax(0, 1fr))` }}
+						aria-label={project.name}
+						onDragOver={(event) => handleProjectDragOver(event, project.id)}
+						onDragLeave={() => setProjectDropTarget((current) => current?.projectId === project.id ? null : current)}
+						onDrop={(event) => handleProjectDrop(event, project.id)}
+					>
+						{showDropBefore && <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />}
+						{showDropAfter && <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />}
 						<div className="sticky left-0 z-10 bg-base/90 px-3 py-3">
-							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="block w-full truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
+							<div className="flex items-start gap-1">
+								<span
+									role="presentation"
+									draggable={dragEnabled}
+									onDragStart={(event) => {
+										if (!dragEnabled) return;
+										setDraggedProjectId(project.id);
+										event.dataTransfer.setData("text/plain", `project:${project.id}`);
+										event.dataTransfer.effectAllowed = "move";
+									}}
+									onDragEnd={() => {
+										setDraggedProjectId(null);
+										setProjectDropTarget(null);
+									}}
+									title={dragEnabled ? t("dashboard.reorderProject") : undefined}
+									className={`-ml-1 rounded-lg p-1 text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
+								>
+									<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F01DB}"}</span>
+								</span>
+								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
+							</div>
 							<div className="mt-1 text-dense text-fg-muted">{t("workspaceBoard.taskCount", { count: String(projectTasks.length) })}</div>
+							<div className="mt-1 flex items-center gap-0.5">
+								<button type="button" onClick={() => moveProjectByStep(project.id, -1)} disabled={!onReorderProjects || cannotMoveUp} title={t("dashboard.moveProjectUp")} aria-label={t("dashboard.moveProjectUp")} className="rounded p-1 text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"><span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF062"}</span></button>
+								<button type="button" onClick={() => moveProjectByStep(project.id, 1)} disabled={!onReorderProjects || cannotMoveDown} title={t("dashboard.moveProjectDown")} aria-label={t("dashboard.moveProjectDown")} className="rounded p-1 text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"><span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF063"}</span></button>
+							</div>
 							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mt-3 text-xs font-medium text-accent hover:underline">{t("workspaceBoard.openProject")}</button>
 						</div>
 						{columns.map((column) => {

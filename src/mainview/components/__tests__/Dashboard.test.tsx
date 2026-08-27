@@ -117,6 +117,26 @@ describe("Dashboard", () => {
 		await waitFor(() => expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-current", "page"));
 	});
 
+	it("persists project priority changes made on the workspace board", async () => {
+		const dispatch = vi.fn();
+		const projects = [
+			mockProject,
+			{ ...mockProject, id: "p2", name: "Second", path: "/home/user/second" },
+		];
+		mockedApi.request.getWorkspaceBoardTasks.mockResolvedValue([
+			{ projectId: "p1", tasks: [] },
+			{ projectId: "p2", tasks: [] },
+		]);
+		mockedApi.request.reorderProjects.mockResolvedValue([projects[1], projects[0]]);
+
+		renderDashboard(projects, dispatch, vi.fn(), vi.fn(), "board");
+		const firstProject = await screen.findByRole("region", { name: "My Project" });
+		await userEvent.click(within(firstProject).getByRole("button", { name: "Move project down" }));
+
+		expect(dispatch).toHaveBeenCalledWith({ type: "reorderProjects", projectIds: ["p2", "p1"] });
+		expect(mockedApi.request.reorderProjects).toHaveBeenCalledWith({ projectIds: ["p2", "p1"] });
+	});
+
 	describe("empty state", () => {
 		it("shows empty state message", () => {
 			renderDashboard();

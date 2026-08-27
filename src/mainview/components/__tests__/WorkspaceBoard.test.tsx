@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import WorkspaceBoard from "../WorkspaceBoard";
 import { I18nProvider } from "../../i18n";
@@ -91,6 +91,46 @@ describe("WorkspaceBoard", () => {
 		await screen.findByText("Alpha");
 		await userEvent.click(screen.getAllByRole("button", { name: "+ New Task" })[1]);
 		expect(onOpenCreateTask).toHaveBeenCalledWith("p2");
+	});
+
+	it("reorders whole project swimlanes from the project drag handle", async () => {
+		const onReorderProjects = vi.fn();
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "p1", tasks: [] },
+			{ projectId: "p2", tasks: [] },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onReorderProjects={onReorderProjects} /></I18nProvider>);
+
+		await screen.findByText("Alpha");
+		const betaHandle = screen.getAllByTitle("Drag to reorder project")[1];
+		const alphaRow = screen.getByRole("region", { name: "Alpha" });
+		const dataTransfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+		vi.spyOn(alphaRow, "getBoundingClientRect").mockReturnValue({ top: 0, height: 100 } as DOMRect);
+		fireEvent.dragStart(betaHandle, { dataTransfer });
+		fireEvent.dragOver(alphaRow, { clientY: 25, dataTransfer });
+		fireEvent.drop(alphaRow, { clientY: 25, dataTransfer });
+
+		expect(onReorderProjects).toHaveBeenCalledWith(["p2", "p1"]);
+	});
+
+	it("pins Operations and exposes step controls as the non-drag path", async () => {
+		const onReorderProjects = vi.fn();
+		const operations: Project = { ...projects[0], id: "ops", name: "Operations", kind: "virtual", builtin: true };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "ops", tasks: [] },
+			{ projectId: "p1", tasks: [] },
+			{ projectId: "p2", tasks: [] },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0], operations, projects[1]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onReorderProjects={onReorderProjects} /></I18nProvider>);
+
+		const operationsRow = await screen.findByRole("region", { name: "Operations" });
+		const alphaRow = screen.getByRole("region", { name: "Alpha" });
+		expect(within(operationsRow).getByRole("button", { name: "Move project down" })).toBeDisabled();
+		expect(within(alphaRow).getByRole("button", { name: "Move project up" })).toBeDisabled();
+		await userEvent.click(within(alphaRow).getByRole("button", { name: "Move project down" }));
+		expect(onReorderProjects).toHaveBeenCalledWith(["ops", "p2", "p1"]);
 	});
 
 	it("hands an active task and its project cache to the workspace overlay host", async () => {

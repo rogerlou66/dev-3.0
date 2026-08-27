@@ -4,6 +4,12 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+## 2026-08-27 — Workspace swimlanes express project priority
+
+- **Rule:** Dashboard → Board reuses the persisted project order: drag a desktop project handle or use up/down controls to move the whole swimlane; Operations remains pinned and task dragging remains project-scoped.
+- **Why:** Cross-project scanning loses its value when important projects are trapped below less urgent ones; a second Board-only ranking would make Board and Projects disagree.
+- **Status:** Implemented. Evidence: `WorkspaceBoard.tsx`, `Dashboard.tsx`, `WorkspaceBoard.test.tsx`, bible §5.
+
 ## 2026-08-26 — Workspace Board opens one focused task overlay
 
 - **Rule:** Clicking an active/preparing/recoverable task on Dashboard → Board opens one modal, non-route `WorkspaceTaskOverlay` (`92vw × 88dvh`, full-bleed narrow) over the still-mounted inert board; terminal Tab/Escape pass through, Close/Back/backdrop/Global Kanban return to the board, Open full page hands off to the route, and non-live cards keep their detail/edit flow.

@@ -236,8 +236,9 @@ ux_architecture:
       shortcut: "A remappable app-level shortcut opens this surface directly (default: Command+Backquote on macOS, Ctrl+Backquote elsewhere) and forces Board when Dashboard > Projects is active."
       creation: "Each project swimlane owns a New Task action in its To Do cell; it opens the existing create-task modal preselected to that project."
       search_placement: "One trailing field in the Board | Projects tab row, visible only while Board is active and flex-shrinking before either tab."
-      allowed: ["object_card", "same_project_drag_move", "task_open", "project_open", "search"]
+      allowed: ["object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search"]
       forbidden: ["cross_project_drag", "project_specific_column_config", "custom_column_drop"]
+      project_order: "The persisted project order is shared with Dashboard > Projects and moves the entire swimlane. Desktop uses a dedicated drag handle plus keyboard step controls; narrow layouts use 44px up/down controls. Virtual projects cannot be reordered and the built-in Operations board stays pinned first."
       custom_columns: "Project-specific custom columns roll up into one occupied-only Custom display column; lifecycle menu retains the precise project column."
       completed_disclosure: "Each project cell shows its two newest Completed tasks by default; Show N more expands all remaining Completed history for that project, and Show less restores the compact state."
       status: "observed"
