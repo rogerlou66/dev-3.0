@@ -150,7 +150,13 @@ function WorkspaceTaskOverlay({
 		: t("workspaceTaskOverlay.title");
 
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-0 md:p-[6vh_4vw]" data-testid="workspace-task-overlay">
+		<div
+			className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-0 md:p-[6vh_4vw]"
+			data-testid="workspace-task-overlay"
+			onPointerDown={(event) => {
+				if (event.target === event.currentTarget) onRequestClose();
+			}}
+		>
 			<section
 				ref={dialogRef}
 				role="dialog"

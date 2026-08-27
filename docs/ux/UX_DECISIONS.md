@@ -6,7 +6,7 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 ## 2026-08-26 — Workspace Board opens one focused task overlay
 
-- **Rule:** Clicking an active/preparing/recoverable task on Dashboard → Board opens one modal, non-route `WorkspaceTaskOverlay` (`92vw × 88dvh`, full-bleed narrow) over the still-mounted inert board; terminal Tab/Escape pass through, Close/Back/Global Kanban return to the board, Open full page hands off to the route, and non-live cards keep their detail/edit flow.
+- **Rule:** Clicking an active/preparing/recoverable task on Dashboard → Board opens one modal, non-route `WorkspaceTaskOverlay` (`92vw × 88dvh`, full-bleed narrow) over the still-mounted inert board; terminal Tab/Escape pass through, Close/Back/backdrop/Global Kanban return to the board, Open full page hands off to the route, and non-live cards keep their detail/edit flow.
 - **Why:** Route navigation discarded the cross-project scan context the user was working from; a drawer squeezed the terminal, a popover could not host the full inspector/workspace, and multiple draggable windows would create a second window manager.
 - **Status:** Implemented. Evidence: `WorkspaceTaskOverlay.tsx`, `App.tsx`, `WorkspaceBoard.tsx`, bible §5/§12.
 

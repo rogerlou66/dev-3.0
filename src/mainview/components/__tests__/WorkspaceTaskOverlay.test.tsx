@@ -82,17 +82,19 @@ describe("WorkspaceTaskOverlay", () => {
 		expect(getTasks).toHaveBeenCalledTimes(1);
 	});
 
-	it("uses explicit full-page and close controls without backdrop dismissal", async () => {
+	it("supports full-page, close, and backdrop dismissal", async () => {
 		const onOpenFullPage = vi.fn();
 		const onRequestClose = vi.fn();
 		renderOverlay({ onOpenFullPage, onRequestClose });
 
 		await userEvent.click(screen.getByRole("button", { name: "Open full page" }));
 		expect(onOpenFullPage).toHaveBeenCalledOnce();
-		fireEvent.mouseDown(screen.getByTestId("workspace-task-overlay"));
+		fireEvent.pointerDown(screen.getByRole("dialog"));
 		expect(onRequestClose).not.toHaveBeenCalled();
-		await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
+		fireEvent.pointerDown(screen.getByTestId("workspace-task-overlay"));
 		expect(onRequestClose).toHaveBeenCalledOnce();
+		await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
+		expect(onRequestClose).toHaveBeenCalledTimes(2);
 	});
 
 	it("keeps Escape inside the terminal and closes from outside or Back", () => {

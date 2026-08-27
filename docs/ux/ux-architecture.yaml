@@ -247,9 +247,9 @@ ux_architecture:
       feature_class: ["object_detail_overlay", "task_workspace"]
       reached_from: ["dashboard.workspace_board.active_task_card"]
       allowed: ["task_info_panel", "task_terminal", "inline_diff", "task_artifact_workspace", "explicit_full_page_handoff", "close"]
-      forbidden: ["new_destination", "breadcrumb", "multiple_windows", "todo_or_archived_terminal", "native_dialog", "backdrop_dismissal", "drag_or_resize", "persisted_geometry"]
+      forbidden: ["new_destination", "breadcrumb", "multiple_windows", "todo_or_archived_terminal", "native_dialog", "drag_or_resize", "persisted_geometry"]
       state: "Renderer-only and ephemeral: opening/closing does not change Route, route history, last-route persistence, board search, scroll, carousel, or disclosure state."
-      interaction: "One focused modal layer at a time. Background board + global chrome are inert; Close, Back, or the existing Global Kanban action restores the board. Terminal-focused Tab/Escape stay in the TUI; outside the terminal focus is contained and Escape/Back close after nested layers and dirty-review guards."
+      interaction: "One focused modal layer at a time. Background board + global chrome are inert; Close, Back, backdrop click, or the existing Global Kanban action restores the board. Terminal-focused Tab/Escape stay in the TUI; outside the terminal focus is contained and every dismissal path retains nested-layer and dirty-review guards."
       open_policy: "Active/preparing/hibernated/recoverable task cards open it only from Workspace Board. Todo/draft/completed/cancelled retain detail/edit; project cards, sidebar, notifications, and deep links retain configured split/fullscreen behavior."
       layout: "Wide: centered 92vw x 88dvh solid overlay with a light scrim. Narrow: full-bleed one-at-a-time workspace over the still-mounted board."
       status: "observed"
