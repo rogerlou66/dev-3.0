@@ -156,7 +156,7 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 
 		// ── View navigation ──
 		case "view-dashboard":
-			navigate(ctx, { screen: "dashboard" });
+			window.dispatchEvent(new CustomEvent("menu:open-workspace-board"));
 			return;
 		case "view-kanban": {
 			const projectId = currentProjectId(state);

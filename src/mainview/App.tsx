@@ -696,6 +696,11 @@ function App() {
 		setWorkspaceBoardRequest((request) => request + 1);
 		navigate({ screen: "dashboard" });
 	}, [navigate]);
+	useEffect(() => {
+		function onOpenWorkspaceBoard() { openWorkspaceBoard(); }
+		window.addEventListener("menu:open-workspace-board", onOpenWorkspaceBoard);
+		return () => window.removeEventListener("menu:open-workspace-board", onOpenWorkspaceBoard);
+	}, [openWorkspaceBoard]);
 
 	const toggleTerminalImmersive = useCallback(() => {
 		if (!isTaskTerminalRoute(routeRef.current) && !workspaceTaskTargetRef.current) return;
@@ -1033,7 +1038,11 @@ function App() {
 			// While hint mode is active the overlay owns every keystroke.
 			if (hintMode) return;
 			if (workspaceTaskTarget && !terminalImmersiveVisible) {
-				if (matchesShortcut(e, "back")) {
+				if (matchesShortcut(e, "workspace-board")) {
+					e.preventDefault();
+					e.stopPropagation();
+					openWorkspaceBoard();
+				} else if (matchesShortcut(e, "back")) {
 					e.preventDefault();
 					e.stopPropagation();
 					requestWorkspaceDismiss();

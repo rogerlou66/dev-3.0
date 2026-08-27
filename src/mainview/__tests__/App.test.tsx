@@ -527,6 +527,18 @@ describe("App keyboard shortcuts", () => {
 			await userEvent.click(screen.getByRole("button", { name: "Discard" }));
 			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
 		});
+
+		it("returns to the board when Global Kanban is chosen", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			expect(screen.getByTestId("workspace-task-overlay")).toBeInTheDocument();
+
+			act(() => window.dispatchEvent(new CustomEvent("rpc:menuAction", { detail: { action: "view-dashboard" } })));
+
+			await waitFor(() => expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument());
+			expect(screen.getByTestId("dashboard-screen")).toHaveAttribute("data-workspace-board-request", "1");
+		});
 	});
 
 	describe("live variant cycling", () => {

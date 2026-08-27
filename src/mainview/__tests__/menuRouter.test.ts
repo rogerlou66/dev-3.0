@@ -30,6 +30,16 @@ describe("handleMenuAction — palette openers", () => {
 		window.removeEventListener("menu:open-command-palette", listener);
 		expect(listener).toHaveBeenCalledTimes(1);
 	});
+
+	it("dispatches menu:open-workspace-board for view-dashboard", async () => {
+		ctx.dispatch.mockClear();
+		const listener = vi.fn();
+		window.addEventListener("menu:open-workspace-board", listener);
+		await handleMenuAction("view-dashboard", ctx);
+		window.removeEventListener("menu:open-workspace-board", listener);
+		expect(listener).toHaveBeenCalledTimes(1);
+		expect(ctx.dispatch).not.toHaveBeenCalled();
+	});
 });
 
 describe("handleMenuAction — toggle-streamer-mode", () => {
