@@ -244,10 +244,10 @@ ux_architecture:
       lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review mounts only while occupied; PR Review remains visible for peer-reviewed git projects; Completed remains visible; the workspace board omits Cancelled while project boards retain it as reachable history."
       desktop_layout: "Compact equal-width grid across available space; no default horizontal scrollbar for the standard lifecycle columns."
     workspace_board:
-      purpose: "Cross-project daily work: one lifecycle header, project swimlanes."
-      allowed: ["object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create"]
+      purpose: "Cross-project daily work: Inbox + compact project swimlanes."
+      allowed: ["human_inbox", "object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create", "completed_disclosure"]
       forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
-      contract: "Board-tab search; occupied-only Custom; two newest Completed + local disclosure; direct shortcut. Desktop drag handles reorder whole swimlanes; narrow layouts preserve that order. Virtual boards stay fixed, Operations pinned, and project names are the sole open controls."
+      contract: "Inbox duplicates human-owned work; AI Review stays distinct. Done counts disclose completed cards; empty rows retain New Task. Search, lifecycle actions, same-project drag, reorder, Custom, live refresh and the narrow carousel remain."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
     workspace_task_overlay:

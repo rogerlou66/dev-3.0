@@ -51,7 +51,7 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Proyectos",
 	"help.dashboard.workspaceBoard.title": "Tablero global",
-	"help.dashboard.workspaceBoard.body": "Trabaja con todos los proyectos en un tablero alineado. En escritorio, arrastra el tirador para priorizar toda la fila; haz clic en el nombre para abrir el proyecto. Las tareas solo se mueven dentro de su proyecto y las activas se abren sobre el tablero.",
+	"help.dashboard.workspaceBoard.body": "La bandeja reúne arriba las preguntas y tareas para tu revisión; debajo quedan las filas compactas de todos los proyectos. En escritorio, arrastra el tirador, abre las completadas desde el contador y abre una tarea activa sin salir del tablero.",
 	"help.dashboard.workspaceTaskOverlay.title": "Espacio de trabajo sobre el tablero",
 	"help.dashboard.workspaceTaskOverlay.body": "El inspector completo y el terminal del agente flotan sobre el tablero global. Haz clic en el tablero atenuado alrededor o ciérralo para volver a la misma posición; también puedes abrir la tarea a página completa.",
 	"help.dashboard.projects.body":

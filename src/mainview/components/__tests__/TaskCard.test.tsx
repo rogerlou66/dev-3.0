@@ -209,6 +209,7 @@ describe("TaskCard", () => {
 		it("keeps the title to one truncated line and does not let the rail label set card height", () => {
 			renderCard(makeTask({ status: "review-by-user", title: "A very long task title that cannot fit inside one compact card" }), { compact: true });
 
+			expect(screen.getByTestId("workspace-compact-task-card")).toHaveClass("h-[3.25rem]");
 			expect(screen.getByTestId("task-card-title")).toHaveClass("truncate", "whitespace-nowrap");
 			expect(screen.getByTestId("task-card-title")).not.toHaveClass("line-clamp-2");
 			expect(within(screen.getByTestId("task-card-rail")).queryByText("REVIEW")).not.toBeInTheDocument();

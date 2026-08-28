@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type DragEvent } from "react";
 import type { CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
-import { getAllowedTransitions, getTaskTitle, isBuiltinOpsProject, orderProjectsForDisplay } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, isBuiltinOpsProject, orderProjectsForDisplay, taskSortRank } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { getTaskOpenMode } from "../state";
 import { useT, statusKey } from "../i18n";
@@ -11,6 +11,7 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { sortTasksForColumn } from "./sortTasks";
 import TaskCard from "./TaskCard";
+import PriorityBadge from "./PriorityBadge";
 import LaunchVariantsModal from "./LaunchVariantsModal";
 import MobileBoardCarousel, { CAROUSEL_MAX_WIDTH, type CarouselColumn } from "./MobileBoardCarousel";
 
@@ -24,6 +25,7 @@ interface WorkspaceBoardProps {
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
 	onOpenCreateTask: (projectId: string) => void;
+	onOpenAddProject?: () => void;
 	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
 	onReorderProjects?: (projectIds: string[]) => void | Promise<void>;
 }
@@ -33,7 +35,7 @@ const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 type ProjectDropSide = "before" | "after";
 
-function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenWorkspaceTask, onReorderProjects }: WorkspaceBoardProps) {
+function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenAddProject, onOpenWorkspaceTask, onReorderProjects }: WorkspaceBoardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -52,6 +54,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	const [projectDropTarget, setProjectDropTarget] = useState<{ projectId: string; side: ProjectDropSide } | null>(null);
 	const [movingTaskIds, setMovingTaskIds] = useState<Set<string>>(new Set());
 	const [expandedCompletedProjects, setExpandedCompletedProjects] = useState<Set<string>>(new Set());
+	const [inboxExpanded, setInboxExpanded] = useState(false);
 	const [launchModal, setLaunchModal] = useState<{ task: Task; project: Project; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
 
 	const load = useCallback(async () => {
@@ -126,6 +129,28 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		}
 		return next;
 	}, [allTasks]);
+	const desktopColumns = useMemo(() => columns.filter((column) => column !== "completed"), [columns]);
+	const projectById = useMemo(() => new Map(orderedProjects.map((project) => [project.id, project])), [orderedProjects]);
+
+	function matchesWorkspaceQuery(project: Project, task: Task): boolean {
+		const normalizedQuery = query.trim().toLocaleLowerCase();
+		return !normalizedQuery || `${project.name} ${getTaskTitle(task)} ${task.description}`.toLocaleLowerCase().includes(normalizedQuery);
+	}
+
+	const inboxItems = useMemo(() => {
+		const items = allTasks
+			.filter((task) => task.status === "user-questions" || task.status === "review-by-user")
+			.map((task) => ({ task, project: projectById.get(task.projectId) }))
+			.filter((entry): entry is { task: Task; project: Project } => !!entry.project)
+			.filter(({ task, project }) => matchesWorkspaceQuery(project, task));
+		return items.sort((a, b) => {
+			const rankDelta = taskSortRank(a.task) - taskSortRank(b.task);
+			if (rankDelta !== 0) return rankDelta;
+			const aTime = Date.parse(a.task.movedAt ?? a.task.updatedAt ?? a.task.createdAt);
+			const bTime = Date.parse(b.task.movedAt ?? b.task.updatedAt ?? b.task.createdAt);
+			return globalSettings.taskSortOrder === "newest-first" ? bTime - aTime : aTime - bTime;
+		});
+	}, [allTasks, globalSettings.taskSortOrder, projectById, query]);
 
 	function reorderProject(sourceProjectId: string, targetProjectId: string, side: ProjectDropSide) {
 		if (!onReorderProjects || sourceProjectId === targetProjectId) return;
@@ -194,7 +219,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	}, [dispatch, updateLocalTask]);
 
 	function tasksForCell(project: Project, column: WorkspaceColumnId): Task[] {
-		const normalizedQuery = query.trim().toLocaleLowerCase();
 		const tasks = (tasksByProject.get(project.id) ?? [])
 			.filter((task) => {
 				if (column === "custom") return Boolean(task.customColumnId);
@@ -202,7 +226,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				if (column === "in-progress") return task.status === "in-progress" || task.status === "user-questions";
 				return task.status === column;
 			})
-			.filter((task) => !normalizedQuery || `${project.name} ${getTaskTitle(task)} ${task.description}`.toLocaleLowerCase().includes(normalizedQuery));
+			.filter((task) => matchesWorkspaceQuery(project, task));
 		return sortTasksForColumn(tasks, globalSettings.taskSortOrder, column === "custom" ? undefined : column);
 	}
 
@@ -227,6 +251,32 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				return next;
 			}),
 		});
+	}
+
+	function openInboxTask(project: Project, task: Task, trigger: HTMLElement | null) {
+		if (onOpenWorkspaceTask && ACTIVE_STATUSES.includes(task.status)) {
+			onOpenWorkspaceTask(project, task, tasksByProject.get(project.id) ?? [task], trigger);
+			return;
+		}
+		navigate({ screen: "task", projectId: project.id, taskId: task.id });
+	}
+
+	function inboxAgentLabel(task: Task): string {
+		const agent = task.agentId ? agents.find((candidate) => candidate.id === task.agentId) : null;
+		const config = agent && task.configId
+			? agent.configurations.find((candidate) => candidate.id === task.configId)
+			: agent?.configurations.find((candidate) => candidate.id === agent.defaultConfigId) ?? agent?.configurations[0];
+		if (config) return config.model ? `${config.name} · ${config.model}` : config.name;
+		return agent?.name ?? "—";
+	}
+
+	function inboxAge(task: Task): string {
+		const enteredAt = Date.parse(task.movedAt ?? task.updatedAt ?? task.createdAt);
+		const elapsed = Math.max(0, Date.now() - enteredAt);
+		if (elapsed < 60_000) return t("activity.justNow");
+		if (elapsed < 3_600_000) return t("activity.minutesAgo", { count: String(Math.floor(elapsed / 60_000)) });
+		if (elapsed < 86_400_000) return t("activity.hoursAgo", { count: String(Math.floor(elapsed / 3_600_000)) });
+		return t("activity.daysAgo", { count: String(Math.floor(elapsed / 86_400_000)) });
 	}
 
 	function columnLabel(column: WorkspaceColumnId): string {
@@ -315,6 +365,66 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		);
 	}
 
+	function renderInbox() {
+		return (
+			<section className="border-b border-edge bg-gradient-to-b from-raised/80 to-base/40 px-3 py-2" aria-label={t("workspaceBoard.inbox")}>
+				<div className="mb-2 flex min-w-0 items-center gap-2">
+					<span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#FFA353] ${inboxItems.length > 0 ? "motion-safe:animate-pulse" : "opacity-40"}`} />
+					<h2 className="text-dense font-bold uppercase tracking-[0.12em] text-fg">{t("workspaceBoard.inbox")}</h2>
+					<span className="rounded bg-[#FFA353] px-1.5 py-px font-mono text-nano font-bold" style={{ color: "#2b1402" }}>{inboxItems.length}</span>
+					<span className="min-w-0 truncate text-xs text-fg-muted">{t("workspaceBoard.inboxDescription")}</span>
+					{inboxItems.length > 0 && (
+						<button type="button" onClick={() => setInboxExpanded((expanded) => !expanded)} aria-expanded={inboxExpanded} className="ml-auto flex-shrink-0 rounded px-2 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent/10">
+							{inboxExpanded ? t("workspaceBoard.collapseInbox") : t("workspaceBoard.openAll")}
+						</button>
+					)}
+				</div>
+				{inboxItems.length === 0 ? (
+					<div className="rounded-lg border border-dashed border-edge px-3 py-2 text-xs text-fg-muted">{t("workspaceBoard.inboxEmpty")}</div>
+				) : (
+					<div className={`flex gap-2 pb-0.5 ${inboxExpanded ? "flex-wrap" : "overflow-x-auto"}`}>
+						{inboxItems.map(({ task, project }) => {
+							const isQuestion = task.status === "user-questions";
+							const statusColor = statusColors[task.status];
+							const busy = movingTaskIds.has(task.id);
+							return (
+								<article key={`inbox:${project.id}:${task.id}`} className="group/inbox flex w-[14.875rem] flex-none flex-col gap-1 rounded-lg border border-edge-active bg-raised/90 px-2.5 py-2 shadow-sm shadow-black/20">
+									<div className="flex min-w-0 items-center gap-1.5">
+										<PriorityBadge priority={task.priority} />
+										<span className="flex-shrink-0 font-mono text-nano text-fg-muted">#{task.seq}</span>
+										<span className="min-w-0 flex-1 truncate text-nano font-medium text-fg-3">{project.name}</span>
+										<span className="flex-shrink-0 text-nano font-semibold" style={{ color: statusColor }}>{isQuestion ? t("workspaceBoard.question") : t("workspaceBoard.review")}</span>
+										<span className="flex-shrink-0 font-mono text-nano text-fg-muted">{inboxAge(task)}</span>
+									</div>
+									<button type="button" onClick={(event) => openInboxTask(project, task, event.currentTarget)} className="flex min-w-0 items-center gap-2 rounded text-left focus-visible:ring-1 focus-visible:ring-accent/70">
+										<span className="h-5 w-0.5 flex-shrink-0 rounded-full" style={{ background: statusColor }} />
+										<span className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border font-mono text-nano" style={{ borderColor: statusColor, color: statusColor }}>{isQuestion ? "?" : "!"}</span>
+										<span className="min-w-0 flex-1 truncate text-xs font-semibold text-fg streamer-private">{getTaskTitle(task)}</span>
+									</button>
+									<div className="truncate font-mono text-nano text-fg-muted">{inboxAgentLabel(task)}</div>
+									<div className="mt-0.5 flex items-center gap-1">
+										{isQuestion ? (
+											<>
+												<button type="button" disabled={busy} onClick={(event) => { event.stopPropagation(); openInboxTask(project, task, event.currentTarget); }} className="rounded-md bg-[#FFA353] px-2 py-1 text-dense font-bold transition-[filter,transform] hover:brightness-110 motion-safe:active:scale-[0.96]" style={{ color: "#2b1402" }}>{t("workspaceBoard.answer")}</button>
+												<button type="button" onClick={() => navigate({ screen: "task", projectId: project.id, taskId: task.id })} className="rounded-md bg-fg/8 px-2 py-1 text-dense font-medium text-fg-2 hover:bg-fg/12">{t("workspaceBoard.open")}</button>
+											</>
+										) : (
+											<>
+												{isColumnAvailable(project, "review-by-colleague") && <button type="button" disabled={busy} onClick={() => void moveTask(project, task, "review-by-colleague")} className="rounded-md bg-[rgb(196_165_255_/_0.14)] px-2 py-1 text-dense font-medium hover:bg-[rgb(196_165_255_/_0.22)]" style={{ color: "#C4A5FF" }}>{t("status.reviewByColleague")}</button>}
+												<button type="button" disabled={busy} onClick={() => void moveTask(project, task, "completed")} className="rounded-md bg-[#3CF3B0] px-2 py-1 text-dense font-bold hover:brightness-110" style={{ color: "#04281c" }}>{t("status.completed")}</button>
+											</>
+										)}
+										<button type="button" disabled={busy} onClick={() => void moveTask(project, task, "cancelled")} className="rounded-md bg-danger/10 px-2 py-1 text-dense font-medium text-danger hover:bg-danger/15">{t("task.cancel")}</button>
+									</div>
+								</article>
+							);
+						})}
+					</div>
+				)}
+			</section>
+		);
+	}
+
 	if (loading && tasksByProject.size === 0) {
 		return <div className="flex h-full items-center justify-center text-sm text-fg-3">{t("workspaceBoard.loading")}</div>;
 	}
@@ -348,25 +458,34 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 			</div>
 		),
 	})) : [];
+	const desktopGridStyle = { gridTemplateColumns: `10.5rem repeat(${desktopColumns.length}, minmax(12.5rem, 1fr)) 4.75rem` };
+	const desktopGridMinWidth = `${10.5 + desktopColumns.length * 12.5 + 4.75}rem`;
 
 	return (
 		<div className="flex h-full min-h-0 flex-col" data-help-id="dashboard.workspace-board" tabIndex={-1}>
 		{loadErrors.length > 0 && <div className="flex justify-end border-b border-edge px-3 py-2"><button onClick={load} className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">{t("workspaceBoard.retry")}</button></div>}
 		{isNarrow ? (
 			<MobileBoardCarousel columns={carouselColumns} initialColumnId={carouselColumns.find((column) => column.id === "in-progress" && column.count > 0)?.id ?? "review-by-user"} />
-		) : <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-			<div className="sticky top-0 z-20 grid border-b border-edge bg-base/95 backdrop-blur" style={{ gridTemplateColumns: `10rem repeat(${columns.length}, minmax(0, 1fr))` }}>
-				<div className="px-3 py-3 text-dense font-bold uppercase tracking-[0.08em] text-fg-3">{t("workspaceBoard.projects")}</div>
-				{columns.map((column) => {
+		) : <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
+			<div style={{ minWidth: desktopGridMinWidth }}>
+				{renderInbox()}
+				<div className="sticky top-0 z-20 grid h-9 border-b border-edge bg-base/95 backdrop-blur" style={desktopGridStyle}>
+					<div className="sticky left-0 z-10 flex items-center bg-base/95 px-3 text-dense font-bold uppercase tracking-[0.12em] text-fg-3">{t("workspaceBoard.projects")}</div>
+					{desktopColumns.map((column) => {
 					const color = column === "custom" ? statusColors.todo : statusColors[column];
 					const count = orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0);
-					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2 py-3"><span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.04em] text-fg">{columnLabel(column)}</span>{count > 0 && <span className="ml-auto rounded-full bg-fg/8 px-1.5 text-dense text-fg-3">{count}</span>}</div>;
-				})}
-			</div>
-			{orderedProjects.map((project) => {
+					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2"><span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.08em] text-fg-2">{columnLabel(column)}</span>{count > 0 && <span className="ml-auto font-mono text-nano text-fg-muted">{count}</span>}</div>;
+					})}
+					<div className="flex items-center gap-1.5 border-l border-edge px-2 text-dense font-bold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceBoard.done")}</div>
+				</div>
+				{orderedProjects.map((project) => {
 				const projectTasks = tasksByProject.get(project.id) ?? [];
 				const siblingMap = new Map<string, Task[]>();
 				for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
+				const completedTasks = tasksForCell(project, "completed");
+				const displayTaskCount = desktopColumns.reduce((sum, column) => sum + tasksForCell(project, column).length, 0);
+				const collapsed = displayTaskCount === 0;
+				const completedExpanded = expandedCompletedProjects.has(project.id);
 				const cannotReorder = project.kind === "virtual";
 				const dragEnabled = !!onReorderProjects && !cannotReorder;
 				const isDragged = draggedProjectId === project.id;
@@ -375,8 +494,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				return (
 					<section
 						key={project.id}
-						className={`relative grid min-h-36 border-b border-edge transition-opacity ${isDragged ? "opacity-60" : ""}`}
-						style={{ gridTemplateColumns: `10rem repeat(${columns.length}, minmax(0, 1fr))` }}
+						className={`relative border-b border-edge transition-opacity ${isDragged ? "opacity-60" : ""}`}
 						aria-label={project.name}
 						onDragOver={(event) => handleProjectDragOver(event, project.id)}
 						onDragLeave={() => setProjectDropTarget((current) => current?.projectId === project.id ? null : current)}
@@ -384,8 +502,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					>
 						{showDropBefore && <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />}
 						{showDropAfter && <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />}
-						<div className="sticky left-0 z-10 bg-base/90 px-3 py-3">
-							<div className="flex items-center gap-1">
+						{collapsed ? (
+							<div className="flex h-9 items-center gap-2 bg-base/60 px-3" style={{ minWidth: desktopGridMinWidth }}>
 								<span
 									role="presentation"
 									draggable={dragEnabled}
@@ -400,15 +518,39 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 										setProjectDropTarget(null);
 									}}
 									title={dragEnabled ? t("dashboard.reorderProject") : undefined}
-									className={`-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
+									className={`-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
 								>
 									<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F01DB}"}</span>
 								</span>
-								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
+								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="max-w-64 truncate text-left text-xs font-semibold text-fg-3 hover:text-accent">{project.name}</button>
+								<span className="text-dense text-fg-muted">{t("workspaceBoard.noActiveSummary", { count: String(completedTasks.length) })}</span>
+								<button type="button" onClick={() => onOpenCreateTask(project.id)} className="ml-auto rounded px-2 py-1 text-dense font-medium text-fg-3 hover:bg-accent/10 hover:text-accent">{t("kanban.newTask")}</button>
+								{completedTasks.length > 0 && <button type="button" onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="rounded px-2 py-1 font-mono text-dense font-semibold text-success hover:bg-success/10">✓ {completedTasks.length}</button>}
 							</div>
-							<div className="mt-1 text-dense text-fg-muted">{t("workspaceBoard.taskCount", { count: String(projectTasks.length) })}</div>
-						</div>
-						{columns.map((column) => {
+						) : (
+						<div className="grid" style={desktopGridStyle}>
+							<div className="sticky left-0 z-10 bg-base/90 px-3 py-2">
+								<div className="flex items-center gap-1">
+									<span
+										role="presentation"
+										draggable={dragEnabled}
+										onDragStart={(event) => {
+											if (!dragEnabled) return;
+											setDraggedProjectId(project.id);
+											event.dataTransfer.setData("text/plain", `project:${project.id}`);
+											event.dataTransfer.effectAllowed = "move";
+										}}
+										onDragEnd={() => { setDraggedProjectId(null); setProjectDropTarget(null); }}
+										title={dragEnabled ? t("dashboard.reorderProject") : undefined}
+										className={`-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-3 transition-colors ${dragEnabled ? "cursor-grab hover:bg-elevated hover:text-fg active:cursor-grabbing" : "cursor-default opacity-40"}`}
+									>
+										<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F01DB}"}</span>
+									</span>
+									<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-fg hover:text-accent">{project.name}</button>
+								</div>
+								<div className="mt-0.5 font-mono text-nano text-fg-muted">{t("workspaceBoard.taskCount", { count: String(projectTasks.length) })}</div>
+							</div>
+						{desktopColumns.map((column) => {
 							const cellTasks = tasksForCell(project, column);
 							const targetStatus = column === "custom" ? null : column;
 							const available = isColumnAvailable(project, column) || cellTasks.length > 0;
@@ -416,7 +558,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 							return (
 								<div
 									key={column}
-									className={`min-w-0 border-l border-edge p-1.5 ${acceptsDrop ? "bg-accent/5" : ""}`}
+									className={`min-w-0 border-l border-edge p-1 ${acceptsDrop ? "bg-accent/5" : ""}`}
 									aria-label={acceptsDrop ? t("workspaceBoard.dropHere", { status: columnLabel(column), project: project.name }) : undefined}
 									onDragOver={acceptsDrop ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } : undefined}
 									onDrop={acceptsDrop ? (event) => {
@@ -427,7 +569,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 									} : undefined}
 								>
 									{acceptsDrop && <div className="mb-1 rounded border border-accent/40 bg-accent/10 px-1.5 py-1 text-center text-dense font-semibold text-accent">{t("workspaceBoard.dropHereShort")}</div>}
-									<div className="space-y-1.5">
+									<div className="space-y-1">
 										{visibleTasksForCell(project, column, cellTasks).map((task) => renderTaskCard(project, task, siblingMap))}
 										{!available && <div className="py-5 text-center text-dense text-fg-muted">{t("workspaceBoard.notApplicable")}</div>}
 										{renderCellOverflow(project, column, cellTasks)}
@@ -436,9 +578,22 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 								</div>
 							);
 						})}
+							<div className="flex items-center justify-center border-l border-edge px-1">
+								<button type="button" disabled={completedTasks.length === 0} onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="rounded px-2 py-1 font-mono text-dense font-semibold text-success transition-colors hover:bg-success/10 disabled:text-fg-muted disabled:hover:bg-transparent">✓ {completedTasks.length}</button>
+							</div>
+						</div>
+						)}
+						{completedExpanded && completedTasks.length > 0 && (
+							<div className="border-t border-edge bg-success/5 px-3 py-2">
+								<div className="mb-2 flex items-center gap-2"><span className="text-dense font-bold uppercase tracking-[0.08em] text-success">{t("status.completed")}</span><span className="font-mono text-nano text-fg-muted">{completedTasks.length}</span><button type="button" onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); next.delete(project.id); return next; })} className="ml-auto rounded px-2 py-1 text-dense text-fg-3 hover:bg-fg/8 hover:text-fg">{t("kanban.showLess")}</button></div>
+								<div className="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-1">{completedTasks.map((task) => renderTaskCard(project, task, siblingMap))}</div>
+							</div>
+						)}
 					</section>
 				);
-			})}
+				})}
+				{onOpenAddProject && <button type="button" onClick={onOpenAddProject} className="flex h-9 w-full items-center px-3 text-xs font-medium text-fg-muted transition-colors hover:bg-accent/5 hover:text-accent">+ {t("dashboard.addProject")}</button>}
+			</div>
 		</div>}
 		{launchModal && <LaunchVariantsModal task={launchModal.task} project={launchModal.project} targetStatus={launchModal.targetStatus} agents={agents} globalSettings={globalSettings} dispatch={localDispatch} onClose={() => setLaunchModal(null)} mode={launchModal.mode} onGlobalSettingsChange={setGlobalSettings} />}
 		</div>

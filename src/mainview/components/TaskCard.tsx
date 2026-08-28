@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, type Dispatch } from "react";
+import { Children, Fragment, useState, useRef, useEffect, useLayoutEffect, type Dispatch } from "react";
 import { toast } from "../toast";
 import { createPortal } from "react-dom";
 import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
@@ -38,6 +38,7 @@ import Tooltip from "./Tooltip";
 import TaskShutdownOverlay from "./TaskShutdownOverlay";
 import TaskPrStatusPopover from "./TaskPrStatusPopover";
 import { summarizeMergeability, type PRMergeabilityReason } from "../../shared/pr-status";
+import PipelineRing from "./PipelineRing";
 
 const SUMMARY_PREVIEW_WIDTH = 360;
 const SUMMARY_PREVIEW_HEIGHT = 190;
@@ -646,7 +647,12 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const [configRef, configTruncated] = useIsTruncated<HTMLSpanElement>(configLabel);
 
 	// ---- SIGNALS zone: read-only facts, grouped git / run / time -------------
-	const gitSignals = [prBadge, mergeBadge, reviewBadge, commentBadge].filter(Boolean);
+	const gitSignals = [
+		prBadge ? <Fragment key="pr">{prBadge}</Fragment> : null,
+		mergeBadge ? <Fragment key="merge">{mergeBadge}</Fragment> : null,
+		reviewBadge ? <Fragment key="review">{reviewBadge}</Fragment> : null,
+		commentBadge ? <Fragment key="comments">{commentBadge}</Fragment> : null,
+	].filter(Boolean);
 	const runSignals: React.ReactNode[] = [];
 	if (isActive && ports && ports.length > 0) {
 		runSignals.push(
@@ -757,21 +763,21 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	if (gitSignals.length) {
 		signalGroups.push(
 			<div key="git" data-testid="task-card-status-badges" className="flex min-w-0 flex-wrap items-center gap-1">
-				{gitSignals}
+				{Children.toArray(gitSignals)}
 			</div>,
 		);
 	}
 	if (runSignals.length) {
 		signalGroups.push(
 			<div key="run" data-testid="task-card-run-signals" className="flex min-w-0 flex-wrap items-center gap-1">
-				{runSignals}
+				{Children.toArray(runSignals)}
 			</div>,
 		);
 	}
 	if (timeSignals.length) {
 		signalGroups.push(
 			<div key="time" data-testid="task-card-time-signals" className="flex min-w-0 flex-wrap items-center gap-1">
-				{timeSignals}
+				{Children.toArray(timeSignals)}
 			</div>,
 		);
 	}
@@ -872,6 +878,163 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			</button>
 		</Tooltip>
 	);
+
+	if (compact && !narrow) {
+		const compactStateBadge = isCoordinator
+			? { label: t("task.coordinatorBadge"), className: "border-success/60 text-success-strong" }
+			: task.taskType === "pr-review"
+				? { label: t("task.prReviewBadge"), className: "border-transparent text-fg-3" }
+				: isDraft
+					? { label: t("task.draftBadge"), className: "border-edge-active text-fg-3" }
+					: isHibernated
+						? { label: t("task.hibernatedBadge"), className: "border-edge-active text-fg-muted" }
+						: isDisconnected
+							? { label: t("task.disconnectedBadge"), className: "border-edge-active text-fg-muted" }
+							: null;
+
+		return (
+			<div
+				ref={cardRef}
+				data-task-id={task.id}
+				data-hint-id={task.id}
+				data-help-id="board.task-card"
+				data-testid="workspace-compact-task-card"
+				data-needs-input={needsInput || undefined}
+				draggable={!isDisabled && !detailOpen && !isHibernated}
+				onDragStart={handleDragStart}
+				onDragEnd={handleDragEnd}
+				onContextMenu={handleContextMenu}
+				onMouseEnter={handleCardMouseEnter}
+				onMouseLeave={handleCardMouseLeave}
+				onClick={handleClick}
+				className={`group relative flex h-[3.25rem] min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
+					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : "border-edge"
+				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
+					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""
+				}`}
+				style={needsInput ? {
+					background: `linear-gradient(90deg, ${statusColors["user-questions"]}18, ${statusColors["user-questions"]}08)`,
+					borderColor: `${statusColors["user-questions"]}70`,
+				} : undefined}
+			>
+				<div aria-hidden="true" className="w-0.5 flex-shrink-0" style={{ background: railColor }} />
+				{bellCount > 0 && (
+					<span className="absolute left-1 top-1 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-nano font-bold leading-none text-white shadow-[0_2px_6px_rgb(239_68_68_/_0.45)]">
+						{bellCount > 9 ? "9+" : bellCount}
+					</span>
+				)}
+				<button
+					ref={statusMenu.triggerRef}
+					type="button"
+					onClick={statusMenu.toggle}
+					disabled={isDisabled || isHibernated}
+					aria-label={`${activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
+					data-testid="task-card-rail"
+					className="flex w-7 flex-shrink-0 items-center justify-center text-fg-3 transition-[filter,transform] hover:brightness-125 motion-safe:active:scale-[0.96] disabled:opacity-50"
+				>
+					{activeCol ? (
+						<span className="h-3 w-3 rounded-full" style={{ background: railColor, boxShadow: `0 0 6px ${railColor}60` }} />
+					) : (
+						<PipelineRing status={task.status} size="compact" tooltip={false} />
+					)}
+				</button>
+
+				<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1 pr-1.5">
+					<div className="flex min-w-0 items-center gap-1.5">
+						{compactStateBadge && (
+							<span className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 py-px text-nano font-semibold uppercase tracking-[0.05em] ${compactStateBadge.className}`}>
+								{compactStateBadge.label}
+							</span>
+						)}
+						{task.scratch && <span className="flex-shrink-0 font-mono text-nano text-fg-3" title={t("task.scratchSession")}>&gt;_</span>}
+						<span
+							data-testid="task-card-title"
+							onClick={handleTitleClick}
+							className="min-w-0 flex-1 truncate whitespace-nowrap text-xs font-semibold leading-snug text-fg streamer-private"
+						>
+							{displayTitle}
+						</span>
+						{isTodo && !isDraft && (
+							<button
+								type="button"
+								onClick={(event) => { event.stopPropagation(); onLaunchVariants(task, "in-progress"); }}
+								aria-label={t("task.run")}
+								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success opacity-0 transition-[opacity,background-color,transform] hover:bg-success/15 group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
+							>
+								<svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4.5v15l12-7.5z" /></svg>
+							</button>
+						)}
+						{canQuickComplete && (
+							<button
+								type="button"
+								onClick={handleQuickComplete}
+								disabled={quickCompleting}
+								aria-label={t("pipeline.completeTooltip")}
+								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success opacity-0 transition-[opacity,background-color,transform] hover:bg-success/15 group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
+							>
+								{quickCompleting ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" /> : <span aria-hidden="true">✓</span>}
+							</button>
+						)}
+						{showDismissButton && (
+							<button
+								type="button"
+								onClick={handleDismiss}
+								aria-label={isCancelled ? t("task.delete") : t("task.cancel")}
+								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-fg-muted opacity-0 transition-[opacity,color,background-color,transform] hover:bg-danger/15 hover:text-danger group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
+							>
+								×
+							</button>
+						)}
+						<PriorityBadge priority={task.priority} onChange={handleSetPriority} className="flex-shrink-0" />
+					</div>
+					<div className="flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-nano text-fg-muted">
+						<span className="flex-shrink-0 text-accent/70">#{task.seq}</span>
+						<NativeBackendMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-native-backend" />
+						<ForeignCodeMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-foreign-code" />
+						<span className="min-w-0 truncate">{configLabel || "—"}</span>
+						{variantDots}
+						{(gitSignals.length > 0 || runSignals.length > 0 || timeSignals.length > 0) && (
+							<div data-testid="task-card-signals" className="ml-auto flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden">
+								{prBadge}
+								{mergeBadge}
+								{reviewBadge}
+								{commentBadge}
+								{Children.toArray(runSignals)}
+								{Children.toArray(timeSignals)}
+							</div>
+						)}
+					</div>
+				</div>
+
+				{isMovingProp && <div className="absolute inset-0 z-20 grid place-items-center bg-base/50"><span className="h-4 w-4 animate-spin rounded-full border-2 border-fg-muted/30 border-t-accent" /></div>}
+				{isPreparing && <div className="absolute inset-0 z-20 flex items-center gap-2 bg-overlay/95 px-3 text-xs text-fg"><span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-fg-muted/30 border-t-accent" />{preparingStageLabel}</div>}
+				{isShuttingDown && <TaskShutdownOverlay />}
+
+				{detailOpen && createPortal(
+					<TaskDetailModal task={task} project={project} dispatch={dispatch} onClose={() => setDetailOpen(false)} onOpenTask={openTaskFromDialog} onLaunchVariants={onLaunchVariants} />,
+					document.body,
+				)}
+				<StatusMenuPortal menu={statusMenu} narrow={narrow} title={t("task.moveTo")} sheetTestId="task-status-sheet">
+					<PipelineDropdown currentStatus={task.status} onMove={handleMove} onMoveToCustomColumn={handleMoveToCustomColumn} onDelete={isCancelled ? handleDelete : undefined} customColumns={project.customColumns} currentCustomColumnId={task.customColumnId} project={project} hideHeader />
+					{hasLiveAgent && (
+						<>
+							<div className="mx-3 my-1 border-t border-edge-active" />
+							<PipelineMenuAction icon={<ClockIcon className="h-4 w-4" />} label={t("task.sendMessageLater")} onClick={(event) => { event.stopPropagation(); setMenuOpen(false); setScheduleMsgOpen(true); }} />
+						</>
+					)}
+				</StatusMenuPortal>
+				{ctxMenuOpen && task.worktreePath && <OpenInMenu position={ctxMenuPos} path={task.worktreePath} taskId={task.id} onClose={() => setCtxMenuOpen(false)} />}
+				{scheduleMsgOpen && createPortal(<ScheduleMessageModal task={task} project={project} dispatch={dispatch} onClose={() => setScheduleMsgOpen(false)} />, document.body)}
+				{summaryPreviewPos && createPortal(
+					<div data-testid="workspace-task-summary-preview" className="pointer-events-none fixed z-50 w-[22.5rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-edge-active bg-overlay shadow-2xl shadow-black/50" style={{ left: summaryPreviewPos.left, top: summaryPreviewPos.top }}>
+						<div className="border-b border-edge px-3 py-2.5"><div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.fullTitle")}</div><div className="mt-1 line-clamp-3 break-words text-sm font-semibold leading-snug text-fg streamer-private">{displayTitle}</div></div>
+						<div className="px-3 py-2.5"><div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.latestUpdate")}</div><p className={`mt-1 line-clamp-5 whitespace-pre-wrap break-words text-xs leading-relaxed ${latestUpdate ? "text-fg-2" : "italic text-fg-muted"}`}>{latestUpdate ?? t("workspaceCard.noLatestUpdate")}</p></div>
+					</div>,
+					document.body,
+				)}
+			</div>
+		);
+	}
 
 	return (
 		<div

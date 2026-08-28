@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import WorkspaceBoard from "../WorkspaceBoard";
 import { I18nProvider } from "../../i18n";
@@ -48,10 +48,10 @@ describe("WorkspaceBoard", () => {
 
 		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 
-		expect(await screen.findByText("Alpha")).toBeInTheDocument();
-		expect(screen.getByText("Beta")).toBeInTheDocument();
-		expect(screen.getByText("question")).toHaveAttribute("data-needs-input", "true");
-		expect(screen.queryByText("Has Questions")).not.toBeInTheDocument();
+		expect(await screen.findByRole("region", { name: "Alpha" })).toBeInTheDocument();
+		expect(screen.getByRole("region", { name: "Beta" })).toBeInTheDocument();
+		expect(screen.getByTestId("workspace-task-question")).toHaveAttribute("data-needs-input", "true");
+		expect(screen.getByRole("region", { name: "Inbox" })).toHaveTextContent("Has Questions");
 		expect(screen.queryByText("AI Review")).not.toBeInTheDocument();
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
 		expect(screen.queryByText("Cancelled")).not.toBeInTheDocument();
@@ -68,8 +68,33 @@ describe("WorkspaceBoard", () => {
 		expect(screen.getByText("PR Review")).toBeInTheDocument();
 	});
 
+	it("collects questions and Your Review work in Inbox without removing their grid cards", async () => {
+		const onOpenWorkspaceTask = vi.fn();
+		const navigate = vi.fn();
+		const question = { ...task("question-inbox", "p1", "user-questions"), priority: "P1" as const, worktreePath: "/tmp/question" };
+		const review = { ...task("review-inbox", "p2", "review-by-user"), priority: "P2" as const, worktreePath: "/tmp/review" };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
+			{ projectId: "p1", tasks: [question] },
+			{ projectId: "p2", tasks: [review] },
+		]);
+
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={navigate} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onOpenWorkspaceTask={onOpenWorkspaceTask} /></I18nProvider>);
+
+		const inbox = await screen.findByRole("region", { name: "Inbox" });
+		expect(within(inbox).getByText("question-inbox")).toBeInTheDocument();
+		expect(within(inbox).getByText("review-inbox")).toBeInTheDocument();
+		expect(screen.getByTestId("workspace-task-question-inbox")).toBeInTheDocument();
+		expect(screen.getByTestId("workspace-task-review-inbox")).toBeInTheDocument();
+
+		await userEvent.click(within(inbox).getByRole("button", { name: "Answer" }));
+		expect(onOpenWorkspaceTask).toHaveBeenCalledWith(projects[0], question, [question], expect.any(HTMLElement));
+		await userEvent.click(within(inbox).getByRole("button", { name: "Open" }));
+		expect(navigate).toHaveBeenCalledWith({ screen: "task", projectId: "p1", taskId: "question-inbox" });
+		expect(within(inbox).getByRole("button", { name: "PR Review" })).toBeInTheDocument();
+	});
+
 	it("marks PR Review unavailable for virtual projects", async () => {
-		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [] }]);
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [task("working", "p1", "in-progress")] }]);
 		const virtualProject = { ...projects[0], kind: "virtual" as const };
 
 		render(<I18nProvider><WorkspaceBoard projects={[virtualProject]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
@@ -156,13 +181,13 @@ describe("WorkspaceBoard", () => {
 
 		await screen.findByText("Alpha");
 		expect(screen.queryByText("created-live")).not.toBeInTheDocument();
-		window.dispatchEvent(new CustomEvent("rpc:taskUpdated", {
+		act(() => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", {
 			detail: { projectId: "p1", task: task("created-live", "p1", "todo") },
-		}));
+		})));
 		expect(await screen.findByText("created-live")).toBeInTheDocument();
 	});
 
-	it("shows the two newest completed tasks and expands the rest per project", async () => {
+	it("keeps completed tasks behind a compact per-project count and expands them independently", async () => {
 		const completedTasks = [1, 2, 3, 4].map((index) => ({
 			...task(`done-${index}`, "p1", "completed"),
 			movedAt: `2026-01-0${index}T00:00:00Z`,
@@ -180,22 +205,24 @@ describe("WorkspaceBoard", () => {
 
 		const alpha = await screen.findByRole("region", { name: "Alpha" });
 		const beta = screen.getByRole("region", { name: "Beta" });
-		expect(within(alpha).getByText("done-4")).toBeInTheDocument();
-		expect(within(alpha).getByText("done-3")).toBeInTheDocument();
+		expect(within(alpha).queryByText("done-4")).not.toBeInTheDocument();
+		expect(within(alpha).queryByText("done-3")).not.toBeInTheDocument();
 		expect(within(alpha).queryByText("done-2")).not.toBeInTheDocument();
 		expect(within(alpha).queryByText("done-1")).not.toBeInTheDocument();
-		expect(within(beta).getByText("beta-done-3")).toBeInTheDocument();
-		expect(within(beta).getByText("beta-done-2")).toBeInTheDocument();
+		expect(within(beta).queryByText("beta-done-3")).not.toBeInTheDocument();
+		expect(within(beta).queryByText("beta-done-2")).not.toBeInTheDocument();
 		expect(within(beta).queryByText("beta-done-1")).not.toBeInTheDocument();
 
-		const showMore = within(alpha).getByRole("button", { name: "Show more (2)" });
-		expect(showMore).toHaveAttribute("aria-expanded", "false");
-		await userEvent.click(showMore);
+		const doneCount = within(alpha).getByRole("button", { name: "✓ 4" });
+		expect(doneCount).toHaveAttribute("aria-expanded", "false");
+		await userEvent.click(doneCount);
 
+		expect(within(alpha).getByText("done-4")).toBeInTheDocument();
+		expect(within(alpha).getByText("done-3")).toBeInTheDocument();
 		expect(within(alpha).getByText("done-2")).toBeInTheDocument();
 		expect(within(alpha).getByText("done-1")).toBeInTheDocument();
-		expect(within(alpha).getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+		expect(within(alpha).getByRole("button", { name: "Show less" })).toBeInTheDocument();
 		expect(within(beta).queryByText("beta-done-1")).not.toBeInTheDocument();
-		expect(within(beta).getByRole("button", { name: "Show more (1)" })).toHaveAttribute("aria-expanded", "false");
+		expect(within(beta).getByRole("button", { name: "✓ 3" })).toHaveAttribute("aria-expanded", "false");
 	});
 });

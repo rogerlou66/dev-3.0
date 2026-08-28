@@ -178,6 +178,7 @@ function Dashboard({
 								navigate={navigate}
 								bellCounts={bellCounts}
 								onOpenCreateTask={onOpenCreateTask}
+								onOpenAddProject={onOpenAddProject}
 								onOpenWorkspaceTask={onOpenWorkspaceTask}
 								onReorderProjects={handleReorderProjects}
 							/>
