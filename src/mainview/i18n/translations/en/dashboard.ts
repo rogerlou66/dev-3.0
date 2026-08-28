@@ -37,7 +37,6 @@ const dashboard = {
 	"workspaceBoard.retry": "Retry failed projects",
 	"workspaceBoard.failedLoad": "Unable to load the workspace board. ({error})",
 	"workspaceBoard.taskCount": "{count} tasks",
-	"workspaceBoard.openProject": "Open project",
 	"workspaceBoard.dropHere": "Move task to {status} in {project}",
 	"workspaceBoard.dropHereShort": "Drop to move",
 	"workspaceBoard.notApplicable": "N/A",

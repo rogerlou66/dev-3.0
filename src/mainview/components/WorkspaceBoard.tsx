@@ -139,13 +139,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		void onReorderProjects(projectIds);
 	}
 
-	function moveProjectByStep(projectId: string, step: -1 | 1) {
-		const index = orderedProjects.findIndex((project) => project.id === projectId);
-		const target = orderedProjects[index + step];
-		if (!target) return;
-		reorderProject(projectId, target.id, step < 0 ? "before" : "after");
-	}
-
 	function handleProjectDragOver(event: DragEvent<HTMLElement>, projectId: string) {
 		if (!draggedProjectId || draggedProjectId === projectId) return;
 		const target = orderedProjects.find((project) => project.id === projectId);
@@ -333,39 +326,15 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		count: orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0),
 		element: (
 			<div className="h-full w-full overflow-y-auto rounded-xl border border-edge bg-base/30 p-2">
-				{orderedProjects.map((project, projectIndex) => {
+				{orderedProjects.map((project) => {
 					const projectTasks = tasksByProject.get(project.id) ?? [];
 					const siblingMap = new Map<string, Task[]>();
 					for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
 					const cellTasks = tasksForCell(project, column);
 					const available = isColumnAvailable(project, column) || cellTasks.length > 0;
-					const cannotReorder = project.kind === "virtual";
-					const hasPinnedBuiltin = orderedProjects.length > 0 && isBuiltinOpsProject(orderedProjects[0]);
-					const cannotMoveUp = projectIndex === 0 || (hasPinnedBuiltin && projectIndex === 1) || cannotReorder;
-					const cannotMoveDown = projectIndex === orderedProjects.length - 1 || cannotReorder;
 					return (
 						<section key={project.id} className="mb-3 rounded-lg border border-edge bg-raised/30 p-2" aria-label={project.name}>
-							<div className="mb-2 flex items-center gap-1">
-								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
-								<button
-									type="button"
-									onClick={() => moveProjectByStep(project.id, -1)}
-									disabled={!onReorderProjects || cannotMoveUp}
-									aria-label={t("dashboard.moveProjectUp")}
-									className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"
-								>
-									<span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF062"}</span>
-								</button>
-								<button
-									type="button"
-									onClick={() => moveProjectByStep(project.id, 1)}
-									disabled={!onReorderProjects || cannotMoveDown}
-									aria-label={t("dashboard.moveProjectDown")}
-									className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"
-								>
-									<span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF063"}</span>
-								</button>
-							</div>
+							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mb-2 block w-full truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
 							<div className="space-y-2">
 								{cellTasks.length > 0
 									? visibleTasksForCell(project, column, cellTasks).map((task) => renderTaskCard(project, task, siblingMap))
@@ -394,7 +363,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2 py-3"><span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.04em] text-fg">{columnLabel(column)}</span>{count > 0 && <span className="ml-auto rounded-full bg-fg/8 px-1.5 text-dense text-fg-3">{count}</span>}</div>;
 				})}
 			</div>
-			{orderedProjects.map((project, projectIndex) => {
+			{orderedProjects.map((project) => {
 				const projectTasks = tasksByProject.get(project.id) ?? [];
 				const siblingMap = new Map<string, Task[]>();
 				for (const task of projectTasks) if (task.groupId) siblingMap.set(task.groupId, [...(siblingMap.get(task.groupId) ?? []), task]);
@@ -403,9 +372,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				const isDragged = draggedProjectId === project.id;
 				const showDropBefore = projectDropTarget?.projectId === project.id && projectDropTarget.side === "before";
 				const showDropAfter = projectDropTarget?.projectId === project.id && projectDropTarget.side === "after";
-				const hasPinnedBuiltin = orderedProjects.length > 0 && isBuiltinOpsProject(orderedProjects[0]);
-				const cannotMoveUp = projectIndex === 0 || (hasPinnedBuiltin && projectIndex === 1) || cannotReorder;
-				const cannotMoveDown = projectIndex === orderedProjects.length - 1 || cannotReorder;
 				return (
 					<section
 						key={project.id}
@@ -441,11 +407,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-fg hover:text-accent">{project.name}</button>
 							</div>
 							<div className="mt-1 text-dense text-fg-muted">{t("workspaceBoard.taskCount", { count: String(projectTasks.length) })}</div>
-							<div className="mt-1 flex items-center gap-0.5">
-								<button type="button" onClick={() => moveProjectByStep(project.id, -1)} disabled={!onReorderProjects || cannotMoveUp} title={t("dashboard.moveProjectUp")} aria-label={t("dashboard.moveProjectUp")} className="rounded p-1 text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"><span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF062"}</span></button>
-								<button type="button" onClick={() => moveProjectByStep(project.id, 1)} disabled={!onReorderProjects || cannotMoveDown} title={t("dashboard.moveProjectDown")} aria-label={t("dashboard.moveProjectDown")} className="rounded p-1 text-fg-3 transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-3"><span aria-hidden="true" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF063"}</span></button>
-							</div>
-							<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="mt-3 text-xs font-medium text-accent hover:underline">{t("workspaceBoard.openProject")}</button>
 						</div>
 						{columns.map((column) => {
 							const cellTasks = tasksForCell(project, column);

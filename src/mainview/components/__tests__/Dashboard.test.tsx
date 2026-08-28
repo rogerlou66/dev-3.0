@@ -133,7 +133,12 @@ describe("Dashboard", () => {
 
 		renderDashboard(projects, dispatch, vi.fn(), vi.fn(), "board");
 		const firstProject = await screen.findByRole("region", { name: "My Project" });
-		await userEvent.click(within(firstProject).getByRole("button", { name: "Move project down" }));
+		const secondProject = screen.getByRole("region", { name: "Second" });
+		const dataTransfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+		vi.spyOn(firstProject, "getBoundingClientRect").mockReturnValue({ top: 0, height: 100 } as DOMRect);
+		fireEvent.dragStart(within(secondProject).getByTitle("Drag to reorder project"), { dataTransfer });
+		fireEvent.dragOver(firstProject, { clientY: 25, dataTransfer });
+		fireEvent.drop(firstProject, { clientY: 25, dataTransfer });
 
 		expect(dispatch).toHaveBeenCalledWith({ type: "reorderProjects", projectIds: ["p2", "p1"] });
 		expect(mockedApi.request.reorderProjects).toHaveBeenCalledWith({ projectIds: ["p2", "p1"] });

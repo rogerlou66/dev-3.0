@@ -57,7 +57,7 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Projects",
 	"help.dashboard.workspaceBoard.title": "Workspace board",
-	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. Drag a project handle to prioritize its whole swimlane; use the up/down controls on narrow screens. Task moves stay inside their project, and active tasks open their coding workspace without leaving the board.",
+	"help.dashboard.workspaceBoard.body": "Work across every project in one aligned board. On desktop, drag a project handle to prioritize its whole swimlane; click the project name to open it. Task moves stay inside their project, and active tasks open their coding workspace without leaving the board.",
 	"help.dashboard.workspaceTaskOverlay.title": "Task workspace over the board",
 	"help.dashboard.workspaceTaskOverlay.body": "The full task inspector and coding terminal float above the workspace board. Click the dimmed board around it or Close to return to the exact board position, or open the task full page when you want to leave the cross-project view.",
 	"help.dashboard.projects.body":

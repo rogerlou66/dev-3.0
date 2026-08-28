@@ -35,7 +35,6 @@ const dashboard = {
 	"workspaceBoard.retry": "Reintentar proyectos fallidos",
 	"workspaceBoard.failedLoad": "No se pudo cargar el tablero global. ({error})",
 	"workspaceBoard.taskCount": "{count} tareas",
-	"workspaceBoard.openProject": "Abrir proyecto",
 	"workspaceBoard.dropHere": "Mover tarea a {status} en {project}",
 	"workspaceBoard.dropHereShort": "Soltar para mover",
 	"workspaceBoard.notApplicable": "No aplicable",

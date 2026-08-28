@@ -114,8 +114,9 @@ describe("WorkspaceBoard", () => {
 		expect(onReorderProjects).toHaveBeenCalledWith(["p2", "p1"]);
 	});
 
-	it("pins Operations and exposes step controls as the non-drag path", async () => {
+	it("pins Operations and leaves project names as the only open-project control", async () => {
 		const onReorderProjects = vi.fn();
+		const navigate = vi.fn();
 		const operations: Project = { ...projects[0], id: "ops", name: "Operations", kind: "virtual", builtin: true };
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([
 			{ projectId: "ops", tasks: [] },
@@ -123,14 +124,15 @@ describe("WorkspaceBoard", () => {
 			{ projectId: "p2", tasks: [] },
 		]);
 
-		render(<I18nProvider><WorkspaceBoard projects={[projects[0], operations, projects[1]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onReorderProjects={onReorderProjects} /></I18nProvider>);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0], operations, projects[1]]} query="" dispatch={vi.fn()} navigate={navigate} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onReorderProjects={onReorderProjects} /></I18nProvider>);
 
 		const operationsRow = await screen.findByRole("region", { name: "Operations" });
 		const alphaRow = screen.getByRole("region", { name: "Alpha" });
-		expect(within(operationsRow).getByRole("button", { name: "Move project down" })).toBeDisabled();
-		expect(within(alphaRow).getByRole("button", { name: "Move project up" })).toBeDisabled();
-		await userEvent.click(within(alphaRow).getByRole("button", { name: "Move project down" }));
-		expect(onReorderProjects).toHaveBeenCalledWith(["ops", "p2", "p1"]);
+		expect(within(operationsRow).queryByRole("button", { name: /Move project/ })).not.toBeInTheDocument();
+		expect(within(alphaRow).queryByRole("button", { name: /Move project/ })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Open project" })).not.toBeInTheDocument();
+		await userEvent.click(within(alphaRow).getByRole("button", { name: "Alpha" }));
+		expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1" });
 	});
 
 	it("hands an active task and its project cache to the workspace overlay host", async () => {

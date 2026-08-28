@@ -37,7 +37,6 @@ const dashboard = {
 	"workspaceBoard.retry": "Повторить загрузку проектов",
 	"workspaceBoard.failedLoad": "Не удалось загрузить общую доску. ({error})",
 	"workspaceBoard.taskCount": "{count} задач",
-	"workspaceBoard.openProject": "Открыть проект",
 	"workspaceBoard.dropHere": "Переместить задачу в {status}, проект {project}",
 	"workspaceBoard.dropHereShort": "Отпустите для перемещения",
 	"workspaceBoard.notApplicable": "Не применяется",

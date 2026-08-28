@@ -247,7 +247,7 @@ ux_architecture:
       purpose: "Cross-project daily work: one lifecycle header, project swimlanes."
       allowed: ["object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create"]
       forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
-      contract: "Board-tab search; occupied-only Custom; two newest Completed + local disclosure; direct shortcut. Persisted project order moves whole swimlanes (desktop handle/steps, narrow 44px arrows); virtual boards stay fixed and Operations pinned."
+      contract: "Board-tab search; occupied-only Custom; two newest Completed + local disclosure; direct shortcut. Desktop drag handles reorder whole swimlanes; narrow layouts preserve that order. Virtual boards stay fixed, Operations pinned, and project names are the sole open controls."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
     workspace_task_overlay:
