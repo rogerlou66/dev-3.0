@@ -34,8 +34,6 @@ const dashboard = {
 	"workspaceBoard.inbox": "Inbox",
 	"workspaceBoard.inboxDescription": "Questions and reviews waiting on you",
 	"workspaceBoard.inboxEmpty": "Nothing needs your response or review.",
-	"workspaceBoard.openAll": "Open all →",
-	"workspaceBoard.collapseInbox": "Collapse",
 	"workspaceBoard.question": "Has Questions",
 	"workspaceBoard.review": "Your Review",
 	"workspaceBoard.answer": "Answer",

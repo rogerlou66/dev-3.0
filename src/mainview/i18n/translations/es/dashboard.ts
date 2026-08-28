@@ -32,8 +32,6 @@ const dashboard = {
 	"workspaceBoard.inbox": "Bandeja de entrada",
 	"workspaceBoard.inboxDescription": "Preguntas y revisiones que esperan tu atención",
 	"workspaceBoard.inboxEmpty": "Nada espera tu respuesta o revisión.",
-	"workspaceBoard.openAll": "Abrir todo →",
-	"workspaceBoard.collapseInbox": "Contraer",
 	"workspaceBoard.question": "Tiene preguntas",
 	"workspaceBoard.review": "Tu revisión",
 	"workspaceBoard.answer": "Responder",

@@ -34,8 +34,6 @@ const dashboard = {
 	"workspaceBoard.inbox": "Входящие",
 	"workspaceBoard.inboxDescription": "Вопросы и проверки, ожидающие вас",
 	"workspaceBoard.inboxEmpty": "Нет задач, ожидающих ответа или проверки.",
-	"workspaceBoard.openAll": "Показать всё →",
-	"workspaceBoard.collapseInbox": "Свернуть",
 	"workspaceBoard.question": "Есть вопросы",
 	"workspaceBoard.review": "Ваша проверка",
 	"workspaceBoard.answer": "Ответить",

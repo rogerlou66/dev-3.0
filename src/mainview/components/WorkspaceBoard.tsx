@@ -54,7 +54,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	const [projectDropTarget, setProjectDropTarget] = useState<{ projectId: string; side: ProjectDropSide } | null>(null);
 	const [movingTaskIds, setMovingTaskIds] = useState<Set<string>>(new Set());
 	const [expandedCompletedProjects, setExpandedCompletedProjects] = useState<Set<string>>(new Set());
-	const [inboxExpanded, setInboxExpanded] = useState(false);
 	const [launchModal, setLaunchModal] = useState<{ task: Task; project: Project; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
 
 	const load = useCallback(async () => {
@@ -367,22 +366,20 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 
 	function renderInbox() {
 		return (
-			<section className="border-b border-edge bg-gradient-to-b from-raised/80 to-base/40 px-3 py-2" aria-label={t("workspaceBoard.inbox")}>
-				<div className="mb-2 flex min-w-0 items-center gap-2">
-					<span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#FFA353] ${inboxItems.length > 0 ? "motion-safe:animate-pulse" : "opacity-40"}`} />
-					<h2 className="text-dense font-bold uppercase tracking-[0.12em] text-fg">{t("workspaceBoard.inbox")}</h2>
+			<section className="flex h-28 flex-shrink-0 overflow-hidden border-b border-edge bg-gradient-to-b from-raised/80 to-base/40" aria-label={t("workspaceBoard.inbox")}>
+				<div className="flex w-[4.75rem] flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-edge bg-base/25" title={t("workspaceBoard.inboxDescription")}>
+					<span className={`h-1.5 w-1.5 rounded-full bg-[#FFA353] ${inboxItems.length > 0 ? "motion-safe:animate-pulse" : "opacity-40"}`} />
+					<div className="flex h-12 w-full items-center justify-center overflow-visible">
+						<h2 data-testid="workspace-inbox-rail" className="-rotate-90 whitespace-nowrap text-dense font-bold uppercase tracking-[0.16em] text-fg">{t("workspaceBoard.inbox")}</h2>
+					</div>
 					<span className="rounded bg-[#FFA353] px-1.5 py-px font-mono text-nano font-bold" style={{ color: "#2b1402" }}>{inboxItems.length}</span>
-					<span className="min-w-0 truncate text-xs text-fg-muted">{t("workspaceBoard.inboxDescription")}</span>
-					{inboxItems.length > 0 && (
-						<button type="button" onClick={() => setInboxExpanded((expanded) => !expanded)} aria-expanded={inboxExpanded} className="ml-auto flex-shrink-0 rounded px-2 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent/10">
-							{inboxExpanded ? t("workspaceBoard.collapseInbox") : t("workspaceBoard.openAll")}
-						</button>
-					)}
+					<span className="sr-only">{t("workspaceBoard.inboxDescription")}</span>
 				</div>
+				<div className="min-w-0 flex-1 overflow-x-auto p-2">
 				{inboxItems.length === 0 ? (
-					<div className="rounded-lg border border-dashed border-edge px-3 py-2 text-xs text-fg-muted">{t("workspaceBoard.inboxEmpty")}</div>
+					<div className="flex h-full items-center rounded-lg border border-dashed border-edge px-3 text-xs text-fg-muted">{t("workspaceBoard.inboxEmpty")}</div>
 				) : (
-					<div className={`flex gap-2 pb-0.5 ${inboxExpanded ? "flex-wrap" : "overflow-x-auto"}`}>
+					<div className="flex h-full gap-2">
 						{inboxItems.map(({ task, project }) => {
 							const isQuestion = task.status === "user-questions";
 							const statusColor = statusColors[task.status];
@@ -421,6 +418,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 						})}
 					</div>
 				)}
+				</div>
 			</section>
 		);
 	}
@@ -466,9 +464,10 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		{loadErrors.length > 0 && <div className="flex justify-end border-b border-edge px-3 py-2"><button onClick={load} className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">{t("workspaceBoard.retry")}</button></div>}
 		{isNarrow ? (
 			<MobileBoardCarousel columns={carouselColumns} initialColumnId={carouselColumns.find((column) => column.id === "in-progress" && column.count > 0)?.id ?? "review-by-user"} />
-		) : <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
+		) : <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-3">
+			{renderInbox()}
+			<div data-testid="workspace-kanban-scroll" className="min-h-0 flex-1 overflow-auto">
 			<div style={{ minWidth: desktopGridMinWidth }}>
-				{renderInbox()}
 				<div className="sticky top-0 z-20 grid h-9 border-b border-edge bg-base/95 backdrop-blur" style={desktopGridStyle}>
 					<div className="sticky left-0 z-10 flex items-center bg-base/95 px-3 text-dense font-bold uppercase tracking-[0.12em] text-fg-3">{t("workspaceBoard.projects")}</div>
 					{desktopColumns.map((column) => {
@@ -593,6 +592,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				);
 				})}
 				{onOpenAddProject && <button type="button" onClick={onOpenAddProject} className="flex h-9 w-full items-center px-3 text-xs font-medium text-fg-muted transition-colors hover:bg-accent/5 hover:text-accent">+ {t("dashboard.addProject")}</button>}
+			</div>
 			</div>
 		</div>}
 		{launchModal && <LaunchVariantsModal task={launchModal.task} project={launchModal.project} targetStatus={launchModal.targetStatus} agents={agents} globalSettings={globalSettings} dispatch={localDispatch} onClose={() => setLaunchModal(null)} mode={launchModal.mode} onGlobalSettingsChange={setGlobalSettings} />}

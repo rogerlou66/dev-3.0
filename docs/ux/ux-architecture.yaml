@@ -247,7 +247,7 @@ ux_architecture:
       purpose: "Cross-project daily work: Inbox + compact project swimlanes."
       allowed: ["human_inbox", "object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create", "completed_disclosure"]
       forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
-      contract: "Inbox duplicates human-owned work; AI Review stays distinct. Done counts disclose completed cards; empty rows retain New Task. Search, lifecycle actions, same-project drag, reorder, Custom, live refresh and the narrow carousel remain."
+      contract: "A fixed horizontal Inbox uses a left vertical rail and stays above scrolling grid; AI Review stays distinct. Done counts disclose cards; empty rows retain New Task. Search, lifecycle actions, drag, reorder, Custom, live refresh and narrow carousel remain."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
     workspace_task_overlay:

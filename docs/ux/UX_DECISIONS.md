@@ -6,7 +6,7 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 **Settled fork decisions now live in the bible/yaml:** 2026-08-27 project-priority swimlanes; 2026-08-26 focused Workspace Task overlay; 2026-08-23 Android hybrid shell (`decisions/2026/08/23/android-hybrid-client-native-prompt-bridge.md`); 2026-08-21 Workspace Board shortcut; 2026-08-20 per-project Completed disclosure and tab-row search; 2026-08-19 questions-as-attention lifecycle projection. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`, bible §5/§12.
 
-**2026-08-28 — Workspace Inbox:** Inbox duplicates Has Questions and Your Review above dense swimlanes; AI Review stays distinct so drag remains unambiguous. Done counts disclose cards and empty rows retain New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`.
+**2026-08-28 — Workspace Inbox:** A fixed horizontal Inbox uses a counter-clockwise left rail above the scrolling grid and duplicates Has Questions/Your Review; AI Review stays distinct. Done counts disclose cards and empty rows retain New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`.
 
 ## 2026-08-25 — Agent traffic: a conditional header readout plus an overlay log
 
