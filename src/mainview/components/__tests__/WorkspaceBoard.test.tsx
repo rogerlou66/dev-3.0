@@ -81,6 +81,7 @@ describe("WorkspaceBoard", () => {
 		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={navigate} bellCounts={new Map()} onOpenCreateTask={vi.fn()} onOpenWorkspaceTask={onOpenWorkspaceTask} /></I18nProvider>);
 
 		const inbox = await screen.findByRole("region", { name: "Inbox" });
+		expect(within(inbox).getByTitle("Questions and reviews waiting on you")).toHaveClass("w-10");
 		expect(within(inbox).getByTestId("workspace-inbox-rail")).toHaveClass("-rotate-90");
 		expect(screen.getByTestId("workspace-kanban-scroll")).not.toContainElement(inbox);
 		expect(within(inbox).getByText("question-inbox")).toBeInTheDocument();

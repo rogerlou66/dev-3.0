@@ -367,7 +367,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	function renderInbox() {
 		return (
 			<section className="flex h-28 flex-shrink-0 overflow-hidden border-b border-edge bg-gradient-to-b from-raised/80 to-base/40" aria-label={t("workspaceBoard.inbox")}>
-				<div className="flex w-[4.75rem] flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-edge bg-base/25" title={t("workspaceBoard.inboxDescription")}>
+				<div className="flex w-10 flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-edge bg-base/25" title={t("workspaceBoard.inboxDescription")}>
 					<span className={`h-1.5 w-1.5 rounded-full bg-[#FFA353] ${inboxItems.length > 0 ? "motion-safe:animate-pulse" : "opacity-40"}`} />
 					<div className="flex h-12 w-full items-center justify-center overflow-visible">
 						<h2 data-testid="workspace-inbox-rail" className="-rotate-90 whitespace-nowrap text-dense font-bold uppercase tracking-[0.16em] text-fg">{t("workspaceBoard.inbox")}</h2>
