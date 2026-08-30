@@ -94,6 +94,55 @@ const LIGHT_TERMINAL_THEME = {
 };
 
 const TERMINAL_BASE_FONT_SIZE = 14;
+
+export function syncTerminalImeAnchor(
+	textarea: HTMLTextAreaElement,
+	col: number,
+	row: number,
+	charWidth: number,
+	charHeight: number,
+): void {
+	if (![col, row, charWidth, charHeight].every(Number.isFinite) || charWidth <= 0 || charHeight <= 0) return;
+	const left = `${Math.max(0, col) * charWidth}px`;
+	const top = `${Math.max(0, row) * charHeight}px`;
+	if (textarea.style.left !== left) textarea.style.left = left;
+	if (textarea.style.top !== top) textarea.style.top = top;
+}
+
+export function installTerminalImeTerminatorBridge(
+	textarea: HTMLTextAreaElement,
+	send: (data: string) => void,
+): () => void {
+	let composing = false;
+	let pendingKey: string | null = null;
+	// ghostty-web 0.4.0 drops a punctuation or space key that ends composition;
+	// replay it only after compositionend has delivered the composed text.
+	const onCompositionStart = () => {
+		composing = true;
+		pendingKey = null;
+	};
+	const onKeyDown = (event: KeyboardEvent) => {
+		if (!composing || event.isComposing || event.keyCode === 229 || event.key.length !== 1) return;
+		pendingKey = event.key;
+		event.preventDefault();
+	};
+	const onCompositionEnd = () => {
+		composing = false;
+		const key = pendingKey;
+		pendingKey = null;
+		if (key) queueMicrotask(() => send(key));
+	};
+
+	textarea.addEventListener("compositionstart", onCompositionStart, { capture: true });
+	textarea.addEventListener("keydown", onKeyDown, { capture: true });
+	textarea.addEventListener("compositionend", onCompositionEnd, { capture: true });
+	return () => {
+		textarea.removeEventListener("compositionstart", onCompositionStart, { capture: true });
+		textarea.removeEventListener("keydown", onKeyDown, { capture: true });
+		textarea.removeEventListener("compositionend", onCompositionEnd, { capture: true });
+	};
+}
+
 /**
  * A terminal teardown longer than this blocked the renderer for that long: every
  * dispose on the path is synchronous. One frame at 60 Hz is 16 ms, so 50 ms is
@@ -585,6 +634,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		let layoutObserver: ResizeObserver | null = null;
 		let refitTimer: ReturnType<typeof setTimeout> | null = null;
 		let mouseCleanup: (() => void) | undefined;
+		let imeAnchorCleanup: (() => void) | undefined;
+		let imeTerminatorCleanup: (() => void) | undefined;
+		let syncImeAnchor = () => {};
 		let linkUnderlines: FilePathUnderlinesHandle | null = null;
 		let filePathLinks: FilePathLinkProvider | null = null;
 		let nativeSelectionClipboardCleanup: (() => void) | undefined;
@@ -680,6 +732,54 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				return;
 			}
 			console.log("[TerminalView] Terminal opened in DOM successfully");
+			const hiddenTextarea = term.textarea ?? containerRef.current.querySelector("textarea");
+			if (hiddenTextarea) {
+				hiddenTextarea.style.position = "absolute";
+				hiddenTextarea.style.width = "1px";
+				hiddenTextarea.style.height = "1px";
+				hiddenTextarea.style.fontSize = "16px";
+				hiddenTextarea.style.clipPath = "inset(50%)";
+				hiddenTextarea.style.opacity = "0";
+				hiddenTextarea.style.pointerEvents = "none";
+				hiddenTextarea.style.caretColor = "transparent";
+				hiddenTextarea.style.zIndex = "-1";
+				const originalFocus = term.focus.bind(term);
+				const focusImeInput = () => {
+					if (!hiddenTextarea.isConnected) {
+						originalFocus();
+						return;
+					}
+					hiddenTextarea.focus({ preventScroll: true });
+				};
+
+				// WKWebView inserts CJK composition text into a focused contenteditable
+				// container at (0,0). Keep the real textarea as the sole input target.
+				containerRef.current.removeAttribute("contenteditable");
+				containerRef.current.setAttribute("tabindex", "-1");
+				containerRef.current.addEventListener("focus", focusImeInput);
+				term.focus = focusImeInput;
+				if (isElectrobun) {
+					imeTerminatorCleanup = installTerminalImeTerminatorBridge(hiddenTextarea, (data) => {
+						if (!disposed) term.input(data, true);
+					});
+				}
+				syncImeAnchor = () => {
+					const renderer = term.renderer;
+					if (!renderer) return;
+					syncTerminalImeAnchor(
+						hiddenTextarea,
+						term.buffer.active.cursorX,
+						term.buffer.active.cursorY,
+						renderer.charWidth,
+						renderer.charHeight,
+					);
+				};
+				syncImeAnchor();
+				imeAnchorCleanup = () => {
+					containerRef.current?.removeEventListener("focus", focusImeInput);
+					term.focus = originalFocus;
+				};
+			}
 			termRef.current = term;
 			session.liveTerminals += 1;
 			countedLive = true;
@@ -714,7 +814,10 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			// frame or notice that the loop stopped. Installed last, disposed first.
 			if (term.renderer) {
 				renderGuardRef.current = installRenderGuard(term.renderer, {
-					onFrame: (durationMs) => latency.noteFrame(durationMs),
+					onFrame: (durationMs) => {
+						latency.noteFrame(durationMs);
+						syncImeAnchor();
+					},
 					onFrameError: (error, consecutive) => {
 						if (disposed) return;
 						if (consecutive === 1) {
@@ -776,12 +879,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				linksForRows: filePathLinks.linksForRows,
 			});
 
-			// ghostty marks the container contenteditable="true", so ANY focus on
-			// it (term.focus() after fit, ghostty's own canvas mousedown →
-			// parentElement.focus()) summons the on-screen keyboard on iOS/Android
-			// the moment a task opens. inputmode="none" keeps the element focusable
-			// (hardware keyboards unaffected) but suppresses the virtual keyboard;
-			// browser-mode typing goes through the hidden textarea instead.
+			// If a future ghostty build exposes no textarea, focus falls back to the
+			// container; keep that path from summoning the mobile keyboard on entry.
 			if (!isElectrobun) {
 				containerRef.current.setAttribute("inputmode", "none");
 				// Our touch listeners are passive, so nothing preventDefaults a
@@ -794,19 +893,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				containerRef.current.style.touchAction = "none";
 			}
 
-			// Stretch ghostty-web's hidden textarea over the canvas.
-			// Without this it's 1x1px in the corner, causing scroll jumps on focus.
-			const hiddenTextarea = containerRef.current.querySelector("textarea");
 			if (hiddenTextarea) {
-				hiddenTextarea.style.fontSize = "16px";
-				hiddenTextarea.style.width = "100%";
-				hiddenTextarea.style.height = "100%";
-				hiddenTextarea.style.clipPath = "none";
-				hiddenTextarea.style.opacity = "0";
-				hiddenTextarea.style.pointerEvents = "none";
-				hiddenTextarea.style.caretColor = "transparent";
-				hiddenTextarea.style.zIndex = "-1";
-
 				// In browser mode, keep the textarea focused to prevent
 				// the mobile keyboard from dismissing. Re-focus on blur
 				// unless another input element actually needs focus.
@@ -1949,6 +2036,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			glyphFitRef.current = null;
 			layoutObserver?.disconnect();
 			mouseCleanup?.();
+			imeTerminatorCleanup?.();
+			imeAnchorCleanup?.();
 			linkUnderlines?.dispose();
 			linkUnderlines = null;
 			filePathLinks?.dispose();

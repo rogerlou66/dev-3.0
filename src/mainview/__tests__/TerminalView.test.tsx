@@ -1,5 +1,5 @@
 import { render, act, fireEvent, waitFor } from "@testing-library/react";
-import TerminalView, { type TerminalHandle, TERMINAL_SYNC_GATE_TIMEOUT_MS, buildResizeDance, buildCursorMoveSequence, clearStaleSelectionOnWrite, normalizePastedText } from "../TerminalView";
+import TerminalView, { type TerminalHandle, TERMINAL_SYNC_GATE_TIMEOUT_MS, buildResizeDance, buildCursorMoveSequence, clearStaleSelectionOnWrite, installTerminalImeTerminatorBridge, normalizePastedText, syncTerminalImeAnchor } from "../TerminalView";
 import { I18nProvider } from "../i18n";
 import { api } from "../rpc";
 import { Terminal } from "ghostty-web";
@@ -47,6 +47,7 @@ const {
 	const mockTermInstance = {
 		loadAddon: vi.fn(),
 		open: vi.fn(),
+		textarea: undefined as HTMLTextAreaElement | undefined,
 		focus: mockFocus,
 		input: mockInput,
 		paste: mockPaste,
@@ -211,6 +212,10 @@ beforeAll(() => {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mockTermInstance.open.mockReset();
+	mockTermInstance.textarea = undefined;
+	mockBufferActive.cursorX = 0;
+	mockBufferActive.cursorY = 0;
 	fireResize = null;
 	lastWebSocket = null;
 	webSockets = [];
@@ -364,6 +369,40 @@ describe("TerminalView – resilient re-fit on late layout growth", () => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("TerminalView – focus-on-type", () => {
+	it("focuses the cursor-synced textarea instead of ghostty's contenteditable container", async () => {
+		mockBufferActive.cursorX = 7;
+		mockBufferActive.cursorY = 4;
+		mockTermInstance.open.mockImplementationOnce((parent: HTMLElement) => {
+			parent.setAttribute("contenteditable", "true");
+			const textarea = document.createElement("textarea");
+			parent.appendChild(textarea);
+			mockTermInstance.textarea = textarea;
+		});
+
+		const view = await renderAndSetup();
+		const container = view.container.querySelector<HTMLElement>("[data-terminal='true']");
+		const textarea = container?.querySelector("textarea");
+
+		expect(container?.hasAttribute("contenteditable")).toBe(false);
+		expect(container?.getAttribute("tabindex")).toBe("-1");
+		expect(document.activeElement).toBe(textarea);
+		expect(textarea?.style.left).toBe("56px");
+		expect(textarea?.style.top).toBe("64px");
+		expect(textarea?.style.position).toBe("absolute");
+		expect(textarea?.style.width).toBe("1px");
+		expect(textarea?.style.height).toBe("1px");
+		expect(textarea?.style.clipPath).toBe("inset(50%)");
+
+		container?.focus();
+		expect(document.activeElement).toBe(textarea);
+
+		mockBufferActive.cursorX = 12;
+		mockBufferActive.cursorY = 6;
+		mockTermInstance.renderer.render({ getCursor: () => ({ visible: true }) });
+		expect(textarea?.style.left).toBe("96px");
+		expect(textarea?.style.top).toBe("96px");
+	});
+
 	it("focuses the terminal and feeds the key when body is active and a printable key is pressed", async () => {
 		await renderAndSetup();
 
@@ -1270,6 +1309,59 @@ describe("normalizePastedText", () => {
 	});
 	it("returns plain text unchanged", () => {
 		expect(normalizePastedText("no newlines here")).toBe("no newlines here");
+	});
+});
+
+describe("syncTerminalImeAnchor", () => {
+	it("positions the hidden input at the terminal cursor cell", () => {
+		const textarea = document.createElement("textarea");
+		syncTerminalImeAnchor(textarea, 9, 3, 8.5, 17);
+
+		expect(textarea.style.left).toBe("76.5px");
+		expect(textarea.style.top).toBe("51px");
+	});
+
+	it("leaves the previous anchor intact until font metrics are valid", () => {
+		const textarea = document.createElement("textarea");
+		textarea.style.left = "12px";
+		textarea.style.top = "24px";
+		syncTerminalImeAnchor(textarea, 4, 5, 0, Number.NaN);
+
+		expect(textarea.style.left).toBe("12px");
+		expect(textarea.style.top).toBe("24px");
+	});
+});
+
+describe("installTerminalImeTerminatorBridge", () => {
+	it.each(["，", "。", " "])("replays %j after the composed text commits", async (key) => {
+		const textarea = document.createElement("textarea");
+		const send = vi.fn();
+		const dispose = installTerminalImeTerminatorBridge(textarea, send);
+
+		textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+		const terminator = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+		textarea.dispatchEvent(terminator);
+		textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "中文", bubbles: true }));
+		await Promise.resolve();
+
+		expect(terminator.defaultPrevented).toBe(true);
+		expect(send).toHaveBeenCalledOnce();
+		expect(send).toHaveBeenCalledWith(key);
+		dispose();
+	});
+
+	it("leaves punctuation outside composition to ghostty's normal key path", async () => {
+		const textarea = document.createElement("textarea");
+		const send = vi.fn();
+		const dispose = installTerminalImeTerminatorBridge(textarea, send);
+		const punctuation = new KeyboardEvent("keydown", { key: "，", bubbles: true, cancelable: true });
+
+		textarea.dispatchEvent(punctuation);
+		await Promise.resolve();
+
+		expect(punctuation.defaultPrevented).toBe(false);
+		expect(send).not.toHaveBeenCalled();
+		dispose();
 	});
 });
 
