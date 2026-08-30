@@ -6,11 +6,11 @@ ghostty-web 0.4.0 focuses a contenteditable terminal container while its hidden 
 
 ## Investigation
 
-The behavior matches [coder/ghostty-web#97](https://github.com/coder/ghostty-web/issues/97). The upstream fix in [coder/ghostty-web#169](https://github.com/coder/ghostty-web/pull/169) moves the textarea to `cursor column × character width, cursor row × character height`, makes it the sole focus target, and queues a punctuation or space key that terminates composition until `compositionend` delivers the composed text.
+The behavior matches [coder/ghostty-web#97](https://github.com/coder/ghostty-web/issues/97). The upstream fix in [coder/ghostty-web#169](https://github.com/coder/ghostty-web/pull/169) moves the textarea to `cursor column × character width, cursor row × character height`, makes it the sole focus target, and preserves composition terminators; WKWebView can deliver those characters either as a key before `compositionend` or as standalone `beforeinput(insertText)` data.
 
 ## Decision
 
-`TerminalView` applies the focused compatibility fix locally: remove ghostty's `contenteditable`, redirect container and terminal focus to the textarea, synchronize its one-pixel anchor after every successful render, and replay a single-character composition terminator after `compositionend`. The workaround stays outside `node_modules` so installs remain reproducible while the upstream PR is unmerged.
+`TerminalView` applies the focused compatibility fix locally: remove ghostty's `contenteditable`, redirect container and terminal focus to the textarea, synchronize its one-pixel anchor after every successful render, and bridge both composition-ending keys and direct `insertText` data without duplication. The workaround stays outside `node_modules` so installs remain reproducible while the upstream PR is unmerged.
 
 ## Risks
 

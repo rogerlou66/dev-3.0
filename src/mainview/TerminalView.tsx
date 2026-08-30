@@ -109,7 +109,7 @@ export function syncTerminalImeAnchor(
 	if (textarea.style.top !== top) textarea.style.top = top;
 }
 
-export function installTerminalImeTerminatorBridge(
+export function installTerminalImeInputBridge(
 	textarea: HTMLTextAreaElement,
 	send: (data: string) => void,
 ): () => void {
@@ -126,6 +126,12 @@ export function installTerminalImeTerminatorBridge(
 		pendingKey = event.key;
 		event.preventDefault();
 	};
+	const onBeforeInput = (event: InputEvent) => {
+		if (event.inputType !== "insertText" || !event.data) return;
+		pendingKey = null;
+		event.preventDefault();
+		send(event.data);
+	};
 	const onCompositionEnd = () => {
 		composing = false;
 		const key = pendingKey;
@@ -135,10 +141,12 @@ export function installTerminalImeTerminatorBridge(
 
 	textarea.addEventListener("compositionstart", onCompositionStart, { capture: true });
 	textarea.addEventListener("keydown", onKeyDown, { capture: true });
+	textarea.addEventListener("beforeinput", onBeforeInput, { capture: true });
 	textarea.addEventListener("compositionend", onCompositionEnd, { capture: true });
 	return () => {
 		textarea.removeEventListener("compositionstart", onCompositionStart, { capture: true });
 		textarea.removeEventListener("keydown", onKeyDown, { capture: true });
+		textarea.removeEventListener("beforeinput", onBeforeInput, { capture: true });
 		textarea.removeEventListener("compositionend", onCompositionEnd, { capture: true });
 	};
 }
@@ -759,7 +767,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				containerRef.current.addEventListener("focus", focusImeInput);
 				term.focus = focusImeInput;
 				if (isElectrobun) {
-					imeTerminatorCleanup = installTerminalImeTerminatorBridge(hiddenTextarea, (data) => {
+					imeTerminatorCleanup = installTerminalImeInputBridge(hiddenTextarea, (data) => {
 						if (!disposed) term.input(data, true);
 					});
 				}

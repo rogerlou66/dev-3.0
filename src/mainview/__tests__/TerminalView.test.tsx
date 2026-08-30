@@ -1,5 +1,5 @@
 import { render, act, fireEvent, waitFor } from "@testing-library/react";
-import TerminalView, { type TerminalHandle, TERMINAL_SYNC_GATE_TIMEOUT_MS, buildResizeDance, buildCursorMoveSequence, clearStaleSelectionOnWrite, installTerminalImeTerminatorBridge, normalizePastedText, syncTerminalImeAnchor } from "../TerminalView";
+import TerminalView, { type TerminalHandle, TERMINAL_SYNC_GATE_TIMEOUT_MS, buildResizeDance, buildCursorMoveSequence, clearStaleSelectionOnWrite, installTerminalImeInputBridge, normalizePastedText, syncTerminalImeAnchor } from "../TerminalView";
 import { I18nProvider } from "../i18n";
 import { api } from "../rpc";
 import { Terminal } from "ghostty-web";
@@ -1332,11 +1332,11 @@ describe("syncTerminalImeAnchor", () => {
 	});
 });
 
-describe("installTerminalImeTerminatorBridge", () => {
+describe("installTerminalImeInputBridge", () => {
 	it.each(["，", "。", " "])("replays %j after the composed text commits", async (key) => {
 		const textarea = document.createElement("textarea");
 		const send = vi.fn();
-		const dispose = installTerminalImeTerminatorBridge(textarea, send);
+		const dispose = installTerminalImeInputBridge(textarea, send);
 
 		textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 		const terminator = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
@@ -1353,7 +1353,7 @@ describe("installTerminalImeTerminatorBridge", () => {
 	it("leaves punctuation outside composition to ghostty's normal key path", async () => {
 		const textarea = document.createElement("textarea");
 		const send = vi.fn();
-		const dispose = installTerminalImeTerminatorBridge(textarea, send);
+		const dispose = installTerminalImeInputBridge(textarea, send);
 		const punctuation = new KeyboardEvent("keydown", { key: "，", bubbles: true, cancelable: true });
 
 		textarea.dispatchEvent(punctuation);
@@ -1361,6 +1361,46 @@ describe("installTerminalImeTerminatorBridge", () => {
 
 		expect(punctuation.defaultPrevented).toBe(false);
 		expect(send).not.toHaveBeenCalled();
+		dispose();
+	});
+
+	it.each(["，", "。", "！", "？", " "])("forwards WebKit insertText data %j", (data) => {
+		const textarea = document.createElement("textarea");
+		const send = vi.fn();
+		const dispose = installTerminalImeInputBridge(textarea, send);
+		const event = new InputEvent("beforeinput", {
+			inputType: "insertText",
+			data,
+			bubbles: true,
+			cancelable: true,
+		});
+
+		textarea.dispatchEvent(event);
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(send).toHaveBeenCalledOnce();
+		expect(send).toHaveBeenCalledWith(data);
+		dispose();
+	});
+
+	it("does not duplicate a terminator already delivered by beforeinput", async () => {
+		const textarea = document.createElement("textarea");
+		const send = vi.fn();
+		const dispose = installTerminalImeInputBridge(textarea, send);
+
+		textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+		textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "，", bubbles: true, cancelable: true }));
+		textarea.dispatchEvent(new InputEvent("beforeinput", {
+			inputType: "insertText",
+			data: "，",
+			bubbles: true,
+			cancelable: true,
+		}));
+		textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "中文", bubbles: true }));
+		await Promise.resolve();
+
+		expect(send).toHaveBeenCalledOnce();
+		expect(send).toHaveBeenCalledWith("，");
 		dispose();
 	});
 });
