@@ -16,6 +16,7 @@ import { withFileLock } from "./file-lock";
 import { persistTaskBlobs, splitTaskBlobs } from "./task-blobs";
 import { readNewTaskTerminalBackendPreference } from "./terminal-backend-preference";
 import { projectSlug } from "./git";
+import { canBlockTask, isTaskBlocked } from "../shared/task-blocking";
 
 const log = createLogger("data");
 
@@ -1236,14 +1237,20 @@ function applyTaskUpdate(
 		return { task: currentTask, changed: false };
 	}
 	const now = new Date().toISOString();
-	// A move to a different RENDERED column happens either when the builtin status
-	// changes, or when only customColumnId changes (builtin <-> custom column that
-	// share the same status). Both refresh `movedAt`; the card's position inside the
-	// new column is derived from the sort setting, never persisted.
+	if (updates.blocked === true && !currentTask.blocked && !canBlockTask(currentTask)) {
+		throw new Error("Only settled review tasks can be blocked.");
+	}
+	if (updates.status && ["todo", "completed", "cancelled"].includes(updates.status) && currentTask.blocked) {
+		updates = { ...updates, blocked: false };
+	}
+	const blockingChanged = updates.blocked !== undefined && updates.blocked !== (currentTask.blocked === true);
+	if (blockingChanged) updates = { ...updates, blockedAt: updates.blocked ? now : null };
+	// Status, custom-column and hold changes refresh `movedAt`. Card order within
+	// the rendered column comes from the sort setting, never a persisted position.
 	const statusChanged = updates.status !== undefined && updates.status !== currentTask.status;
 	const customColumnChanged =
 		updates.customColumnId !== undefined && (updates.customColumnId ?? null) !== (currentTask.customColumnId ?? null);
-	const renderedColumnChanged = statusChanged || customColumnChanged;
+	const renderedColumnChanged = statusChanged || customColumnChanged || blockingChanged;
 	const prevTitle = getTaskTitle(currentTask);
 	const prevOverview = getTaskOverview(currentTask);
 
@@ -1255,12 +1262,9 @@ function applyTaskUpdate(
 			: undefined;
 	const updatesWithLifecycle = lifecycleStartedAt ? { ...updates, lifecycleStartedAt } : updates;
 
-	// When the builtin status changes, finalize the wall-clock spent in the status
-	// being left (credited to `statusDurations`) and stamp `statusEnteredAt` for the
-	// new one. Custom-column-only moves keep the same status, so they don't finalize
-	// a bucket — hence this is gated on `statusChanged`, not `renderedColumnChanged`.
-	// See {@link Task.statusDurations} / the Productivity "Time invested" split.
-	const statusTimePatch: Partial<Task> = statusChanged ? accumulateStatusDuration(currentTask, now) : {};
+	// Status transitions and hold boundaries finalize the current timing bucket.
+	// Blocked time is separate; custom-column-only moves do not split a bucket.
+	const statusTimePatch: Partial<Task> = statusChanged || blockingChanged ? accumulateStatusDuration(currentTask, now) : {};
 
 	if (renderedColumnChanged) {
 		tasks[idx] = { ...tasks[idx], ...updatesWithLifecycle, ...statusTimePatch, movedAt: now, updatedAt: now };
@@ -1296,17 +1300,19 @@ function recordTitleOverviewHistory(
 }
 
 /**
- * Compute the {@link Task.statusDurations} + {@link Task.statusEnteredAt} patch for a
- * status transition: credit the wall-clock spent in the status being left, then
- * stamp the entry time of the new status. The reference for "when did we enter the
- * leaving status" is `statusEnteredAt`, falling back to `movedAt`/`createdAt` for
- * tasks that predate this tracking so their first tracked stint is a best-effort
- * estimate rather than zero.
+ * Finalize the current status or blocked-time bucket at a transition boundary.
+ * Older tasks fall back to their move/creation time for a best-effort first stint.
  */
 function accumulateStatusDuration(currentTask: Task, nowIso: string): Partial<Task> {
 	const enteredIso = currentTask.statusEnteredAt ?? currentTask.movedAt ?? currentTask.createdAt;
 	const delta = Date.parse(nowIso) - Date.parse(enteredIso);
 	const durations: Partial<Record<TaskStatus, number>> = { ...(currentTask.statusDurations ?? {}) };
+	if (isTaskBlocked(currentTask)) {
+		return {
+			blockedDurationMs: (currentTask.blockedDurationMs ?? 0) + (Number.isFinite(delta) ? Math.max(0, delta) : 0),
+			statusEnteredAt: nowIso,
+		};
+	}
 	if (Number.isFinite(delta) && delta > 0) {
 		durations[currentTask.status] = (durations[currentTask.status] ?? 0) + delta;
 	}

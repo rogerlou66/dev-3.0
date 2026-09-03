@@ -28,6 +28,7 @@ export interface LifecycleFacts {
 	draft?: boolean;
 	/** The task is hibernated: frozen in place, no column change is accepted. */
 	hibernated?: boolean;
+	blocked?: boolean;
 	peerReviewEnabled: boolean;
 	manualCompletion?: boolean;
 	mergeCompletionPrompt?: Task["mergeCompletionPrompt"];
@@ -68,6 +69,7 @@ export type LifecycleTaskPatch = Partial<Pick<
 	| "scheduledLaunch"
 	| "preparationError"
 	| "hibernated"
+	| "blocked"
 >>;
 
 export type LifecycleEvent =
@@ -96,6 +98,7 @@ export type LifecycleEvent =
 	| { type: "deleteRequested" }
 	| { type: "hibernateRequested" }
 	| { type: "wakeRequested" }
+	| { type: "blockingRequested"; blocked: boolean }
 	| {
 		type: "preparationStageChanged";
 		runId: string;

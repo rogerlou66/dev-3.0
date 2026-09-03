@@ -10,12 +10,17 @@ import { useStatusColors } from "../hooks/useStatusColors";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { sortTasksForColumn } from "./sortTasks";
+import { canBlockTask, effectiveTaskColumn, isTaskBlocked, type TaskBoardColumn } from "../../shared/task-blocking";
+import { setTaskBlocked } from "../utils/setTaskBlocked";
+import { matchesTaskQuery } from "../utils/taskSearch";
+import { isAttentionTask } from "../utils/taskFacets";
+import HelpSpot from "./HelpSpot";
 import TaskCard from "./TaskCard";
 import PriorityBadge from "./PriorityBadge";
 import LaunchVariantsModal from "./LaunchVariantsModal";
 import MobileBoardCarousel, { CAROUSEL_MAX_WIDTH, type CarouselColumn } from "./MobileBoardCarousel";
 
-type WorkspaceColumnId = TaskStatus | "custom";
+type WorkspaceColumnId = TaskBoardColumn;
 type WorkspaceTasksResult = { projectId: string; tasks: Task[]; error?: string };
 
 interface WorkspaceBoardProps {
@@ -30,7 +35,7 @@ interface WorkspaceBoardProps {
 	onReorderProjects?: (projectIds: string[]) => void | Promise<void>;
 }
 
-const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "review-by-colleague", "completed"];
+const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "blocked", "review-by-colleague", "completed"];
 const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 type ProjectDropSide = "before" | "after";
@@ -121,8 +126,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	const allTasks = useMemo(() => [...tasksByProject.values()].flat(), [tasksByProject]);
 	const columns = useMemo(() => {
 		const next = [...BASE_COLUMNS];
-		if (allTasks.some((task) => task.status === "review-by-ai")) next.splice(2, 0, "review-by-ai");
-		if (allTasks.some((task) => task.customColumnId)) {
+		if (allTasks.some((task) => effectiveTaskColumn(task) === "review-by-ai")) next.splice(2, 0, "review-by-ai");
+		if (allTasks.some((task) => effectiveTaskColumn(task) === "custom")) {
 			const completedIndex = next.indexOf("completed");
 			next.splice(completedIndex, 0, "custom");
 		}
@@ -133,12 +138,17 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 
 	function matchesWorkspaceQuery(project: Project, task: Task): boolean {
 		const normalizedQuery = query.trim().toLocaleLowerCase();
-		return !normalizedQuery || `${project.name} ${getTaskTitle(task)} ${task.description}`.toLocaleLowerCase().includes(normalizedQuery);
+		return !normalizedQuery || matchesTaskQuery({ ...task, description: `${project.name} ${task.description}` }, normalizedQuery, {
+			labelNames: (project.labels ?? []).filter((label) => task.labelIds?.includes(label.id)).map((label) => label.name),
+			agentName: agents.find((agent) => agent.id === task.agentId)?.name ?? null,
+			statusValues: [task.status, t(statusKey(task.status)), ...(task.customColumnId ? (project.customColumns ?? []).filter((column) => column.id === task.customColumnId).map((column) => column.name) : [])],
+			priorityValue: task.priority?.toLowerCase() ?? "p3", hasPort: false, isAttention: isAttentionTask(task), spaceNames: null,
+		});
 	}
 
 	const inboxItems = useMemo(() => {
 		const items = allTasks
-			.filter((task) => task.status === "user-questions" || task.status === "review-by-user")
+			.filter((task) => !isTaskBlocked(task) && (task.status === "user-questions" || task.status === "review-by-user"))
 			.map((task) => ({ task, project: projectById.get(task.projectId) }))
 			.filter((entry): entry is { task: Task; project: Project } => !!entry.project)
 			.filter(({ task, project }) => matchesWorkspaceQuery(project, task));
@@ -220,17 +230,16 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	function tasksForCell(project: Project, column: WorkspaceColumnId): Task[] {
 		const tasks = (tasksByProject.get(project.id) ?? [])
 			.filter((task) => {
-				if (column === "custom") return Boolean(task.customColumnId);
-				if (task.customColumnId) return false;
-				if (column === "in-progress") return task.status === "in-progress" || task.status === "user-questions";
-				return task.status === column;
+				const effective = effectiveTaskColumn(task);
+				if (column === "in-progress") return effective === "in-progress" || effective === "user-questions";
+				return effective === column;
 			})
 			.filter((task) => matchesWorkspaceQuery(project, task));
-		return sortTasksForColumn(tasks, globalSettings.taskSortOrder, column === "custom" ? undefined : column);
+		return sortTasksForColumn(tasks, globalSettings.taskSortOrder, column === "custom" || column === "blocked" ? undefined : column);
 	}
 
 	async function moveTask(project: Project, task: Task, targetStatus: TaskStatus) {
-		if (task.status === targetStatus && !task.customColumnId) return;
+		if (task.status === targetStatus && !task.customColumnId && !isTaskBlocked(task)) return;
 		if (task.status === "todo" && targetStatus !== "todo" && !task.worktreePath) {
 			setLaunchModal({ task, project, targetStatus });
 			return;
@@ -279,6 +288,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 	}
 
 	function columnLabel(column: WorkspaceColumnId): string {
+		if (column === "blocked") return t("task.blocked");
 		return column === "custom" ? t("workspaceBoard.custom") : t(statusKey(column));
 	}
 
@@ -473,7 +483,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					{desktopColumns.map((column) => {
 					const color = column === "custom" ? statusColors.todo : statusColors[column];
 					const count = orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0);
-					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2"><span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.08em] text-fg-2">{columnLabel(column)}</span>{count > 0 && <span className="ml-auto font-mono text-nano text-fg-muted">{count}</span>}</div>;
+					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2"><span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.08em] text-fg-2">{columnLabel(column)}</span>{column === "blocked" && <HelpSpot topicId="board.column.blocked" />}{count > 0 && <span className="ml-auto font-mono text-nano text-fg-muted">{count}</span>}</div>;
 					})}
 					<div className="flex items-center gap-1.5 border-l border-edge px-2 text-dense font-bold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceBoard.done")}</div>
 				</div>
@@ -551,12 +561,16 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 							</div>
 						{desktopColumns.map((column) => {
 							const cellTasks = tasksForCell(project, column);
-							const targetStatus = column === "custom" ? null : column;
+							const targetStatus = column === "custom" || column === "blocked" ? null : column;
 							const available = isColumnAvailable(project, column) || cellTasks.length > 0;
-							const acceptsDrop = available && targetStatus && dragged?.projectId === project.id && getAllowedTransitions(dragged.status).includes(targetStatus);
+							const draggedTask = dragged?.projectId === project.id ? projectTasks.find((task) => task.id === dragged.taskId) : undefined;
+							const acceptsDrop = available && draggedTask && (column === "blocked"
+								? canBlockTask(draggedTask) && !isTaskBlocked(draggedTask)
+								: targetStatus && (getAllowedTransitions(draggedTask.status).includes(targetStatus) || (isTaskBlocked(draggedTask) && draggedTask.status === targetStatus)));
 							return (
 								<div
 									key={column}
+									data-testid={`workspace-cell-${project.id}-${column}`}
 									className={`min-w-0 border-l border-edge p-1 ${acceptsDrop ? "bg-accent/5" : ""}`}
 									aria-label={acceptsDrop ? t("workspaceBoard.dropHere", { status: columnLabel(column), project: project.name }) : undefined}
 									onDragOver={acceptsDrop ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } : undefined}
@@ -564,7 +578,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 										event.preventDefault();
 										const task = projectTasks.find((candidate) => candidate.id === dragged?.taskId);
 										setDragged(null);
-										if (task && targetStatus) moveTask(project, task, targetStatus);
+										if (task && column === "blocked") void setTaskBlocked({ task, blocked: true, dispatch: localDispatch, t });
+										else if (task && targetStatus) void moveTask(project, task, targetStatus);
 									} : undefined}
 								>
 									{acceptsDrop && <div className="mb-1 rounded border border-accent/40 bg-accent/10 px-1.5 py-1 text-center text-dense font-semibold text-accent">{t("workspaceBoard.dropHereShort")}</div>}

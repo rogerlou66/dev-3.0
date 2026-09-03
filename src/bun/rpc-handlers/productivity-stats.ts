@@ -25,6 +25,7 @@ export function toStatEvent(
 		projectKind: project.kind === "virtual" ? "virtual" : "git",
 		title: getTaskTitle(task),
 		status: task.status,
+		...(task.blocked ? { blocked: true } : {}),
 		createdAt: task.createdAt,
 		movedAt: task.movedAt ?? null,
 		lifecycleStartedAt: task.lifecycleStartedAt ?? null,

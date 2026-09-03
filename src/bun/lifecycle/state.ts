@@ -69,6 +69,7 @@ export function lifecycleStateFromTask(project: Project, task: Task): LifecycleS
 			hasPrIdentity: task.prNumber != null,
 			draft: task.draft === true,
 			hibernated: task.hibernated === true,
+			blocked: task.blocked === true,
 			peerReviewEnabled: project.peerReviewEnabled !== false,
 			// Derived, not the raw flag: a coordinator always owns its own completion.
 			manualCompletion: taskCompletesManually(task),

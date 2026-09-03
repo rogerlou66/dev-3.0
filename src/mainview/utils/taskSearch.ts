@@ -1,5 +1,6 @@
 import type { Task } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
+import { isTaskBlocked } from "../../shared/task-blocking";
 
 /**
  * Token-DSL task search & filter engine.
@@ -43,6 +44,7 @@ export interface TaskQueryContext {
 	hasPort: boolean;
 	/** True when the task needs the user's attention (see `is:attention`). */
 	isAttention: boolean;
+	isBlocked?: boolean;
 	/** The task's effective priority level (e.g. "p2"), lowercased. */
 	priorityValue: string;
 	/** Names of every space the task's project belongs to; [] when it is in none.
@@ -93,8 +95,9 @@ const FACET_DEFS: Record<FacetKey, FacetDef> = {
 	is: {
 		key: "is",
 		kind: "flag",
-		flagValues: ["attention", "home"],
+		flagValues: ["attention", "home", "blocked"],
 		match: (ctx, v) => {
+			if (v === "blocked") return ctx.isBlocked === true;
 			if (v === "attention") return ctx.isAttention;
 			// `home` is the computed no-space group, not a space called "Home" —
 			// a flag value, so it can never collide with a real space name.
@@ -261,6 +264,9 @@ function matchesFreeText(task: Task, freeText: string, prNumber?: number | null)
  */
 export function matchesTaskQuery(task: Task, query: string, context: TaskQueryContext): boolean {
 	const parsed = parseTaskQuery(query);
+	const blocked = isTaskBlocked(task);
+	context = { ...context, isBlocked: blocked, isAttention: !blocked && context.isAttention,
+		statusValues: blocked ? ["blocked", ...context.statusValues] : context.statusValues };
 
 	for (const facet of FACET_KEYS) {
 		const values = parsed.facets[facet];

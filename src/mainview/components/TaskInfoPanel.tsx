@@ -18,6 +18,8 @@ import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { ImageAttachmentsStrip } from "./ImageAttachmentsStrip";
 import PipelineRing, { CompleteCheckIcon } from "./PipelineRing";
 import PipelineDropdown from "./PipelineDropdown";
+import TaskBlockAction from "./TaskBlockAction";
+import { isTaskBlocked } from "../../shared/task-blocking";
 import SpawnAgentModal from "./SpawnAgentModal";
 import ScheduleMessageModal from "./ScheduleMessageModal";
 import ScheduledMessagesChip from "./ScheduledMessagesChip";
@@ -410,6 +412,7 @@ function TaskInfoPanel({
 				taskId: task.id,
 				projectId: project.id,
 				customColumnId,
+				...(isTaskBlocked(task) ? { clearBlocked: true } : {}),
 			});
 			dispatch({ type: "updateTask", task: updated });
 		} catch (err) {
@@ -859,7 +862,7 @@ function TaskInfoPanel({
 				disabled={movingStatus}
 				className={`flex min-w-0 items-center gap-2 transition-colors hover:bg-elevated ${showQuickComplete ? "rounded-l-lg" : "rounded-lg"} ${narrow ? "px-3 min-h-[2.75rem]" : "px-2.5 py-1"}`}
 			>
-				{activeCustomColumn ? (
+				{isTaskBlocked(task) ? <span aria-hidden="true">Ⅱ</span> : activeCustomColumn ? (
 					<div
 						className="w-2.5 h-2.5 rounded-full flex-shrink-0"
 						style={{ background: activeCustomColumn.color, boxShadow: `0 0 6px ${activeCustomColumn.color}60` }}
@@ -871,7 +874,7 @@ function TaskInfoPanel({
 				    plus the chevron still read as "status, tap to change", and this is
 				    the only survivor still worth its width. `sr-only` keeps it announced. */}
 				<span className={`font-medium text-fg-2 truncate ${narrow ? "text-sm [@container(max-width:299px)]:sr-only" : "text-micro"}`}>
-					{activeCustomColumn ? activeCustomColumn.name : getStatusLabel(task.status, t, project)}
+					{isTaskBlocked(task) ? t("task.blocked") : activeCustomColumn ? activeCustomColumn.name : getStatusLabel(task.status, t, project)}
 				</span>
 				<svg className={`flex-shrink-0 text-fg-3 ${narrow ? "w-4 h-4" : "w-3 h-3"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -909,6 +912,7 @@ function TaskInfoPanel({
 			style={{ top: statusMenuPos.top, left: statusMenuPos.left, visibility: statusMenuVisible ? "visible" : "hidden" }}
 			onClick={(event) => event.stopPropagation()}
 		>
+			<TaskBlockAction task={task} dispatch={dispatch} onClose={() => setStatusMenuOpen(false)} />
 			<PipelineDropdown
 				currentStatus={task.status}
 				onMove={handleStatusMove}
@@ -940,6 +944,7 @@ function TaskInfoPanel({
 				size="touch"
 				hideHeader
 			/>
+			<TaskBlockAction task={task} dispatch={dispatch} onClose={() => setStatusMenuOpen(false)} />
 		</BottomSheet>
 	);
 

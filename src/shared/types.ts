@@ -1871,9 +1871,10 @@ export const DEFAULT_BEFORE_CUSTOM_COLUMNS: TaskStatus[] = [
 export const DEFAULT_AFTER_CUSTOM_COLUMNS: TaskStatus[] = ["review-by-colleague", "completed", "cancelled"];
 export const ALL_BUILTIN_COLUMNS: TaskStatus[] = [...DEFAULT_BEFORE_CUSTOM_COLUMNS, ...DEFAULT_AFTER_CUSTOM_COLUMNS];
 
-/** A single board column: either a built-in status column or a user-defined custom column. */
+/** A board column: built-in status, external hold, or user-defined custom column. */
 export type BoardColumnSlot =
 	| { type: "builtin"; status: TaskStatus }
+	| { type: "blocked" }
 	| { type: "custom"; col: CustomColumn };
 
 /**
@@ -1908,6 +1909,7 @@ export function getBoardColumns(
 	if (!project.columnOrder || project.columnOrder.length === 0) {
 		return [
 			...filterBuiltin(DEFAULT_BEFORE_CUSTOM_COLUMNS).map((s) => ({ type: "builtin" as const, status: s })),
+			{ type: "blocked" },
 			...cols.map((c) => ({ type: "custom" as const, col: c })),
 			...filterBuiltin(DEFAULT_AFTER_CUSTOM_COLUMNS).map((s) => ({ type: "builtin" as const, status: s })),
 		];
@@ -1916,6 +1918,11 @@ export function getBoardColumns(
 	const result: BoardColumnSlot[] = [];
 	const used = new Set<string>();
 	for (const id of project.columnOrder) {
+		if (id === "blocked" && !used.has(id)) {
+			result.push({ type: "blocked" });
+			used.add(id);
+			continue;
+		}
 		if ((ALL_BUILTIN_COLUMNS as string[]).includes(id) && shouldHide(id as TaskStatus)) {
 			used.add(id);
 			continue;
@@ -1954,6 +1961,10 @@ export function getBoardColumns(
 	}
 	for (const col of cols) {
 		if (!used.has(col.id)) result.push({ type: "custom", col });
+	}
+	if (!used.has("blocked")) {
+		const reviewIndex = result.findIndex((slot) => slot.type === "builtin" && slot.status === "review-by-user");
+		result.splice(reviewIndex < 0 ? result.length : reviewIndex + 1, 0, { type: "blocked" });
 	}
 	return result;
 }
@@ -2018,6 +2029,11 @@ export interface Task {
 	 */
 	titleEditedByUser?: boolean;
 	status: TaskStatus;
+	/** Manual external hold; the underlying lifecycle and workspace remain intact. */
+	blocked?: boolean;
+	blockedAt?: string | null;
+	/** Accumulated external waiting time, excluded from status-based work time. */
+	blockedDurationMs?: number;
 	/**
 	 * Task importance {@link TaskPriority}, `P0` (highest) … `P4` (lowest). The
 	 * topmost sort key on the board and sidebar (strict bands). Shared across a
@@ -2323,6 +2339,7 @@ export interface TaskTimeBreakdown {
 
 /** The subset of {@link Task} fields {@link computeTaskTimeBreakdown} needs. */
 export type TaskTimeInput = Pick<Task, "status" | "createdAt"> & {
+	blocked?: boolean;
 	movedAt?: string | null;
 	statusDurations?: Partial<Record<TaskStatus, number>>;
 	statusEnteredAt?: string | null;
@@ -2356,7 +2373,7 @@ export function computeTaskTimeBreakdown(task: TaskTimeInput, nowMs: number): Ta
 
 	const durations: Partial<Record<TaskStatus, number>> = { ...(task.statusDurations ?? {}) };
 	// Credit the live portion of the current status for active tasks only.
-	if (!isTerminal && task.statusEnteredAt) {
+	if (!isTerminal && !task.blocked && task.statusEnteredAt) {
 		const enteredMs = Date.parse(task.statusEnteredAt);
 		if (Number.isFinite(enteredMs)) {
 			durations[task.status] = (durations[task.status] ?? 0) + Math.max(0, nowMs - enteredMs);
@@ -3882,6 +3899,7 @@ export interface AgentSkillInfo {
  * switching needs no round-trip). All timestamps are ISO 8601.
  */
 export interface ProductivityStatEvent {
+	blocked?: boolean;
 	taskId: string;
 	projectId: string;
 	projectName: string;
@@ -4033,7 +4051,7 @@ export type AppRPCSchema = {
 				response: void;
 			};
 			moveTaskToCustomColumn: {
-				params: { taskId: string; projectId: string; customColumnId: string | null };
+				params: { taskId: string; projectId: string; customColumnId: string | null; clearBlocked?: boolean };
 				response: Task;
 			};
 			reorderColumns: {
@@ -4377,7 +4395,11 @@ export type AppRPCSchema = {
 				// — a desktop window AND a remote browser on the same machine — and
 				// would play a second time). Unset for CLI / branch-merge / agent
 				// approval, where no renderer played locally and the push is the sound.
-				params: { taskId: string; projectId: string; newStatus: TaskStatus; force?: boolean; clientPlayedSound?: boolean };
+				params: { taskId: string; projectId: string; newStatus: TaskStatus; force?: boolean; clientPlayedSound?: boolean; clearBlocked?: boolean };
+				response: Task;
+			};
+			setTaskBlocked: {
+				params: { taskId: string; projectId: string; blocked: boolean };
 				response: Task;
 			};
 			// View → Debug probe: fires the same `taskSound` push a real CLI /

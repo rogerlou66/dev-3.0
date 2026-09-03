@@ -6,6 +6,7 @@ import { playTaskCompletionSound } from "../task-sounds";
 import type { Task, Project, TaskStatus } from "../../shared/types";
 import type { AppAction } from "../state";
 import type { TFunction } from "../i18n";
+import { isTaskBlocked } from "../../shared/task-blocking";
 
 function isTerminalStatus(status: TaskStatus): boolean {
 	return status === "completed" || status === "cancelled";
@@ -85,6 +86,7 @@ export async function moveTaskToStatus({
 	revertOnFailure = true,
 }: MoveTaskToStatusOptions): Promise<boolean> {
 	const terminal = isTerminalStatus(newStatus);
+	const unblock = isTaskBlocked(task) ? { clearBlocked: true } : {};
 
 	if (confirm && terminal && (task.worktreePath || alwaysConfirm)) {
 		const proceed = await confirmTaskCompletion(task, project, newStatus, t, onOpenTask, { alwaysConfirm });
@@ -107,6 +109,7 @@ export async function moveTaskToStatus({
 			statusEnteredAt: movedNow,
 		}
 		: { ...task, status: newStatus, customColumnId: null, movedAt: movedNow, statusEnteredAt: movedNow };
+	if (isTaskBlocked(task)) Object.assign(optimisticTask, { blocked: false, blockedAt: null });
 	dispatch({ type: "updateTask", task: optimisticTask });
 	// When the UI plays the completion sound here, tell the backend to skip its
 	// own `taskSound` push — otherwise it fans out to every other connected
@@ -122,10 +125,10 @@ export async function moveTaskToStatus({
 	try {
 		let updated: Task;
 		try {
-			updated = await api.request.moveTask({ taskId: task.id, projectId: project.id, newStatus, clientPlayedSound });
+			updated = await api.request.moveTask({ taskId: task.id, projectId: project.id, newStatus, clientPlayedSound, ...unblock });
 		} catch {
 			// Environment is likely broken (missing worktree, etc.) — force it through.
-			updated = await api.request.moveTask({ taskId: task.id, projectId: project.id, newStatus, force: true, clientPlayedSound });
+			updated = await api.request.moveTask({ taskId: task.id, projectId: project.id, newStatus, force: true, clientPlayedSound, ...unblock });
 		}
 		dispatch({ type: "updateTask", task: updated });
 		onSuccess?.();

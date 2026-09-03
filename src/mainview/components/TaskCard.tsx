@@ -25,6 +25,8 @@ import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import TaskDetailModal from "./TaskDetailModal";
 import PipelineDropdown, { PipelineMenuAction } from "./PipelineDropdown";
 import TaskCardRail from "./TaskCardRail";
+import TaskBlockAction from "./TaskBlockAction";
+import { isTaskBlocked } from "../../shared/task-blocking";
 import StatusMenuPortal from "./StatusMenuPortal";
 import { useStatusMenu } from "../hooks/useStatusMenu";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
@@ -169,10 +171,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const isDisconnected = isTaskDisconnected(task);
 	const isCoordinator = isCoordinatorTask(task);
 	const isCancelled = task.status === "cancelled";
-	const needsInput = task.status === "user-questions";
+	const blocked = isTaskBlocked(task);
+	const needsInput = !blocked && task.status === "user-questions";
 	const isActive = ACTIVE_STATUSES.includes(task.status);
 	const isCompleting = (moving || isMovingProp) && (task.status === "completed" || task.status === "cancelled");
-	const color = statusColors[task.status];
+	const color = statusColors[blocked ? "blocked" : task.status];
 
 	// Deferred launch ("Start in…") — countdown badge with Start now / Cancel.
 	// Only meaningful on todo cards; the field vanishes when the launch fires.
@@ -311,6 +314,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				taskId: task.id,
 				projectId: project.id,
 				customColumnId,
+				...(isTaskBlocked(task) ? { clearBlocked: true } : {}),
 			});
 			dispatch({ type: "updateTask", task: updated });
 		} catch (err) {
@@ -628,7 +632,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// desktop-only. Deliberately NOT gated on `isHibernated`: finishing a parked
 	// task must not require waking it first.
 	const canQuickComplete = !isDisabled && getAllowedTransitions(task.status).includes("completed");
-	const railColor = isCompleting || isShuttingDown ? "#888" : activeCol ? activeCol.color : color;
+	const railColor = isCompleting || isShuttingDown ? "#888" : blocked ? color : activeCol ? activeCol.color : color;
 
 	// ---- IDENTITY zone inputs -----------------------------------------------
 	const agent = task.agentId ? agents.find((a) => a.id === task.agentId) : null;
@@ -880,7 +884,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	);
 
 	if (compact && !narrow) {
-		const compactStateBadge = isCoordinator
+		const compactStateBadge = blocked ? { label: t("task.blocked"), className: "border-edge-active text-fg-2" } : isCoordinator
 			? { label: t("task.coordinatorBadge"), className: "border-success/60 text-success-strong" }
 			: task.taskType === "pr-review"
 				? { label: t("task.prReviewBadge"), className: "border-transparent text-fg-3" }
@@ -928,11 +932,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					type="button"
 					onClick={statusMenu.toggle}
 					disabled={isDisabled || isHibernated}
-					aria-label={`${activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
+					aria-label={`${blocked ? t("task.blocked") : activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
 					data-testid="task-card-rail"
 					className="flex w-7 flex-shrink-0 items-center justify-center text-fg-3 transition-[filter,transform] hover:brightness-125 motion-safe:active:scale-[0.96] disabled:opacity-50"
 				>
-					{activeCol ? (
+					{blocked ? <span aria-hidden="true" style={{ color: railColor }}>Ⅱ</span> : activeCol ? (
 						<span className="h-3 w-3 rounded-full" style={{ background: railColor, boxShadow: `0 0 6px ${railColor}60` }} />
 					) : (
 						<PipelineRing status={task.status} size="compact" tooltip={false} />
@@ -1015,6 +1019,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					document.body,
 				)}
 				<StatusMenuPortal menu={statusMenu} narrow={narrow} title={t("task.moveTo")} sheetTestId="task-status-sheet">
+					<TaskBlockAction task={task} dispatch={dispatch} onClose={() => setMenuOpen(false)} />
 					<PipelineDropdown currentStatus={task.status} onMove={handleMove} onMoveToCustomColumn={handleMoveToCustomColumn} onDelete={isCancelled ? handleDelete : undefined} customColumns={project.customColumns} currentCustomColumnId={task.customColumnId} project={project} hideHeader />
 					{hasLiveAgent && (
 						<>
@@ -1272,6 +1277,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			<div className="flex min-w-0 items-stretch">
 				<TaskCardRail
 					status={task.status}
+					blocked={blocked}
 					project={project}
 					customColumn={activeCol ? { name: activeCol.name, color: activeCol.color } : null}
 					color={railColor}
@@ -1514,6 +1520,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			{/* Status dropdown menu — bottom sheet on narrow (≥44px touch rows),
 			    anchored portal + smart viewport clamping on desktop. */}
 			<StatusMenuPortal menu={statusMenu} narrow={narrow} title={t("task.moveTo")} sheetTestId="task-status-sheet">
+				<TaskBlockAction task={task} dispatch={dispatch} onClose={() => setMenuOpen(false)} />
 				<PipelineDropdown
 					currentStatus={task.status}
 					onMove={handleMove}

@@ -20,6 +20,7 @@ import { confirm } from "../confirm";
 import { useT } from "../i18n";
 import HelpSpot from "./HelpSpot";
 import { getStatusLabel } from "../utils/statusLabel";
+import { isTaskBlocked } from "../../shared/task-blocking";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import { useClipboardPaste } from "../hooks/useClipboardPaste";
@@ -219,6 +220,7 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 				taskId: task.id,
 				projectId: project.id,
 				customColumnId,
+				...(isTaskBlocked(task) ? { clearBlocked: true } : {}),
 			});
 			dispatch({ type: "updateTask", task: updated });
 			onClose();

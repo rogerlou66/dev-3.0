@@ -27,6 +27,7 @@ import Tooltip from "./Tooltip";
 import { CompleteCheckIcon } from "./PipelineRing";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
+import { isTaskBlocked } from "../../shared/task-blocking";
 
 interface ActivityOverviewProps {
 	projects: Project[];
@@ -450,10 +451,10 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 		// tasks carry the column's identity, not their underlying status, and
 		// are never collapsed into the summary line below.
 		const rowTasks = tasks.filter(
-			(task) => columnOf(task) !== null || ATTENTION_STATUSES.includes(task.status),
+			(task) => isTaskBlocked(task) || columnOf(task) !== null || ATTENTION_STATUSES.includes(task.status),
 		);
 		const backgroundTasks = tasks.filter(
-			(task) => columnOf(task) === null && BACKGROUND_STATUSES.includes(task.status),
+			(task) => !isTaskBlocked(task) && columnOf(task) === null && BACKGROUND_STATUSES.includes(task.status),
 		);
 
 		// Build summary segments: "3 in-progress · 2 AI review"
@@ -472,6 +473,8 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 		const rankOf = (task: Task) =>
 			columnOf(task) !== null ? 3 : ATTENTION_RANK[task.status] ?? 3;
 		const orderedRowTasks = [...rowTasks].sort((a, b) => {
+			const blockedOrder = Number(isTaskBlocked(a)) - Number(isTaskBlocked(b));
+			if (blockedOrder) return blockedOrder;
 			const byPriority = compareTaskSortRank(a, b);
 			if (byPriority !== 0) return byPriority;
 			return narrow ? rankOf(a) - rankOf(b) : 0;
@@ -685,12 +688,12 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 						    is readable instead of squeezed by the status + time cluster. */}
 						{visibleRowTasks.map((task) => {
 							const col = columnOf(task);
-							const rowColor = col ? col.color : statusColors[task.status];
-							const rowLabel = col ? col.name : getStatusLabel(task.status, t, project);
+							const rowColor = isTaskBlocked(task) ? statusColors.blocked : col ? col.color : statusColors[task.status];
+							const rowLabel = isTaskBlocked(task) ? t("task.blocked") : col ? col.name : getStatusLabel(task.status, t, project);
 							// A user-picked column colour has no per-theme variant, so it is
 							// shown as a swatch instead of as text colour (see comment above).
 							const labelAsSwatch = col !== null;
-							const needsMe = !col && NEEDS_ME_STATUSES.includes(task.status);
+							const needsMe = !isTaskBlocked(task) && !col && NEEDS_ME_STATUSES.includes(task.status);
 							// The row's single object action. A hibernated task refuses column
 							// changes in the lifecycle machine, so it gets no ✓ at all.
 							// A locked project's rows are blurred, so completing from one would
@@ -1022,7 +1025,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 							groups={spaceGroups}
 							sensitiveProjectIds={sensitiveProjectIds}
 							needsYouCountOf={(projectId) =>
-								(tasksByProject.get(projectId) ?? []).filter((task) => NEEDS_ME_STATUSES.includes(task.status)).length
+								(tasksByProject.get(projectId) ?? []).filter((task) => !isTaskBlocked(task) && NEEDS_ME_STATUSES.includes(task.status)).length
 							}
 							workingCountOf={(projectId) =>
 								(tasksByProject.get(projectId) ?? []).filter((task) => BACKGROUND_STATUSES.includes(task.status)).length

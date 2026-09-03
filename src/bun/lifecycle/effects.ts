@@ -92,6 +92,7 @@ export type LifecycleEffect =
 	| ({
 		type: "persistColumn";
 		column: LifecycleColumn;
+		taskPatch?: LifecycleTaskPatch;
 		patch: "status" | "statusOnly" | "custom" | "activation" | "preparation";
 		guards?: { ifStatus?: string; ifStatusNot?: string };
 		writeOptions?: "none";

@@ -982,6 +982,7 @@ export async function executeLifecycleEffect(
 			if (effect.runtime) {
 				updates = { ...updates, ...preparationRuntimeUpdates(effect.runtime) };
 			}
+			if (effect.taskPatch) updates = { ...effect.taskPatch, ...updates };
 			// Guards are the only write option left; pass none when the effect declares none.
 			const guards = effect.patch === "preparation" || effect.writeOptions === "none"
 				? {}

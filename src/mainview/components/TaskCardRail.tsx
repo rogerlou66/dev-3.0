@@ -43,6 +43,7 @@ export function shortenForRail(name: string, max: number = RAIL_LABEL_MAX): stri
 
 interface TaskCardRailProps {
 	status: TaskStatus;
+	blocked?: boolean;
 	project: Project;
 	/** Set when the task sits in a custom column: its own name and dot colour win. */
 	customColumn?: { name: string; color: string } | null;
@@ -78,6 +79,7 @@ interface TaskCardRailProps {
  */
 export default function TaskCardRail({
 	status,
+	blocked = false,
 	project,
 	customColumn,
 	color,
@@ -94,8 +96,8 @@ export default function TaskCardRail({
 	const t = useT();
 	const stage = getPipelineIndex(status) + 1;
 	const total = PIPELINE_STAGES.length;
-	const fullLabel = customColumn ? customColumn.name : getStatusLabel(status, t, project);
-	const railLabel = customColumn ? shortenForRail(customColumn.name) : t(RAIL_LABEL_KEY[status]);
+	const fullLabel = blocked ? t("task.blocked") : customColumn ? customColumn.name : getStatusLabel(status, t, project);
+	const railLabel = blocked ? shortenForRail(t("task.blocked")) : customColumn ? shortenForRail(customColumn.name) : t(RAIL_LABEL_KEY[status]);
 	const stageLabel = t("pipeline.stageOf", { current: String(stage), total: String(total) });
 	const railRef = useRef<HTMLDivElement>(null);
 	const [labelFits, setLabelFits] = useState(!autoLabel);
@@ -132,7 +134,7 @@ export default function TaskCardRail({
 					aria-label={`${fullLabel} — ${stageLabel}. ${t("task.moveTo")}`}
 					className={`flex w-full flex-1 flex-col items-center rounded-tl-none rounded-bl-none pb-1.5 transition-[filter] duration-150 ease-out hover:brightness-125 disabled:cursor-not-allowed disabled:opacity-60 motion-safe:active:scale-[0.97] ${touch ? "gap-1.5 pt-2" : "gap-1 pt-1.5"}`}
 				>
-					{customColumn ? (
+					{blocked ? <span aria-hidden="true" style={{ color }}>Ⅱ</span> : customColumn ? (
 						<span
 							className={`flex-shrink-0 rounded-full ${touch ? "h-[0.9375rem] w-[0.9375rem]" : "h-2.5 w-2.5"}`}
 							style={{ background: color, boxShadow: `0 0 6px ${color}60` }}

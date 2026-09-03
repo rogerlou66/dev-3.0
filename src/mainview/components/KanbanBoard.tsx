@@ -15,6 +15,8 @@ import LaunchVariantsModal from "./LaunchVariantsModal";
 import CreateTaskModal from "./CreateTaskModal";
 import { sortTasksForColumn } from "./sortTasks";
 import { partitionTasksByStatus } from "./partitionTasks";
+import { canBlockTask, effectiveTaskColumn, isTaskBlocked } from "../../shared/task-blocking";
+import { setTaskBlocked } from "../utils/setTaskBlocked";
 import LabelFilterBar from "./LabelFilterBar";
 import { matchesTaskQuery } from "../utils/taskSearch";
 import { buildFilterGroups, taskQueryContext, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
@@ -25,6 +27,8 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { useAgents } from "../hooks/useAgents";
 import MobileBoardCarousel, { CAROUSEL_MAX_WIDTH, type CarouselColumn } from "./MobileBoardCarousel";
+
+const columnToken = (slot: ColumnSlot): string => slot.type === "blocked" ? "blocked" : slot.type === "builtin" ? slot.status : slot.col.id;
 
 interface KanbanBoardProps {
 	project: Project;
@@ -122,6 +126,7 @@ function KanbanBoard({
 	});
 	const [launchModal, setLaunchModal] = useState<{ task: Task; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
 	const [dragFromStatus, setDragFromStatus] = useState<TaskStatus | null>(null);
+	const [dragTaskId, setDragTaskId] = useState<string | null>(null);
 	// Draft being edited: reopens the New Task popup prefilled from the card.
 	const [editDraftTaskId, setEditDraftTaskId] = useState<string | null>(null);
 	const [dragFromDraft, setDragFromDraft] = useState(false);
@@ -253,6 +258,7 @@ function KanbanBoard({
 	// Global dragend listener to clear drag state
 	useEffect(() => {
 		function handleDragEnd() {
+			setDragTaskId(null);
 			setDragFromStatus(null);
 			setDragFromCustomColumnId(null);
 			setDragFromDraft(false);
@@ -262,6 +268,7 @@ function KanbanBoard({
 	}, []);
 
 	function handleDragStart(taskId: string) {
+		setDragTaskId(taskId);
 		const task = tasks.find((t) => t.id === taskId);
 		if (task) {
 			setDragFromStatus(task.status);
@@ -271,6 +278,7 @@ function KanbanBoard({
 	}
 
 	async function handleTaskDrop(taskId: string, targetStatus: TaskStatus) {
+		setDragTaskId(null);
 		setDragFromStatus(null);
 		setDragFromCustomColumnId(null);
 		setDragFromDraft(false);
@@ -285,7 +293,7 @@ function KanbanBoard({
 		}
 
 		// If already in target status and no custom column, nothing to do
-		if (task.status === targetStatus && !task.customColumnId) return;
+		if (task.status === targetStatus && !task.customColumnId && !isTaskBlocked(task)) return;
 
 		// todo → active: open LaunchVariantsModal
 		if (task.status === "todo" && ACTIVE_STATUSES.includes(targetStatus) && !task.worktreePath) {
@@ -314,14 +322,14 @@ function KanbanBoard({
 		setDragFromCustomColumnId(null);
 		setDragFromDraft(false);
 		const task = tasks.find((t) => t.id === taskId);
-		if (!task || task.customColumnId === customColumnId) return;
+		if (!task || (task.customColumnId === customColumnId && !isTaskBlocked(task))) return;
 		if (task.draft === true) {
 			toast.error(t("kanban.draftNotDroppable"), { taskId: task.id });
 			return;
 		}
 
 		// Optimistic update
-		const optimisticTask = { ...task, customColumnId };
+		const optimisticTask = { ...task, customColumnId, ...(isTaskBlocked(task) ? { blocked: false, blockedAt: null } : {}) };
 		dispatch({ type: "updateTask", task: optimisticTask });
 		setMovingTaskIds((prev) => new Set(prev).add(task.id));
 
@@ -330,6 +338,7 @@ function KanbanBoard({
 				taskId: task.id,
 				projectId: project.id,
 				customColumnId,
+				...(isTaskBlocked(task) ? { clearBlocked: true } : {}),
 			});
 			dispatch({ type: "updateTask", task: updated });
 		} catch (err) {
@@ -379,7 +388,7 @@ function KanbanBoard({
 		statusValuesFor: (task) => {
 			const col = task.customColumnId ? customColumns.find((c) => c.id === task.customColumnId) : undefined;
 			const label = customStatusLabels[task.status] || t(statusKey(task.status));
-			return col ? [col.name, task.status, label] : [task.status, label];
+			return isTaskBlocked(task) ? ["blocked", t("task.blocked"), task.status, label] : col ? [col.name, task.status, label] : [task.status, label];
 		},
 		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
 		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
@@ -394,9 +403,10 @@ function KanbanBoard({
 	);
 	// The board offers every board status (plus custom columns) in the funnel.
 	const statusCandidates = useMemo<FilterFunnelOption[]>(() => [
+		{ facet: "status", value: "blocked", label: t("task.blocked"), color: statusColors.blocked },
 		...ALL_STATUSES.map((s) => ({ facet: "status" as const, value: s, label: customStatusLabels[s] || t(statusKey(s)) })),
 		...customColumns.map((c) => ({ facet: "status" as const, value: c.name, label: c.name, color: c.color })),
-	], [customStatusLabels, customColumns, t]);
+	], [customStatusLabels, customColumns, statusColors, t]);
 
 	const filterGroups = useMemo(
 		() => buildFilterGroups(tasks, resolver, {
@@ -427,7 +437,7 @@ function KanbanBoard({
 				projectId: project.id,
 				name: t("customColumns.defaultName"),
 			});
-			const currentOrder = getOrderedColumns().map((slot) => slot.type === "builtin" ? slot.status : slot.col.id);
+			const currentOrder = getOrderedColumns().map(columnToken);
 			const completedIndex = currentOrder.indexOf("completed");
 			const columnOrder = [...currentOrder];
 			columnOrder.splice(completedIndex === -1 ? columnOrder.length : completedIndex, 0, column.id);
@@ -472,7 +482,8 @@ function KanbanBoard({
 	// Built-in column tasks (exclude tasks in an existing custom column; tasks
 	// with a dangling customColumnId fall back here into their status column,
 	// and an unrecognized status falls back to To Do — see partitionTasksByStatus).
-	const tasksByStatus = partitionTasksByStatus(displayTasks, isInCustomColumn);
+	const blockedTasks = sortTasksForColumn(displayTasks.filter(isTaskBlocked), globalSettings.taskSortOrder);
+	const tasksByStatus = partitionTasksByStatus(displayTasks, (task) => effectiveTaskColumn(task) === "blocked" || isInCustomColumn(task));
 
 	// Sort tasks within each built-in column for variant grouping
 	for (const status of ALL_STATUSES) {
@@ -504,7 +515,7 @@ function KanbanBoard({
 	function getOrderedColumns(): ColumnSlot[] {
 		const occupiedStatuses = new Set<TaskStatus>();
 		for (const task of tasks) {
-			if (!isInCustomColumn(task)) occupiedStatuses.add(task.status);
+			if (!isTaskBlocked(task) && !isInCustomColumn(task)) occupiedStatuses.add(task.status);
 		}
 		return getBoardColumns(project, { occupiedStatuses });
 	}
@@ -518,7 +529,7 @@ function KanbanBoard({
 	function handleColumnDrop(targetColId: string, side: "before" | "after") {
 		const srcColId = draggedColumnIdRef.current;
 		if (!srcColId || srcColId === targetColId) return;
-		const currentOrder = getOrderedColumns().map((c) => c.type === "builtin" ? c.status : c.col.id);
+		const currentOrder = getOrderedColumns().map(columnToken);
 		const fromIndex = currentOrder.indexOf(srcColId);
 		const toIndex = currentOrder.indexOf(targetColId);
 		if (fromIndex === -1 || toIndex === -1) return;
@@ -550,7 +561,7 @@ function KanbanBoard({
 		tasksByCustomColumn.set(col.id, []);
 	}
 	for (const task of displayTasks) {
-		if (isInCustomColumn(task)) {
+		if (!isTaskBlocked(task) && isInCustomColumn(task)) {
 			tasksByCustomColumn.get(task.customColumnId!)?.push(task);
 		}
 	}
@@ -569,6 +580,7 @@ function KanbanBoard({
 		if (tasks.length === 0) return null;
 		const orderedCols = getOrderedColumns();
 		for (const slot of orderedCols) {
+			if (slot.type === "blocked") continue;
 			if (slot.type === "builtin") {
 				const count = tasksByStatus.get(slot.status)?.length ?? 0;
 				if (count < 3) return slot.status;
@@ -619,6 +631,7 @@ function KanbanBoard({
 			setLaunchModal({ task, targetStatus: task.status, mode: "addAttempts" }),
 		onTaskDrop: handleTaskDrop,
 		dragFromStatus,
+		dragFromBlocked: !!tasks.find((task) => task.id === dragTaskId && isTaskBlocked(task)),
 		dragFromCustomColumnId,
 		dragFromDraft,
 		onEditDraft: (task: Task) => setEditDraftTaskId(task.id),
@@ -637,6 +650,18 @@ function KanbanBoard({
 	};
 
 	function renderColumnElement(slot: ColumnSlot) {
+		if (slot.type === "blocked") {
+			const draggedTask = tasks.find((task) => task.id === dragTaskId);
+			return <KanbanColumn key="blocked" status="review-by-user" label={t("task.blocked")}
+				description={t("task.blockedDescription")} tasks={blockedTasks} colorOverride={statusColors.blocked}
+				blockedColumn canDropBlocked={!!draggedTask && canBlockTask(draggedTask) && !isTaskBlocked(draggedTask)}
+				onTaskDropToBlocked={(taskId) => {
+					setDragTaskId(null);
+					setDragFromStatus(null);
+					const task = tasks.find((candidate) => candidate.id === taskId);
+					if (task) void setTaskBlocked({ task, blocked: true, dispatch, t, onMovingChange: (moving) => handleSetMoving(task.id, moving) });
+				}} {...commonProps} />;
+		}
 		if (slot.type === "builtin") {
 			return (
 				<KanbanColumn
@@ -684,7 +709,9 @@ function KanbanBoard({
 	const carouselColumns: CarouselColumn[] = isCarousel
 		? orderedColumns
 				.map((slot) =>
-					slot.type === "builtin"
+					slot.type === "blocked"
+						? { id: "blocked", label: t("task.blocked"), color: statusColors.blocked, count: blockedTasks.length, element: renderColumnElement(slot) }
+					: slot.type === "builtin"
 						? {
 								id: slot.status,
 								label: customStatusLabels[slot.status] || t(statusKey(slot.status)),

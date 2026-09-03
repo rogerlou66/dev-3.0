@@ -45,6 +45,7 @@ export interface HelpTopic {
 export const HELP_ATTRACTOR_DISMISS_EVENT = "help:dismiss-attractor";
 
 export const HELP_TOPICS: HelpTopic[] = [
+	{ id: "board.column.blocked", titleKey: "task.blocked", bodyKey: "task.blockedDescription" },
 	// ── Board columns ──
 	{ id: "board.column.todo", titleKey: "help.board.column.todo.title", bodyKey: "help.board.column.todo.body" },
 	{ id: "board.column.in-progress", titleKey: "help.board.column.inProgress.title", bodyKey: "help.board.column.inProgress.body" },
@@ -225,6 +226,7 @@ export const HELP_TOPICS: HelpTopic[] = [
  * (§5.5 — remote-only, conditional, self-evident, earned entry).
  */
 export const REQUIRED_HELP_SURFACES: string[] = [
+	"board.column.blocked",
 	// Board
 	"board.filter-bar",
 	"board.priority-filter",

@@ -7,14 +7,18 @@ import type { Project, Task } from "../../../shared/types";
 vi.mock("../../rpc", () => ({
 	api: { request: {
 		getWorkspaceBoardTasks: vi.fn(),
+		setTaskBlocked: vi.fn(),
+		moveTask: vi.fn(),
 		getAgents: vi.fn().mockResolvedValue([]),
 		getGlobalSettings: vi.fn().mockResolvedValue({ defaultAgentId: "builtin-claude", defaultConfigId: "claude-default", taskSortOrder: "oldest-first", updateChannel: "stable" }),
 	} },
 }));
 
 vi.mock("../TaskCard", () => ({
-	default: ({ task, project, onOpenWorkspaceTask }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void }) => (
+	default: ({ task, project, onOpenWorkspaceTask, onDragStart }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void; onDragStart?: (id: string) => void }) => (
 		<button
+			draggable
+			onDragStart={() => onDragStart?.(task.id)}
 			data-testid={`workspace-task-${task.id}`}
 			data-needs-input={task.status === "user-questions" || undefined}
 			onClick={(event) => onOpenWorkspaceTask?.(task, project, event.currentTarget)}
@@ -39,6 +43,50 @@ function task(id: string, projectId: string, status: Task["status"]): Task {
 
 describe("WorkspaceBoard", () => {
 	beforeEach(() => vi.clearAllMocks());
+
+	it("loads a blocked review in its own cell, never in Inbox or Your Review", async () => {
+		const held = { ...task("external-wait", "p1", "review-by-user"), blocked: true };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [held] }]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		expect(await screen.findByTestId("workspace-cell-p1-blocked")).toHaveTextContent("external-wait");
+		expect(screen.getByRole("region", { name: "Inbox" })).not.toHaveTextContent("external-wait");
+		expect(screen.getByTestId("workspace-cell-p1-review-by-user")).not.toHaveTextContent("external-wait");
+	});
+
+	it("restores an unblocked review to Inbox after a live push", async () => {
+		const held = { ...task("external-wait", "p1", "review-by-user"), blocked: true };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [held] }]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		await screen.findByTestId("workspace-cell-p1-blocked");
+		await act(async () => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", { detail: { projectId: "p1", task: { ...held, blocked: false } } })));
+		expect(screen.getByRole("region", { name: "Inbox" })).toHaveTextContent("external-wait");
+		expect(screen.getByTestId("workspace-cell-p1-blocked")).not.toHaveTextContent("external-wait");
+	});
+
+	it("accepts review drops into Blocked only in the same project", async () => {
+		const review = task("review-drag", "p1", "review-by-user");
+		vi.mocked(api.request.setTaskBlocked).mockResolvedValue({ ...review, blocked: true });
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [review] }, { projectId: "p2", tasks: [task("other", "p2", "in-progress")] }]);
+		render(<I18nProvider><WorkspaceBoard projects={projects} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		const card = await screen.findByTestId("workspace-task-review-drag");
+		await act(async () => card.dispatchEvent(new Event("dragstart", { bubbles: true })));
+		await act(async () => screen.getByTestId("workspace-cell-p2-blocked").dispatchEvent(new Event("drop", { bubbles: true })));
+		expect(api.request.setTaskBlocked).not.toHaveBeenCalled();
+		await act(async () => screen.getByTestId("workspace-cell-p1-blocked").dispatchEvent(new Event("drop", { bubbles: true })));
+		await waitFor(() => expect(api.request.setTaskBlocked).toHaveBeenCalledWith({ projectId: "p1", taskId: review.id, blocked: true }));
+		expect(screen.getByRole("region", { name: "Inbox" })).not.toHaveTextContent("review-drag");
+	});
+
+	it("dragging a blocked review back to the same review stage clears the hold", async () => {
+		const review = { ...task("return-review", "p1", "review-by-user"), blocked: true };
+		vi.mocked(api.request.moveTask).mockResolvedValue({ ...review, blocked: false });
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [review] }]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		const card = await screen.findByTestId("workspace-task-return-review");
+		await act(async () => card.dispatchEvent(new Event("dragstart", { bubbles: true })));
+		await act(async () => screen.getByTestId("workspace-cell-p1-review-by-user").dispatchEvent(new Event("drop", { bubbles: true })));
+		await waitFor(() => expect(api.request.moveTask).toHaveBeenCalledWith(expect.objectContaining({ taskId: review.id, newStatus: "review-by-user", clearBlocked: true })));
+	});
 
 	it("keeps every project visible and projects Questions into Agent Working", async () => {
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([

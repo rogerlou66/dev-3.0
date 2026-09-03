@@ -163,9 +163,13 @@ function moveTransition(
 		if (event.preparation) return unchanged(state);
 		if (!event.taskPatch) return unchanged(state);
 		return {
-			next: state,
+			next: {
+				...state,
+				facts: { ...state.facts, ...(event.taskPatch.blocked !== undefined ? { blocked: event.taskPatch.blocked } : {}) },
+			},
 			effects: [
 				effect({ type: "persistTaskPatch", taskPatch: event.taskPatch }, "abort"),
+				effect({ type: "push", message: "taskUpdated", view: "current" }),
 			],
 		};
 	}
@@ -336,7 +340,7 @@ function moveTransition(
 			effect({ type: "notifyStatusChange", from: oldStatus, to: terminalStatus }),
 		);
 		return {
-			next: { ...state, column: target, runtime },
+			next: { ...state, column: target, runtime, facts: { ...state.facts, blocked: false } },
 			effects,
 		};
 	}
@@ -346,14 +350,12 @@ function moveTransition(
 		: state.runtime;
 	const launchAgentNow = state.runtime.phase !== "preparing" && event.launchColumnAgent !== false;
 	return {
-		next: { ...state, column: target, runtime: nextRuntime },
+		next: { ...state, column: target, runtime: nextRuntime, facts: { ...state.facts, ...(target.status === "todo" || event.taskPatch?.blocked === false ? { blocked: false } : {}) } },
 		effects: [
-			...(event.taskPatch
-				? [effect({ type: "persistTaskPatch", taskPatch: event.taskPatch }, "abort")]
-				: []),
 			effect({
 				type: "persistColumn",
 				column: target,
+				...(event.taskPatch ? { taskPatch: event.taskPatch } : {}),
 				patch: event.target.status
 					? (event.target.customColumnId === undefined ? "statusOnly" : "status")
 					: "custom",
@@ -477,6 +479,22 @@ export function transition(state: LifecycleState, event: LifecycleEvent): Transi
 	switch (event.type) {
 		case "moveRequested":
 			return moveTransition(state, event);
+		case "blockingRequested": {
+			if ((state.facts.blocked === true) === event.blocked) return unchanged(state);
+			if (event.blocked && !["review-by-user", "review-by-colleague"].includes(state.column.status)) {
+				return { next: state, effects: [effect({ type: "reject", message: "Only review tasks can be blocked." }, "abort")] };
+			}
+			if (event.blocked && (state.runtime.phase === "preparing" || state.runtime.phase === "tearing-down" || state.facts.draft)) {
+				return { next: state, effects: [effect({ type: "reject", message: "Wait until the task finishes starting or stopping before blocking it." }, "abort")] };
+			}
+			return {
+				next: { ...state, facts: { ...state.facts, blocked: event.blocked } },
+				effects: [
+					effect({ type: "persistTaskPatch", taskPatch: { blocked: event.blocked } }, "abort"),
+					effect({ type: "push", message: "taskUpdated", view: "current" }),
+				],
+			};
+		}
 		case "hibernateRequested": {
 			// Already frozen: a repeat request is a no-op, not an error. Hibernating
 			// the same task again over its life is a normal recurring move.

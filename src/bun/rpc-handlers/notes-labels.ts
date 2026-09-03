@@ -160,7 +160,7 @@ async function deleteCustomColumn(params: { projectId: string; columnId: string 
 	log.info("← deleteCustomColumn done", { removed_from_tasks: affectedTasks.length });
 }
 
-async function moveTaskToCustomColumn(params: { taskId: string; projectId: string; customColumnId: string | null }): Promise<Task> {
+async function moveTaskToCustomColumn(params: { taskId: string; projectId: string; customColumnId: string | null; clearBlocked?: boolean }): Promise<Task> {
 	log.info("→ moveTaskToCustomColumn", params);
 	const project = await data.getProject(params.projectId);
 	if (params.customColumnId !== null) {
@@ -170,6 +170,7 @@ async function moveTaskToCustomColumn(params: { taskId: string; projectId: strin
 	const updated = await dispatchLifecycleEvent(project.id, params.taskId, {
 		type: "moveRequested",
 		target: { customColumnId: params.customColumnId },
+		...(params.clearBlocked ? { taskPatch: { blocked: false } } : {}),
 	});
 	log.info("← moveTaskToCustomColumn done", { taskId: params.taskId, customColumnId: params.customColumnId });
 	return updated;

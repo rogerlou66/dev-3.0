@@ -24,6 +24,8 @@ vi.mock("../../rpc", () => ({
 			resetTipState: vi.fn().mockResolvedValue({ snoozedUntil: 0, seen: {}, rotationIndex: 0 }),
 			getProjectCurrentBranch: vi.fn().mockResolvedValue({ branch: "main", isBaseBranch: true, isDirty: false }),
 			getProjectPRs: vi.fn().mockResolvedValue([]),
+			setTaskBlocked: vi.fn(),
+			moveTask: vi.fn(),
 		},
 	},
 }));
@@ -90,6 +92,34 @@ function dispatchDrag(el: Element, type: string, opts: { clientX?: number; dataT
 function getColumnEl(name: string) {
 	return screen.getByText(name).closest("[class*='glass-column']") as HTMLElement;
 }
+
+describe("Blocked review placement", () => {
+	it("keeps blocked tasks out of their underlying review column", async () => {
+		await renderBoardWith({ tasks: [makeTask({ title: "Waiting on access", status: "review-by-user", blocked: true })] });
+		expect(within(screen.getByTestId("kanban-column-blocked")).getByText("Waiting on access")).toBeInTheDocument();
+		expect(within(screen.getByTestId("kanban-column-review-by-user:")).queryByText("Waiting on access")).not.toBeInTheDocument();
+	});
+
+	it("parks a dragged review through the hold RPC instead of a status move", async () => {
+		const task = makeTask({ title: "Waiting on access", status: "review-by-user" });
+		vi.mocked(api.request.setTaskBlocked).mockResolvedValue({ ...task, blocked: true });
+		await renderBoardWith({ tasks: [task] });
+		const card = screen.getByTestId("workspace-compact-task-card");
+		const dt = makeDt();
+		dispatchDrag(card, "dragstart", { dataTransfer: dt });
+		dispatchDrag(getColumnEl("Blocked"), "dragover", { dataTransfer: dt });
+		dispatchDrag(getColumnEl("Blocked"), "drop", { dataTransfer: dt });
+		await waitFor(() => expect(api.request.setTaskBlocked).toHaveBeenCalledWith({ projectId: "p1", taskId: task.id, blocked: true }));
+	});
+
+	it("exposes Blocked through the existing status menu", async () => {
+		const task = makeTask({ title: "Review menu", status: "review-by-user" });
+		await renderBoardWith({ tasks: [task] });
+		const user = userEvent.setup();
+		await user.click(screen.getByRole("button", { name: "review-by-user. Move to" }));
+		expect(await screen.findByRole("button", { name: "Move to Blocked" })).toBeInTheDocument();
+	});
+});
 
 function getHandle(name: string) {
 	// The drag handle is inside the column with the given label text
@@ -673,14 +703,14 @@ describe("mobile carousel mode", () => {
 
 	it("starts on Agent is Working when a task needs input", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "user-questions" })] });
-		expect(screen.getByText("2 / 6")).toBeTruthy();
+		expect(screen.getByText("2 / 7")).toBeTruthy();
 		expect(screen.getByText("Needs input")).toBeTruthy();
 	});
 
 	it("falls back to Your Review when Has Questions is empty", async () => {
 		await renderBoardWith({ tasks: [makeTask({ status: "review-by-user" })] });
 		// With no questions waiting, show the next human-action queue instead.
-		expect(screen.getByText("3 / 6")).toBeTruthy();
+		expect(screen.getByText("3 / 7")).toBeTruthy();
 	});
 
 	it("keeps completed and cancelled columns in the mobile carousel", async () => {

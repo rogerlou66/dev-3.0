@@ -26,10 +26,18 @@ import {
 	parseRgbTriple,
 } from "../contrast-check";
 import type { TaskStatus } from "../../shared/types";
+import { BLOCKED_COLORS } from "../../shared/task-blocking";
 import {
 	STATUS_COLORS,
 	STATUS_COLORS_LIGHT_INK,
 } from "../../shared/types";
+
+describe("Blocked identity contrast", () => {
+	it.each(["dark", "light"] as const)("clears the non-body text floor in %s", (theme) => {
+		const surface = parseHex(theme === "dark" ? "#1c2030" : "#e9edf7");
+		expect(Math.abs(apcaContrast(parseHex(BLOCKED_COLORS[theme]), surface))).toBeGreaterThanOrEqual(60);
+	});
+});
 
 // ─── Parse tokens from index.css ────────────────────────────────────────────
 

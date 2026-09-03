@@ -16,6 +16,8 @@ import PipelineDropdown from "./PipelineDropdown";
 import PriorityBadge from "./PriorityBadge";
 import StatusMenuPortal from "./StatusMenuPortal";
 import TaskCardRail from "./TaskCardRail";
+import TaskBlockAction from "./TaskBlockAction";
+import { isTaskBlocked } from "../../shared/task-blocking";
 import TaskShutdownOverlay from "./TaskShutdownOverlay";
 import Tooltip from "./Tooltip";
 import VariantDots from "./VariantDots";
@@ -106,7 +108,7 @@ export default function ActiveTaskRow({
 		: null;
 	// Busy statuses keep the flowing highlight the thin rail used to carry — the
 	// ring reports the stage, not that an agent is moving right now.
-	const isBusy = (task.status === "in-progress" || task.status === "review-by-ai") && !disconnected;
+	const isBusy = !isTaskBlocked(task) && (task.status === "in-progress" || task.status === "review-by-ai") && !disconnected;
 
 	async function handleMove(newStatus: TaskStatus, opts?: { alwaysConfirm?: boolean }) {
 		statusMenu.setOpen(false);
@@ -130,6 +132,7 @@ export default function ActiveTaskRow({
 				taskId: task.id,
 				projectId: taskProject.id,
 				customColumnId,
+				...(isTaskBlocked(task) ? { clearBlocked: true } : {}),
 			});
 			dispatch({ type: "updateTask", task: updated });
 		} catch (err) {
@@ -198,6 +201,7 @@ export default function ActiveTaskRow({
 			<span className="relative flex flex-shrink-0 overflow-hidden" data-testid={`sidebar-status-rail-${task.id}`}>
 				<TaskCardRail
 					status={task.status}
+					blocked={isTaskBlocked(task)}
 					project={taskProject}
 					customColumn={activeCol ? { name: activeCol.name, color: activeCol.color } : null}
 					color={color}
@@ -383,6 +387,7 @@ export default function ActiveTaskRow({
 				title={t("task.moveTo")}
 				sheetTestId={`sidebar-status-sheet-${task.id}`}
 			>
+				<TaskBlockAction task={task} dispatch={dispatch} onClose={() => statusMenu.setOpen(false)} />
 				<PipelineDropdown
 					currentStatus={task.status}
 					onMove={handleMove}
@@ -394,6 +399,7 @@ export default function ActiveTaskRow({
 					hideHeader={narrow}
 				/>
 			</StatusMenuPortal>
+
 		</div>
 	);
 }

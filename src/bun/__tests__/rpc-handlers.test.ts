@@ -483,6 +483,53 @@ function mockTaskWrites(...tasks: Task[]): void {
 
 // ---- Tests ----
 
+describe("setTaskBlocked", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		mockTaskWrites(makeTask({ status: "review-by-user" }));
+		setPushMessage(vi.fn());
+	});
+	afterEach(() => {
+		vi.mocked(data.getProject).mockReset();
+		vi.mocked(data.getTask).mockReset();
+		vi.mocked(data.updateTask).mockReset();
+	});
+
+	it("persists a review hold through the mailbox without changing its workspace", async () => {
+		const push = vi.fn();
+		setPushMessage(push);
+		const task = await handlers.setTaskBlocked({ projectId: "proj-1", taskId: "task-1", blocked: true });
+		expect(task).toMatchObject({ blocked: true, status: "review-by-user", worktreePath: "/tmp/test-worktree" });
+		expect(push).toHaveBeenCalledWith("taskUpdated", expect.objectContaining({ task: expect.objectContaining({ blocked: true }) }));
+	});
+
+	it("rejects invalid payloads before writing", async () => {
+		await expect(handlers.setTaskBlocked({ projectId: "proj-1", taskId: "task-1", blocked: "true" as unknown as boolean })).rejects.toThrow("boolean");
+		expect(data.updateTask).not.toHaveBeenCalled();
+	});
+
+	it("rejects a task that is no longer in review", async () => {
+		mockTaskWrites(makeTask({ status: "in-progress" }));
+		await expect(handlers.setTaskBlocked({ projectId: "proj-1", taskId: "task-1", blocked: true })).rejects.toThrow("Only review tasks");
+		expect(data.updateTask).not.toHaveBeenCalled();
+	});
+
+	it("propagates persistence errors without publishing a successful hold", async () => {
+		const push = vi.fn();
+		setPushMessage(push);
+		vi.mocked(data.updateTask).mockRejectedValueOnce(new Error("disk full"));
+		await expect(handlers.setTaskBlocked({ projectId: "proj-1", taskId: "task-1", blocked: true })).rejects.toThrow("disk full");
+		expect(push).not.toHaveBeenCalled();
+	});
+
+	it("unblocks after an underlying hook change without restoring stale status", async () => {
+		mockTaskWrites(makeTask({ status: "review-by-colleague", blocked: true }));
+		const task = await handlers.setTaskBlocked({ projectId: "proj-1", taskId: "task-1", blocked: false });
+		expect(task).toMatchObject({ blocked: false, status: "review-by-colleague" });
+	});
+});
+
 // ================================================================
 // Pure helper functions
 // ================================================================

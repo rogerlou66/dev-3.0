@@ -1,14 +1,16 @@
 import type { Task } from "../../shared/types";
 import { compareTasksInBand, type TaskSortOrder } from "./sortTasks";
 import { isAttentionTask } from "../utils/taskFacets";
+import { isTaskBlocked } from "../../shared/task-blocking";
 
 /**
  * Readiness tiers for the Active Tasks sidebar. The sidebar is a live work
  * queue, so it groups by "how much this needs YOU right now" instead of by raw
- * status. Three tiers, rendered top → bottom:
+ * status. Tiers render top → bottom:
  *
  *   - `needs-you`  — waiting on the user: `review-by-user` ∪ `user-questions` ∪
  *                    `review-by-colleague`.
+ *   - `blocked`    — explicitly held tasks, excluded from the actionable queue.
  *   - `custom`     — one tier per project custom column (deliberate manual
  *                    placement), in the project's column order, between the two
  *                    built-in tiers.
@@ -19,7 +21,7 @@ import { isAttentionTask } from "../utils/taskFacets";
  *
  * See UX_DECISIONS 2026-07-11 and decision record 124.
  */
-export type SidebarTierKind = "needs-you" | "custom" | "waiting";
+export type SidebarTierKind = "needs-you" | "blocked" | "custom" | "waiting";
 
 export interface SidebarTier {
 	kind: SidebarTierKind;
@@ -63,9 +65,14 @@ export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): Si
 
 	const needsYou: Task[] = [];
 	const waiting: Task[] = [];
+	const blocked: Task[] = [];
 	const customByKey = new Map<string, Task[]>();
 
 	for (const task of tasks) {
+		if (isTaskBlocked(task)) {
+			blocked.push(task);
+			continue;
+		}
 		if (task.customColumnId) {
 			const key = `${task.projectId}|${task.customColumnId}`;
 			const existing = customByKey.get(key);
@@ -83,6 +90,7 @@ export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): Si
 	if (needsYou.length > 0) {
 		tiers.push({ kind: "needs-you", key: "needs-you", tasks: needsYou.sort(byBand) });
 	}
+	if (blocked.length) tiers.push({ kind: "blocked", key: "blocked", tasks: blocked.sort(byBand) });
 	for (const { projectId, columnId } of orderedCustomColumns) {
 		const key = `${projectId}|${columnId}`;
 		const colTasks = customByKey.get(key);

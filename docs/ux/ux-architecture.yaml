@@ -1,6 +1,6 @@
 ux_architecture:
   version: 1
-  updated_at: "2026-08-19"
+  updated_at: "2026-09-02"
   source: "derived_from_repository"
   confidence: "medium"
 
@@ -220,17 +220,17 @@ ux_architecture:
       purpose: "Native macOS/Linux menu bar; canonical home for the full action taxonomy (File / Edit / Task / Project / View / Debug)."
       allowed: ["destination", "task_action", "project_action", "git_action", "dev_server_action", "destructive", "expert_shortcut"]
       forbidden: []
-      note: "Native menu is the overflow/expert surface. Frequent actions are mirrored into DOM toolbars. Definition lives in src/shared/application-menu.ts (relocated from src/bun) so the browser menu bar can share it."
+      note: "Overflow/expert surface; frequent actions mirror into DOM toolbars. Shared definition: src/shared/application-menu.ts."
       evidence: ["src/shared/application-menu.ts", "src/bun/menu-actions.ts", "src/mainview/menuRouter.ts"]
     app_menu_bar:
-      purpose: "Browser / Remote Access stand-in for the native menu bar. First row of the window (above global_header); renders the same buildApplicationMenu(context) tree as React."
+      purpose: "Browser-only native-menu mirror above the global header; renders buildApplicationMenu(context)."
       mode: "browser_only"  # mounted only when isElectrobun === false; never in the Electrobun desktop shell
       allowed: ["destination", "task_action", "project_action", "dev_server_action", "expert_shortcut"]
       forbidden: ["native_role_item", "roadmap_item", "bun_only_action", "task_scoped_action_in_header"]
-      filtering: "Drop role items (clipboard/window/quit — browser owns them), actions not in menuRouter.BROWSER_HANDLED_ACTIONS (bun-only: new-window/check-for-updates/devtools/zoom/open-logs/remote-QR), and NOT_YET_IMPLEMENTED roadmap items. Context-gated items render greyed."
+      filtering: "Exclude native roles, actions outside BROWSER_HANDLED_ACTIONS, and roadmap items. Context-gated items stay disabled."
       dispatch: "handleMenuAction (same router as native menu + command palette)"
-      labels: "English, sourced from the shared menu definition — parity with the native menu (which is not i18n'd); documented i18n exception."
-      responsive: "Visible in wide browser/remote layouts; hidden below 768px so the GlobalHeader More bottom sheet and command palette own the narrow touch action surface."
+      labels: "English, matching the shared native menu; documented i18n exception."
+      responsive: "Wide browser layouts only; below 768px use GlobalHeader More and the command palette."
       budget:
         max_top_level_menus: 7   # mirrors the native top-levels minus native-only role menus (Edit/Window)
         dropdown_length: "unbounded — it is the overflow/expert surface"
@@ -241,7 +241,7 @@ ux_architecture:
       allowed: ["object_card", "create_in_column", "drag_move", "column_config", "label_filter"]
       forbidden: ["durable_global_configuration"]
       evidence: ["src/mainview/components/KanbanBoard.tsx", "src/mainview/components/KanbanColumn.tsx", "src/mainview/components/LabelFilterBar.tsx"]
-      lifecycle_projection: "user-questions persists as a backend status but renders inside Agent is Working with an amber whole-card wash and Needs input text; AI Review mounts only while occupied; PR Review remains visible for peer-reviewed git projects; Completed remains visible; the workspace board omits Cancelled while project boards retain it as reachable history."
+      lifecycle_projection: "user-questions renders as amber Needs input in Agent is Working. AI Review is occupied-only; PR Review stays for peer-reviewed git projects; Completed stays. Cancelled history is project-board-only."
       desktop_layout: "Compact equal-width grid across available space; no default horizontal scrollbar for the standard lifecycle columns."
     workspace_board:
       purpose: "Cross-project daily work: Inbox + compact project swimlanes."
@@ -250,6 +250,7 @@ ux_architecture:
       contract: "A fixed horizontal Inbox uses a left vertical rail and stays above scrolling grid; AI Review stays distinct. Done counts disclose cards; empty rows retain New Task. Search, lifecycle actions, drag, reorder, Custom, live refresh and narrow carousel remain."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
+      blocked_reviews: "Both boards retain Blocked after Your Review. Existing drag/status menus hold settled reviews without a required reason or runtime change. Hold excludes Inbox/Needs You and survives hooks; explicit unblock/drag out or todo/terminal cleanup clears it. Search: is:blocked/status:blocked; wait time is separate."
     workspace_task_overlay:
       purpose: "Ephemeral coding workspace over the still-mounted Workspace Board."
       allowed: ["task_info", "terminal", "diff", "artifacts", "full_page_handoff", "close"]
@@ -428,7 +429,7 @@ ux_architecture:
       allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark"]
       forbidden: ["durable_configuration"]
       variant_dots: "Same capped clickable dots + SiblingPopover as task_card (see surfaces.task_card.variant_dots); placed in the card's bottom status row, mirroring the kanban card position."
-      queue_policy: "Readiness tiers are NEEDS YOU (review-by-user, user-questions, review-by-colleague) → project custom columns → WAITING (in-progress, review-by-ai). Per-task bells are visual notifications and never alter tier membership."
+      queue_policy: "NEEDS YOU (unblocked human/peer reviews, questions) → BLOCKED (hold) → custom columns → WAITING (working/AI review). Bells never alter membership."
       evidence: ["src/mainview/components/ActiveTasksSidebar.tsx"]
     identity_markers:
       native_backend_mark: "One shared non-interactive glyph (bolt in a rounded frame): before the title on task_card, between the #seq badge and the title in the breadcrumb task segment, and in the sidebar row's top badge row between the priority badge and the agent badge. It states the task's PERSISTED terminal-backend identity (explicit `native`) and nothing else — never liveness, health, focus or writer lease. Explicit tmux and legacy records with no field render nothing; an unknown value never guesses. Identity is read only through the shared terminal-backend-identity codec. Accent-toned, no new token, no action slot, no shortcut/setting/tip. Localized tooltip + accessible name (en/ru/es); on the sidebar the row is role=button with its own aria-label, so the backend label is appended to THAT name."

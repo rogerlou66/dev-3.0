@@ -1,4 +1,9 @@
 const kanban = {
+	"task.blocked": "Bloqueado",
+	"task.block": "Mover a Bloqueado",
+	"task.unblock": "Desbloquear tarea",
+	"task.blockedDescription": "Esperando una dependencia externa. Arrastra aquí una tarea en revisión para quitarla del Inbox sin detener su entorno.",
+	"task.failedBlock": "No se pudo cambiar el bloqueo: {error}",
 	// KanbanColumn
 	"kanban.noTasks": "Sin tareas",
 	"kanban.noTasksHint": "Arrastra una tarea aquí o usa el botón de abajo para crear una.",

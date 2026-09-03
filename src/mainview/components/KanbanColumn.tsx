@@ -18,6 +18,10 @@ let _activeDragColumnId: string | null = null;
 
 interface KanbanColumnProps {
 	status: TaskStatus;
+	blockedColumn?: boolean;
+	canDropBlocked?: boolean;
+	dragFromBlocked?: boolean;
+	onTaskDropToBlocked?: (taskId: string) => void;
 	label: string;
 	description?: string;
 	tasks: Task[];
@@ -74,6 +78,10 @@ interface KanbanColumnProps {
 
 function KanbanColumn({
 	status,
+	blockedColumn = false,
+	canDropBlocked = false,
+	dragFromBlocked = false,
+	onTaskDropToBlocked,
 	label,
 	description,
 	tasks,
@@ -139,7 +147,7 @@ function KanbanColumn({
 	const taskListRef = useRef<HTMLDivElement>(null);
 
 	// Auto-collapse when column identity changes (e.g. project switch)
-	const columnKey = `${status}:${customColumnId ?? ""}`;
+	const columnKey = blockedColumn ? "blocked" : `${status}:${customColumnId ?? ""}`;
 	useEffect(() => {
 		setExpanded(false);
 	}, [columnKey]);
@@ -186,11 +194,11 @@ function KanbanColumn({
 	const draftBlocksDrop = dragFromDraft && !(!isCustomColumn && status === "todo");
 
 	// Can this column accept a cross-column drop?
-	const isCrossColumnTarget = !draftBlocksDrop && (isCustomColumn
+	const isCrossColumnTarget = !draftBlocksDrop && (blockedColumn ? canDropBlocked : isCustomColumn
 		// Custom columns accept drops from any column except themselves
 		? (dragFromStatus !== null || dragFromCustomColumnId !== null) && dragFromCustomColumnId !== customColumnId
 		// Built-in columns use transition logic; also accept from custom columns (underlying status governs)
-		: dragFromStatus !== null && getAllowedTransitions(dragFromStatus).includes(status));
+		: dragFromStatus !== null && (getAllowedTransitions(dragFromStatus).includes(status) || (dragFromBlocked && dragFromStatus === status)));
 
 	useEffect(() => {
 		function handleDragEnd() {
@@ -255,7 +263,9 @@ function KanbanColumn({
 		// Ignore col: prefixed data (column drags that fell through without a side set)
 		if (!taskId || taskId.startsWith("col:")) return;
 
-		if (isCustomColumn && customColumnId) {
+		if (blockedColumn && isCrossColumnTarget) {
+			onTaskDropToBlocked?.(taskId);
+		} else if (isCustomColumn && customColumnId) {
 			// Drop into a custom column
 			onTaskDropToCustomColumn?.(taskId, customColumnId);
 		} else if (isCrossColumnTarget) {
@@ -286,6 +296,7 @@ function KanbanColumn({
 	return (
 		<>
 		<div
+			data-testid={`kanban-column-${columnKey}`}
 			className={`group/col relative flex min-w-0 w-full flex-col glass-column column-glow rounded-xl border transition-[background-color,border-color,box-shadow,opacity] duration-150 ease-out ${
 				showDropHighlight
 					? "border-accent bg-accent/5 shadow-lg shadow-accent/10"
@@ -383,7 +394,7 @@ function KanbanColumn({
 							) : null
 						) : (
 							<HelpSpot
-								topicId={statusHelpTopicId(status)}
+								topicId={blockedColumn ? "board.column.blocked" : statusHelpTopicId(status)}
 								className="opacity-0 group-hover/col:opacity-100 focus:opacity-100"
 							/>
 						)
@@ -470,7 +481,7 @@ function KanbanColumn({
 						) : (
 							<>
 								<p>{t("kanban.noTasks")}</p>
-								<p className="mt-1 text-pretty">{t(ownsAddTask ? "kanban.noTasksHint" : "kanban.noTasksHintAgentMoves")}</p>
+								<p className="mt-1 text-pretty">{t(blockedColumn ? "task.blockedDescription" : ownsAddTask ? "kanban.noTasksHint" : "kanban.noTasksHintAgentMoves")}</p>
 							</>
 						)}
 					</div>

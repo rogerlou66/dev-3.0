@@ -1,6 +1,7 @@
 import type { CodingAgent, Label, Task, TaskStatus } from "../../shared/types";
 import type { FacetKey, TaskQueryContext } from "./taskSearch";
 import { getTaskAgentMeta } from "./taskAgentMeta";
+import { isTaskBlocked } from "../../shared/task-blocking";
 
 /**
  * Facet-pool builders shared by the Kanban filter bar and the Active Tasks
@@ -37,7 +38,7 @@ const ATTENTION_STATUSES: TaskStatus[] = ["user-questions", "review-by-user", "r
  * `is:attention` facet. Per-task bells remain visual notifications only.
  */
 export function isAttentionTask(task: Task): boolean {
-	return ATTENTION_STATUSES.includes(task.status);
+	return !isTaskBlocked(task) && ATTENTION_STATUSES.includes(task.status);
 }
 
 export interface FacetResolver {

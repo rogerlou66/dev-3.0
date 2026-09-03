@@ -9,7 +9,7 @@ function customCol(id: string, name = id): CustomColumn {
 
 /** Flatten slots to comparable tokens: builtin → status, custom → `custom:<id>`. */
 function tokens(slots: BoardColumnSlot[]): string[] {
-	return slots.map((s) => (s.type === "builtin" ? s.status : `custom:${s.col.id}`));
+	return slots.map((s) => (s.type === "blocked" ? "blocked" : s.type === "builtin" ? s.status : `custom:${s.col.id}`));
 }
 
 function project(overrides: Partial<Project> = {}): ProjectInput {
@@ -17,11 +17,18 @@ function project(overrides: Partial<Project> = {}): ProjectInput {
 }
 
 describe("getBoardColumns", () => {
+	it("preserves one Blocked slot when a saved order already contains it", () => {
+		const result = tokens(getBoardColumns(project({ columnOrder: ["todo", "review-by-user", "blocked", "blocked", "completed"] })));
+		expect(result.filter((token) => token === "blocked")).toHaveLength(1);
+		expect(result.indexOf("blocked")).toBe(result.indexOf("review-by-user") + 1);
+	});
+
 	it("default git board keeps only the persistent workflow columns", () => {
 		expect(tokens(getBoardColumns(project()))).toEqual([
 			"todo",
 			"in-progress",
 			"review-by-user",
+			"blocked",
 			"review-by-colleague",
 			"completed",
 			"cancelled",
@@ -34,6 +41,7 @@ describe("getBoardColumns", () => {
 			"todo",
 			"in-progress",
 			"review-by-user",
+			"blocked",
 			"custom:deploy",
 			"custom:qa",
 			"review-by-colleague",
@@ -113,7 +121,7 @@ describe("getBoardColumns", () => {
 
 	it("virtual (Operations) board hides both AI Review and PR Review", () => {
 		const result = tokens(getBoardColumns(project({ kind: "virtual" })));
-		expect(result).toEqual(["todo", "in-progress", "review-by-user", "completed", "cancelled"]);
+		expect(result).toEqual(["todo", "in-progress", "review-by-user", "blocked", "completed", "cancelled"]);
 	});
 
 	it("respects an explicit columnOrder, placing custom columns where listed", () => {

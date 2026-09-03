@@ -21,6 +21,33 @@ function state(
 }
 
 describe("task lifecycle transition table", () => {
+	it("blocks review without changing the column, runtime, workspace or watchers", () => {
+		const before = state("review-by-user");
+		const result = transition(before, { type: "blockingRequested", blocked: true });
+		expect(result.next.column).toEqual(before.column);
+		expect(result.next.runtime).toEqual(before.runtime);
+		expect(result.effects.map((effect) => effect.type)).toEqual(["persistTaskPatch", "push"]);
+		expect(activitiesFor(result.next)).toEqual(activitiesFor(before));
+	});
+
+	it("unblocks after a background hook changed the underlying status", () => {
+		const blocked = transition(state("review-by-user"), { type: "blockingRequested", blocked: true });
+		const working = transition(blocked.next, { type: "moveRequested", target: { status: "in-progress" } });
+		expect(working.next.facts.blocked).toBe(true);
+		const result = transition(working.next, { type: "blockingRequested", blocked: false });
+		expect(result.next.column.status).toBe("in-progress");
+		expect(result.effects.map((effect) => effect.type)).toEqual(["persistTaskPatch", "push"]);
+	});
+
+	it("rejects blocking an agent that is still working", () => {
+		expect(transition(state("in-progress"), { type: "blockingRequested", blocked: true }).effects).toMatchObject([{ type: "reject" }]);
+	});
+
+	it("commits a user move and unblocking in one column write", () => {
+		const blocked = transition(state("review-by-user"), { type: "blockingRequested", blocked: true }).next;
+		const result = transition(blocked, { type: "moveRequested", target: { status: "review-by-colleague", customColumnId: null }, taskPatch: { blocked: false } });
+		expect(result.effects.filter((effect) => effect.type.startsWith("persist"))).toMatchObject([{ type: "persistColumn", taskPatch: { blocked: false } }]);
+	});
 	it("keeps a late bell from overriding a Stop-hook review move", () => {
 		const reviewed = transition(state("in-progress"), {
 			type: "moveRequested",

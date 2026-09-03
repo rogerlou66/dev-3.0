@@ -280,6 +280,7 @@ export async function moveTask(params: {
 	ifStatusNot?: string;
 	clientPlayedSound?: boolean;
 	enforceAllowedTransition?: boolean;
+	clearBlocked?: boolean;
 }): Promise<Task> {
 	if (params.newStatus === undefined && params.customColumnId === undefined) {
 		throw new Error("A lifecycle move requires a status or custom column");
@@ -296,7 +297,13 @@ export async function moveTask(params: {
 		force: params.force,
 		clientPlayedSound: params.clientPlayedSound,
 		enforceAllowedTransition: params.enforceAllowedTransition,
+		...(params.clearBlocked ? { taskPatch: { blocked: false } } : {}),
 	});
+}
+
+async function setTaskBlocked(params: { projectId: string; taskId: string; blocked: boolean }): Promise<Task> {
+	if (typeof params.blocked !== "boolean") throw new Error("blocked must be a boolean");
+	return dispatchLifecycleEvent(params.projectId, params.taskId, { type: "blockingRequested", blocked: params.blocked });
 }
 
 /**
@@ -1176,6 +1183,7 @@ export const taskLifecycleHandlers = {
 	openQuickShell,
 	createTask,
 	moveTask,
+	setTaskBlocked,
 	debugEmitTaskSound,
 	cancelTaskPreparation,
 	setTaskPriority,

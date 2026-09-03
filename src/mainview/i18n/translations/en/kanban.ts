@@ -1,4 +1,9 @@
 const kanban = {
+	"task.blocked": "Blocked",
+	"task.block": "Move to Blocked",
+	"task.unblock": "Unblock task",
+	"task.blockedDescription": "Waiting on an external dependency. Drag a review task here to remove it from Inbox without stopping its workspace.",
+	"task.failedBlock": "Could not change the blocked state: {error}",
 	// KanbanColumn
 	"kanban.noTasks": "No tasks",
 	"kanban.noTasksHint": "Drag a task here, or use the button below to create one.",

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback, type Dispatch } from
 import { useTaskSortOrder } from "../hooks/useTaskSortOrder";
 import type { CodingAgent, PortInfo, Project, Task, TaskPriority, TaskStatus } from "../../shared/types";
 import { ACTIVE_STATUSES, ALL_PRIORITIES, DEFAULT_PRIORITY, spacesOfProject } from "../../shared/types";
+import { isTaskBlocked } from "../../shared/task-blocking";
 import { PRIORITY_NAME_KEYS } from "./priorityStyles";
 import { groupTasksIntoTiers } from "./sidebarTiers";
 import { toast } from "../toast";
@@ -272,7 +273,7 @@ function ActiveTasksSidebar({
 			const proj = projectById.get(task.projectId);
 			const col = task.customColumnId ? proj?.customColumns?.find((c) => c.id === task.customColumnId) : undefined;
 			const label = getStatusLabel(task.status, t, proj);
-			return col ? [col.name, task.status, label] : [task.status, label];
+			return isTaskBlocked(task) ? ["blocked", t("task.blocked"), task.status, label] : col ? [col.name, task.status, label] : [task.status, label];
 		},
 		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
 		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
@@ -290,6 +291,7 @@ function ActiveTasksSidebar({
 	// plus any custom columns present across the projects in scope.
 	const statusCandidates = useMemo<FilterFunnelOption[]>(() => {
 		const byValue = new Map<string, FilterFunnelOption>();
+		byValue.set("blocked", { facet: "status", value: "blocked", label: t("task.blocked") });
 		for (const status of STATUS_ORDER) {
 			byValue.set(status.toLowerCase(), { facet: "status", value: status, label: getStatusLabel(status, t, project) });
 		}
@@ -335,6 +337,7 @@ function ActiveTasksSidebar({
 	// underlying status color.
 	const taskColor = useCallback(
 		(task: Task): string => {
+			if (isTaskBlocked(task)) return statusColors.blocked;
 			if (task.customColumnId) {
 				const col = projectById
 					.get(task.projectId)
@@ -377,6 +380,7 @@ function ActiveTasksSidebar({
 	// rendering; here we only map it to header chrome.
 	const tiers = groupTasksIntoTiers(activeTasks, { scope: effectiveScope, orderedCustomColumns, sortOrder });
 	const grouped: SidebarGroup[] = tiers.map((tier) => {
+		if (tier.kind === "blocked") return { key: tier.key, label: t("task.blocked"), color: statusColors.blocked, tasks: tier.tasks };
 		if (tier.kind === "needs-you") {
 			return {
 				key: tier.key,

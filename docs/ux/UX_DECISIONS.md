@@ -4,9 +4,11 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
-**Settled fork decisions now live in the bible/yaml:** 2026-08-27 project-priority swimlanes; 2026-08-26 focused Workspace Task overlay; 2026-08-23 Android hybrid shell (`decisions/2026/08/23/android-hybrid-client-native-prompt-bridge.md`); 2026-08-21 Workspace Board shortcut; 2026-08-20 per-project Completed disclosure and tab-row search; 2026-08-19 questions-as-attention lifecycle projection. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`, bible §5/§12.
+**2026-09-02 — Blocked reviews:** Persistent hold, formal column/tier, no Inbox/Needs You; existing drag/status menus own it. Why: `decisions/2026/09/02/blocked-review-hold.md`.
 
-**2026-08-28 — Workspace Inbox:** A fixed horizontal Inbox uses a counter-clockwise left rail above the scrolling grid and duplicates Has Questions/Your Review; AI Review stays distinct. Done counts disclose cards and empty rows retain New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`.
+**Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
+
+**2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 
 ## 2026-08-25 — Agent traffic: a conditional header readout plus an overlay log
 
