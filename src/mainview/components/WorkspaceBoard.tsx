@@ -444,6 +444,11 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		count: orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0),
 		element: (
 			<div className="h-full w-full overflow-y-auto rounded-xl border border-edge bg-base/30 p-2">
+				<div className="mb-2 flex min-w-0 items-center gap-2 px-1">
+					<span className="h-2 w-2 shrink-0 rounded-full" style={{ background: column === "custom" ? statusColors.todo : statusColors[column] }} />
+					<h2 className="min-w-0 truncate text-sm font-semibold text-fg">{columnLabel(column)}</h2>
+					{column === "blocked" && <HelpSpot topicId="board.column.blocked" />}
+				</div>
 				{orderedProjects.map((project) => {
 					const projectTasks = tasksByProject.get(project.id) ?? [];
 					const siblingMap = new Map<string, Task[]>();

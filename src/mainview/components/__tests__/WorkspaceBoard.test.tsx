@@ -44,6 +44,19 @@ function task(id: string, projectId: string, status: Task["status"]): Task {
 describe("WorkspaceBoard", () => {
 	beforeEach(() => vi.clearAllMocks());
 
+	it("names the Blocked column visibly in the narrow carousel", async () => {
+		const originalMatchMedia = window.matchMedia;
+		const mock = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({ ...originalMatchMedia(query), matches: query === "(max-width: 767px)" }));
+		try {
+			vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [{ ...task("held", "p1", "review-by-user"), blocked: true }] }]);
+			render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+			expect(await screen.findByRole("heading", { name: "Blocked" })).not.toHaveClass("sr-only");
+			expect(screen.getByRole("button", { name: "Next column" })).toBeInTheDocument();
+		} finally {
+			mock.mockRestore();
+		}
+	});
+
 	it("loads a blocked review in its own cell, never in Inbox or Your Review", async () => {
 		const held = { ...task("external-wait", "p1", "review-by-user"), blocked: true };
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [held] }]);
