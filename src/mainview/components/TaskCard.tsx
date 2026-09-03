@@ -104,9 +104,11 @@ interface TaskCardProps {
 	onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 	/** Jira-like board density: keep identity, title, lifecycle, and the To Do run action. */
 	compact?: boolean;
+	/** Global board: two title lines with priority and lifecycle stacked on the left. */
+	workspaceCard?: boolean;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false, workspaceCard = false }: TaskCardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -896,6 +898,31 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 							? { label: t("task.disconnectedBadge"), className: "border-edge-active text-fg-muted" }
 							: null;
 
+		const compactStatusControl = (
+			<button
+				ref={statusMenu.triggerRef}
+				type="button"
+				onClick={statusMenu.toggle}
+				disabled={isDisabled || isHibernated}
+				aria-label={`${blocked ? t("task.blocked") : activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
+				data-testid="task-card-rail"
+				className={`flex w-7 flex-shrink-0 items-center justify-center text-fg-3 transition-[filter,transform] hover:brightness-125 motion-safe:active:scale-[0.96] disabled:opacity-50 ${workspaceCard ? "h-5" : ""}`}
+			>
+				{blocked ? <span aria-hidden="true" style={{ color: railColor }}>Ⅱ</span> : activeCol ? (
+					<span className="h-3 w-3 rounded-full" style={{ background: railColor, boxShadow: `0 0 6px ${railColor}60` }} />
+				) : <PipelineRing status={task.status} size="compact" tooltip={false} />}
+			</button>
+		);
+		const compactBadges = <>
+			{compactStateBadge && <span className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 py-px text-nano font-semibold uppercase tracking-[0.05em] ${workspaceCard ? "leading-none" : ""} ${compactStateBadge.className}`}>{compactStateBadge.label}</span>}
+			{task.scratch && <span className="flex-shrink-0 font-mono text-nano text-fg-3" title={t("task.scratchSession")}>&gt;_</span>}
+		</>;
+		const compactBell = bellCount > 0 && (
+			<span className={`${workspaceCard ? "flex-shrink-0" : "absolute left-1 top-1 z-10"} flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-nano font-bold leading-none text-white shadow-[0_2px_6px_rgb(239_68_68_/_0.45)]`}>
+				{bellCount > 9 ? "9+" : bellCount}
+			</span>
+		);
+
 		return (
 			<div
 				ref={cardRef}
@@ -903,6 +930,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				data-hint-id={task.id}
 				data-help-id="board.task-card"
 				data-testid="workspace-compact-task-card"
+				data-card-layout={workspaceCard ? "two-line" : "single-line"}
 				data-needs-input={needsInput || undefined}
 				draggable={!isDisabled && !detailOpen && !isHibernated}
 				onDragStart={handleDragStart}
@@ -911,7 +939,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				onMouseEnter={handleCardMouseEnter}
 				onMouseLeave={handleCardMouseLeave}
 				onClick={handleClick}
-				className={`group relative flex h-[3.25rem] min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
+				className={`group relative flex ${workspaceCard ? "h-16" : "h-[3.25rem]"} min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
 					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : "border-edge"
 				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
 					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""
@@ -922,39 +950,23 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				} : undefined}
 			>
 				<div aria-hidden="true" className="w-0.5 flex-shrink-0" style={{ background: railColor }} />
-				{bellCount > 0 && (
-					<span className="absolute left-1 top-1 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-nano font-bold leading-none text-white shadow-[0_2px_6px_rgb(239_68_68_/_0.45)]">
-						{bellCount > 9 ? "9+" : bellCount}
-					</span>
-				)}
-				<button
-					ref={statusMenu.triggerRef}
-					type="button"
-					onClick={statusMenu.toggle}
-					disabled={isDisabled || isHibernated}
-					aria-label={`${blocked ? t("task.blocked") : activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
-					data-testid="task-card-rail"
-					className="flex w-7 flex-shrink-0 items-center justify-center text-fg-3 transition-[filter,transform] hover:brightness-125 motion-safe:active:scale-[0.96] disabled:opacity-50"
-				>
-					{blocked ? <span aria-hidden="true" style={{ color: railColor }}>Ⅱ</span> : activeCol ? (
-						<span className="h-3 w-3 rounded-full" style={{ background: railColor, boxShadow: `0 0 6px ${railColor}60` }} />
-					) : (
-						<PipelineRing status={task.status} size="compact" tooltip={false} />
-					)}
-				</button>
+				{!workspaceCard && compactBell}
+				{workspaceCard ? (
+					<div data-testid="workspace-card-controls" className="flex w-8 flex-shrink-0 flex-col items-center pt-1">
+						<div data-testid="workspace-card-priority-slot" className="flex h-5 items-center justify-center">
+							<PriorityBadge priority={task.priority} onChange={handleSetPriority} />
+						</div>
+						{compactStatusControl}
+					</div>
+				) : compactStatusControl}
 
-				<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1 pr-1.5">
-					<div className="flex min-w-0 items-center gap-1.5">
-						{compactStateBadge && (
-							<span className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 py-px text-nano font-semibold uppercase tracking-[0.05em] ${compactStateBadge.className}`}>
-								{compactStateBadge.label}
-							</span>
-						)}
-						{task.scratch && <span className="flex-shrink-0 font-mono text-nano text-fg-3" title={t("task.scratchSession")}>&gt;_</span>}
+				<div className={`flex min-w-0 flex-1 flex-col justify-center py-1 pr-1.5 ${workspaceCard ? "gap-0" : "gap-0.5"}`}>
+					<div className={`flex min-w-0 gap-1.5 ${workspaceCard ? "items-start" : "items-center"}`}>
+						{!workspaceCard && compactBadges}
 						<span
 							data-testid="task-card-title"
 							onClick={handleTitleClick}
-							className="min-w-0 flex-1 truncate whitespace-nowrap text-xs font-semibold leading-snug text-fg streamer-private"
+							className={`min-w-0 flex-1 text-xs font-semibold text-fg streamer-private ${workspaceCard ? "h-10 line-clamp-2 whitespace-normal break-words leading-5" : "truncate whitespace-nowrap leading-snug"}`}
 						>
 							{displayTitle}
 						</span>
@@ -989,10 +1001,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 								×
 							</button>
 						)}
-						<PriorityBadge priority={task.priority} onChange={handleSetPriority} className="flex-shrink-0" />
+						{!workspaceCard && <PriorityBadge priority={task.priority} onChange={handleSetPriority} className="flex-shrink-0" />}
 					</div>
-					<div className="flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-nano text-fg-muted">
+					<div className={`flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-nano text-fg-muted ${workspaceCard ? "h-3.5" : ""}`}>
 						<span className="flex-shrink-0 text-accent/70">#{task.seq}</span>
+						{workspaceCard && <>{compactBadges}{compactBell}</>}
 						<NativeBackendMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-native-backend" />
 						<ForeignCodeMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-foreign-code" />
 						<span className="min-w-0 truncate">{configLabel || "—"}</span>
@@ -1297,7 +1310,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					<div>
 						<div
 							data-testid="task-card-title"
-							className={`text-sm font-medium text-fg ${compact ? "truncate whitespace-nowrap leading-snug" : "line-clamp-3 break-words leading-relaxed"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
+							className={`text-sm font-medium text-fg ${workspaceCard ? "line-clamp-2 break-words leading-5" : compact ? "truncate whitespace-nowrap leading-snug" : "line-clamp-3 break-words leading-relaxed"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}
 							onClick={handleTitleClick}
 							title={isTodo && hasLongDescription ? task.description : undefined}
 						>
