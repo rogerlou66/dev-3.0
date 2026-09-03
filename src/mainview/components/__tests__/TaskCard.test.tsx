@@ -175,7 +175,6 @@ function renderCard(
 		onEditDraft?: (task: Task) => void;
 			onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 			compact?: boolean;
-			workspaceCard?: boolean;
 			devServer?: DevServerSummary;
 	},
 ) {
@@ -199,7 +198,6 @@ function renderCard(
 				onEditDraft={opts?.onEditDraft}
 					onOpenWorkspaceTask={opts?.onOpenWorkspaceTask}
 					compact={opts?.compact}
-					workspaceCard={opts?.workspaceCard}
 					devServer={opts?.devServer}
 			/>
 		</I18nProvider>,
@@ -207,49 +205,8 @@ function renderCard(
 }
 
 describe("TaskCard", () => {
-	describe("compact board presentation", () => {
-		it("also allows two title lines on narrow workspace cards", () => {
-			const originalMatchMedia = window.matchMedia;
-			const mock = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({ ...originalMatchMedia(query), matches: query === "(max-width: 767px)" }));
-			try {
-				renderCard(makeTask({ status: "review-by-user", title: "A long title in the phone carousel" }), { compact: true, workspaceCard: true });
-				expect(screen.getByTestId("task-card-title")).toHaveClass("line-clamp-2");
-				expect(screen.getByTestId("task-card-title")).not.toHaveClass("whitespace-nowrap");
-			} finally {
-				mock.mockRestore();
-			}
-		});
-		it("gives global cards two title lines with priority above the stage control", () => {
-			renderCard(makeTask({ status: "review-by-user", title: "A long global card title that wraps onto a second line", priority: "P1" }), { compact: true, workspaceCard: true });
-			expect(screen.getByTestId("task-card-title")).toHaveClass("line-clamp-2", "h-10", "leading-5");
-			expect(screen.getByTestId("task-card-title")).not.toHaveClass("truncate", "whitespace-nowrap");
-			const controls = screen.getByTestId("workspace-card-controls");
-			expect(within(controls).getByRole("button", { name: /Priority P1/ })).toBeInTheDocument();
-			expect(within(controls).getByRole("img", { name: "Stage 5 of 7" })).toBeInTheDocument();
-			expect(screen.getByTestId("workspace-card-priority-slot").compareDocumentPosition(screen.getByTestId("task-card-rail")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		});
-
-		it("keeps the relocated priority and status controls isolated from workspace opening", async () => {
-			const onOpenWorkspaceTask = vi.fn();
-			renderCard(makeTask({ status: "review-by-user", worktreePath: "/tmp/wt" }), { compact: true, workspaceCard: true, onOpenWorkspaceTask });
-			const user = userEvent.setup();
-			await user.click(screen.getByRole("button", { name: /Priority P3/ }));
-			expect(await screen.findByRole("menu")).toBeInTheDocument();
-			await user.keyboard("{Escape}");
-			await user.click(screen.getByTestId("task-card-rail"));
-			expect(await screen.findByRole("button", { name: "Move to Blocked" })).toBeInTheDocument();
-			expect(onOpenWorkspaceTask).not.toHaveBeenCalled();
-		});
-
-		it("preserves blocked and bell signals outside the two-line title", () => {
-			renderCard(makeTask({ status: "review-by-user", blocked: true }), { compact: true, workspaceCard: true, bellCount: 2 });
-			expect(screen.getByText("Blocked")).toBeInTheDocument();
-			expect(screen.getByText("2")).toBeInTheDocument();
-			expect(screen.getByRole("button", { name: "Blocked. Move to" })).toHaveTextContent("Ⅱ");
-			expect(screen.getByTestId("task-card-title")).not.toHaveTextContent("Blocked");
-		});
-
-		it("keeps project-board compact cards to one truncated title line", () => {
+	describe("workspace-board compact presentation", () => {
+		it("keeps the title to one truncated line and does not let the rail label set card height", () => {
 			renderCard(makeTask({ status: "review-by-user", title: "A very long task title that cannot fit inside one compact card" }), { compact: true });
 
 			expect(screen.getByTestId("workspace-compact-task-card")).toHaveClass("h-[3.25rem]");
@@ -266,7 +223,7 @@ describe("TaskCard", () => {
 				worktreePath: "/tmp/wt",
 				title: "A complete task title",
 				overview: "The agent's latest useful update.",
-			}), { compact: true, workspaceCard: true });
+			}), { compact: true });
 
 			const card = document.querySelector<HTMLElement>('[data-task-id="t1"]')!;
 			await act(async () => {

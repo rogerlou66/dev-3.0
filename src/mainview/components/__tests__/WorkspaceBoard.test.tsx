@@ -15,12 +15,11 @@ vi.mock("../../rpc", () => ({
 }));
 
 vi.mock("../TaskCard", () => ({
-	default: ({ task, project, onOpenWorkspaceTask, onDragStart, workspaceCard }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void; onDragStart?: (id: string) => void; workspaceCard?: boolean }) => (
+	default: ({ task, project, onOpenWorkspaceTask, onDragStart }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void; onDragStart?: (id: string) => void }) => (
 		<button
 			draggable
 			onDragStart={() => onDragStart?.(task.id)}
 			data-testid={`workspace-task-${task.id}`}
-			data-workspace-card={workspaceCard || undefined}
 			data-needs-input={task.status === "user-questions" || undefined}
 			onClick={(event) => onOpenWorkspaceTask?.(task, project, event.currentTarget)}
 		>
@@ -63,7 +62,6 @@ describe("WorkspaceBoard", () => {
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [held] }]);
 		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
 		expect(await screen.findByTestId("workspace-cell-p1-blocked")).toHaveTextContent("external-wait");
-		expect(screen.getByTestId("workspace-task-external-wait")).toHaveAttribute("data-workspace-card", "true");
 		expect(screen.getByRole("region", { name: "Inbox" })).not.toHaveTextContent("external-wait");
 		expect(screen.getByTestId("workspace-cell-p1-review-by-user")).not.toHaveTextContent("external-wait");
 	});
