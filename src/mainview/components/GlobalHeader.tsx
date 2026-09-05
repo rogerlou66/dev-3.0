@@ -82,6 +82,7 @@ interface GlobalHeaderProps {
 	 * already teaching, and bible §10 allows exactly one callout per screen.
 	 */
 	tourRunning?: boolean;
+	dashboardSlotRef?: (node: HTMLDivElement | null) => void;
 }
 
 /**
@@ -109,7 +110,7 @@ interface BreadcrumbSegment {
 /** Cache TTL for project task counts (30 seconds) */
 const COUNTS_CACHE_TTL = 30_000;
 
-function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable = false, remoteAccessActive, helpDiscovered = false, tourRunning = false }: GlobalHeaderProps) {
+function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable = false, remoteAccessActive, helpDiscovered = false, tourRunning = false, dashboardSlotRef }: GlobalHeaderProps) {
 	const t = useT();
 	useKeymapVersion();
 	const highlightHelp = !helpDiscovered && !tourRunning && HELP_ATTRACTOR_SCREENS.has(route.screen);
@@ -117,6 +118,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	const { file: spacesFile } = useSpaces();
 	const compact = useCompact();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	const hasDashboardControls = route.screen === "dashboard" && projects.length > 0 && !!dashboardSlotRef;
 	const androidShell = isAndroidAppShell();
 	const viewedOverRemote = isRemote();
 	// Live fullscreen state for the action-sheet toggle label (browser only).
@@ -558,12 +560,12 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 									className="header-anim flex items-center gap-1.5 text-accent hover:text-accent-emphasis transition-colors flex-shrink-0"
 								>
 									<HomeIcon className="w-3.5 h-3.5 flex-shrink-0" />
-									<span className="font-mono font-semibold text-xs tracking-wide">{seg.label}</span>
+									<span className={`font-mono font-semibold text-xs tracking-wide ${hasDashboardControls ? "hidden md:inline" : ""}`}>{seg.label}</span>
 								</button>
 							) : (
 								<span className="flex items-center gap-1.5 text-accent flex-shrink-0">
 									<HomeIcon className="w-3.5 h-3.5 flex-shrink-0" />
-									<span className="font-mono font-semibold text-xs tracking-wide">{seg.label}</span>
+									<span className={`font-mono font-semibold text-xs tracking-wide ${hasDashboardControls ? "hidden md:inline" : ""}`}>{seg.label}</span>
 								</span>
 							)
 						) : seg.isProjectDropdown ? (
@@ -685,6 +687,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 					</Fragment>
 				))}
 			</nav>
+			{hasDashboardControls && <div ref={dashboardSlotRef} data-testid="dashboard-header-slot" className="mx-2 flex min-w-0 flex-1 items-center" />}
 
 			{/* Actions — tmux sessions, changelog, project settings, global settings, external links */}
 			<div className="flex items-center gap-0.5 flex-shrink-0" data-help-id="header.utilities">

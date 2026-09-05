@@ -103,7 +103,7 @@ Evidence: `GlobalHeader.tsx`.
 
 ### Tabs — `Observed`
 
-Tabs divide sibling views inside an existing destination. Observed in `dashboard` (`Board | Projects`) and `project-settings` (`global | project | worktree | automations`). Budget ≤ 6 visible tabs. Dashboard Board may use one trailing search field in this row because it filters only the active workspace board; it disappears on Projects and flexes before displacing either tab.
+Tabs divide sibling views inside a destination (≤6). Dashboard's `Board | Projects` and Board-only search occupy a contextual slot beside the main-header breadcrumbs; no separate row. Tight slots use a magnifier → input popover; closing preserves the query. Project/task headers are unchanged. Project Settings keeps its own tabs.
 
 ### Command palette (Cmd/Ctrl+K nav · Cmd/Ctrl+Shift+P actions) — `Observed`
 
@@ -113,7 +113,7 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 
 | Surface | Purpose | Allowed | Forbidden | Evidence |
 |---|---|---|---|---|
-| Global header | Location + switching + app utilities | breadcrumb, destination, project switcher, settings/changelog entry, tmux manager, prevent-sleep (awake) toggle, **≤1 ambient resource readout** (memory headroom), **≤1 unread-earned agent-traffic pill** (§5.9) | task-scoped action, dense filters, destructive primary | `GlobalHeader.tsx` |
+| Global header | Location + switching + app utilities | breadcrumb, destination, Dashboard-only view/search slot, project switcher, settings/changelog, tmux manager, awake toggle, **≤1 ambient readout**, **≤1 unread agent-traffic pill** (§5.9) | task-scoped action, dense filters, destructive primary | `GlobalHeader.tsx` |
 | Application menu (native) | Canonical home for the full action taxonomy | every action type | — | `application-menu.ts`, `menu-actions.ts` |
 | Workspace board | Cross-project daily work on the Dashboard Board tab | project swimlanes, aligned lifecycle columns, task open/move, search | cross-project task moves, project-specific column configuration | `WorkspaceBoard.tsx`, `Dashboard.tsx` |
 | Workspace task overlay | Focused, non-route coding workspace for one active task opened from Dashboard Board while the board stays mounted | existing task inspector + terminal/diff/artifact workspace, explicit full-page handoff, close/back/backdrop | new destination/breadcrumb, multiple windows, archived/todo terminal, native dialog | `WorkspaceTaskOverlay.tsx`, `App.tsx`, `TaskWorkspaceView.tsx` |

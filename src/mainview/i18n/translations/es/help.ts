@@ -1,4 +1,5 @@
 const help = {
+	"help.header.dashboardViews.body": "Alterna entre el tablero global y la gestión de proyectos. La búsqueda filtra el tablero; en una cabecera estrecha, pulsa la lupa para escribir. Cerrar la búsqueda conserva el filtro, igual que volver al tablero.",
 	// ── UI chrome ──
 	"help.ui.aboutSection": "Acerca de esta sección",
 	"help.ui.modeBanner": "Modo ayuda — haz clic en cualquier zona resaltada para saber qué hace",

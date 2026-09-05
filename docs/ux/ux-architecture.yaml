@@ -1,6 +1,6 @@
 ux_architecture:
   version: 1
-  updated_at: "2026-09-02"
+  updated_at: "2026-09-05"
   source: "derived_from_repository"
   confidence: "medium"
 
@@ -200,7 +200,8 @@ ux_architecture:
       evidence: ["src/mainview/diagnostics.ts", "src/mainview/components/RootErrorBoundary.tsx", "src/mainview/components/BootstrapScreen.tsx", "src/mainview/components/DiagnosticsPanel.tsx", "src/mainview/components/StatusDock.tsx", "src/mainview/components/ConnectionStatusPill.tsx", "src/mainview/components/DiagnosticsIndicator.tsx", "src/mainview/components/KanbanBoardSkeleton.tsx", "src/mainview/components/BoardLoadFailed.tsx", "src/mainview/index.html (pre-React loader)"]
     global_header:
       purpose: "Breadcrumb location, project switcher, and app-level destinations/utilities."
-      allowed: ["history_nav", "breadcrumb", "destination", "project_switcher", "variant_switcher", "changelog", "settings_entry", "tmux_session_manager", "prevent_sleep_toggle", "agent_rate_limit_indicator", "ambient_resource_readout", "agent_traffic_readout"]
+      allowed: ["history_nav", "breadcrumb", "dashboard_view_search", "destination", "project_switcher", "variant_switcher", "changelog", "settings_entry", "tmux_session_manager", "prevent_sleep_toggle", "agent_rate_limit_indicator", "ambient_resource_readout", "agent_traffic_readout"]
+      dashboard_view_search: "Dashboard-only slot beside breadcrumbs: Board/Projects plus Board search, no separate row. Tight width: magnifier opens input; closing preserves query. Dashboard owns state; header inert covers controls. Project/task titles stay unchanged."
       agent_traffic_readout:
         budget: 1
         spec: "Home is the labelled kebab row. A violet identity pill earns a bar slot only for unread traffic (per-browser stamp, 9+ cap) and remains while its panel is open; warning ink means unproven delivery. Rows navigate to the receiver. No invented importance axis."
@@ -214,7 +215,7 @@ ux_architecture:
         reclaim_action: "Only leftover processes inside task worktrees are actionable; top consumers remain read-only. When leftovers exist, show ghost-danger Kill all (confirmed), per-row kill (named target, no dialog), and rescan. Scan on demand plus startup logging, never in the memory poller; startup never kills. This is the ambient-status mutation exception."
         status: "proposed"
       forbidden: ["task_scoped_action", "dense_filters", "destructive_primary"]
-      note: "history_nav = back/forward arrows pinned at the far left of the breadcrumb row (browser convention), driven by the route-history stack in state.ts. Also bound to Cmd+[/Cmd+] and mouse side buttons. Buttons are neutral/ghost icon-only and disable when canGoBack/canGoForward is false."
+      note: "History arrows: far-left, neutral/ghost, disabled at stack boundaries; state.ts history, Cmd+[/Cmd+] and mouse side buttons."
       evidence: ["src/mainview/components/GlobalHeader.tsx", "src/mainview/state.ts (routeHistory/goBack/goForward)", "src/mainview/App.tsx (Cmd+[/], mouseup buttons 3/4)"]
     application_menu:
       purpose: "Native macOS/Linux menu bar; canonical home for the full action taxonomy (File / Edit / Task / Project / View / Debug)."

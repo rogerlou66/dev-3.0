@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch } from "react";
+import { createPortal } from "react-dom";
+import DashboardHeaderControls from "./DashboardHeaderControls";
 import { toast } from "../toast";
 import type { Project, Space, Task } from "../../shared/types";
 import { isBuiltinOpsProject, isSpaceSensitive, orderProjectsForDisplay } from "../../shared/types";
@@ -26,6 +28,8 @@ interface DashboardProps {
 	onOpenCreateTask: (projectId: string) => void;
 	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
 	workspaceBoardRequest: number;
+	headerSlot: HTMLElement | null;
+	headerDisabled?: boolean;
 }
 
 function Dashboard({
@@ -37,6 +41,8 @@ function Dashboard({
 	onOpenCreateTask,
 	onOpenWorkspaceTask,
 	workspaceBoardRequest,
+	headerSlot,
+	headerDisabled,
 }: DashboardProps) {
 	const t = useT();
 	const { spaces } = useSpaces();
@@ -122,32 +128,9 @@ function Dashboard({
 
 	return (
 		<div className="h-full w-full flex flex-col">
-			{projects.length > 0 && (
-				<nav className="flex h-12 flex-shrink-0 items-center gap-2 border-b border-edge px-3" aria-label={t("dashboard.views")}>
-					{(["board", "projects"] as const).map((view) => (
-						<button
-							key={view}
-							type="button"
-							onClick={() => setSurface(view)}
-							aria-current={surface === view ? "page" : undefined}
-							className={`h-full border-b-2 px-4 text-sm font-semibold transition-colors ${surface === view ? "border-accent text-fg" : "border-transparent text-fg-3 hover:text-fg"}`}
-						>
-							{t(view === "board" ? "dashboard.tabBoard" : "dashboard.tabProjects")}
-						</button>
-					))}
-					{surface === "board" && (
-						<div className="relative ml-auto min-w-0 flex-1 max-w-sm">
-							<svg className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
-							<input
-								aria-label={t("workspaceBoard.search")}
-								value={workspaceQuery}
-								onChange={(event) => setWorkspaceQuery(event.target.value)}
-								placeholder={t("workspaceBoard.search")}
-								className="h-8 w-full rounded-lg border border-edge bg-base/50 pl-9 pr-3 text-sm text-fg outline-none focus:border-accent"
-							/>
-						</div>
-					)}
-				</nav>
+			{projects.length > 0 && headerSlot && createPortal(
+				<DashboardHeaderControls surface={surface} onSurfaceChange={setSurface} query={workspaceQuery} onQueryChange={setWorkspaceQuery} disabled={headerDisabled} />,
+				headerSlot,
 			)}
 			<div ref={containerRef} className="flex-1 overflow-hidden flex">
 				{railOnScreen && (

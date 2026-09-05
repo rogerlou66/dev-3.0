@@ -4,6 +4,8 @@ Compact index of UX architecture decisions — the *why* behind rules that live 
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
 git history, PRs, and the records in `decisions/`. Newest first.
 
+**2026-09-05 — Dashboard shares its header:** Move view/search controls into a Dashboard-only header slot to reclaim the separate row; project/task titles stay unchanged. See `decisions/2026/09/05/dashboard-controls-use-header-slot.md`.
+
 **2026-09-02 — Blocked reviews:** Persistent hold, formal column/tier, no Inbox/Needs You; existing drag/status menus own it. Why: `decisions/2026/09/02/blocked-review-hold.md`.
 
 **Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
@@ -533,11 +535,9 @@ git history, PRs, and the records in `decisions/`. Newest first.
 - **Why:** A command palette was rejected — the sidebar already owns `task_jump` and a new global palette would be surface creep; MRU matches the alt-tab muscle memory the user explicitly invoked. Decision 069.
 - **Status:** Observed. Evidence: `TaskSwitcherOverlay.tsx`.
 
-## 2026-06-16 — Browser-style back/forward navigation in the global header
+## 2026-06-16 — History arrows belong beside location
 
-- **Rule:** History arrows live at the far LEFT of the header breadcrumb row (navigation belongs with the "address bar", not the action cluster), as a segmented pill of two icon-only chevrons; ⌘[/⌘] + mouse side buttons drive the existing `state.ts` route-history stack.
-- **Why:** Bare chevrons didn't read as a control (looked decorative); the segmented group is the universal back/forward affordance; far-left placement adds zero pressure to the dense right cluster. History dropdown rejected as scope creep.
-- **Status:** Observed. Evidence: `GlobalHeader.tsx`, `App.tsx`, `state.ts`.
+Segmented back/forward at the far left makes the bare chevrons recognizable without crowding utilities; history dropdown rejected. Rule: yaml `global_header.note`; evidence: `GlobalHeader.tsx`, `state.ts`.
 
 ## 2026-06-15 — Compact status-age badge on Active Tasks sidebar cards
 

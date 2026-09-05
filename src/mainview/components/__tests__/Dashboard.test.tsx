@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState, type ComponentProps } from "react";
 import Dashboard from "../Dashboard";
 import { I18nProvider } from "../../i18n";
 import type { Project } from "../../../shared/types";
@@ -30,6 +31,11 @@ vi.mock("../../confirm", () => ({
 
 const mockedApi = vi.mocked(api, true);
 
+function DashboardWithHeader(props: Omit<ComponentProps<typeof Dashboard>, "headerSlot">) {
+	const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+	return <><header data-testid="dashboard-test-header"><div ref={setSlot} /></header><main data-testid="dashboard-test-main"><Dashboard {...props} headerSlot={slot} /></main></>;
+}
+
 function renderDashboard(
 	projects: Project[] = [],
 	dispatch?: React.Dispatch<AppAction>,
@@ -40,7 +46,7 @@ function renderDashboard(
 ) {
 	const result = render(
 		<I18nProvider>
-			<Dashboard
+			<DashboardWithHeader
 				projects={projects}
 				dispatch={dispatch ?? vi.fn()}
 				navigate={navigate ?? vi.fn()}
@@ -80,7 +86,7 @@ describe("Dashboard", () => {
 		expect(await within(navigation).findByPlaceholderText("Search tasks and projects…")).toBeInTheDocument();
 	});
 
-	it("keeps the workspace search in the trailing tab-bar slot", async () => {
+	it("renders navigation and search in the header and retains the query across views", async () => {
 		const user = userEvent.setup();
 		renderDashboard([mockProject], vi.fn(), vi.fn(), vi.fn(), "board");
 		const navigation = screen.getByRole("navigation", { name: "Dashboard views" });
@@ -88,9 +94,13 @@ describe("Dashboard", () => {
 
 		await user.type(search, "api");
 		expect(search).toHaveValue("api");
+		expect(screen.getByTestId("dashboard-test-header")).toContainElement(navigation);
+		expect(screen.getByTestId("dashboard-test-main")).not.toContainElement(navigation);
 		expect(navigation.lastElementChild).toContainElement(search);
 		await user.click(within(navigation).getByRole("button", { name: "Projects" }));
 		expect(within(navigation).queryByRole("textbox")).not.toBeInTheDocument();
+		await user.click(within(navigation).getByRole("button", { name: "Board" }));
+		expect(within(navigation).getByRole("textbox")).toHaveValue("api");
 	});
 
 	it("returns to the workspace board when App requests it", async () => {
@@ -104,7 +114,7 @@ describe("Dashboard", () => {
 		};
 		const { rerender } = render(
 			<I18nProvider>
-				<Dashboard {...props} workspaceBoardRequest={0} />
+				<DashboardWithHeader {...props} workspaceBoardRequest={0} />
 			</I18nProvider>,
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Projects" }));
@@ -112,7 +122,7 @@ describe("Dashboard", () => {
 
 		rerender(
 			<I18nProvider>
-				<Dashboard {...props} workspaceBoardRequest={1} />
+				<DashboardWithHeader {...props} workspaceBoardRequest={1} />
 			</I18nProvider>,
 		);
 

@@ -402,6 +402,7 @@ function App() {
 	const [openAddProjectOnDashboard, setOpenAddProjectOnDashboard] = useState(false);
 	const [showProjectSwitch, setShowProjectSwitch] = useState(false);
 	const [workspaceBoardRequest, setWorkspaceBoardRequest] = useState(0);
+	const [dashboardHeaderSlot, setDashboardHeaderSlot] = useState<HTMLDivElement | null>(null);
 	// Cmd/Ctrl+O picker when no app is chosen yet (or the chosen one is gone).
 	const [openInPicker, setOpenInPicker] = useState<{ path: string; taskId?: string } | null>(null);
 	const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -2661,6 +2662,7 @@ function App() {
 					{!isElectrobun && <AppMenuBar context={menuContext} onAction={handleMenuBarAction} />}
 					<GlobalHeader
 						route={route}
+						dashboardSlotRef={setDashboardHeaderSlot}
 						projects={state.projects}
 						tasks={state.currentProjectTasks}
 						agents={agents}
@@ -3309,6 +3311,8 @@ function App() {
 							onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
 							onOpenWorkspaceTask={openWorkspaceTask}
 							workspaceBoardRequest={workspaceBoardRequest}
+							headerSlot={dashboardHeaderSlot}
+							headerDisabled={!!workspaceTaskTarget}
 					/>
 				);
 			case "project":

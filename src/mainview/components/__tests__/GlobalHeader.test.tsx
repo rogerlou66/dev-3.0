@@ -191,10 +191,29 @@ function renderHeader(
 		goForward?: () => void;
 		canGoBack?: boolean;
 		canGoForward?: boolean;
+		dashboardSlotRef?: (node: HTMLDivElement | null) => void;
 	},
 ) {
 	return render(headerElement(route, projects, navigate, tasks, extra));
 }
+
+describe("Dashboard header slot", () => {
+	it("mounts only on Dashboard and releases the slot when leaving", () => {
+		const slot = vi.fn();
+		const { rerender } = renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { dashboardSlotRef: slot });
+		expect(slot).toHaveBeenCalledWith(screen.getByTestId("dashboard-header-slot"));
+		rerender(headerElement({ screen: "project", projectId: "p1" }, [project1], vi.fn(), [], { dashboardSlotRef: slot }));
+		expect(screen.queryByTestId("dashboard-header-slot")).not.toBeInTheDocument();
+		expect(screen.getByText("Project Alpha")).toBeInTheDocument();
+		expect(slot.mock.calls.map(([node]) => node)).toContain(null);
+	});
+	it("retains task title and project switching without Dashboard controls", () => {
+		renderHeader({ screen: "task", projectId: "p1", taskId: "t1" }, [project1], vi.fn(), [makeBreadcrumbTask()], { dashboardSlotRef: vi.fn() });
+		expect(screen.queryByTestId("dashboard-header-slot")).not.toBeInTheDocument();
+		expect(screen.getByText("My Task Title")).toBeInTheDocument();
+		expect(screen.getByText("Project Alpha")).toBeInTheDocument();
+	});
+});
 
 function headerElement(
 	route: Route,
@@ -221,6 +240,7 @@ function headerElement(
 				updateDownloadStatus={extra?.updateDownloadStatus}
 				remoteAccessAvailable={extra?.remoteAccessAvailable ?? true}
 				remoteAccessActive={extra?.remoteAccessActive ?? false}
+				dashboardSlotRef={extra?.dashboardSlotRef}
 			/>
 		</I18nProvider>
 	);

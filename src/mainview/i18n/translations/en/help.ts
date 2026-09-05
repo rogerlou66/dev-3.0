@@ -5,6 +5,7 @@
  * live under `help.ui.*`.
  */
 const help = {
+	"help.header.dashboardViews.body": "Switch between the cross-project Board and project management here. Search filters the Board; in a narrow header, open the magnifier to type. Closing search keeps your filter, and switching back to Board restores it.",
 	// ── UI chrome ──
 	"help.ui.aboutSection": "About this section",
 	"help.ui.modeBanner": "Help mode — click any highlighted zone to learn what it does",
