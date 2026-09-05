@@ -1,3 +1,4 @@
+import { stopAgentMessageLogWatches } from "./agent-message-log-watch";
 import Electrobun, {
 	ApplicationMenu,
 	PATHS,
@@ -15,6 +16,7 @@ import {
 	isUpdateAlreadyReady,
 } from "./updater";
 import { loadSettings, loadSettingsSync } from "./settings";
+import { setTmuxPaneDimming, writeTmuxConfigs } from "./tmux/config";
 import { shouldAutoOpenDevTools } from "./devtools-auto-open";
 import { installSignalQuitConfirmation, isQuitConfirmed, markQuitConfirmed, markQuitDialogPending } from "./quit-manager";
 import { initNativeNotifications } from "./native-notifications";
@@ -39,13 +41,15 @@ import { startSocketServer, stopSocketServer } from "./cli-socket-server";
 import { writeSystemClipboard } from "./system-clipboard";
 import { stopTunnel } from "./cloudflare-tunnel";
 import { installAgentSkills } from "./agent-skills";
+import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { ensureCodexConfigFile } from "./codex-config";
 import { ensureWindowsShortcuts } from "./windows-shortcuts";
 import { makeTitle } from "./app-utils";
 import { buildApplicationMenu, getMenuContext, MENU_ACTIONS, onMenuContextChange } from "../shared/application-menu";
 import { openLogsDirectory } from "./menu-actions";
 import { startLoopMonitor } from "./loop-monitor";
-import { createAppWindow, broadcastToAllWindows, focusFocusedWindow, getFocusedWindow, getWindowCount, handleDisplayConfigurationChange, sendToFocusedWindow, setOpenNewWindow, flushWindowState } from "./window-manager";
+import { createAppWindow, focusFocusedWindow, getFocusedWindow, getWindowCount, handleDisplayConfigurationChange, sendToFocusedWindow, setOpenNewWindow, flushWindowState } from "./window-manager";
+import { pushEverywhere } from "./push-targets";
 import electrobunConfig, { cliBinaryName } from "../../electrobun.config";
 import { BUILD_TIME } from "../shared/build-info.generated";
 import { existsSync, writeSync } from "node:fs";
@@ -161,11 +165,16 @@ log.info("Log files", { dir: getLogPath() });
 
 	// Windows ships `dev3.exe`; the bundle name is owned by electrobun.config so
 	// the copy map and this install path can never disagree.
-	installBinary(cliBinaryName());
+	//
+	// A dev-channel build (`bun run dev`) is deliberately not allowed here: this
+	// copy owns the CLI every agent on the machine runs, and a worktree build
+	// landing on it silently swaps everyone onto an unmerged branch. See
+	// managed-cli-guard.ts.
+	if (managedCliWriteAllowed(PATHS.VIEWS_FOLDER, DEV3_HOME)) installBinary(cliBinaryName());
 
 	// Install dev3 skill into all supported AI agent directories (~/.claude, ~/.codex, etc.).
 	// Overwritten on every start to match the running app version (same pattern as CLI binary).
-	installAgentSkills({ configureCodex: false });
+	installAgentSkills({ configureCodex: false, lowBattery: loadSettingsSync().lowBatteryEnabled });
 
 	// Append ~/.dev3.0/bin to the user's shell rc files (idempotent).
 	// This makes `dev3` available in all terminals, not just worktree tmux
@@ -297,14 +306,26 @@ applyFullShellEnvToProcess(shellEnv, (await loadSettings()).importShellEnv !== f
 const cliSocketPath = startSocketServer();
 log.info("CLI socket server ready", { path: cliSocketPath });
 
-// Daily projects.json safety snapshot (projects-YYYY-MM-DD.json.bak, 7 days kept).
-// Saves also trigger it, but projects.json can go untouched for weeks — the
-// startup hook guarantees at least one fresh backup per day the app is used.
+// User-state safety snapshots: hourly copies (72 kept) of every file in the
+// registry — projects, virtual projects, spaces, agents, settings, the model
+// catalog — plus the daily projects.json .bak files (7 kept).
+//
+// The timer is the point of this block. Both schemes fired only on a save or at
+// startup, so an app left running for days snapshotted nothing — 28-30 Aug 2026
+// have no copy for exactly that reason, while the board was edited all three
+// days. Ticking below the hourly bucket gives every hour the app is alive one,
+// and it is the ONLY trigger the files outside data.ts have.
 {
+	// Half the hourly bucket, so no bucket can be skipped by drift.
+	const STATE_BACKUP_TICK_MS = 30 * 60 * 1000;
 	const { backupProjectsDaily } = await import("./data");
-	backupProjectsDaily().catch((err) => {
-		log.warn("Startup projects backup failed (non-fatal)", { err });
-	});
+	const { snapshotProtectedState } = await import("./state-backup");
+	const snapshotUserState = () => {
+		backupProjectsDaily().catch((err) => log.warn("Daily projects backup failed (non-fatal)", { err }));
+		snapshotProtectedState().catch((err) => log.warn("Hourly state backup failed (non-fatal)", { err }));
+	};
+	snapshotUserState();
+	setInterval(snapshotUserState, STATE_BACKUP_TICK_MS).unref?.();
 }
 
 // Exclude the worktrees root from OS backups (Time Machine) once at startup.
@@ -321,6 +342,16 @@ log.info("CLI socket server ready", { path: cliSocketPath });
 {
 	const { sweepStaleWorktreeTrust } = await import("./worktree-trust");
 	sweepStaleWorktreeTrust();
+}
+
+// tmux never unlinks a socket file when its server dies, and every pid-keyed
+// socket name is one file that would otherwise stay forever. Conservative:
+// dev3-prefixed, ours, no live server behind it, older than a minute.
+{
+	const { sweepDeadTmuxSockets } = await import("./tmux");
+	sweepDeadTmuxSockets().catch((err) => {
+		log.warn("Startup tmux socket sweep failed (non-fatal)", { err: String(err) });
+	});
 }
 
 // Side-effect: starts the PTY WebSocket server (dynamic import so PATH is patched first)
@@ -459,23 +490,28 @@ await openMainWindow();
 log.info("Main window created");
 readiness.arm();
 
-// Wire push messages to every open desktop renderer window. Browser clients are
-// served only by the explicit `dev3 remote` process in headless-entry.ts.
+// Wire push messages. Every push in this file goes through `pushEverywhere`, so
+// an open window and an attached browser always hear the same events.
 setPushMessage((name, payload) => {
 	log.debug("Push to renderer", { name });
-	broadcastToAllWindows(name, payload);
+	pushEverywhere(name, payload);
 });
 
 // Initialize the backend gate before background pollers and CLI requests can
 // raise agent notifications. Queued entries flush when Focus Mode is disabled.
 setFocusMode(loadSettingsSync().focusMode === true);
 
+// The tmux configs were written at import time on the built-in default (dimmed);
+// hand the module the user's own answer and rewrite them before any pane spawns.
+if (loadSettingsSync().dimInactivePanes === false) {
+	setTmuxPaneDimming(false);
+	writeTmuxConfigs();
+}
+
 // `exposedPortsChanged` rides its own hook because port-tunnels lives below
 // rpc-handlers — same broadcast target as above.
 import("./port-tunnels").then(({ setPortTunnelsPushHook }) => {
-	setPortTunnelsPushHook((name, payload) => {
-		broadcastToAllWindows(name, payload);
-	});
+	setPortTunnelsPushHook(pushEverywhere);
 }).catch((err) => log.warn("port-tunnels push hook setup failed", { error: String(err) }));
 
 // Diagnostic: log whenever the Bun event loop is blocked for >500ms.
@@ -516,7 +552,7 @@ setNativeDevServerProbe(async (task, socket) => {
 startPortScanPoller(
 	(name, payload) => {
 		try {
-			broadcastToAllWindows(name, payload);
+			pushEverywhere(name, payload);
 		} catch (err) {
 			log.error("Failed to push port update", { error: String(err) });
 		}
@@ -535,7 +571,7 @@ startDisplayWatch({
 // Start background resource usage monitor (discovers tmux sessions directly, not via pty-server)
 startResourceMonitor((name, payload) => {
 	try {
-		broadcastToAllWindows(name, payload);
+		pushEverywhere(name, payload);
 	} catch (err) {
 		log.error("Failed to push resource usage update", { error: String(err) });
 	}
@@ -575,7 +611,7 @@ setTimeout(() => {
 // Start background agent rate-limit monitor (Claude dump / Codex rollouts + monthly credits)
 startRateLimitMonitor((name, payload) => {
 	try {
-		broadcastToAllWindows(name, payload);
+		pushEverywhere(name, payload);
 	} catch (err) {
 		log.error("Failed to push rate-limit update", { error: String(err) });
 	}
@@ -604,19 +640,21 @@ startScheduledMessageScheduler();
 const { startFocusTracker, stopFocusTracker } = await import("./focus-tracker");
 startFocusTracker();
 
-// Wire PTY death notifications
+// Wire PTY death notifications. This is what replaces a dead terminal with the
+// "session ended" screen, so it has to reach an attached browser too — without it
+// a phone keeps rendering a terminal that exited minutes ago.
 setOnPtyDied((sessionKey) => {
 	try {
 		if (sessionKey.startsWith("project-")) {
 			const projectId = sessionKey.slice(8);
-			log.info("Project terminal died, notifying renderer", { projectId: projectId.slice(0, 8) });
-			broadcastToAllWindows("projectPtyDied", { projectId });
+			log.info("Project terminal died, notifying clients", { projectId: projectId.slice(0, 8) });
+			pushEverywhere("projectPtyDied", { projectId });
 		} else {
-			log.info("PTY died, notifying renderer", { taskId: sessionKey.slice(0, 8) });
-			broadcastToAllWindows("ptyDied", { taskId: sessionKey });
+			log.info("PTY died, notifying clients", { taskId: sessionKey.slice(0, 8) });
+			pushEverywhere("ptyDied", { taskId: sessionKey });
 		}
 	} catch (err) {
-		log.error("Failed to notify renderer about PTY death", {
+		log.error("Failed to notify clients about PTY death", {
 			sessionKey: sessionKey.slice(0, 8),
 			error: String(err),
 			stack: (err as Error)?.stack ?? "no stack",
@@ -682,7 +720,7 @@ setOnOsc52Copy((payload) => {
 	}
 	// Still forward to the desktop renderer for diagnostics.
 	try {
-		broadcastToAllWindows("osc52Clipboard", payload);
+		pushEverywhere("osc52Clipboard", payload);
 	} catch (err) {
 		log.error("Failed to forward OSC 52 clipboard payload", {
 			taskId: payload.taskId.slice(0, 8),
@@ -700,6 +738,7 @@ setOnPaneExited((taskId, paneId) => {
 
 function runGlobalQuitCleanup(): void {
 	log.info("App is quitting, running global cleanup");
+	stopAgentMessageLogWatches();
 	// Snapshot window geometry so an update restart reopens on the same screen.
 	try { flushWindowState(); } catch (err) { log.warn("flushWindowState failed", { error: String(err) }); }
 	try { stopPortScanPoller(); } catch (err) { log.warn("stopPortScanPoller failed", { error: String(err) }); }
@@ -869,7 +908,7 @@ Electrobun.events.on("reopen", () => {
 
 // Helper to push update progress to the renderer
 const sendUpdateProgress = (status: string, progress?: number) => {
-	broadcastToAllWindows("updateDownloadProgress", { status, progress });
+	pushEverywhere("updateDownloadProgress", { status, progress });
 };
 
 // --- Menu Event Handlers ---
@@ -925,7 +964,7 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 				// of downloading the same tar again (issue #1072).
 				if (isUpdateAlreadyReady(result.version)) {
 					sendUpdateProgress("idle");
-					broadcastToAllWindows("updateAvailable", {
+					pushEverywhere("updateAvailable", {
 						version: result.version,
 						changelog: result.changelog,
 					});
@@ -934,7 +973,7 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 				sendUpdateProgress("downloading", 0);
 				const dlResult = await downloadUpdateForChannel(settings.updateChannel, sendUpdateProgress);
 				if (dlResult.ok) {
-					broadcastToAllWindows("updateAvailable", { version: result.version, changelog: result.changelog });
+					pushEverywhere("updateAvailable", { version: result.version, changelog: result.changelog });
 				} else {
 					sendUpdateProgress("error");
 					sendToFocusedWindow("updateCheckOutcome", { status: "error", detail: dlResult.error || "Download failed" });

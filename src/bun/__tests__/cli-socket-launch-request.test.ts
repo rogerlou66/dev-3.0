@@ -260,6 +260,35 @@ describe("task.move — agent-initiated launch approval", () => {
 		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
 			childTaskId: TARGET_ID,
 			source: expect.objectContaining({ seq: 3 }),
+			// No --handoff-file: the child still gets dev3's own default note.
+			launcherNote: null,
+		}));
+	});
+
+	it("passes the launcher's --handoff-file text through to the child's note", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" as const }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+			handoffNote: "Report to Seq 1141 only.",
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: null, configId: null }] },
+		});
+		await respPromise;
+
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			launcherNote: "Report to Seq 1141 only.",
 		}));
 	});
 
@@ -347,10 +376,10 @@ describe("task.move — agent-initiated launch approval", () => {
 		}));
 	});
 
-	it("addresses variants by task id — a live variant group shares one seq", async () => {
+	it("addresses variants by seq + --variant — a live variant group shares one seq", async () => {
 		const target = makeTask();
 		// A real variant launch mints siblings: two tasks answering to seq 7 is what
-		// makes `--task seq:7` ambiguous and forces the id form.
+		// makes a bare `--task seq:7` ambiguous, so the address has to name the member.
 		const targetSibling = makeTask({ id: "task-tgt33333-1111-2222-3333-444444444444", variantIndex: 2 });
 		const variantRequester = { ...requester, variantIndex: 1 };
 		const project = makeProject();
@@ -375,7 +404,7 @@ describe("task.move — agent-initiated launch approval", () => {
 		});
 
 		const resp = await respPromise;
-		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe(`dev3 message --task ${TARGET_ID} "your message"`);
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe('dev3 message --task seq:7 --variant 2 --subject "what your reply is about" "your message"');
 		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
 			source: expect.objectContaining({ seq: 3, variantIndex: 1 }),
 		}));
@@ -404,7 +433,7 @@ describe("task.move — agent-initiated launch approval", () => {
 		});
 
 		const resp = await respPromise;
-		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe('dev3 message --task seq:7 "your message"');
+		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe('dev3 message --task seq:7 --subject "what your reply is about" "your message"');
 	});
 
 	it("scopes the reply command with --project when the requester is on another board", async () => {
@@ -436,7 +465,7 @@ describe("task.move — agent-initiated launch approval", () => {
 		const resp = await respPromise;
 		// Without the scope the requester would look seq:7 up on its OWN board.
 		expect((resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand).toBe(
-			'dev3 message --task seq:7 --project proj-1 "your message"',
+			'dev3 message --task seq:7 --project proj-1 --subject "what your reply is about" "your message"',
 		);
 	});
 
@@ -718,13 +747,13 @@ describe("task.move — agent-initiated launch with variants", () => {
 		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({ childTaskId: SIBLING_ID }));
 
 		// seq:7 now matches two live tasks, so the requester gets one address per
-		// variant and neither of them is the shared seq.
+		// variant — the shared seq plus the index that tells them apart.
 		expect(resp.data).toMatchObject({
 			approved: true,
 			seq: 7,
 			launched: [
-				{ variantIndex: 1, replyCommand: `dev3 message --task ${TARGET_ID} "your message"` },
-				{ variantIndex: 2, replyCommand: `dev3 message --task ${SIBLING_ID} "your message"` },
+				{ variantIndex: 1, replyCommand: 'dev3 message --task seq:7 --variant 1 --subject "what your reply is about" "your message"' },
+				{ variantIndex: 2, replyCommand: 'dev3 message --task seq:7 --variant 2 --subject "what your reply is about" "your message"' },
 			],
 		});
 	});

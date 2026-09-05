@@ -263,9 +263,15 @@ describe("the held dev3 message — nothing reaches the pane until it goes quiet
 		await vi.advanceTimersByTimeAsync(AGENT_PROMPT_ENTER_DELAY_MS);
 		expect(tmux.sendKeysGuarded).not.toHaveBeenCalled();
 
-		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS);
-		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+		// Exactly to the release: the text goes in and the Enter does not follow it yet.
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS - AGENT_PROMPT_ENTER_DELAY_MS);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(1);
 		expect(sentChunks(0)).toEqual([{ literal: "check CI" }]);
+
+		// The Enter keeps the hand-off's gap behind it: sent in the same millisecond,
+		// Claude Code reads the paste and the CR as one paste and never submits.
+		await vi.advanceTimersByTimeAsync(AGENT_PROMPT_ENTER_DELAY_MS);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
 		expect(sentChunks(1)).toEqual([{ keys: ["Enter"] }]);
 		expect(sentPane(1)).toBe("%1");
 	});
@@ -277,11 +283,13 @@ describe("the held dev3 message — nothing reaches the pane until it goes quiet
 		}
 		expect(tmux.sendKeysGuarded).not.toHaveBeenCalled();
 
-		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS);
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS + AGENT_PROMPT_ENTER_DELAY_MS);
 		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(4);
+		// The first opens the turn; the other two arrive behind a blank line, because an
+		// envelope ends without a newline and used to weld onto its predecessor (#1608).
 		expect(sentChunks(0)).toEqual([{ literal: "one" }]);
-		expect(sentChunks(1)).toEqual([{ literal: "two" }]);
-		expect(sentChunks(2)).toEqual([{ literal: "three" }]);
+		expect(sentChunks(1)).toEqual([{ literal: "\n\ntwo" }]);
+		expect(sentChunks(2)).toEqual([{ literal: "\n\nthree" }]);
 		expect(sentChunks(3)).toEqual([{ keys: ["Enter"] }]);
 	});
 
@@ -313,7 +321,7 @@ describe("the held dev3 message — nothing reaches the pane until it goes quiet
 	it("lands the moment the user submits his own line", async () => {
 		await holdMessageForAgentPane(TASK, "check CI", [agentPane("%1")]);
 		flushHeldAgentMessagesForTask(TASK_ID);
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(AGENT_PROMPT_ENTER_DELAY_MS);
 
 		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
 		expect(sentChunks(0)).toEqual([{ literal: "check CI" }]);

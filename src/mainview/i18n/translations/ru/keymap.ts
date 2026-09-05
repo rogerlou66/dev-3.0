@@ -28,6 +28,7 @@ const keymap = {
 	"keymap.shortcut.taskSwitcherGlobal": "Циклический выбор активных задач (все проекты)",
 	"keymap.shortcut.taskHints": "Переход к задаче или проекту по подсказке",
 	"keymap.shortcut.goTo": "Перейти к… (D дашборд · P проект · T задачи · S настройки · цифра = проект N; P/T + цифра = доска/задачи проекта N)",
+	"keymap.shortcut.zoomOutToSpace": "Выйти на доску пространства",
 	"keymap.shortcut.focusSearch": "Фокус в поиск",
 	"keymap.shortcut.escape": "Закрыть диалог / шаг назад",
 	"keymap.shortcut.newTask": "Новая задача",
@@ -72,7 +73,10 @@ const keymap = {
 	"keymap.edit.reset": "Вернуть по умолчанию",
 	"keymap.edit.resetAll": "Сбросить все хоткеи",
 	"keymap.edit.resetAllTitle": "Сбросить все хоткеи?",
-	"keymap.edit.resetAllMessage": "Изменённых хоткеев: {count}. Все вернутся к значениям по умолчанию. Отменить нельзя.",
+	"keymap.edit.resetAllMessage_one": "{count} изменённый хоткей вернётся к значению по умолчанию. Отменить нельзя.",
+	"keymap.edit.resetAllMessage_few": "{count} изменённых хоткея вернутся к значениям по умолчанию. Отменить нельзя.",
+	"keymap.edit.resetAllMessage_many": "{count} изменённых хоткеев вернутся к значениям по умолчанию. Отменить нельзя.",
+	"keymap.edit.resetAllMessage_other": "{count} изменённых хоткеев вернутся к значениям по умолчанию. Отменить нельзя.",
 	"keymap.edit.resetAllConfirmLabel": "Сбросить хоткеи",
 	"keymap.edit.conflict": "Занято хоткеем «{name}». Если сохранить, он его лишится.",
 	"keymap.edit.stolen": "«{name}» остался без хоткея.",
@@ -82,7 +86,10 @@ const keymap = {
 	"keymap.edit.desktopOnly": "Только в десктоп-приложении",
 	"keymap.edit.browserReserved": "Эту комбинацию забирает браузер — она сработает только в десктоп-приложении или в полноэкранном режиме.",
 	"keymap.edit.inBrowser": "В браузере: {keys}",
-	"keymap.edit.changedCount": "изменено: {count}",
+	"keymap.edit.changedCount_one": "изменён {count}",
+	"keymap.edit.changedCount_few": "изменено {count}",
+	"keymap.edit.changedCount_many": "изменено {count}",
+	"keymap.edit.changedCount_other": "изменено {count}",
 };
 
 export default keymap;

@@ -1,6 +1,8 @@
-import type { CliResponse, Task, TaskStatus, TaskHistoryEntry, TaskNote } from "../../shared/types";
-import { STATUS_LABELS, ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DRAFT_TASK_ACTIVATION_ERROR, TASK_TYPES, getTaskTitle, getTaskOverview, normalizePriority, normalizeTaskType, taskCompletesManually } from "../../shared/types";
-import { CLI_EXIT_CODE_COMPLETION_DECLINED, CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT } from "../../shared/cli-exit-codes";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import type { CliResponse, Task, TaskStatus, TaskType, TaskHistoryEntry, TaskNote } from "../../shared/types";
+import { STATUS_LABELS, ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DRAFT_TASK_ACTIVATION_ERROR, TASK_REF_UNRESOLVED_PREFIX, TASK_TYPES, getTaskTitle, getTaskOverview, normalizePriority, normalizeTaskType, taskAgentSessionLooksLive, taskCompletesManually } from "../../shared/types";
+import { CLI_EXIT_CODE_CANCELLATION_DECLINED, CLI_EXIT_CODE_COMPLETION_DECLINED, CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT, CLI_EXIT_CODE_TASK_REF_UNRESOLVED } from "../../shared/cli-exit-codes";
 import { CODEX_STOP_HOOK_FLAG, CODEX_STOP_HOOK_SUCCESS_JSON, TOLERATE_APP_OFFLINE_FLAG } from "../../shared/agent-hooks";
 import { sendRequest } from "../socket-client";
 import { printDetail, exitError, exitUsage } from "../output";
@@ -10,16 +12,49 @@ import { rejectUnknownFlags } from "../flag-validation";
 import { readStdin } from "../stdin";
 import { handleTasks } from "./tasks";
 
-// Statuses that destroy the worktree + terminal are not directly reachable via
-// CLI. `completed` is special-cased: it becomes a blocking approval request the
-// user answers in the app. `cancelled` stays fully forbidden — an agent must
-// not be able to silently kill its own session.
+// Statuses that destroy the worktree + terminal are never a direct CLI move.
+// Both become a blocking approval request the user answers in the app, so an
+// agent can neither complete nor kill its own session silently.
 const DESTRUCTIVE_STATUSES: TaskStatus[] = ["completed", "cancelled"];
 const CLI_ALLOWED_STATUSES = ALL_STATUSES.filter((s) => !DESTRUCTIVE_STATUSES.includes(s));
 
 // How long the CLI waits for the user to answer an approval dialog.
 const COMPLETION_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const LAUNCH_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * The one reading of `--type` for every command that takes it, so `task create`
+ * and `task update` can never accept different spellings of the same three
+ * roles. `standard` (and its aliases) means "no type" and maps to null.
+ */
+function parseTypeFlag(raw: string): TaskType | null {
+	const value = raw.trim().toLowerCase();
+	if (value === "standard" || value === "none" || value === "") return null;
+	const normalized = normalizeTaskType(value);
+	if (!normalized) exitUsage(`--type must be one of ${TASK_TYPES.join(", ")} or standard (got "${raw}")`);
+	return normalized;
+}
+
+/**
+ * Read `--handoff-file <path>`: the launcher's own standing instructions, appended
+ * to the handoff note every task it starts receives. The file is read HERE rather
+ * than server-side so a wrong path fails on the launcher's own terminal instead of
+ * silently reaching nobody. Absent flag ⇒ undefined, and the child gets the default
+ * note alone.
+ */
+function readHandoffFile(args: ParsedArgs): string | undefined {
+	const raw = args.flags["handoff-file"]?.trim();
+	if (!raw) return undefined;
+	const path = resolve(raw);
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		exitUsage(`--handoff-file: cannot read ${path}`);
+	}
+	if (!text.trim()) exitUsage(`--handoff-file: ${path} is empty`);
+	return text.trim();
+}
 
 function formatDate(iso: string): string {
 	const d = new Date(iso);
@@ -159,7 +194,7 @@ async function showTask(args: ParsedArgs, socketPath: string, context: CliContex
 }
 
 async function createTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
-	rejectUnknownFlags(args, ["project", "title", "description", "scratch", "run"]);
+	rejectUnknownFlags(args, ["project", "title", "description", "type", "scratch", "run", "pr", "branch", "handoff-file"]);
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (!projectId) {
 		exitUsage("--project <id> is required (or run from inside a worktree)");
@@ -174,14 +209,30 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 		);
 	}
 	if (scratch) {
-		if (args.positional[0] || args.flags.title || args.flags.description) {
+		if (args.positional[0] || args.flags.title || args.flags.description || args.flags.type || args.flags.pr || args.flags.branch) {
 			exitUsage(
-				"A scratch task takes no title or description — it has no prompt by design.\n" +
+				"A scratch task takes no title, description or type — it has no prompt by design.\n" +
 				"Create a normal task instead, or send instructions with `dev3 message --task seq:<N>` after it starts.",
 			);
 		}
-		return createScratchAndRun(projectId, socketPath, context);
+		return createScratchAndRun(projectId, socketPath, context, readHandoffFile(args));
 	}
+	if (args.flags["handoff-file"] !== undefined) {
+		exitUsage("--handoff-file only applies to a launch: `task create --scratch --run` or `task move --status in-progress`.");
+	}
+
+	const prFlag = args.flags.pr?.trim();
+	const branchFlag = args.flags.branch?.trim();
+	if (prFlag && branchFlag) {
+		exitUsage("--pr and --branch name the same thing two ways — pass one of them.");
+	}
+
+	// Read before the title check so a bad --type fails on its own message.
+	// `--pr` means the task is about someone's pull request, which is what
+	// pr-review is; the GUI flips the same switch when a PR is resolved there.
+	const taskType = args.flags.type === undefined
+		? (prFlag ? "pr-review" as const : null)
+		: parseTypeFlag(args.flags.type);
 
 	// A literal "-" is the conventional CLI sentinel for reading the value
 	// from stdin. Read it only for the description flag so title-only creates
@@ -203,12 +254,39 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 
 	const params: Record<string, unknown> = { projectId, title };
 	if (description) params.description = description;
+	if (taskType) params.taskType = taskType;
+	if (prFlag) params.pr = prFlag;
+	if (branchFlag) params.branch = branchFlag;
 
 	const resp = await sendRequest(socketPath, "task.create", params);
-	if (!resp.ok) exitError(resp.error || "Failed to create task");
+	if (!resp.ok) {
+		// An unresolvable --pr/--branch created NOTHING, and it is not the same
+		// failure as "the task could not be written".
+		const marker = resp.error?.indexOf(TASK_REF_UNRESOLVED_PREFIX) ?? -1;
+		if (marker >= 0 && resp.error) {
+			exitError(
+				resp.error.slice(marker + TASK_REF_UNRESOLVED_PREFIX.length),
+				"No task was created.",
+				CLI_EXIT_CODE_TASK_REF_UNRESOLVED,
+			);
+		}
+		exitError(resp.error || "Failed to create task");
+	}
 
 	const task = resp.data as Task;
 	process.stdout.write(`Created task ${task.id.slice(0, 8)} (seq ${task.seq}): ${getTaskTitle(task)}\n`);
+	// The type is only real once the role brief is in the description the agent
+	// will read, so name it rather than leaving the caller to check the card.
+	if (task.taskType) {
+		process.stderr.write(`Role: ${task.taskType} — created with its role brief already in the description.\n`);
+	}
+	// Where the worktree will sit is the whole difference between a review task
+	// that can read the diff and one stranded on the base branch — say it.
+	if (task.existingBranch) {
+		process.stderr.write(
+			`Starts on: ${task.existingBranch}${task.foreignCode ? " (someone else's code — the branch's own scripts and MCP config are ignored)" : ""}\n`,
+		);
+	}
 }
 
 async function updateTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
@@ -253,12 +331,7 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		params.manualCompletion = normalized === "on";
 	}
 	const rawType = args.flags.type;
-	if (rawType !== undefined) {
-		const value = rawType.trim().toLowerCase();
-		if (value === "standard" || value === "none" || value === "") params.taskType = null;
-		else if (normalizeTaskType(value)) params.taskType = normalizeTaskType(value);
-		else exitUsage(`--type must be one of ${TASK_TYPES.join(", ")} or standard (got "${rawType}")`);
-	}
+	if (rawType !== undefined) params.taskType = parseTypeFlag(rawType);
 	if (args.flags.force === "true") {
 		params.force = true;
 	}
@@ -299,6 +372,16 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		);
 	}
 	process.stdout.write(`Updated task ${task.id.slice(0, 8)}: ${getTaskTitle(task)}\n`);
+	// The trap this exists for: a description is the agent's first prompt at
+	// launch and nothing re-delivers it, so rewriting a live task's brief reaches
+	// the board and not the agent. Docs are read once; the mistake happens here.
+	if (params.description !== undefined && taskAgentSessionLooksLive(task)) {
+		const projectFlag = args.flags.project ? ` --project ${args.flags.project}` : "";
+		process.stdout.write(
+			`Note: the running agent will NOT see this — a description is delivered as its first prompt at launch, and nothing re-delivers it.\n`
+			+ `Tell it too: dev3 message --task ${task.id.slice(0, 8)}${projectFlag} --subject "brief updated" "<what changed>"\n`,
+		);
+	}
 }
 
 async function requestCompletion(
@@ -353,6 +436,58 @@ async function requestCompletion(
 }
 
 /**
+ * `dev3 task move --status cancelled`: ask the user to throw this task away.
+ * Mirrors {@link requestCompletion} — same blocking approval dialog, same
+ * 10-minute wait — with its own exit code, because "the work landed" and "the
+ * work is garbage" are answers an agent must be able to tell apart.
+ */
+async function requestCancellation(
+	taskId: string,
+	args: ParsedArgs,
+	socketPath: string,
+	context: CliContext | null,
+): Promise<void> {
+	const params: Record<string, unknown> = { taskId };
+	const projectId = resolveProjectId(args.flags.project, context);
+	if (projectId) params.projectId = projectId;
+
+	process.stderr.write(
+		"Cancelling a task throws its work away — branch, worktree and everything uncommitted in it — so it requires user approval.\n" +
+		"Waiting for the user to respond in the dev-3.0 app (up to 10 minutes)...\n",
+	);
+
+	let resp: CliResponse;
+	try {
+		resp = await sendRequest(socketPath, "task.requestCancellation", params, {
+			timeoutMs: COMPLETION_APPROVAL_TIMEOUT_MS,
+		});
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
+			exitError(
+				"Timed out waiting for the user's decision",
+				"The approval dialog may still be open in the app — if the user approves later, the task will be cancelled and this session will be destroyed.",
+			);
+		}
+		throw err;
+	}
+	if (!resp.ok) exitError(resp.error || "Failed to request task cancellation");
+
+	const result = resp.data as { approved: boolean; task?: Task };
+	if (!result.approved) {
+		exitError(
+			"User declined the cancellation request",
+			"The task keeps its current status and this session stays alive.\nAsk the user what they want done with it instead of retrying.",
+			CLI_EXIT_CODE_CANCELLATION_DECLINED,
+		);
+	}
+
+	process.stdout.write(
+		`User approved — task ${(result.task?.id ?? taskId).slice(0, 8)} moved to Cancelled.\n` +
+		"This worktree and terminal session are being destroyed now.\n",
+	);
+}
+
+/**
  * `dev3 task create --scratch --run`: ask the user to spin up a throwaway peer
  * agent. Blocks on the same approval dialog as an agent-initiated launch; the
  * app discards the placeholder task if the user declines.
@@ -361,6 +496,7 @@ async function createScratchAndRun(
 	projectId: string,
 	socketPath: string,
 	context: CliContext | null,
+	handoffNote?: string,
 ): Promise<void> {
 	if (!context?.taskId) {
 		exitUsage("Run this from inside a task worktree — the new scratch task reports back to yours.");
@@ -371,6 +507,7 @@ async function createScratchAndRun(
 		resp = await sendRequest(socketPath, "task.createScratchAndRun", {
 			projectId,
 			sourceTaskId: context.taskId,
+			...(handoffNote ? { handoffNote } : {}),
 		}, { timeoutMs: LAUNCH_APPROVAL_TIMEOUT_MS });
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
@@ -430,7 +567,7 @@ function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: bool
 		return;
 	}
 	const launched = outcome.launched ?? [];
-	const fallback = `dev3 message --task seq:${outcome.seq} "your message"`;
+	const fallback = `dev3 message --task seq:${outcome.seq} --subject "what this is about" "your message"`;
 	if (launched.length > 1) {
 		// The user turned one launch into a variant group. Every sibling shares
 		// `seq:<N>`, so that handle is ambiguous and each address is per-task —
@@ -457,7 +594,7 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// `--tolerate-app-offline` only changes the app-offline exit code, which is
 	// decided before dispatch (main.ts) — accepted and ignored here.
 	rejectUnknownFlags(args, [
-		"id", "task", "task-id", "project", "status", "if-status", "if-status-not",
+		"id", "task", "task-id", "project", "status", "if-status", "if-status-not", "handoff-file",
 		CODEX_STOP_HOOK_FLAG.slice(2), TOLERATE_APP_OFFLINE_FLAG.slice(2),
 	]);
 	const taskId = resolveTaskId(args, context);
@@ -467,13 +604,7 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 
 	const newStatus = args.flags.status;
 	if (!newStatus) {
-		exitUsage(`--status is required. Valid built-in: ${CLI_ALLOWED_STATUSES.join(", ")}; \`completed\` (asks the user for approval); or a custom column ID (see \`dev3 current\`)`);
-	}
-	if (newStatus === "cancelled") {
-		exitError(
-			`Cannot move to "cancelled" via CLI`,
-			`This status destroys the worktree and terminal session.\nUse the desktop app UI to mark tasks as cancelled.`,
-		);
+		exitUsage(`--status is required. Valid built-in: ${CLI_ALLOWED_STATUSES.join(", ")}; \`completed\` and \`cancelled\` (both ask the user for approval); or a custom column ID (see \`dev3 current\`)`);
 	}
 	// Non-built-in values may be custom column IDs — let the server validate
 
@@ -487,6 +618,13 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 		return requestCompletion(taskId, args, socketPath, context, codexStopHook);
 	}
 
+	// `cancelled` is the same deal, and the dialog behind it is deliberately a
+	// red one: cancelling is an agent throwing its own task away, not reporting
+	// it done.
+	if (newStatus === "cancelled") {
+		return requestCancellation(taskId, args, socketPath, context);
+	}
+
 	const params: Record<string, unknown> = { taskId, newStatus };
 	if (ifStatus) params.ifStatus = ifStatus;
 	if (ifStatusNot) params.ifStatusNot = ifStatusNot;
@@ -496,6 +634,10 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// to know which one: moving somebody else's task into a running column is a
 	// launch, and a launch needs the user's approval and agent pick.
 	if (context?.taskId) params.sourceTaskId = context.taskId;
+	// Only used when this move turns out to be a launch; a same-task status move
+	// carries it and the server ignores it.
+	const handoffNote = readHandoffFile(args);
+	if (handoffNote) params.handoffNote = handoffNote;
 
 	// The approval dialog can sit open for minutes, so a move that might turn
 	// into one waits on the long timeout. A silent move still answers instantly.

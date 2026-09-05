@@ -174,6 +174,14 @@ vi.mock("../rpc-handlers/settings-config", () => ({
 	resolveOperationalProjectConfig: vi.fn(async () => ({ devScript: "bun run dev", portCount: 0 })),
 }));
 
+// Mocked, not left real: the store touches the filesystem, and `node:fs` here is
+// a two-export stub. Its own behaviour lives in `dev-server-env.test.ts`.
+vi.mock("../dev-server-env-store", () => ({
+	saveDevServerEnv: vi.fn(),
+	readDevServerEnv: vi.fn(() => ({})),
+	clearDevServerEnv: vi.fn(),
+}));
+
 import * as data from "../data";
 import { clearPortDataForTask } from "../port-scanner";
 import { terminatePidsVerified } from "../process-reaper";

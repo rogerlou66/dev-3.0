@@ -1,6 +1,7 @@
 import {
 	compareTaskSortRank,
 	isTaskDisconnected,
+	taskAgentSessionLooksLive,
 	taskSortRank,
 	hexToRgb,
 	titleFromDescription,
@@ -333,6 +334,37 @@ describe("DEFAULT_AGENTS", () => {
 		]);
 	});
 
+	it("uses the pinned 1M Fable 5.1 model in Fable 5.1 presets", () => {
+		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
+		const fable51Configs = claude!.configurations.filter((config) => /-fable51(-|$)/.test(config.id));
+		expect(fable51Configs.map((c) => c.id)).toEqual([
+			"claude-auto-fable51-medium",
+			"claude-auto-fable51-high",
+			"claude-auto-fable51-xhigh",
+			"claude-bypass-fable51-medium",
+			"claude-bypass-fable51-high",
+			"claude-bypass-fable51-xhigh",
+			"claude-default-fable51",
+			"claude-plan-fable51",
+			"claude-approvals-fable51",
+		]);
+		for (const config of fable51Configs) {
+			expect(config.model).toBe("claude-fable-5-1[1m]");
+		}
+	});
+
+	it("lists Fable 5.1 ahead of Fable 5 in every Claude mode group", () => {
+		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
+		const ids = claude!.configurations.map((c) => c.id);
+		const modes = ["claude-auto-", "claude-bypass-", "claude-default", "claude-plan", "claude-approvals"];
+		for (const mode of modes) {
+			const fable51 = ids.indexOf(mode === "claude-auto-" || mode === "claude-bypass-" ? `${mode}fable51-medium` : `${mode}-fable51`);
+			const fable5 = ids.indexOf(mode === "claude-auto-" || mode === "claude-bypass-" ? `${mode}fable5-medium` : mode);
+			expect(fable51, mode).toBeGreaterThanOrEqual(0);
+			expect(fable51, mode).toBeLessThan(fable5);
+		}
+	});
+
 	it("uses the pinned Opus 5 model in Opus 5 presets", () => {
 		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
 		expect(claude).toBeDefined();
@@ -373,34 +405,38 @@ describe("DEFAULT_AGENTS", () => {
 		}
 	});
 
-	it("uses Luna X-High bypass as the default Codex configuration", () => {
+	it("uses Astra Medium bypass as the default Codex configuration", () => {
 		const codex = DEFAULT_AGENTS.find((a) => a.id === "builtin-codex");
 		expect(codex).toBeDefined();
 
 		const cfg = codex!.configurations.find((c) => c.id === "codex-default");
 		expect(cfg).toBeDefined();
-		expect(cfg!.name).toBe("GPT-5.6 Luna Bypass [X-High] — Default");
-		expect(cfg!.model).toBe("gpt-5.6-luna");
+		expect(cfg!.name).toBe("GPT-6 Astra Bypass [Medium] — Default");
+		expect(cfg!.model).toBe("gpt-6-astra");
 		expect(cfg!.additionalArgs).toContain("--sandbox");
 		expect(cfg!.additionalArgs).toContain("danger-full-access");
-		expect(cfg!.additionalArgs).toContain('model_reasoning_effort="xhigh"');
+		expect(cfg!.additionalArgs).toContain('model_reasoning_effort="medium"');
 		expect(cfg!.additionalArgs).not.toContain('default_permissions="dev3"');
 	});
 
-	it("prioritizes Luna and keeps Terra at the end of the Codex presets", () => {
+	it("prioritizes Astra ahead of the existing Codex model tiers", () => {
 		const codex = DEFAULT_AGENTS.find((a) => a.id === "builtin-codex");
 		expect(codex).toBeDefined();
 
 		const modelOrder = codex!.configurations
 			.map((config) => config.model)
 			.filter((model, index, models) => model != null && models.indexOf(model) === index);
-		expect(modelOrder).toEqual(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]);
+		expect(modelOrder).toEqual(["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]);
 
 		const modesFor = (model: string) => codex!.configurations
 			.filter((config) => config.model === model)
 			.map((config) => config.modeLabel);
+		expect(modesFor("gpt-6-astra")).toEqual([
+			"Bypass [Medium] — Default", "Bypass [Low]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]", "Bypass [Ultra]",
+			"Standard [Medium]", "Standard [Low]", "Standard [High]", "Standard [X-High]", "Standard [Max]", "Standard [Ultra]",
+		]);
 		expect(modesFor("gpt-5.6-luna")).toEqual([
-			"Bypass [X-High] — Default",
+			"Bypass [X-High]",
 			"Bypass [Max]", "Bypass [High]", "Bypass [Medium]",
 			"Standard [Medium]", "Standard [High]",
 		]);
@@ -883,6 +919,38 @@ describe("isTaskDisconnected — a session that died with the app", () => {
 		const disconnectedP0 = dead({ priority: "P0" });
 		expect(compareTaskSortRank(disconnectedP0, { priority: "P4" })).toBeGreaterThan(0);
 		expect(compareTaskSortRank(disconnectedP0, { priority: "P0", hibernated: true })).toBeLessThan(0);
+	});
+});
+
+describe("taskAgentSessionLooksLive — is there an agent that would miss a description edit", () => {
+	const live = (over: Partial<Task> = {}): Partial<Task> => ({
+		status: "in-progress",
+		worktreePath: "/wt",
+		runtimeState: { runtime: "running", updatedAt: 1 },
+		...over,
+	});
+
+	it("is true for a task running in an active column", () => {
+		expect(taskAgentSessionLooksLive(live())).toBe(true);
+		expect(taskAgentSessionLooksLive(live({ status: "review-by-user" }))).toBe(true);
+	});
+
+	it("says nothing is live before the launch that will read the description", () => {
+		expect(taskAgentSessionLooksLive(live({ status: "todo" }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ worktreePath: null }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ draft: true }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ preparing: true }))).toBe(false);
+	});
+
+	it("says nothing is live once the session is gone", () => {
+		expect(taskAgentSessionLooksLive(live({ hibernated: true }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ shuttingDown: true }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ status: "completed" }))).toBe(false);
+		expect(taskAgentSessionLooksLive(live({ runtimeState: { runtime: "idle", updatedAt: 1 } }))).toBe(false);
+	});
+
+	it("treats a task whose runtime was never persisted as live, same as the sort bands do", () => {
+		expect(taskAgentSessionLooksLive(live({ runtimeState: undefined }))).toBe(true);
 	});
 });
 

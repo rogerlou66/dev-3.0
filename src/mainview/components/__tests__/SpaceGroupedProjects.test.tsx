@@ -173,7 +173,7 @@ describe("SpaceGroupedProjects — header details from the mock", () => {
 		);
 		const header = screen.getByTestId("space-header-sp_a");
 		expect(header).toHaveTextContent("2 projects");
-		expect(header).toHaveTextContent("1 need you");
+		expect(header).toHaveTextContent("1 needs you");
 		expect(header).toHaveTextContent("2 working");
 		// No amber/blue dot: its only legend was this very line saying it in words.
 		expect(header.querySelector(".bg-awake")).toBeNull();
@@ -320,5 +320,47 @@ describe("SpaceGroupedProjects — nothing to reorder", () => {
 		fireEvent.dragOver(header);
 		fireEvent.drop(header);
 		expect(vi.mocked(api.request.reorderSpaces)).not.toHaveBeenCalled();
+	});
+});
+
+// The unified board used to be reachable only from inside a member project, so
+// the dashboard — where a space is actually named — had no way in at all.
+describe("opening the space board from the dashboard", () => {
+	function renderWithBoard(onOpenSpaceBoard: (space: Space) => void) {
+		return render(
+			<I18nProvider>
+				<SpaceGroupedProjects
+					groups={groups}
+					sensitiveProjectIds={new Set()}
+					needsYouCountOf={() => 0}
+					workingCountOf={() => 0}
+					onOpenSpaceBoard={onOpenSpaceBoard}
+					renderProject={(p) => <div data-testid={`row-${p.id}`}>{p.name}</div>}
+					renderBottomBlockProject={(p) => <div data-testid={`rest-row-${p.id}`}>{p.name}</div>}
+				/>
+			</I18nProvider>,
+		);
+	}
+
+	it("gives every space its own visible button, never a menu item", async () => {
+		const onOpen = vi.fn();
+		const user = userEvent.setup();
+		renderWithBoard(onOpen);
+
+		// Visible without opening anything: no menu click precedes this.
+		await user.click(screen.getByTestId("space-open-board-sp_a"));
+
+		expect(onOpen).toHaveBeenCalledTimes(1);
+		expect(onOpen.mock.calls[0][0].id).toBe("sp_a");
+	});
+
+	it("offers nothing for the Home block, which names no space", () => {
+		renderWithBoard(vi.fn());
+		expect(screen.getAllByText("Open space board")).toHaveLength(2);
+	});
+
+	it("stays absent when the dashboard wires no handler", () => {
+		renderGroups();
+		expect(screen.queryByTestId("space-open-board-sp_a")).toBeNull();
 	});
 });

@@ -17,8 +17,10 @@ import { isAbsolute, join, extname, relative, resolve } from "node:path";
 import { networkInterfaces } from "node:os";
 import { Readable } from "node:stream";
 import QRCode from "qrcode";
-import type { RemoteNetInterface } from "../shared/types";
+import type { RemoteAccessStartFailure, RemoteAccessStatus, RemoteNetInterface } from "../shared/types";
 import { NATIVE_STREAM_SINCE_PARAM, parseSinceParam } from "../shared/native-terminal-stream";
+import { remoteStaticCodeError } from "../shared/remote-static-code";
+import { authAttemptRetryAfterS, recordAuthFailure, clearAuthFailures } from "./remote-auth-rate-limit";
 import { PATHS } from "./electrobun-platform";
 import { createLogger } from "./logger";
 import { isCustomTunnelProviderActive } from "./tunnel-provider";
@@ -27,14 +29,15 @@ import { getTunnelUrl, getTunnelState, tunnelManager } from "./cloudflare-tunnel
 import { loadSettingsSync } from "./settings";
 import { getCurrentUiTheme } from "./theme-state";
 import { ARTIFACT_DOWNLOAD_ROUTE, resolveArtifactDownloadTicket } from "./artifact-download-tickets";
+import { buildSignInLink } from "../shared/remote-sign-in-link";
 
 const log = createLogger("remote-access");
 
 // ── Auth ────────────────────────────────────────────────────────────
 //
 // The session credential is an HttpOnly cookie (decision 133, supersedes 086):
-// POST /auth/exchange trades a one-time QR token (or the dev static code) for a
-// Set-Cookie; every gated surface — the RPC and PTY WebSocket upgrades,
+// POST /auth/exchange trades a one-time QR token (or the static access code) for
+// a Set-Cookie; every gated surface — the RPC and PTY WebSocket upgrades,
 // /auth/refresh, /health — authenticates by that cookie. The token never
 // appears in URLs, so it stops leaking into proxy/tunnel logs, and HttpOnly
 // keeps it unreadable to injected script. SameSite=Strict is safe because
@@ -125,12 +128,19 @@ async function isSessionAuthenticated(req: Request): Promise<boolean> {
 interface AuthHandlerContext {
 	clientIp?: string;
 	ua?: string;
+	/**
+	 * Socket peer address, used as the throttle bucket for failed exchanges.
+	 * Deliberately NOT `clientIp`, which is read from headers a direct caller
+	 * controls and could rotate at will.
+	 */
+	rateLimitKey?: string;
 	onQrConsumed?: () => void;
 }
 
 /**
- * POST /auth/exchange — trade a one-time QR token (or the dev static code)
- * for a session cookie. Exported for handler-level tests.
+ * POST /auth/exchange — trade a one-time QR token OR the static access code for
+ * a session cookie. Both paths are live at once: a new device may scan a QR or
+ * type the code, and neither disables the other. Exported for handler-level tests.
  */
 export async function handleAuthExchange(req: Request, ctx: AuthHandlerContext = {}): Promise<Response> {
 	const { clientIp, ua } = ctx;
@@ -138,22 +148,29 @@ export async function handleAuthExchange(req: Request, ctx: AuthHandlerContext =
 		log.warn("Auth exchange: origin mismatch", { ip: clientIp, ua, origin: req.headers.get("origin") });
 		return new Response("Forbidden", { status: 403 });
 	}
+	// Throttle before the credential is even read: a static code is long-lived
+	// and multi-use by design, so an unthrottled endpoint makes it guessable.
+	const throttleKey = ctx.rateLimitKey ?? "unknown";
+	const retryAfterS = authAttemptRetryAfterS(throttleKey);
+	if (retryAfterS !== null) {
+		log.warn("Auth exchange: throttled", { ip: clientIp, ua, retryAfterS });
+		return new Response("Too many attempts", { status: 429, headers: { "Retry-After": String(retryAfterS) } });
+	}
 	try {
 		const body = await req.json() as { token?: string };
 		if (!body.token) {
 			log.warn("Auth exchange: missing token", { ip: clientIp, ua });
 			return new Response("Missing token", { status: 400 });
 		}
-		// Static code path — fixed code, no replay protection, dev only.
-		// When active, the JWT exchange path is disabled entirely: only
-		// the static code is accepted so that a stale QR JWT cannot bypass it.
+		// Static access code — permanent and multi-use by design: the owner sets
+		// one long code and signs in with it from any browser, any number of
+		// times. It never rotates and is never voided. A wrong code simply falls
+		// through to the QR path below, so a configured code cannot shadow a
+		// freshly scanned QR (and vice versa) — both credentials stay live.
 		const staticCode = getStaticCode();
-		if (staticCode) {
-			if (body.token !== staticCode) {
-				log.warn("Auth exchange: invalid static code", { ip: clientIp, ua });
-				return new Response("Invalid or expired token", { status: 401 });
-			}
+		if (staticCode && body.token === staticCode) {
 			const sessionToken = await createSessionToken();
+			clearAuthFailures(throttleKey);
 			log.info("Auth exchange: static code accepted", { ip: clientIp, ua });
 			ctx.onQrConsumed?.();
 			return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken, requestIsSecure(req)) } });
@@ -163,9 +180,13 @@ export async function handleAuthExchange(req: Request, ctx: AuthHandlerContext =
 			// Do NOT clear an existing cookie here: a consumed QR token replayed
 			// from browser history must not kill a still-valid session — the
 			// client falls back to /auth/refresh with that cookie.
-			log.warn("Auth exchange: invalid/expired QR token", { ip: clientIp, ua });
+			// A wrong static code lands here too, now that it falls through — so
+			// this single branch is what feeds the throttle for BOTH credentials.
+			recordAuthFailure(throttleKey);
+			log.warn("Auth exchange: rejected (not the access code, not a live QR token)", { ip: clientIp, ua });
 			return new Response("Invalid or expired token", { status: 401 });
 		}
+		clearAuthFailures(throttleKey);
 		log.info("Auth exchange: success", { ip: clientIp, ua });
 		ctx.onQrConsumed?.();
 		return Response.json({ ok: true }, { headers: { "Set-Cookie": buildSessionCookie(sessionToken, requestIsSecure(req)) } });
@@ -260,6 +281,7 @@ const MIME_TYPES: Record<string, string> = {
 	".js": "application/javascript; charset=utf-8",
 	".css": "text/css; charset=utf-8",
 	".json": "application/json; charset=utf-8",
+	".webmanifest": "application/manifest+json",
 	".png": "image/png",
 	".jpg": "image/jpeg",
 	".svg": "image/svg+xml",
@@ -657,12 +679,19 @@ interface StartOptions {
 let qrConsumedCallback: (() => void) | null = null;
 
 /**
- * Resolve the listen port from DEV3_REMOTE_PORT env.
+ * Resolve the listen port from DEV3_REMOTE_PORT env, else the `remotePort`
+ * setting.
  *
  * Returns 0 (let Bun pick a random port) when unset, invalid, or explicitly "0".
  * The env is set by the CLI's `--port <n>` flag (Docker maps a stable host port
  * to a known container port) and by the dev script as `DEV3_REMOTE_PORT=${DEV3_PORT0:-0}`,
  * which pins the dev app to its task's pool-allocated port — see decision 093.
+ * It wins over the setting: both are explicit, and the env one names this launch.
+ *
+ * The setting exists because the desktop app cannot be given the env at all —
+ * `SHELL_ENV_DENIED_PREFIXES` strips every `DEV3_*` key out of the imported
+ * shell environment, so a shell profile, `launchctl setenv` and a `.zshenv`
+ * all silently do nothing.
  *
  * "0" is the documented "pick a random port" sentinel: the dev script's `:-0`
  * fallback produces it whenever no pool port is allocated, so it is a normal,
@@ -674,18 +703,20 @@ let qrConsumedCallback: (() => void) | null = null;
  * surfaces the EACCES cleanly, which is more informative than "refused at startup".
  */
 export function resolveListenPort(): number {
-	const raw = process.env.DEV3_REMOTE_PORT;
+	const settingsPort = loadSettingsSync().remotePort;
+	const raw = process.env.DEV3_REMOTE_PORT || (settingsPort === undefined ? "" : String(settingsPort));
 	if (!raw) return 0;
 	const n = Number.parseInt(raw, 10);
 	if (n === 0) return 0; // explicit random-port sentinel — not an error
 	if (!Number.isFinite(n) || n < 1 || n > 65535) {
-		log.warn("Invalid DEV3_REMOTE_PORT, falling back to random port", { raw });
+		log.warn("Invalid remote access port, falling back to random port", { raw });
 		return 0;
 	}
 	return n;
 }
 
 export async function startRemoteAccessServer(options: StartOptions): Promise<void> {
+	assertStaticCodeStrongEnough();
 	await initSecret();
 	requestHandler = options.rpcHandler;
 	ptyPortGetter = options.getPtyPort;
@@ -715,7 +746,11 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 
 			// ── Auth endpoints (no session required) ──
 			if (url.pathname === "/auth/exchange" && req.method === "POST") {
-				return handleAuthExchange(req, { clientIp, ua, onQrConsumed: qrConsumedCallback ?? undefined });
+				// The throttle bucket is the socket peer, not `clientIp`: the
+				// headers `clientIp` comes from are set by the caller on a direct
+				// connection, so an attacker could mint a fresh budget per request.
+				const peer = server.requestIP(req)?.address || "unknown";
+				return handleAuthExchange(req, { clientIp, ua, rateLimitKey: peer, onQrConsumed: qrConsumedCallback ?? undefined });
 			}
 
 			if (url.pathname === "/auth/refresh" && req.method === "POST") {
@@ -810,6 +845,54 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 				return Response.json({ ok: true, ptyPort: ptyPortGetter?.() ?? 0 });
 			}
 
+			// The public key is not a secret — the browser needs it to subscribe —
+			// but it stays behind the session so an unauthenticated caller learns
+			// nothing about whether this install has push configured.
+			if (url.pathname === "/push/key") {
+				if (!(await isSessionAuthenticated(req))) return new Response("Unauthorized", { status: 401 });
+				const { loadOrCreateVapidKeys } = await import("./web-push");
+				try {
+					return Response.json({ publicKey: (await loadOrCreateVapidKeys()).publicKey });
+				} catch (err) {
+					log.error("Could not prepare push keys", { error: String(err) });
+					return Response.json({ error: "Push keys unavailable" }, { status: 500 });
+				}
+			}
+
+			// Registering is a capability to wake this person's phone, so it is
+			// gated exactly like /rpc: origin checked, then session.
+			if (url.pathname === "/push/subscribe" && req.method === "POST") {
+				if (!checkOrigin(req)) return new Response("Forbidden", { status: 403 });
+				if (!(await isSessionAuthenticated(req))) return new Response("Unauthorized", { status: 401 });
+				const { addSubscription, MalformedPushSubscriptionError } = await import("./web-push-store");
+				try {
+					const body = (await req.json()) as { subscription?: unknown; label?: string };
+					const subs = addSubscription(body?.subscription, body?.label);
+					log.info("Push device registered", { count: subs.length });
+					return Response.json({ ok: true, count: subs.length });
+				} catch (err) {
+					if (err instanceof SyntaxError || err instanceof MalformedPushSubscriptionError) {
+						return Response.json({ error: "Malformed push subscription" }, { status: 400 });
+					}
+					log.error("Could not register push device", { error: String(err) });
+					return Response.json({ error: "Could not register push device" }, { status: 500 });
+				}
+			}
+
+			if (url.pathname === "/push/unsubscribe" && req.method === "POST") {
+				if (!checkOrigin(req)) return new Response("Forbidden", { status: 403 });
+				if (!(await isSessionAuthenticated(req))) return new Response("Unauthorized", { status: 401 });
+				const { removeSubscription } = await import("./web-push-store");
+				const body = (await req.json().catch(() => ({}))) as { endpoint?: string };
+				if (!body?.endpoint) return Response.json({ error: "endpoint required" }, { status: 400 });
+				try {
+					return Response.json({ ok: true, count: removeSubscription(body.endpoint).length });
+				} catch (err) {
+					log.error("Could not unregister push device", { error: String(err) });
+					return Response.json({ error: "Could not unregister push device" }, { status: 500 });
+				}
+			}
+
 			// ── Static files (no auth — UI code is not sensitive) ──
 			const resp = await serveStatic(url.pathname);
 			if (resp) return resp;
@@ -866,6 +949,74 @@ export async function startRemoteAccessServer(options: StartOptions): Promise<vo
 
 	// Print access URL to console
 	printAccessInfo();
+}
+
+// ── Guarded start, for the desktop app only ──────────────────────────────────
+//
+// `startRemoteAccessServer` throws, and `Bun.serve` throws SYNCHRONOUSLY when the
+// port is taken. On the desktop boot path that call is a top-level await, so the
+// throw does not merely kill remote access — it aborts the rest of the module and
+// takes the whole app down a millisecond after the window appears. See
+// `decisions/2026/08/29/remote-access-port-in-use-keeps-the-app-alive.md`.
+//
+// Headless keeps calling the throwing form on purpose: there, remote access IS
+// the process, so dying is the correct answer.
+
+let lastStartOptions: StartOptions | null = null;
+let startFailure: RemoteAccessStartFailure | null = null;
+let statusHook: ((status: RemoteAccessStatus) => void) | null = null;
+
+/** Set by the app so both settings and the QR modal see a status change live. */
+export function setRemoteAccessStatusHook(hook: (status: RemoteAccessStatus) => void): void {
+	statusHook = hook;
+}
+
+export function getRemoteAccessStatus(): RemoteAccessStatus {
+	return { running: serverPort !== 0, port: serverPort, failure: startFailure };
+}
+
+/**
+ * Start remote access without letting its failure escape into the caller's module.
+ *
+ * Returns the resulting status instead of throwing. The pin is NEVER silently
+ * traded for a random port: a taken port stays a visible failure the user can act
+ * on, because a pin exists precisely to keep an external URL or a Docker mapping
+ * valid, and quietly moving it breaks that without saying so.
+ */
+export async function startRemoteAccessServerGuarded(options: StartOptions): Promise<RemoteAccessStatus> {
+	lastStartOptions = options;
+	const requestedPort = resolveListenPort();
+	try {
+		await startRemoteAccessServer(options);
+		startFailure = null;
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		const portInUse = /EADDRINUSE/i.test(String(err)) || /is port \d+ in use/i.test(message);
+		startFailure = { port: requestedPort, reason: portInUse ? "port-in-use" : "other", message };
+		log.error("Remote access server failed to start — the app keeps running without it", {
+			requestedPort,
+			reason: startFailure.reason,
+			error: message,
+		});
+	}
+	const status = getRemoteAccessStatus();
+	statusHook?.(status);
+	return status;
+}
+
+/** Re-attempt the bind after the user freed the port — no app restart needed. */
+export async function retryRemoteAccessServer(): Promise<RemoteAccessStatus> {
+	if (serverPort !== 0) return getRemoteAccessStatus();
+	if (!lastStartOptions) return getRemoteAccessStatus();
+	return startRemoteAccessServerGuarded(lastStartOptions);
+}
+
+/** Test seam — module state survives between cases. */
+export function resetRemoteAccessStartState(): void {
+	lastStartOptions = null;
+	startFailure = null;
+	statusHook = null;
+	serverPort = 0;
 }
 
 /**
@@ -955,21 +1106,112 @@ export function resolveAccessHost(host?: string): string {
 }
 
 /**
- * True when `dev3 remote --static-code=<value>` is in effect. In that mode the
- * URL token is the fixed user-supplied code (not a rolling JWT), the auth
- * exchange accepts it as a magic word, and the QR auto-refresher is skipped.
- * Intended for local dev only — there is no replay protection.
+ * The static access code, if the owner set one. Permanent and multi-use: it is
+ * typed into the browser's sign-in screen and accepted for as many sign-ins as
+ * the owner wants, from as many devices. It never rotates and never expires.
+ *
+ * Two sources, env first: `DEV3_REMOTE_STATIC_CODE` (headless, Docker, systemd)
+ * beats the `staticAccessCode` global setting, so a container's environment is
+ * always authoritative over whatever settings file it happens to mount.
  */
 export function getStaticCode(): string | null {
-	return process.env.DEV3_REMOTE_STATIC_CODE || null;
+	const fromEnv = process.env.DEV3_REMOTE_STATIC_CODE?.trim();
+	if (fromEnv) return fromEnv;
+	let fromSettings: string | null = null;
+	try {
+		fromSettings = loadSettingsSync().staticAccessCode?.trim() || null;
+	} catch {
+		return null;
+	}
+	if (!fromSettings) return null;
+	// A settings code too short to survive `remoteStaticCodeError` is dropped, not
+	// honoured: the Settings field's save-time check does not cover a hand-edited
+	// settings.json, nor a code saved before that check existed, and this is the
+	// line where such a string would silently become a working credential.
+	//
+	// Dropped rather than thrown — unlike the env source above, this one is
+	// UI-editable, and `startRemoteAccessServer` is a top-level await on the boot
+	// path. Killing the app over a settings field would leave the only fix inside
+	// the app that no longer starts.
+	const problem = remoteStaticCodeError(fromSettings);
+	if (problem) {
+		warnOnceAboutWeakSettingsCode(problem);
+		return null;
+	}
+	return fromSettings;
 }
 
+// Once per process: this is read on every auth exchange, and a per-request line
+// would bury the log under a brute-force attempt it is meant to explain.
+let weakSettingsCodeWarned = false;
+
+function warnOnceAboutWeakSettingsCode(problem: string): void {
+	if (weakSettingsCodeWarned) return;
+	weakSettingsCodeWarned = true;
+	log.warn(
+		`Ignoring the remote access code from settings: it ${problem}. ` +
+		"Remote access is falling back to one-time QR links until it is fixed in Settings → System.",
+	);
+}
+
+/** Test seam — the warn-once latch is module state that survives between cases. */
+export function resetWeakSettingsCodeWarning(): void {
+	weakSettingsCodeWarned = false;
+}
+
+/**
+ * Refuse to serve remote access on an ENV-supplied static code short enough to
+ * guess. Reads `process.env` directly, deliberately NOT `getStaticCode()`.
+ *
+ * Both CLI entry points reject a short code at flag-parse time, so reaching the
+ * server with one means the env var was set directly (Docker, a hand-written
+ * unit file, an exported shell). Those are unattended contexts where a log line
+ * goes unread, and silently downgrading to rotating QR tokens would break the
+ * caller's saved URL with a plain 401 — an outage that reads as "auth broken"
+ * rather than "your code is too short". So: throw, and name the cause.
+ *
+ * A code from any UI-editable source must NOT come through here. This runs as a
+ * top-level await on the app's boot path, so a typo in a settings field would
+ * take the whole app down with no way to fix it from inside the app. Such a
+ * source rejects the *value* — drop it, log it, surface the error in its own
+ * field — never the boot.
+ */
+export function assertStaticCodeStrongEnough(): void {
+	const code = process.env.DEV3_REMOTE_STATIC_CODE || null;
+	if (!code) return;
+	const problem = remoteStaticCodeError(code);
+	if (!problem) return;
+	throw new Error(
+		`DEV3_REMOTE_STATIC_CODE ${problem}. It is a long-lived, multi-use credential ` +
+		"fronting full terminal access; refusing to start remote access on a guessable code.",
+	);
+}
+
+/**
+ * The URL carries a one-time QR token and NOTHING else. The static code is
+ * deliberately absent: a permanent credential in a URL lands in browser history,
+ * the address bar, and every proxy/referrer log along the way. It is typed into
+ * the sign-in screen instead.
+ */
 export async function getAccessUrl(host?: string): Promise<string> {
-	const token = getStaticCode() ?? await createQrToken();
+	const token = await createQrToken();
 	const tunnel = getTunnelUrl();
 	if (tunnel) return `${tunnel}/?token=${token}`;
 	const ip = resolveAccessHost(host);
 	return `http://${ip}:${serverPort}/?token=${token}`;
+}
+
+/**
+ * The bookmarkable sign-in link, or null when no access code is set. The code
+ * rides the fragment, so it never reaches this server's own logs, the tunnel, or
+ * a proxy — see `src/shared/remote-sign-in-link.ts` for what that does and does
+ * not buy. The URL half still carries a one-time QR token, so the link works
+ * even before its fragment is read.
+ */
+export async function getSignInLink(host?: string): Promise<string | null> {
+	const code = getStaticCode();
+	if (!code) return null;
+	return buildSignInLink(await getAccessUrl(host), code);
 }
 
 export function getBaseUrl(): string {

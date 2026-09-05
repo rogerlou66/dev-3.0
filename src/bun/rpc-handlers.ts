@@ -27,6 +27,7 @@ export {
 	isNotificationSuppressed,
 	queueTerminalFocusToast,
 	queueTerminalFocusAttention,
+	dropQueuedAttention,
 	isProjectSilenced,
 	setStreamerPrivacy,
 	pushCliToast,
@@ -49,6 +50,7 @@ export {
 } from "./lifecycle/activities";
 export {
 	createScratchTask,
+	createTask,
 	deleteTask,
 	handleBellAutoStatus,
 	isTaskInProgress,
@@ -76,6 +78,7 @@ import { remoteAccessHandlers } from "./rpc-handlers/remote-access";
 import { scriptsHandlers } from "./rpc-handlers/scripts";
 import { portTunnelHandlers } from "./rpc-handlers/port-tunnels";
 import { conversationSearchHandlers } from "./rpc-handlers/conversation-search-handlers";
+import { conversationImportHandlers } from "./rpc-handlers/conversation-import-handlers";
 import { productivityStatsHandlers } from "./rpc-handlers/productivity-stats";
 import { agentUsageHandlers } from "./rpc-handlers/agent-usage";
 import { automationsHandlers } from "./rpc-handlers/automations";
@@ -83,6 +86,7 @@ import { modelCatalogHandlers } from "./rpc-handlers/model-catalog";
 import { pxpipeProxyHandlers } from "./rpc-handlers/pxpipe-proxy";
 import { agentAccountHandlers } from "./rpc-handlers/agent-accounts";
 import { prCommentsHandlers } from "./rpc-handlers/pr-comments";
+import { artifactMessageHandlers } from "./rpc-handlers/artifact-messages";
 import { taskPanesHandlers } from "./rpc-handlers/task-panes";
 import { spacesHandlers } from "./rpc-handlers/spaces";
 
@@ -98,6 +102,7 @@ export const handlers = {
 	...scriptsHandlers,
 	...portTunnelHandlers,
 	...conversationSearchHandlers,
+	...conversationImportHandlers,
 	...productivityStatsHandlers,
 	...agentUsageHandlers,
 	...automationsHandlers,
@@ -105,6 +110,7 @@ export const handlers = {
 	...pxpipeProxyHandlers,
 	...agentAccountHandlers,
 	...prCommentsHandlers,
+	...artifactMessageHandlers,
 	...taskPanesHandlers,
 	...spacesHandlers,
 };

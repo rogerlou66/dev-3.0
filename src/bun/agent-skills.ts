@@ -9,6 +9,7 @@ import {
 } from "../shared/agent-message-hold-timing";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
 import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
+import { applyLowBattery } from "./low-battery";
 
 // Re-exported for backward-compat: agents.ts and other callers import the
 // composed skill bodies from here. The section constants that compose them now
@@ -16,6 +17,14 @@ import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
 export { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
 
 const log = createLogger("agent-skills");
+
+/**
+ * Two descriptions on purpose. For Codex and the generic agents the SKILL.md IS
+ * the protocol, so loading it is mandatory. A dev3-launched Claude already has
+ * the protocol in its system prompt and the SessionStart hook has set the status,
+ * so telling it to invoke the skill anyway costs a tool call that buys nothing.
+ */
+const CLAUDE_SKILL_DESCRIPTION = "Refreshes live dev3 task state (status, current task). Trigger: PWD is inside ~/.dev3.0/worktrees/ (the dev-3.0 managed path; other worktrees do NOT qualify). If your system prompt already has the 'dev3 — Task Lifecycle Protocol' section, dev3 launched you and you do NOT need to invoke this — follow that section. Invoke only when that section is missing.";
 
 const SKILL_DESCRIPTION = "MANDATORY — invoke BEFORE doing anything else. Trigger: your working directory (PWD) is inside ~/.dev3.0/worktrees/ (i.e. $HOME/.dev3.0/worktrees/). Regular git worktrees or other worktree paths do NOT qualify — only the dev-3.0 managed path. Step 1: invoke this skill (for Codex exec_command calls, always set shell=\\\"/bin/bash\\\" and login=false). Step 2: handle the user's request. NEVER skip step 1, even if the user gives a direct command.";
 
@@ -36,7 +45,7 @@ export function buildClaudeSkillContent(dialect: HookCliDialect = hookCliDialect
 	const captureStderr = dialect.posixShell ? " 2>&1" : "";
 	return `---
 name: dev3
-description: "${SKILL_DESCRIPTION}"
+description: "${CLAUDE_SKILL_DESCRIPTION}"
 user-invocable: true
 ---
 
@@ -187,7 +196,7 @@ is genuinely ambiguous (e.g., multiple possible dev servers, unclear base branch
    | \`$DEV3_PROJECT_PATH\` | Project root directory (the original repo checkout) |
    | \`$DEV3_PROJECT_NAME\` | Project name |
    | \`$DEV3_TASK_ID\` | Task UUID |
-   | \`$DEV3_TASK_SEQ\` | The task's human number, variant suffix included (\`1383\`, \`1383-1\`) — plain numbers work as \`--task seq:<N>\`; a variant shares its seq with its siblings, so address it by \`$DEV3_TASK_ID\` |
+   | \`$DEV3_TASK_SEQ\` | The task's human number, variant suffix included (\`1383\`, \`1383-1\`) — plain numbers work as \`--task seq:<N>\`; a variant shares its seq with its siblings, so address it by \`$DEV3_TASK_ID\` — or, with \`dev3 message\`, as \`--task seq:1383 --variant 1\` |
    | \`$DEV3_TASK_TITLE\` | Task title |
    | \`$DEV3_WORKTREE_PATH\` | This task's worktree directory |
    | \`$DEV3_BRANCH_NAME\` | The task's git branch |
@@ -720,8 +729,9 @@ A starting situation that generates work, then merges onto the main flow.
 
 - **A bug report arrived** → make it a task with the repro as the description; the fix then flows through review and PR like any feature. Don't know where the bug lives? → **bug-hunter swarm**: a multi-variant task where each agent runs \`/dev3-bug-hunter\` with a seeded strategy, so different agents start from different corners of the codebase.
 - **"Review this PR"** → create a **PR review task**: paste the GitHub PR URL straight into the Create Task modal — dev3 fetches the branch into a worktree and the agent reviews the actual diff — runnable code, not a GitHub-tab skim. Such a task is marked **someone else's code** (eye glyph on the card, \`Code\` row in the inspector): dev3 will not run that branch's own \`.dev3\` setup/dev/cleanup scripts, env vars, MCP servers or agent hooks, using the project's own config instead. Nothing is read-only — edit, commit and push as usual — and one click in the inspector hands the branch its trust back if you deliberately want its scripts. In the diff, a file dev3 executes by itself wears a **RUNS** badge; read its commands rather than skimming.
-- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
+- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. From the CLI you can also start it that way in one command: \`dev3 task create --title "..." --description "..." --type coordinator\` writes the same role brief above your text at creation; a review task is \`dev3 task create --pr <number> --title "..."\`, where \`--pr\` both implies \`pr-review\` and starts the worktree on the pull request's own branch (without it the task lands on the base branch with nothing to review). A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, each one's priority, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
 - **"Continue what we did in that other task"** → past conversations are searchable: the agent runs \`dev3 conversations search\` and reads the old task's notes and transcript. This is *why* notes matter — they are weighted highest in that search.
+- **"What did every task record since I last looked?"** → \`dev3 events\`. One feed of the notes written by EVERY task on the board AND of every board movement — created, a status change (completed and cancelled included), a custom-column move — finished tasks included — a live task can still message you, a completed one cannot, and its notes are all that outlived its worktree. It is addressed by a **position, not a time window**: each run ends with a \`Cursor:\` line — one compact instant such as \`2026-08-28T20:22:22.303\` — plus the exact next command, and passing it back returns only what happened since. \`--from\` also takes an event id straight from the ID column (\`8eb2da3d\`) — the shortest form to carry, though a deleted or evicted note makes it exit 19 rather than pretend the board was quiet — or a plain date (\`2026-08-01\`) or a duration (\`2h\`, \`3d\`) when you deliberately want a window. Keep the cursor yourself; the app remembers nothing per caller, so the same cursor always gives the same answer. A bare \`dev3 events\` shows the last 24 hours and tells you, as a number, how many events are older than that window — so a lost cursor is visible instead of silent. \`--kind note\` or \`--kind move\` narrows it, and a cursor from a filtered run covers that kind only — the run says so. Movements are recorded from the version that shipped them onward; nothing older exists and none is invented. One line per event; \`dev3 note show <id> --task <seq>\` prints a note's full body.
 - **A new codebase** → add the project from a folder or clone it from a URL, then run \`/dev3-project-config\` to auto-detect its setup / dev / cleanup scripts, ports, and clone paths.
 - **"I don't want to try this on my own repo yet"** → **Try a sandbox repo** on the dashboard's first-run strip. dev3 creates a tiny throwaway repository of its own under \`~/.dev3.0/sandbox\` and opens its board, so the branch / worktree / diff loop is visible on something nobody cares about. Its README suggests three first prompts. Remove it like any project when done — nothing on disk is deleted.
 
@@ -739,6 +749,7 @@ A starting situation that generates work, then merges onto the main flow.
 - **Slice features small enough for a 30-second check.** The dev server pays off most when a feature is small enough that pressing the button and clicking around for ~30 seconds tells you whether it's done: the new button is there and works, nothing that should exist has vanished, it looks right. If you can't verify a feature that fast, the task was probably too big — split it.
 - **Screenshots → the agent takes them and shows them to you.** With the dev server up (or any page the agent can reach) and a browser tool at hand (agent-browser, Puppeteer, a browser MCP), just say *"take a screenshot and show it to me in dev3"* — the agent will understand: it drives the browser, captures the pixels, and pushes them into the app (\`dev3 show-image\` under the hood). Prefer pixels over prose when the change is visual.
 - **Reports and richer results → dev3 artifacts.** An artifact is an HTML page shown right inside dev3's UI — it can embed screenshots, tables from CSVs, charts, anything dynamic. Perfect for reports and for validating what the agent did: often you don't even need to launch the dev server yourself — the agent has already screenshotted everything and presents the finished result as one page. To activate it, just tell the agent to *"use a dev3 artifact"*.
+- **A report can ask you a question back.** An artifact is not read-only: report code can draw a form and send what you fill in straight to the agent that published it (\`window.dev3.sendToAgent\`, documented in the artifact starter's \`AUTHORING.md\`). Pick an option, approve a variant, list the files to skip — it lands in that task's agent pane as if you had typed it, tagged with which artifact and which version you were looking at. It is one-way: the agent answers by republishing the artifact, and you switch to the new version \u2014 anything you had typed and not sent is kept, and the viewer offers to take you back to the version you were answering, where sending still works. The form is deliberately dead on any OTHER older version, in a downloaded copy, and in a tab opened outside the app.
 - **Send a report to someone outside dev3 → ask for a link.** An artifact lives inside the app, so *"share this report"* / *"give me a link"* / *"I want to look at it on my phone"* means the agent folds it into one self-contained HTML file (\`dev3 inline-html\`), publishes it as a GitHub gist — secret by default — and hands back a preview URL it has actually opened and screenshotted. That is \`/dev3-share-artifact\`; re-sharing a regenerated report updates the same gist, so a URL already pasted into an issue keeps working. It refuses to publish a page with an embedded credential and names home paths, emails and tunnel URLs before they go public.
 - **Artifacts travel well — the ZIP → PDF trick.** Downloading an artifact gives you the HTML page, and when it references images or other files — a ZIP with everything bundled. A proven workflow for analytics-style reports: view the report in dev3, download it, open the HTML in a browser, print → save as PDF — and send that PDF to people.
 
@@ -763,7 +774,9 @@ Under the hood the agent uses \`dev3 pane run\` / \`dev3 pane logs\` (either bac
 Several agents at once is the normal case here. Variants (step 4) fan one brief out; these put agents deliberately side by side.
 
 - **More hands on the same task → spawn an extra agent.** Another agent in the *same* worktree, opened in a new pane with a fresh session — zero extra setup. Two agents, one branch, side by side.
-- **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N "text"\` types a message straight into another task's live agent (\`seq:N\` is the small number on its card). Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. A task on a different project needs \`--project <id>\` too: the command defaults to the sender's own board. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel. Nothing is typed on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing into that pane, and lands instantly when they press Enter — so a burst of messages from several peers lands as ONE turn instead of interrupting the receiver three times, nothing is ever mixed into a half-written human line, and a reply takes about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds to start.
+- **The same work, a different agent → hand the conversation over.** In the same **+ Agent** dialog, tick **Continue this task's conversation**: dev3 writes a retelling of the session so far — your prompts and the agent's replies verbatim, its tool calls reduced to what they did — next to the task's other files, and points the new agent at it. Start in Claude Code and finish in Codex, or the reverse, in the same worktree. It is a retelling, never a resume: agents cannot read each other's sessions, and the file says so on its first line. Offered only when the task has a parseable transcript; from a terminal the same text comes out of \`dev3 conversations handoff\`.
+- **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N --subject "<about 6 words>" "text"\` types a message straight into another task's live agent. \`--subject\` is required (one line, 80 characters at most, rejected rather than shortened if longer): it is stored with the message and it is the line the agent-traffic view (\`⇧⌘M\`) shows for it, so say what happened (\`"PR 1577 merged, main green"\`) and never who is speaking (\`"Seq 1722 -> Coordinator: ..."\` — the row already shows the pair). \`seq:N\` is the small number on its card. Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. A task on a different project needs \`--project <id>\` too: the command defaults to the sender's own board. A live variant group shares one seq, so \`seq:N\` alone is rejected as ambiguous there — add \`--variant <i>\` (the card's \`<seq>-<i>\` suffix) instead of hunting for the UUID. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel. Nothing is typed on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing into that pane, and lands instantly when they press Enter — so a burst of messages from several peers lands as ONE turn instead of interrupting the receiver three times, nothing is ever mixed into a half-written human line, and a reply takes about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds to start.
+- **A task an agent started already knows how to report back.** When a peer launches a task (\`dev3 task move --task seq:N --status in-progress\`, or \`dev3 task create --scratch --run\`), the child's first message tells it who started it, that its description is the brief, and — with no flag and no setup — to write progress and results as a file under its own task directory and message back only that path. Long bodies typed into a pane can lose their head; a path cannot. So a coordinator does **not** repeat that instruction by hand after every launch. Standing rules of its own go in a file it passes as \`--handoff-file <path>\`, appended under the default rather than replacing it.
 - **A message can also wait.** The same command with \`--in 30m\` / \`--at 14:00\` queues the text (the **Send later** button on the task's composer does it from the UI), and an agent can aim it at itself as a wake-up — *"check the deploy in an hour."*
 
 ## Vocabulary underneath
@@ -784,6 +797,7 @@ Point, don't dig. Name where to look and stop — deep diagnosis is \`/diagnosin
 - Environment or setup acting up → \`dev3 doctor\` first.
 - Disk filling up → \`dev3 doctor --worktrees\`. Per project it shows what \`~/.dev3.0/worktrees\` holds and how much is reclaimable: orphaned folders whose task record is gone, worktrees whose teardown never finished, old diffs/logs. Report-only; \`--prune-orphans\` / \`--prune-older-than 30d\` delete, and anything on an unmerged \`dev3/task-*\` branch is skipped without \`--force-unmerged\`.
 - The task's terminal died → **Resume Agent Session** restarts the agent with its conversation intact (\`--continue\`), picking up right where it stopped.
+- Spaces, settings, agent presets, projects or the model catalog came back empty → dev3 keeps hourly copies of each, plus a last-known-good copy that rotation never evicts. Restoring is manual and always starts with quitting the app: \`docs/state-backups.md\` has the exact steps and the table of what is and is not copied (credentials deliberately are not).
 - "Why does dev3 behave this way?" → the relevant record in \`decisions/\` usually explains it.
 - Something crashed or misbehaved → the app logs, plus the decision record for that subsystem.
 
@@ -801,6 +815,7 @@ Off the main flow entirely.
 - **Machine running out of RAM → hibernate a task.** The header shows how many gigabytes are still free; hover it for the breakdown of who ate the rest, dev3's own tasks included. **Hibernate**, on the open task's session bar, stops that task's agent, terminal, and dev server and frees its ports, while the worktree, your uncommitted changes, notes, and PR state stay untouched. It asks for confirmation first, and spells out the one thing that does not survive: the terminal scrollback. The card greys out and sinks below the live tasks; waking is explicit — open its terminal and pick a plain shell or a resume of the agent's conversation.
 - **Rate limit closing in → hot-swap the account.** The header carries live Claude/Codex rate-limit usage and yellows near the cap; click it to land in **Settings → Agent Accounts**, where several logins per agent CLI sit side by side and the active one switches without a re-login (add one by running the login command dev3 hands you, then verify — or import the login you already have). The switch applies to every *new* agent session dev3 launches — new tasks, spawned agents, bug hunters, auto-review — while running sessions keep theirs, and each launch can pick a non-default account. An **API profile** replaces the subscription login entirely: the Anthropic API, an Anthropic-compatible gateway (OpenRouter, a LiteLLM proxy), or Bedrock, with per-model overrides.
 - **Too many projects to scan → group them into Spaces.** Once the project list stops being scannable, a **Space** groups projects: a rail on the dashboard lists every space with its project count, and picking one filters the overview to it — it never navigates away, so nothing gains a second board. Membership is **many-to-many** (a shared service can sit in both \`infra\` and \`client-x\`), and a project that belongs to several renders under each of them, carrying a chip for its other spaces. Create one from **+ New space**, the last entry of the rail's space list — the overview header offers the same button only while the rail is off screen (a narrow window, or your very first space, when there is no rail yet); edit which projects belong from **Edit projects…** in a space's **…** menu — every project is listed with the members ticked, so one dialog both adds and removes (it searches, and can start a brand-new project already linked); change one project's memberships from the row's **Spaces…** action or Project Settings → Spaces. Rename, delete and reorder live in the same **…** menu, which every space carries twice over: on its rail row and on its dashboard group header — deleting only removes the grouping, never a project. Projects in no space collect under a computed **Home** group; **Home is not a real space** — it is not stored, cannot be renamed, and never appears in a membership picker. The rail appears when the dashboard's own column is at least 1024px wide — not the window, so app chrome and a browser tab count against it; below that width the same filter opens as a sheet from the control beside the dashboard's search field, and whatever you had filtered stays filtered. The overview row above the spaces is **Everything** — it covers the whole list, spaces included. A space can also be marked **Hide on camera** from its **…** menu: in streamer mode its name blurs everywhere it appears (rail, filter sheet, group header, row chips, pickers) — independent of whether any member project is marked sensitive. **Space order:** drag a row in the rail, or use **Move up** / **Move down** in the space header's **…** menu (the path that works by touch and keyboard, where drag does not). Projects reorder by drag within their space — while you drag, every row in that space collapses to its name so the whole list fits on one screen. Neither ever changes membership. With zero spaces the dashboard is exactly the screen it always was.
+- **Work a whole space on ONE kanban.** A space can be the SUBJECT of the board itself, not just a dashboard filter. On a project's board, the button right of the project switcher (⇧⌘U) zooms out to that project's space — one click when it belongs to one space, a two-row menu when it belongs to several, and no button at all when it belongs to none. ⌘K lists spaces alongside projects, and \`dev3://space/<id>\` (https twin: \`https://dev3.h0x91b.com/open.html?space=<id>\`) opens it directly. The space board shows every member project's tasks on one set of columns and is a board you WORK in: drag moves a card, and the move only ever changes status in that card's own repository; **+ New task** leads with a project field limited to the space's members and remembering the last one you used there; the label bar and every search token work as usual. Columns are the union across member projects — same-named custom columns merge into one lane (case- and spacing-insensitive) that says how many projects it covers, and a lane your card's project has no column in is dimmed while you drag rather than refusing you after the drop. Each card names its own project. Two deliberate limits: per-project column renames are ignored there (dev3's canonical status names are used, because two projects' renames cannot be reconciled), and adding, renaming or reordering a column stays on a project's own board. **A project's own board is untouched** — this is an additional view, never a replacement.
 - **Filter and search by space.** ⌘K matches space names as well as project names, the dashboard has its own field over projects + spaces, and the task funnel grows a **Spaces** group — \`space:"Client X"\` filters tasks anywhere task search runs, and \`is:home\` catches the projects in no space. The active-tasks sidebar gains a **space** scope (every project sharing a space with the current one). It lives in the task workspace, not on the dashboard — the dashboard's project rows already list every task waiting on you, so a panel beside them was showing the same rows twice; for cross-project task search, open any project and switch that sidebar to the globe scope.
 - **Terminals start in the wrong shell, or not at all → Settings → Terminal → Shell.** dev3 follows your login shell by default and falls back to whichever of zsh, bash or sh is installed, which is what makes a minimal Linux box (no zsh, sometimes no bash) work at all. Pin it to \`zsh\`, \`bash\` or \`sh\` when the detected one is not the one you want; a shell that is not installed says so under the picker and names the one actually running. Windows runs PowerShell and ignores the setting.
 - **Stats** — productivity and token-cost dashboards across projects.
@@ -1181,7 +1196,20 @@ const LEGACY_GEMINI_SKILL_DUPLICATES = [
 const AGENTS_MD_MARKER_START = "<!-- dev3:start -->";
 const AGENTS_MD_MARKER_END = "<!-- dev3:end -->";
 
-const AGENTS_MD_BLOCK = `${AGENTS_MD_MARKER_START}
+/**
+ * A skill is inert until something loads it, so every harness except Claude Code
+ * (which gets the output style instead) needs one always-on line. It lives inside
+ * dev3's existing managed block: no second managed region, and removal is the same
+ * code path that rewrites the block on every start.
+ */
+const LOW_BATTERY_ALWAYS_ON = `
+## Answer format
+
+Load the \`low-battery\` skill (\`~/.agents/skills/low-battery/SKILL.md\`) before composing any substantial answer, and follow it. It is the answer format this machine expects: header block first, decision last, tables over prose. Skip it only when the Low Battery output style is already active — they are the same rules.
+`;
+
+function agentsMdBlock(lowBattery: boolean): string {
+	return `${AGENTS_MD_MARKER_START}
 ## dev-3.0 Managed Worktree
 
 If your working directory (PWD) is inside \`~/.dev3.0/worktrees/\` (i.e. \`$HOME/.dev3.0/worktrees/\`), you are a **dev-3.0 managed AI agent** with a Kanban task assigned. Regular git worktrees or other paths containing "worktrees" do **NOT** qualify — only the dev-3.0 managed directory under the user's home.
@@ -1194,14 +1222,16 @@ If your working directory (PWD) is inside \`~/.dev3.0/worktrees/\` (i.e. \`$HOME
 Do NOT skip these steps, even if the user gives a direct command.
 
 **Codex shell note:** For \`exec_command\` calls, always set \`shell="/bin/bash"\` and \`login=false\`. The sandbox may block homebrew zsh.
-${AGENTS_MD_MARKER_END}`;
+${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
+}
 
 /**
  * Ensure the dev3 block exists in ~/.agents/AGENTS.md.
  * Creates the file if missing; replaces an existing block if present;
  * appends if the file exists but has no dev3 block.
  */
-function installAgentsMd(): void {
+function installAgentsMd(lowBattery: boolean): void {
+	const block = agentsMdBlock(lowBattery);
 	const agentsDir = `${homedir()}/.agents`;
 	const agentsFile = `${agentsDir}/AGENTS.md`;
 
@@ -1220,11 +1250,11 @@ function installAgentsMd(): void {
 			const re = new RegExp(
 				`${AGENTS_MD_MARKER_START}[\\s\\S]*?${AGENTS_MD_MARKER_END}`,
 			);
-			content = content.replace(re, AGENTS_MD_BLOCK);
+			content = content.replace(re, block);
 		} else {
 			// Append
 			const separator = content.length > 0 && !content.endsWith("\n") ? "\n\n" : content.length > 0 ? "\n" : "";
-			content = content + separator + AGENTS_MD_BLOCK + "\n";
+			content = content + separator + block + "\n";
 		}
 
 		writeFileSync(agentsFile, content, "utf-8");
@@ -1374,6 +1404,13 @@ function installOpenAiMetadata(home: string): void {
 export interface InstallAgentSkillsOptions {
 	/** Skip Codex config patching when the caller has not resolved the user PATH yet. */
 	configureCodex?: boolean;
+	/**
+	 * Ship the low-battery answer format. Tri-state on purpose: `true` installs,
+	 * `false` is a real uninstall (skill dirs, style file, always-on line), and
+	 * omitted means "the user has not chosen" — dev3 installs nothing and deletes
+	 * nothing, because a `low-battery` skill dir may be the user's own.
+	 */
+	lowBattery?: boolean;
 }
 
 export function installAgentSkills(options: InstallAgentSkillsOptions = {}): void {
@@ -1531,9 +1568,13 @@ export function installAgentSkills(options: InstallAgentSkillsOptions = {}): voi
 		}
 	}
 
+	// No choice stored ⇒ touch nothing on disk. dev3's own managed block still
+	// drops the always-on line, because that block is dev3's to rewrite.
+	if (options.lowBattery !== undefined) applyLowBattery(home, options.lowBattery);
+
 	cleanupLegacyGeminiSkillDuplicates(home);
 	installOpenAiMetadata(home);
-	installAgentsMd();
+	installAgentsMd(options.lowBattery === true);
 	ensureClaudeSettings(home);
 	if (options.configureCodex !== false) {
 		ensureCodexConfigFile(home);

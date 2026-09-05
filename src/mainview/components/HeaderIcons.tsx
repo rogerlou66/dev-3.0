@@ -79,7 +79,6 @@ export function DropdownIcon({ className }: HeaderIconProps) {
 		</svg>
 	);
 }
-
 // 05 — No Sleep (off, sleep allowed): calm z's; on hover they drift upward.
 export function SleepZzzIcon({ className }: HeaderIconProps) {
 	return (

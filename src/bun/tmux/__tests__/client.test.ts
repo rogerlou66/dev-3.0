@@ -14,7 +14,11 @@ import {
 	STATUS_GEOMETRY_FORMAT,
 } from "../formats";
 import { activeTmuxConfigPath } from "../config";
+import { tmuxSocketPath } from "../socket-files";
 import { DEV3_HOME } from "../../paths";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 // The client is constructed with an INJECTED fake spawn — the only seam its
 // own tests use. Assertions target external behavior: the argv handed to
@@ -64,6 +68,43 @@ describe("argv construction", () => {
 		const client = new TmuxClient({ spawn: spawnFn as never, socket: "custom" });
 		await client.killSession("s");
 		expect(argvOf(spawnFn).slice(0, 3)).toEqual(["tmux", "-L", "custom"]);
+	});
+
+	it("killServer kills the server AND unlinks the socket file tmux leaves behind", async () => {
+		const root = mkdtempSync(join(tmpdir(), "dev3-socket-file-"));
+		const previous = process.env.TMUX_TMPDIR;
+		process.env.TMUX_TMPDIR = root;
+		try {
+			const socketPath = tmuxSocketPath("dev3-live-test-42");
+			mkdirSync(dirname(socketPath), { recursive: true });
+			writeFileSync(socketPath, "");
+			const { client, spawnFn } = makeClient();
+			await client.killServer({ socket: "dev3-live-test-42" });
+			expect(argvOf(spawnFn)).toEqual(["tmux", "-L", "dev3-live-test-42", "kill-server"]);
+			expect(existsSync(socketPath)).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.TMUX_TMPDIR;
+			else process.env.TMUX_TMPDIR = previous;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("killServer still unlinks the socket file when there is no server to kill", async () => {
+		const root = mkdtempSync(join(tmpdir(), "dev3-socket-file-"));
+		const previous = process.env.TMUX_TMPDIR;
+		process.env.TMUX_TMPDIR = root;
+		try {
+			const socketPath = tmuxSocketPath("dev3-live-test-43");
+			mkdirSync(dirname(socketPath), { recursive: true });
+			writeFileSync(socketPath, "");
+			const { client } = makeClient({ exited: Promise.resolve(1), stderr: "no server running" });
+			await expect(client.killServer({ socket: "dev3-live-test-43" })).resolves.toBeUndefined();
+			expect(existsSync(socketPath)).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.TMUX_TMPDIR;
+			else process.env.TMUX_TMPDIR = previous;
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("pipes stdout and stderr for every run", async () => {
@@ -318,6 +359,9 @@ describe("command methods build the documented argv", () => {
 		["selectLayout", (c) => c.selectLayout("dev3-a", "tiled"), ["select-layout", "-t", "dev3-a", "tiled"]],
 		["nextLayout", (c) => c.nextLayout("dev3-a"), ["next-layout", "-t", "dev3-a"]],
 		["toggleZoom", (c) => c.toggleZoom("dev3-a"), ["resize-pane", "-Z", "-t", "dev3-a"]],
+		// -D/-U and no -d: exactly what tmux's own `}` / `{` run, so focus follows the pane.
+		["swapPaneStep next", (c) => c.swapPaneStep("dev3-a", "next"), ["swap-pane", "-D", "-t", "dev3-a"]],
+		["swapPaneStep prev", (c) => c.swapPaneStep("dev3-a", "prev"), ["swap-pane", "-U", "-t", "dev3-a"]],
 		["killPane", (c) => c.killPane("%4"), ["kill-pane", "-t", "%4"]],
 		["sendKeys", (c) => c.sendKeys("%4", ["Left", "Left"]), ["send-keys", "-t", "%4", "Left", "Left"]],
 		["sendKeys literal", (c) => c.sendKeys("%4", ["echo hi\r"], { literal: true }), ["send-keys", "-l", "-t", "%4", "echo hi\r"]],
@@ -431,11 +475,25 @@ describe("the default command bound", () => {
 describe("sendKeysGuarded — one server command list, no check/send window", () => {
 	const GUARDED = { pane: "%3", serverToken: "srv-token-1", session: "dev3-task-abc12345" };
 
+	/** The if-shell call, which is the last one a successful send makes. */
+	function guardedArgv(spawnFn: ReturnType<typeof vi.fn>): string[] {
+		const calls = spawnFn.mock.calls.map((call) => call[0] as string[]);
+		return calls.find((argv) => argv.includes("if-shell")) ?? [];
+	}
+
+	/** Every `set-buffer` call, in order, as [buffer-name, text] pairs. */
+	function loadedBuffers(spawnFn: ReturnType<typeof vi.fn>): [string, string][] {
+		return spawnFn.mock.calls
+			.map((call) => call[0] as string[])
+			.filter((argv) => argv[3] === "set-buffer")
+			.map((argv) => [argv[5] as string, argv[7] as string]);
+	}
+
 	it("puts the guard and the sends in ONE if-shell command", async () => {
 		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent\n" });
 		const result = await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "hi" }], socket: "s" });
 
-		const argv = argvOf(spawnFn);
+		const argv = guardedArgv(spawnFn);
 		expect(argv.slice(3, 7)).toEqual([
 			"if-shell",
 			"-t",
@@ -449,47 +507,95 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 				"#{&&:#{==:#{session_name},dev3-task-abc12345}," +
 				"#{&&:#{==:#{pane_dead},0},#{==:#{pane_in_mode},0}}}}",
 		);
-		expect(argv[8]).toBe("send-keys -t %3 -H 68 69 ; display-message -p dev3-pane-input-sent");
+		const [[name, text]] = loadedBuffers(spawnFn);
+		expect(text).toBe("hi");
+		expect(argv[8]).toBe(`paste-buffer -d -p -r -b ${name} -t %3 ; display-message -p dev3-pane-input-sent`);
 		expect(result).toEqual({ sent: true });
 	});
 
-	// Hex means no tmux-level quoting exists to get wrong: text that looks like an
-	// option, a key name, or a command separator is still typed.
-	it("hex-encodes literal text, whatever it looks like", async () => {
+	// `-p` is the whole point: it wraps the payload in bracketed paste when the running app
+	// asked for DEC 2004, so an agent CLI takes one message as ONE paste instead of slicing
+	// the ~1 KB pieces the kernel hands it into several (issue #1608, heads arriving cut off).
+	it("pastes with -p so a bracketed-paste app receives one atomic paste", async () => {
 		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
-		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "-N ; kill-server 'x'" }] });
-		const nested = argvOf(spawnFn)[8];
-		expect(nested).not.toContain("kill-server");
-		expect(nested).toContain(Buffer.from("-N ; kill-server 'x'", "utf8").toString("hex").match(/../g)!.join(" "));
+		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "a long message" }] });
+		expect(guardedArgv(spawnFn)[8]).toContain("paste-buffer -d -p -r -b ");
+	});
+
+	// Without `-r`, tmux replaces every LF in the buffer with CR (measured on 3.6a:
+	// `41 0a 42` typed arrives as A LF B, pasted without `-r` as A CR B). An app that
+	// never asked for DEC 2004 gets no brackets and reads CR as submit, so a multi-line
+	// prompt would submit itself one line at a time.
+	it("keeps newlines as newlines in a multi-line prompt", async () => {
+		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
+		const prompt = "first line\nsecond line\nthird line";
+		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: prompt }] });
+
+		expect(loadedBuffers(spawnFn)[0][1]).toBe(prompt);
+		expect(guardedArgv(spawnFn)[8]).toContain(" -r ");
+	});
+
+	// The text rides argv, so no tmux-level quoting exists to get wrong: text that looks
+	// like an option, a key name, or a command separator never reaches the command list.
+	it("carries literal text through argv, whatever it looks like", async () => {
+		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
+		const hostile = "-N ; kill-server 'x'";
+		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: hostile }] });
+		expect(guardedArgv(spawnFn)[8]).not.toContain("kill-server");
+		// `--` ends the options, so a body starting with a dash is data rather than a flag.
+		const load = spawnFn.mock.calls.map((c) => c[0] as string[]).find((argv) => argv[3] === "set-buffer")!;
+		expect(load.slice(3)).toEqual(["set-buffer", "-b", expect.stringMatching(/^dev3-paste-/), "--", hostile]);
 	});
 
 	it("keeps multibyte text byte-exact", async () => {
 		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
 		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "日本語" }] });
-		expect(argvOf(spawnFn)[8]).toContain("e6 97 a5 e6 9c ac e8 aa 9e");
+		expect(loadedBuffers(spawnFn)[0][1]).toBe("日本語");
 	});
 
 	it("sends key names as names, in one send-keys per run", async () => {
 		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
 		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ keys: ["Left", "Left"] }, { literal: "x" }] });
-		expect(argvOf(spawnFn)[8]).toBe(
-			"send-keys -t %3 Left Left ; send-keys -t %3 -H 78 ; display-message -p dev3-pane-input-sent",
+		const [[name]] = loadedBuffers(spawnFn);
+		expect(guardedArgv(spawnFn)[8]).toBe(
+			`send-keys -t %3 Left Left ; paste-buffer -d -p -r -b ${name} -t %3 ; display-message -p dev3-pane-input-sent`,
 		);
 	});
 
-	// tmux answers a false guard with exit 0 and no output, so the marker IS the signal.
+	// tmux buffers are server-wide, so two messages in flight at once must not be able to
+	// paste each other's text.
+	it("gives every literal chunk its own buffer name", async () => {
+		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
+		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "one" }, { keys: ["Left"] }, { literal: "two" }] });
+		const buffers = loadedBuffers(spawnFn);
+		expect(buffers.map(([, text]) => text)).toEqual(["one", "two"]);
+		expect(buffers[0][0]).not.toBe(buffers[1][0]);
+	});
+
+	// A refused guard never runs `paste-buffer -d`, so the body would otherwise sit in the
+	// server's buffer stack for anyone to `show-buffer`.
+	it("deletes a buffer the guard refused to paste", async () => {
+		const { client, spawnFn } = makeClient({ stdout: "" });
+		await expect(client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "secret" }] })).resolves.toEqual({
+			sent: false,
+		});
+		const [[name]] = loadedBuffers(spawnFn);
+		await vi.waitFor(() =>
+			expect(spawnFn.mock.calls.map((c) => (c[0] as string[]).slice(3))).toContainEqual([
+				"delete-buffer",
+				"-b",
+				name,
+			]),
+		);
+	});
+
 	// The size budget in shared/pane-input.ts is computed from this shape, so it has to be
 	// measured against the REAL encoder rather than re-derived in a test.
-	it("spends 3 bytes of argv per byte of text, plus a fixed per-chunk prefix", async () => {
+	it("spends one byte of argv per byte of text", async () => {
 		const { client, spawnFn } = makeClient({ stdout: "dev3-pane-input-sent" });
 		const text = "abcdefghij";
 		await client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: text }, { literal: text }] });
-
-		const commands = argvOf(spawnFn)[8] ?? "";
-		// Two chunks: each is "send-keys -t %3 -H " plus 2 hex digits and a separator per
-		// byte (the last needs no separator), joined by " ; ", then the marker command.
-		const perChunk = "send-keys -t %3 -H ".length + text.length * 3 - 1;
-		expect(commands.length).toBe(perChunk * 2 + " ; ".length * 2 + "display-message -p dev3-pane-input-sent".length);
+		for (const [, loaded] of loadedBuffers(spawnFn)) expect(loaded.length).toBe(text.length);
 	});
 
 	it("reports sent:false when the marker does not come back", async () => {

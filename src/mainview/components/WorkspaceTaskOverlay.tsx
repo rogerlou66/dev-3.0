@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject } from "react";
-import { getTaskTitle, type Project, type SharedArtifact, type Task } from "../../shared/types";
+import { getTaskTitle, type Project, type Task } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import type { NavigationGuard } from "../navigation-guard";
 import { api } from "../rpc";
@@ -28,8 +28,6 @@ interface WorkspaceTaskOverlayProps {
 	onOpenFullPage: () => void;
 	onTaskMissing: () => void;
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
-	artifactViewer?: { taskId: string; artifacts: SharedArtifact[]; index: number } | null;
-	onCloseArtifactViewer?: () => void;
 	skipCopyModeReset?: boolean;
 }
 
@@ -50,8 +48,6 @@ function WorkspaceTaskOverlay({
 	onOpenFullPage,
 	onTaskMissing,
 	navigationGuardRef,
-	artifactViewer,
-	onCloseArtifactViewer,
 	skipCopyModeReset,
 }: WorkspaceTaskOverlayProps) {
 	const t = useT();
@@ -207,8 +203,6 @@ function WorkspaceTaskOverlay({
 							navigate={navigate}
 							dispatch={dispatch}
 							navigationGuardRef={navigationGuardRef}
-							artifactViewer={artifactViewer}
-							onCloseArtifactViewer={onCloseArtifactViewer}
 							presentation="overlay"
 							skipCopyModeReset={skipCopyModeReset}
 							loadTasks={false}

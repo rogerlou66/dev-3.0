@@ -32,6 +32,8 @@ vi.mock("../../rpc", () => ({
 			getAllProjectTasks: vi.fn(() => Promise.resolve([])),
 			getSpaces: vi.fn(() => Promise.resolve({ version: 1, spaces: [], order: [] })),
 			setTaskPriority: vi.fn(() => Promise.resolve([])),
+			getProjectPRs: vi.fn(() => Promise.resolve([])),
+			refreshTaskPrStatus: vi.fn(() => Promise.resolve(undefined)),
 			// Feature-discovery tip rotation (useTipRotation).
 			getGlobalSettings: vi.fn(() => Promise.resolve({ tipsDisabled: true })),
 			getTipState: vi.fn(() => Promise.resolve({ snoozedUntil: 0, seen: {}, rotationIndex: 0 })),
@@ -1169,11 +1171,12 @@ describe("ActiveTasksSidebar — space scope", () => {
 		};
 	}
 
-	function renderSidebarWith(allProjects: Project[]) {
+	function renderSidebarWith(allProjects: Project[], spaceId?: string) {
 		return render(
 			<I18nProvider>
 				<ActiveTasksSidebar
 					project={project}
+					spaceId={spaceId}
 					tasks={[makeTask()]}
 					allProjects={allProjects}
 					activeTaskId="t1"
@@ -1250,6 +1253,33 @@ describe("ActiveTasksSidebar — space scope", () => {
 		expect(screen.getByTestId("sidebar-scope-project").className).not.toContain("bg-accent/20");
 	});
 
+	// A project in two spaces: without the route's space the pool is the union of
+	// both, which is never the board the user is actually looking at.
+	it("scopes to the space on the route, not the union of the project's spaces", async () => {
+		const { api } = await import("../../rpc");
+		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"], ["p1", "p3"]]));
+		const siblingTask = makeTask({
+			id: "t-sib", seq: 200, projectId: "p2",
+			title: "Sibling task", description: "Sibling task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		const otherSpaceTask = makeTask({
+			id: "t-oth", seq: 201, projectId: "p3",
+			title: "Other space task", description: "Other space task",
+			groupId: null as unknown as string, variantIndex: null,
+		});
+		(api.request.getAllProjectTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+			{ projectId: "p1", tasks: [makeTask()] },
+			{ projectId: "p2", tasks: [siblingTask] },
+			{ projectId: "p3", tasks: [otherSpaceTask] },
+		]);
+
+		renderSidebarWith([project, otherProject, strangerProject], "sp_0");
+
+		await waitFor(() => expect(screen.getByText("Sibling task")).toBeInTheDocument());
+		expect(screen.queryByText("Other space task")).not.toBeInTheDocument();
+	});
+
 	it("opens on the space scope by default when the project is in a space", async () => {
 		const { api } = await import("../../rpc");
 		(api.request.getSpaces as ReturnType<typeof vi.fn>).mockResolvedValue(mockSpaces([["p1", "p2"]]));
@@ -1296,9 +1326,9 @@ describe("ActiveTasksSidebar — space scope", () => {
 		const spaceBtn = await screen.findByTestId("sidebar-scope-space");
 		await waitFor(() => expect(spaceBtn).toHaveAttribute("aria-disabled", "true"));
 		expect(spaceBtn.className).toContain("cursor-not-allowed");
-		// The strike lives on the glyph wrapper — an inline-flex box stops the
-		// button's own text-decoration from reaching it.
-		expect(spaceBtn.querySelector(".line-through")).not.toBeNull();
+		// The glyph is an SVG, so the strike is a drawn rule: `line-through` has
+		// nothing to decorate on an <svg>.
+		expect(spaceBtn.querySelector('[data-testid="sidebar-scope-space-struck"]')).not.toBeNull();
 	});
 
 	it("falls back to the project scope when the stored scope is space but the project has no memberships", async () => {
@@ -1425,5 +1455,135 @@ describe("ActiveTasksSidebar — dashboard mount (no current project)", () => {
 		});
 		await user.click(screen.getByTestId("sidebar-preset-all"));
 		await waitFor(() => expect(screen.getByText("Привет! как сам?")).toBeInTheDocument());
+	});
+});
+
+describe("pull-request badges", () => {
+	const prTask = (overrides?: Partial<Task>) => makeTask({
+		prNumber: 1591,
+		prUrl: "https://github.com/h0x91b/dev-3.0/pull/1591",
+		...overrides,
+	});
+
+	function renderWith(tasks: Task[]) {
+		return render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					project={project}
+					tasks={tasks}
+					activeTaskId={undefined}
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+	}
+
+	it("shows the PR number from the task's sticky fields and opens the PR on click", async () => {
+		const user = userEvent.setup();
+		const open = vi.spyOn(window, "open").mockReturnValue(null);
+		renderWith([prTask()]);
+
+		const badge = screen.getByLabelText("Open PR #1591");
+		expect(badge).toHaveTextContent("#1591");
+		await user.click(badge);
+		expect(open).toHaveBeenCalledWith("https://github.com/h0x91b/dev-3.0/pull/1591", "_blank");
+		open.mockRestore();
+	});
+
+	it("renders merge state, review verdict and unresolved comments from the persisted cache", () => {
+		renderWith([prTask({
+			prStatusCache: {
+				number: 1591,
+				url: "https://github.com/h0x91b/dev-3.0/pull/1591",
+				ciStatus: "success",
+				reviewState: "changes_requested",
+				reviewDecision: "changes_requested",
+				unresolvedCount: 3,
+				mergeState: { mergeable: "CONFLICTING", status: "DIRTY" },
+				checks: [],
+				prTitle: "Ship the badge",
+				isDraft: false,
+				cachedAt: "2026-08-30T00:00:00Z",
+			},
+		})]);
+
+		// On this ~200px row the merge verdict is glyph-only, so the word has to
+		// survive in the accessible name and the tooltip instead of on screen.
+		const merge = screen.getByLabelText("PR is not mergeable — click to open the PR — Conflicts");
+		expect(merge).toHaveAttribute("title", "Conflicts");
+		expect(merge).not.toHaveTextContent("Conflicts");
+		expect(screen.getByLabelText("Changes requested — click to open the PR")).toBeInTheDocument();
+		expect(screen.getByLabelText("3 unresolved comments")).toBeInTheDocument();
+	});
+
+	it("opens the shared status popover on hover", async () => {
+		const user = userEvent.setup();
+		renderWith([prTask()]);
+
+		await user.hover(screen.getByLabelText("Open PR #1591"));
+		await waitFor(() => expect(screen.getByTestId("pr-status-popover")).toBeInTheDocument());
+	});
+
+	it("keeps the merge verdict's word out of the row but reachable", () => {
+		renderWith([prTask({
+			prStatusCache: {
+				number: 1591,
+				url: "https://github.com/h0x91b/dev-3.0/pull/1591",
+				ciStatus: "success",
+				reviewState: "approved",
+				reviewDecision: "approved",
+				unresolvedCount: 0,
+				mergeState: { mergeable: "MERGEABLE", status: "CLEAN" },
+				checks: [],
+				prTitle: "Ship the badge",
+				isDraft: false,
+				cachedAt: "2026-08-30T00:00:00Z",
+			},
+		})]);
+
+		// The word is 77px of a 200px line; it must not be rendered as text here.
+		expect(screen.queryByText("Mergeable")).not.toBeInTheDocument();
+		expect(screen.getByLabelText("PR is mergeable — click to open the PR — Mergeable")).toBeInTheDocument();
+	});
+
+	it("renders no PR badge for a task nothing has ever seen a PR for", () => {
+		renderWith([makeTask()]);
+		expect(screen.queryByLabelText(/Open PR/)).not.toBeInTheDocument();
+		expect(screen.getByText("Привет! как сам?")).toBeInTheDocument();
+	});
+
+	it("never fires the board's per-project PR discovery lookup", async () => {
+		const { api } = await import("../../rpc");
+		renderWith([prTask()]);
+		await waitFor(() => expect(screen.getByLabelText("Open PR #1591")).toBeInTheDocument());
+		expect(api.request.getProjectPRs).not.toHaveBeenCalled();
+	});
+
+	it("follows the taskPrStatus push, which carries PR state instead of taskUpdated", async () => {
+		renderWith([prTask()]);
+		expect(screen.queryByLabelText("PR approved — click to open the PR")).not.toBeInTheDocument();
+
+		window.dispatchEvent(new CustomEvent("rpc:taskPrStatus", {
+			detail: {
+				projectId: "p1",
+				taskId: "t1",
+				prNumber: 1591,
+				prUrl: "https://github.com/h0x91b/dev-3.0/pull/1591",
+				ciStatus: "success",
+				reviewState: "approved",
+				unresolvedCount: 0,
+				mergeState: { mergeable: "MERGEABLE", status: "CLEAN" },
+				checks: [],
+				prTitle: "Ship the badge",
+				isDraft: false,
+			},
+		}));
+
+		await waitFor(() => expect(screen.getByLabelText("PR approved — click to open the PR")).toBeInTheDocument());
+		expect(screen.getByLabelText("PR is mergeable — click to open the PR — Mergeable")).toHaveAttribute("title", "Mergeable");
 	});
 });

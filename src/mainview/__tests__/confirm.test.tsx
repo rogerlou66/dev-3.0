@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { ConfirmHost, confirm } from "../confirm";
+import { ConfirmHost, confirm, whenConfirmHostMounted } from "../confirm";
 import { I18nProvider } from "../i18n";
 
 function renderHost() {
@@ -146,6 +146,44 @@ describe("confirm service", () => {
 
 		const cancelBtn = await screen.findByRole("button", { name: "Keep session" });
 		expect(cancelBtn).toHaveFocus();
+	});
+
+	// A red confirm button inside otherwise-accent chrome reads as the ordinary
+	// agent prompt. The danger tone has to reach the dialog's own frame, its
+	// badge and the subject card, or the "don't destroy this by accident" signal
+	// is only on the button the user is already reaching for.
+	it("paints the whole dialog danger for tone: danger", async () => {
+		renderHost();
+		act(() => {
+			void confirm({
+				title: "Agent asks to cancel",
+				message: "M",
+				confirmLabel: "Cancel task",
+				agentInitiated: true,
+				danger: true,
+				tone: "danger",
+				info: { title: "Junk task" },
+			});
+		});
+
+		const dialog = await screen.findByRole("dialog");
+		expect(dialog.className).toContain("border-danger");
+		expect(dialog.className).not.toContain("border-accent/40");
+		expect(screen.getByRole("heading", { name: "Agent asks to cancel" }).className).toContain("text-danger");
+		expect(screen.getByText("AI agent request").className).toContain("text-danger");
+		expect(screen.getByText("Junk task").className).toContain("text-danger");
+		expect(screen.getByTestId("confirm-accept").className).toContain("bg-danger");
+	});
+
+	it("keeps the accent chrome for an agent confirm with no danger tone", async () => {
+		renderHost();
+		act(() => {
+			void confirm({ title: "Agent asks", message: "M", confirmLabel: "Confirm", agentInitiated: true });
+		});
+
+		const dialog = await screen.findByRole("dialog");
+		expect(dialog.className).toContain("border-accent/40");
+		expect(dialog.className).not.toContain("border-danger");
 	});
 
 	it("renders the info subject card with title and body", async () => {
@@ -404,5 +442,29 @@ describe("confirm service", () => {
 
 		await expect(result!).resolves.toBe(false);
 		expect(screen.queryByText("Already resolved")).not.toBeInTheDocument();
+	});
+});
+
+// `confirm()` is fail-closed: with no host it resolves `false` and draws nothing.
+// A startup caller that read that as "the user declined" would answer on the
+// user's behalf for a dialog nobody saw — which is exactly what the replay of a
+// pending completion request did before it learned to wait.
+describe("whenConfirmHostMounted", () => {
+	it("resolves false when no host ever mounts, instead of pretending one did", async () => {
+		await expect(whenConfirmHostMounted(120)).resolves.toBe(false);
+	});
+
+	it("resolves true once the host is on screen", async () => {
+		renderHost();
+		await expect(whenConfirmHostMounted(1000)).resolves.toBe(true);
+	});
+
+	it("resolves true for a host that mounts a moment later", async () => {
+		const waiting = whenConfirmHostMounted(2000);
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 80));
+			renderHost();
+		});
+		await expect(waiting).resolves.toBe(true);
 	});
 });

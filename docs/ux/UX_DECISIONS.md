@@ -12,11 +12,33 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 
-## 2026-08-25 — Agent traffic: a conditional header readout plus an overlay log
+## 2026-09-05 — HTML artifacts open as a popup
 
-- **Rule:** bible §5.9 / yaml `agent_traffic_log` — the readout lives in the kebab and earns a bar slot only while unread traffic exists (never on a phone bar), the log is an overlay (not a 9th destination), and no importance axis may be invented over the delivery verdict the rows already carry.
-- **Why:** the rows were already on disk with no reader, and the rejected alternatives — a permanent header counter, or a recency-based glyph — both put a number nobody acts on in the header of boards where agents never talk.
-- **Status:** proposed. Record: `decisions/2026/08/25/agent-traffic-readout-and-log.md`.
+Artifacts use the App lightbox; the resizable task split is removed — bible §3 + §12.3, yaml `task_artifact_viewer`. Why: `decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md`.
+
+## 2026-09-05 — Agent traffic becomes a live orbit
+
+The existing overlay owns the project orbit, accessible lists and inspector; real append events animate attempts without inventing workflow — bible §5.9. Why: `decisions/2026/09/05/live-agent-traffic-orbit.md`.
+
+
+## 2026-09-03 — Touch scrollback return is a floating button
+
+One round floating button over the canvas, only while that pane is scrolled up, touch only; never a key-bar, composer or pane-bar slot — yaml `terminal_scrollback_return`. Why: `decisions/2026/09/03/touch-scroll-to-latest-button.md`.
+
+## 2026-08-30 — Sidebar rows carry the task_card PR badge cluster
+
+`surfaces.sidebar` may render `git_status_badge` — the shared `TaskPrBadges` component, leading the row's signals line, without the board's discovery poll. Why: `decisions/2026/08/30/sidebar-pr-badge-without-discovery-poll.md`.
+
+## 2026-08-27 — Notification preferences have one Settings home
+
+- **Rule:** Settings → Notifications owns focus, watch default, sound, browser alerts, and Web Push; anchors stay stable. **Why:** `decisions/2026/08/27/notification-preferences-settings-home.md`.
+
+2026-08-26 — Header presence follows data, unread is only the badge (§5.9). Why: `decisions/2026/08/26/header-slot-presence-follows-data-not-unread.md`.
+
+2026-08-25 — Traffic remains an overlay (§5.9); presentation superseded 2026-09-05. Why: `decisions/2026/08/25/agent-traffic-readout-and-log.md`.
+
+## 2026-08-25 — A self-previewing option list earns a disclosure, not a Settings category
+- **Rule:** the terminal font picker stays in Settings → Terminal behind a collapsed "Compare all N" disclosure of preview rows; no category of its own. **Why:** `decisions/2026/08/25/terminal-font-width-is-clamped-to-the-reference.md`.
 
 ## 2026-08-23 — A guided tour points; it does not drive
 
@@ -63,7 +85,7 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 ## 2026-08-19 — A data-bearing menu row opens on hover, its flyout beside the menu — rule now lives in bible §12.6.
 ## 2026-08-17 — A Space filters the dashboard; it never becomes a place
-- **Rule:** Spaces group projects on the dashboard only — a rail that FILTERS the overview, collapsible group headers, row membership chips + a `Spaces…` action, and **every space action behind one `…`**; no space route, no merged board, no colour, no stored `Home` (it is computed from zero-membership projects).
+- **Rule:** Spaces group projects on the dashboard — a rail that FILTERS the overview, collapsible group headers, row membership chips + a `Spaces…` action, every space action behind one `…`; no space route, no colour, no stored `Home` (computed from zero-membership projects). The merged-board half was superseded 2026-08-28 — bible §10 grouping row owns it now.
 - **Why:** `decisions/2026/08/17/spaces-dashboard-follows-the-proposal-mock.md`.
 
 ## 2026-08-21 — The dashboard's spaces surface is calm, container-gated, and stream-safe
@@ -117,8 +139,7 @@ git history, PRs, and the records in `decisions/`. Newest first.
 - **Why:** `decisions/2026/08/08/reap-worktree-cwd-holders-on-teardown.md`.
 
 ## 2026-08-08 — An archived task reaches its images and artifacts as enumerated rows
-- **Rule:** the archived (completed/cancelled) task modal lists every `dev3 show-image` image and `dev3 show-artifact` artifact as its own clickable row above Notes (`SharedOutputsList.tsx`); rows open the App-hosted viewers at their own index, the artifact viewer as a standalone overlay — bible §3 + yaml; yaml `task_image_viewer.reached_from`.
-- **Why:** `decisions/2026/08/08/archived-task-shared-outputs.md`.
+- Rule lives in bible §3 and yaml `task_image_viewer.reached_from`; why in `decisions/2026/08/08/archived-task-shared-outputs.md` (its standalone-overlay half superseded 2026-09-05).
 
 ## 2026-08-08 — On a phone the memory readout folds into the kebab like everything else
 
@@ -226,9 +247,7 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 ## 2026-07-29 — Artifact bundles separate authoring from the stable shell
 
-- **Rule:** A task artifact is an HTML entrypoint plus explicit local CSS/classic-JS/raster assets; agents normally edit only `index.html` and `report.js`, while the opaque-origin iframe sandbox provides isolation and CSP stays permissive for artifact runtimes.
-- **Why:** The single 800-line file forced agents to consume formatting code for content-only work; restrictive per-capability CSP repeatedly broke legitimate local and CDN assets without strengthening the sandbox boundary.
-- **Status:** Implemented. Evidence: `shared-artifacts.ts`, `artifactDocument.ts`, `artifact-template/AUTHORING.md`, decision 179. Supersedes the 2026-07-09 entry's security/export details.
+- Rule lives in yaml `surfaces.task_artifact_viewer.security`; why in `decisions/2026/07/30/multifile-artifact-bundles.md`. Supersedes the 2026-07-09 entry's security/export details.
 
 ## 2026-07-28 — A lifecycle split-control counts as ONE task-card inline action
 
@@ -636,3 +655,7 @@ Folded: role → Tailwind token, no `<Button variant>` API — owned by `PRODUCT
 ## 2026-05-29 — Initial manifest derived from repository
 
 Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `ux-architecture.yaml` `routes`.
+
+## 2026-09-01 — The space is a level of the trail, not a remembered mode
+- **Rule:** A space on the route renders as a plain-link crumb between home and the chip (`dev-3.0 / AI / Nanochat`), icon-only below `md`; the tail always carries the switcher — bible §Breadcrumbs.
+- **Why:** `decisions/2026/09/01/space-rides-into-a-task-by-reducer-inheritance.md`. Status: observed, `GlobalHeader.tsx`.

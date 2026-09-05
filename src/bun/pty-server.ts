@@ -25,6 +25,7 @@ import {
 	startNativeTaskPanes,
 	recoverNativeTaskPanes,
 	stopNativeTaskPanes,
+	nativeTaskPanesState,
 } from "./native-task-panes";
 import { paneSessionKey, parsePaneSessionKey } from "../shared/pane-session-key";
 import { deferHeldAgentMessagesForTask, flushHeldAgentMessagesForTask } from "./agent-message-hold";
@@ -206,12 +207,26 @@ export function setOnOsc52Copy(fn: (payload: { taskId: string; text: string; len
 
 
 /** Compute the tmux session name for a given session key and type. */
+/** Session-key prefix the renderer uses for a project (quick shell) terminal. */
+export const PROJECT_SESSION_KEY_PREFIX = "project-";
+
 function computeTmuxSessionName(key: string, type: PtySessionType): string {
 	if (type === "project") {
-		const projectId = key.startsWith("project-") ? key.slice(8) : key;
+		const projectId = key.startsWith(PROJECT_SESSION_KEY_PREFIX)
+			? key.slice(PROJECT_SESSION_KEY_PREFIX.length)
+			: key;
 		return projectTerminalSessionName(projectId);
 	}
 	return taskSessionName(key);
+}
+
+/**
+ * Does this session key address a project (quick shell) terminal rather than a
+ * task? Keeps key-shape knowledge here, with the rest of the naming: a project
+ * key has no dev-server sibling and no `dev3-<short>` task session.
+ */
+export function isProjectSessionKey(key: string): boolean {
+	return getSessionType(key) === "project" || key.startsWith(PROJECT_SESSION_KEY_PREFIX);
 }
 
 export function createSession(
@@ -281,13 +296,81 @@ function ingestPtyOutput(session: PtySession, data: string | Uint8Array): void {
 	if (session.backend === "native" || session.clients.size > 0) enqueuePtyData(session, cleaned);
 }
 
-/** One death path for both create and reattach, so their bookkeeping cannot drift. */
+/**
+ * One death path for both create and reattach, so their bookkeeping cannot drift.
+ *
+ * `ptyDied` is the task's terminal reporting itself over: the renderer replaces
+ * the WHOLE terminal with the "session ended" screen, so publishing it while
+ * other panes are alive hides running work behind a dead-looking task (seq 1744).
+ * Pane 1 is bound under the bare taskId, which is what made closing it — or its
+ * shell simply exiting — read as the task ending. So the pane set decides, not
+ * the pane's key: death is published only when this pane was the last one.
+ * A surviving pane set instead drops the stale binding, and the survivor that
+ * takes index 0 adopts the bare key on the next viewer attach.
+ */
 function markNativeClosed(session: PtySession): void {
+	const closedPaneId = session.native?.paneId ?? null;
 	session.native = null;
 	session.appliedCols = undefined;
 	session.appliedRows = undefined;
-	log.info("Native PTY session closed", { taskId: shortId(session.taskId) });
-	onPtyDiedCallback?.(session.taskId);
+	log.info("Native PTY session closed", { taskId: shortId(session.taskId), paneId: closedPaneId });
+	void publishNativeDeathIfLastPane(session, closedPaneId);
+}
+
+/**
+ * Publish `ptyDied` only when no pane of the task survives this one.
+ *
+ * The pane-set read races the close it reacts to — the coordinator may not have
+ * republished the record yet — so the CLOSED pane is discounted by id rather
+ * than trusted to be absent. An unreadable pane set is treated as no panes: the
+ * honest end state for a task whose terminal cannot be found at all.
+ */
+async function publishNativeDeathIfLastPane(session: PtySession, closedPaneId: string | null): Promise<void> {
+	const taskId = session.taskId;
+	let survivors = 0;
+	try {
+		const state = await nativeTaskPanesState(taskId);
+		survivors = (state?.panes ?? []).filter((pane) => pane.paneId !== closedPaneId).length;
+	} catch (err) {
+		log.warn("Could not read the pane set after a native pane closed; treating the task as ended", {
+			taskId: shortId(taskId),
+			error: String(err),
+		});
+	}
+	if (survivors === 0) {
+		onPtyDiedCallback?.(taskId);
+		return;
+	}
+	log.info("A native pane closed while others remain; the task's terminal stays alive", {
+		taskId: shortId(taskId),
+		paneId: closedPaneId,
+		survivors,
+	});
+	// The bare-key entry now points at a pane that is gone. Left in place, the
+	// survivor that slides into index 0 is handed this dead session by
+	// `getPanePtyUrl` (which picks the bare key by POSITION) and renders as a dead
+	// pane while its shell is running. Dropping it makes the next attach rebind.
+	dropStaleNativeBinding(session);
+}
+
+/** Forget a native session whose pane is gone, leaving sibling panes untouched. */
+function dropStaleNativeBinding(session: PtySession): void {
+	if (sessions.get(session.registryKey) !== session) return;
+	if (session.batchTimer) {
+		clearTimeout(session.batchTimer);
+		session.batchTimer = null;
+	}
+	session.pendingData = "";
+	for (const client of session.clients) {
+		try {
+			client.close();
+		} catch {
+			// already closed
+		}
+	}
+	session.clients.clear();
+	forgetSession(session.registryKey);
+	sessions.delete(session.registryKey);
 }
 
 /**
@@ -534,14 +617,11 @@ export async function ensureNativePanePtySession(
 				onOutput: (bytes) => ingestPtyOutput(session, bytes),
 				onRoleChange: () => broadcastNativeRoles(session),
 				onGeometry: (size) => applyNativeGeometry(session, size),
-				onClosed: () => {
-					session.native = null;
-					session.appliedCols = undefined;
-					session.appliedRows = undefined;
-					log.info("Native pane session closed", { taskId: shortId(taskId), paneId });
-					// Fire ptyDied only for the FIRST pane (bare key) — additional panes
-					// closing don't signal task death.
-				},
+				// Same rule as pane 1 since seq 1744: the PANE SET decides whether the
+				// task's terminal is over, not which key the closing pane happened to
+				// hold. An aux pane closing beside live siblings publishes nothing; the
+				// last pane of the set does, whichever pane that turns out to be.
+				onClosed: () => markNativeClosed(session),
 			},
 			paneId,
 		);

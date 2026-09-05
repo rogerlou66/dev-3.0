@@ -31,18 +31,21 @@ import { openFolderPicker } from "../folder-picker";
 import { getInitialThemeState, getWindowInjectedThemeState } from "../theme-bootstrap";
 import { getZoom, ZOOM_CHANGED_EVENT } from "../zoom";
 import { getScrollSpeed, SCROLL_SPEED_CHANGED_EVENT } from "../scroll-speed";
+import { getTerminalFontFamily, getTerminalFontSize, TERMINAL_FONT_CHANGED_EVENT } from "../terminal-font";
 import { setShortcutOverrides } from "../keymap-store";
 import { confirm } from "../confirm";
 import type { UpdateChannel } from "../../shared/update-channel";
 import AdvancedExperienceSection from "./global-settings/AdvancedExperienceSection";
 import AgentAccountsSection from "./global-settings/AgentAccountsSection";
 import AgentRateLimitSettingsSection from "./global-settings/AgentRateLimitSettingsSection";
+import LowBatterySettingsSection from "./global-settings/LowBatterySettingsSection";
 import AgentSettingsSection from "./global-settings/AgentSettingsSection";
 import AppearanceSettingsSection from "./global-settings/AppearanceSettingsSection";
 import BehaviorSettingsSection from "./global-settings/BehaviorSettingsSection";
 import DeveloperToolsSection from "./global-settings/DeveloperToolsSection";
 import KeyboardSettingsSection from "./global-settings/KeyboardSettingsSection";
 import ModelCatalogSection from "./global-settings/ModelCatalogSection";
+import NotificationSettingsSection from "./global-settings/NotificationSettingsSection";
 import PxpipeProxySettingsSection from "./global-settings/PxpipeProxySettingsSection";
 import SystemSettingsSection from "./global-settings/SystemSettingsSection";
 import TerminalSettingsSection from "./global-settings/TerminalSettingsSection";
@@ -56,6 +59,7 @@ import {
 	normalizeSettingsCategoryId,
 	SETTINGS_CATEGORIES,
 	type SettingsCategoryId,
+	type SettingsEntryAnchor,
 	type SettingsEntry as SettingsRegistryEntry,
 } from "../settings-registry";
 import {
@@ -79,7 +83,15 @@ interface PersistOptions {
 	};
 }
 
-function GlobalSettings({ section, preset }: { section?: SettingsSectionId; preset?: SettingsPresetTarget } = {}) {
+function GlobalSettings({
+	section,
+	anchor,
+	preset,
+}: {
+	section?: SettingsSectionId;
+	anchor?: SettingsEntryAnchor;
+	preset?: SettingsPresetTarget;
+} = {}) {
 	const t = useT();
 	const [locale, setLocale] = useLocale();
 	const injectedThemeState = getWindowInjectedThemeState();
@@ -94,6 +106,8 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 	);
 	const [zoomLevel, setZoomLevel] = useState(() => getZoom());
 	const [scrollSpeed, setScrollSpeed] = useState(() => getScrollSpeed());
+	const [terminalFontFamily, setTerminalFontFamily] = useState(() => getTerminalFontFamily());
+	const [terminalFontSize, setTerminalFontSize] = useState(() => getTerminalFontSize());
 	const [cliInstallStatus, setCliInstallStatus] = useState<string | null>(null);
 	const [cliArmedInstance, setCliArmedInstance] = useState<string | null>(null);
 	const [agents, setAgents] = useState<CodingAgent[]>([]);
@@ -126,7 +140,7 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 		() => (section ? normalizeSettingsCategoryId(section) : null),
 	);
 	const [searchQuery, setSearchQuery] = useState("");
-	const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+	const [pendingAnchor, setPendingAnchor] = useState<string | null>(anchor ?? null);
 	// A deep-link that names a preset, held until the agents list has loaded and
 	// the Agents page has actually pointed at it. One-shot: leaving it set would
 	// yank the selection back on every later visit to this screen.
@@ -207,6 +221,18 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 				SCROLL_SPEED_CHANGED_EVENT,
 				onScrollSpeedChanged,
 			);
+	}, []);
+
+	useEffect(() => {
+		function onTerminalFontChanged(event: Event) {
+			const { family, size } = (event as CustomEvent<{ family: string; size: number }>).detail;
+			setTerminalFontFamily(family);
+			setTerminalFontSize(size);
+		}
+
+		window.addEventListener(TERMINAL_FONT_CHANGED_EVENT, onTerminalFontChanged);
+		return () =>
+			window.removeEventListener(TERMINAL_FONT_CHANGED_EVENT, onTerminalFontChanged);
 	}, []);
 
 	useEffect(() => {
@@ -411,6 +437,21 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 		[persistSettingChange],
 	);
 
+	const handleDimInactivePanesToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange(
+				{ dimInactivePanes: enabled },
+				{
+					tracking: {
+						setting: "dim_inactive_panes",
+						value: enabled ? "on" : "off",
+					},
+				},
+			);
+		},
+		[persistSettingChange],
+	);
+
 	const handleTerminalShellChange = useCallback(
 		(shell: ShellFlavor | undefined) => {
 			persistSettingChange(
@@ -434,6 +475,28 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 			persistSettingChange(
 				{ remoteTunnel: tunnel },
 				{ tracking: { setting: "remote_tunnel_provider", value: tunnel?.provider ?? "cloudflare" } },
+			);
+		},
+		[persistSettingChange],
+	);
+
+	const handleStaticAccessCodeChange = useCallback(
+		(code: string) => {
+			persistSettingChange(
+				// Undefined rather than "" so an unset code leaves no key behind in
+				// settings.json — getStaticCode() reads absence, not emptiness.
+				{ staticAccessCode: code || undefined },
+				{ tracking: { setting: "remote_static_access_code", value: code ? "set" : "cleared" } },
+			);
+		},
+		[persistSettingChange],
+	);
+
+	const handleRemotePortChange = useCallback(
+		(port: number | undefined) => {
+			persistSettingChange(
+				{ remotePort: port },
+				{ tracking: { setting: "remote_port", value: port === undefined ? "auto" : "pinned" } },
 			);
 		},
 		[persistSettingChange],
@@ -474,6 +537,15 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 		[persistSettingChange],
 	);
 
+	const handleLowBatteryToggle = useCallback(
+		(enabled: boolean) => {
+			// Stored as an opt-IN, and the explicit `false` is kept: "I turned it off"
+			// is a choice, and it is what makes the next start uninstall what dev3 wrote.
+			persistSettingChange({ lowBatteryEnabled: enabled });
+		},
+		[persistSettingChange],
+	);
+
 	const handleTerminalBidiToggle = useCallback(
 		(enabled: boolean) => {
 			persistSettingChange({ experimentalTerminalBidi: enabled ? true : undefined });
@@ -510,6 +582,10 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 		setActiveCategory(nextCategory);
 		if (narrow && section) setMobileCategory(nextCategory);
 	}, [narrow, section]);
+
+	useEffect(() => {
+		if (anchor) setPendingAnchor(anchor);
+	}, [anchor]);
 
 	useEffect(() => {
 		if (!narrow) setMobileCategory(null);
@@ -686,19 +762,26 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 						globalSettings={globalSettings}
 						tipsResetDone={tipsResetDone}
 						onDefaultDiffViewModeChange={handleDefaultDiffViewModeChange}
-						onSoundToggle={handleSoundToggle}
-						onWatchByDefaultToggle={handleWatchByDefaultToggle}
 						onSuggestCompletingTasksAfterMergeToggle={handleSuggestCompletingTasksAfterMergeToggle}
 						onPrOriginTaskLinkToggle={handlePrOriginTaskLinkToggle}
 						onAgentLaunchAutoApproveChange={handleAgentLaunchAutoApproveChange}
 						prOriginTaskLinkSupported={prOriginTaskLinkSupported}
-						onFocusModeToggle={handleFocusModeToggle}
 						onTaskSortOrderChange={handleTaskSortOrderChange}
 						onTaskOpenModeChange={handleTaskOpenModeChange}
 						onTipsDisabledToggle={handleTipsDisabledToggle}
 						onTipsReset={handleTipsReset}
 						onReviewModePromptChange={handleReviewModePromptChange}
 						onCoordinatorPromptChange={handleCoordinatorPromptChange}
+					/>
+				);
+			case "notifications":
+				return (
+					<NotificationSettingsSection
+						t={t}
+						globalSettings={globalSettings}
+						onSoundToggle={handleSoundToggle}
+						onFocusModeToggle={handleFocusModeToggle}
+						onWatchByDefaultToggle={handleWatchByDefaultToggle}
 					/>
 				);
 			case "keyboard":
@@ -713,14 +796,18 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 					<TerminalSettingsSection
 						t={t}
 						scrollSpeed={scrollSpeed}
+						terminalFontFamily={terminalFontFamily}
+						terminalFontSize={terminalFontSize}
 						newTaskTerminalBackend={newTaskTerminalBackend}
 						nativeTerminalAvailability={nativeTerminalAvailability}
 						terminalPathOpenMode={globalSettings.terminalPathOpenMode}
 						terminalShell={globalSettings.terminalShell}
 						shellAvailability={shellAvailability}
+						dimInactivePanes={globalSettings.dimInactivePanes}
 						onNewTaskTerminalBackendChange={handleNewTaskTerminalBackendChange}
 						onTerminalPathOpenModeChange={handleTerminalPathOpenModeChange}
 						onTerminalShellChange={handleTerminalShellChange}
+						onDimInactivePanesToggle={handleDimInactivePanesToggle}
 					/>
 				);
 			case "agents":
@@ -736,6 +823,11 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 							onGlobalSettingsChange={setGlobalSettings}
 							focusPreset={focusPreset}
 							onFocusPresetHandled={clearFocusPreset}
+						/>
+						<LowBatterySettingsSection
+							t={t}
+							globalSettings={globalSettings}
+							onToggle={handleLowBatteryToggle}
 						/>
 						<AgentRateLimitSettingsSection
 							t={t}
@@ -769,7 +861,9 @@ function GlobalSettings({ section, preset }: { section?: SettingsSectionId; pres
 							canaryAvailable={canaryAvailable}
 							onUpdateChannelChange={handleUpdateChannelChange}
 							onRemoteTunnelChange={handleRemoteTunnelChange}
+							onRemotePortChange={handleRemotePortChange}
 							onRemoteSilentUpdateToggle={handleRemoteSilentUpdateToggle}
+							onStaticAccessCodeChange={handleStaticAccessCodeChange}
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}
 						/>

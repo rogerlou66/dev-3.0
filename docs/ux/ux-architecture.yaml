@@ -71,13 +71,13 @@ ux_architecture:
       plural: "Spaces"
       observed: true
       primary_route: "screen:dashboard"      # a rail entry + a group header; NEVER its own screen
-      detail_route: null                     # a space is a grouping, not a place: no board, no breadcrumb
+      detail_route: "screen:project + spaceId"  # not a screen of its own: it rides the board route as its subject
       owner: "workspace"
       owns: []                               # references projects; owns nothing (git never moves)
       common_actions: ["create", "rename", "delete", "reorder", "edit_projects", "filter_dashboard", "hide_on_camera"]
       membership: "Many-to-many by project.id, ordered per space. A project in several spaces renders under each. Dangling ids are normal and skipped silently."
       computed_home: "Projects with no membership group under a computed `Home` heading — never stored, not renameable/deletable, absent from every membership picker."
-      never: "A merged space board, a space route, per-space columns/labels, a space colour or letter badge, drag-changed membership, a stored Home, an add-only + beside the space name, activity dots on a rail row, a filter cleared because its control went off screen."
+      never: "A space route/screen, per-space columns/labels, a space colour or letter badge, drag-changed membership, a stored Home, an add-only + beside the space name, activity dots on a rail row, a filter cleared because its control went off screen."
       fields: "id, name, parentId (always null in v1), projectIds (membership AND per-space order), createdAt, deleted?, sensitive? — the last one is the space's own hide-on-camera flag, additive and deleted rather than written false so an older app version reads spaces.json unchanged."
       narrow_filter: "Below the rail's 1024px CONTAINER width the rail is absent and the same choice (Everything, each space, Home) opens as a BottomSheet from a control beside the dashboard search field. The selection survives the resize."
       evidence: ["src/shared/types.ts (Space)", "src/bun/spaces-data.ts", "src/mainview/components/SpacesRail.tsx", "src/mainview/components/SpaceGroupedProjects.tsx", "decisions/2026/08/14/spaces-group-projects-without-replacing-boards.md", "decisions/2026/08/17/spaces-dashboard-follows-the-proposal-mock.md"]
@@ -161,10 +161,11 @@ ux_architecture:
       status: "observed"
       evidence: ["src/mainview/state.ts (Route)", "src/mainview/components/GlobalHeader.tsx", "src/bun/application-menu.ts"]
     breadcrumbs:
-      purpose: "Show location: Dashboard > Project > Task. Project chevron opens a project switcher dropdown."
+      purpose: "Show location: Dashboard > Space? > Project > Task. The tail carries the switcher dropdown."
       rules:
         - "Text click navigates; a segment chevron toggles a switcher over that segment's object: project name -> project switcher, task #seq-N badge -> variant menu (SiblingPopover; chevron only when the group has >=2 live variants)."
         - "Breadcrumbs show place, not bulk actions."
+        - "A space on the route (routeSpaceId) renders as a PLAIN LINK level between home and the chip — no dropdown of its own, icon-only below md so the spine survives a phone, name masked when the space is sensitive. The chip names the trail's tail: the space on a space board, the project one level deeper."
         - "The task segment also carries the passive native_backend_mark (see identity_markers.native_backend_mark) — identity, not an action."
       status: "observed"
       evidence: ["src/mainview/components/GlobalHeader.tsx (BreadcrumbSegment, project switcher)"]
@@ -201,11 +202,16 @@ ux_architecture:
     global_header:
       purpose: "Breadcrumb location, project switcher, and app-level destinations/utilities."
       allowed: ["history_nav", "breadcrumb", "dashboard_view_search", "destination", "project_switcher", "variant_switcher", "changelog", "settings_entry", "tmux_session_manager", "prevent_sleep_toggle", "agent_rate_limit_indicator", "ambient_resource_readout", "agent_traffic_readout"]
-      dashboard_view_search: "Dashboard-only slot beside breadcrumbs: Board/Projects plus Board search, no separate row. Tight width: magnifier opens input; closing preserves query. Dashboard owns state; header inert covers controls. Project/task titles stay unchanged."
+      dashboard_view_search: "Dashboard-only Board/Projects + search beside breadcrumbs; no second row. Tight width uses a magnifier; query stays Dashboard-owned. Header inert covers it; project/task titles unchanged."
+      agent_rate_limit_indicator:
+        budget: 1
+        spec: "Account-wide Claude/Codex usage, hidden without data. Hover opens a panel; 300ms dwell arms default-account selection for NEW launches, confirmed by toast. Running logins stay unchanged. The gate lives inside the panel, never on a pin; Settings owns all other configuration. See decisions/2026/08/29/arm-the-usage-rows-on-dwell-not-on-a-pin.md."
+        narrow: "Folds into the kebab bottom sheet; a sheet is deliberate and has no pointer to dwell, so its rows arm on open."
+        status: "observed"
       agent_traffic_readout:
         budget: 1
-        spec: "Home is the labelled kebab row. A violet identity pill earns a bar slot only for unread traffic (per-browser stamp, 9+ cap) and remains while its panel is open; warning ink means unproven delivery. Rows navigate to the receiver. No invented importance axis."
-        narrow: "NEVER on the bar. The kebab bottom sheet is the only mobile entry, as a LABELLED row (an unnamed glyph is unfindable among the sheet's numbers); >=44px; panel renders as BottomSheet."
+        spec: "Presence follows recorded traffic; unread is only the per-browser badge (first look initializes it, cap 9+). The labelled kebab row remains available; the conditional bar pill opens the live orbit directly. Never key presence off unread. Violet --agent denotes identity, not severity; warning requires an unread unproven delivery. No reply obligation is inferred from the newest recipient."
+        narrow: "NEVER on the bar. The labelled kebab row opens the same overlay as a BottomSheet; >=44px target."
         flag: "experimentalAgentTraffic (Settings -> System -> Advanced Experience), default OFF, and off leaves NO trace: no kebab row, pill, keymap listing, menu row, palette command or tip. A greyed row is a trace."
         status: "proposed"
       ambient_resource_readout:
@@ -282,12 +288,12 @@ ux_architecture:
       status: "observed"
       evidence: ["src/mainview/components/TaskCard.tsx (32.9K - large, watch density)"]
     agent_traffic_log:
-      purpose: "Every dev3 message the project's agents typed into each other, newest first."
-      allowed: ["read_history", "pair_filter", "delivery_status_filter", "open_receiving_task"]
-      forbidden: ["global_destination", "send_message", "task_lifecycle_action", "importance_filter"]
-      narrow_form: "bottom_sheet"   # wide renders the same content as a centered dialog
-      entry_point: "The header agent_traffic_readout panel, Shift+Cmd/Ctrl+M, View menu, command palette. NOT a nav destination — the 8-destination budget is spent, and this is a log opened to answer one question."
-      note: "Reads the log that already existed on disk (data/<slug>/messages/*.jsonl, 30 days, readAgentMessageLog RPC) with no UI at all. Filters are ONLY what the data supports: one pair, or messages whose delivery was never proven — an importance/blocker filter would invent a fact no sender can set. Trimmed history must read as trimmed: the footer names the retention window and the oldest day still on disk. Behind experimentalAgentTraffic, default off."
+      purpose: "Live project orbit of recorded message attempts, with accessible lists and a selection inspector."
+      allowed: ["orbit_visualization", "task_message_inspector", "search", "loaded_history_window", "delivery_status_filter", "open_existing_task"]
+      forbidden: ["global_destination", "send_message", "task_lifecycle_action", "importance_filter", "inferred_reply_obligation"]
+      narrow_form: "bottom_sheet"
+      entry_point: "Direct header pill click, labelled kebab row, Shift+Cmd/Ctrl+M, View menu, command palette; one overlay, no separate old log or ninth destination."
+      note: "Writer pushes plus lazy Bun filesystem observers cover mixed-version appends; no renderer polling, shutdown closes observers. Finite pulses: delivered travels, other verdicts stay at sender; text/static cues remain distinct. Show active tasks plus selected-history endpoints with current role/state, no dead navigation. Search/time windows filter loaded messages, never past task state. Complete subjects (older rows: body head), retention, oldest day and partial-page limits remain visible. Lists preserve inspection without WebGL; reduced motion suppresses animation. No inferred ownership, merge order/approval, authored stories or demo actions. Behind experimentalAgentTraffic, default off."
       evidence: ["src/mainview/components/agent-traffic/AgentTrafficLog.tsx", "src/mainview/components/agent-traffic/AgentTrafficIndicator.tsx", "src/mainview/agent-traffic.ts", "src/shared/agent-message-log.ts"]
     task_notes_log:
       purpose: "The whole agent-written note log of one task, on its own surface."
@@ -300,11 +306,11 @@ ux_architecture:
       purpose: "Inspector for the active task: git actions, dev server, scripts, notes, pane controls, open-in."
       allowed: ["object_action", "git_action", "dev_server_action", "metadata", "notes_preview", "secondary_edit"]
       forbidden: ["global_destination", "cross_project_action", "uncapped_note_list"]
-      note: "This panel is the densest surface (34K). It is the main complexity-budget risk in the app."
+      note: "Densest surface; enforce the bar budget."
       evidence: ["src/mainview/components/TaskInfoPanel.tsx", "src/mainview/components/task-info-panel/*"]
       bar_model:
         layout: "2x2"  # two rows; each row split into left|right by a flex-1 spacer
-        rationale: "Wide desktop width is used instead of stacking more rows; the panel has a hard height budget (MAX_RATIO=0.33). One bar = one action domain. Panel chrome is not a bar."
+        rationale: "Use available width; MAX_RATIO=0.33 caps height. One domain per bar; chrome excluded."
         per_bar_visible_budget: 4
         overflow_rule: "If a domain bar exceeds 4 visible, promote it to its own dedicated row before widening past budget."
         bars:
@@ -343,6 +349,14 @@ ux_architecture:
       responsive: "Narrow (<768) falls to MobilePaneCarousel — one pane at a time, no dividers (there is no visible boundary to grab)."
       status: "observed"
       evidence: ["src/mainview/components/TaskTerminal.tsx", "src/mainview/components/NativePaneDividers.tsx", "src/shared/split-tree.ts", "src/bun/rpc-handlers/task-panes.ts"]
+    terminal_scrollback_return:
+      purpose: "Return a scrolled-up pane to its live tail; touch has no gesture."
+      allowed: ["conditional_floating_button", "jump_to_tail"]
+      forbidden: ["permanent_chrome", "extra_key_bar_slot", "composer_icon_slot", "pane_bar_slot"]
+      visibility: "Only while THAT pane is scrolled up, keyed per pane (tmux: copy-mode flag + tmuxPanesInMode poll; native: viewportY > 0). Touch only: a pointer click already leaves copy-mode."
+      action: "48px round accent button bottom-right over the canvas; TerminalHandle.scrollToBottom. Composer send exits copy-mode first."
+      status: "observed"
+      evidence: ["src/mainview/components/ScrollToLatestButton.tsx"]
     terminal_immersive_fullscreen:
       purpose: "Ephemeral task-bound terminal workspace for focused tmux work."
       allowed: ["task_terminal", "tmux_windows_and_panes", "dev3_brand", "exit_fullscreen"]
@@ -424,10 +438,11 @@ ux_architecture:
       purpose: "Durable configuration. GlobalSettings (app-wide) and ProjectSettings (per-project scripts, columns, labels, gh account)."
       allowed: ["configuration", "preference", "integration", "permission", "scripts"]
       forbidden: ["daily_operational_action"]
+      notifications: "Owns focus mode, watch default, sound, browser alerts, and Web Push. Invites only link here; image auto-open stays in Tasks."
       evidence: ["src/mainview/components/GlobalSettings.tsx", "src/mainview/components/ProjectSettings.tsx (59.9K)", "src/mainview/components/global-settings/*"]
     sidebar:
       purpose: "Active tasks list / quick jump across running agents, with global-scope toggle."
-      allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark"]
+      allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark", "git_status_badge"]
       forbidden: ["durable_configuration"]
       variant_dots: "Same capped clickable dots + SiblingPopover as task_card (see surfaces.task_card.variant_dots); placed in the card's bottom status row, mirroring the kanban card position."
       queue_policy: "NEEDS YOU (unblocked human/peer reviews, questions) → BLOCKED (hold) → custom columns → WAITING (working/AI review). Bells never alter membership."
@@ -560,7 +575,7 @@ ux_architecture:
         store: "~/.dev3.0/worktrees/{slug}/shared-images/ — copied by bun (src/bun/shared-images.ts), sibling of the DnD uploads/ dir (decision 036), in the worktree tree (shares its lifecycle). Model: Task.sharedImages: SharedImage[] in tasks.json (atomic write)."
         rationale: "Worktree location per the user's call (not data/). ADDITIVE — no rename/move/delete of existing on-disk state (frozen ~/.dev3.0/ layout invariants). Works in remote/browser because bun reads the file and returns base64; the renderer never reads a local path."
         bytes_to_webview: "Reuses the existing readImageBase64(path) -> { dataUrl } RPC (base64), works on both transports. Follow-up: custom protocol / dev-server static route if base64 is heavy."
-        retention: "Unbounded — every image a task shares is kept, matching shared artifacts; the stored files live in the worktree and are removed with it."
+        retention: "Unbounded — every image a task shares is kept (artifacts do NOT match: same-title republishes group into one record capped at MAX_ARTIFACT_VERSIONS=20, and the picker names what the cap dropped); the stored files live in the worktree and are removed with it."
       arrival_policy:
         always: "copy+persist images, mark unseen, raise attention badge (cliAttention/addBell path) + toast (cliToast path with custom onClick -> open viewer)."
         focused_on_this_task: "auto-open the viewer at the newest image (you are already here — it 'pops')."
@@ -569,19 +584,20 @@ ux_architecture:
       status: "observed"
       observed: ["TaskImageViewer.tsx", "shared-images.ts", "show-image.ts", "ui.show-image handler"]
       evidence: ["decisions/2026/07/02/show-image-viewer.md", "UX_DECISIONS 2026-07-02", "src/cli/commands/show-image.ts", "src/bun/cli-socket-server.ts (ui.show-image)", "src/bun/shared-images.ts", "src/mainview/components/TaskImageViewer.tsx", "src/mainview/rpc.ts (cliShowImage)", "decisions/2026/04/16/worktree-uploaded-dnd-files.md"]
-    task_artifact_workspace:
-      purpose: "Task-bound interactive HTML output surfaced via dev3 show-artifact; docked beside the terminal, horizontally resizable, and fullscreen on demand."
+    task_artifact_viewer:
+      purpose: "Task-bound interactive HTML surfaced via dev3 show-artifact; the image viewer's popup lightbox, fullscreen on demand."
       feature_class: ["object_action", "data_visualization", "notification"]
-      reached_from: ["arrival_push (auto-open only on the focused task)", "inspector:Artifacts conditional count button", "archived_task_modal:shared-outputs row (opens the standalone overlay -- no workspace pane exists)"]
-      allowed: ["sandboxed_html", "history_navigation", "theme_sync", "resize", "fullscreen", "find_in_content", "download_html", "download_zip", "open_in_external_browser"]
+      reached_from: ["arrival_push (auto-open only on the focused task)", "inspector:Artifacts conditional count button", "archived_task_modal:shared-outputs row"]
+      allowed: ["sandboxed_html", "history_navigation", "version_switching (same-title republish groups into one record; picker in the header, newest on open)", "theme_sync", "fullscreen", "find_in_content", "download_html", "download_zip", "open_in_external_browser", "unsent_input_recovery"]
       forbidden: ["global_destination", "task_lifecycle_action", "git_mutation", "parent_dom_or_rpc_access", "native_dialog"]
-      find_in_content: "Floating bar over the iframe (top-right); Cmd/Ctrl+F is the primary trigger while focus is inside the viewer, plus exactly ONE earned magnifier icon in the header that toggles the bar (explicit bible-section-10/11 exception -- the search field itself never moves into the header). The parent cannot reach the opaque-origin document, so query/step are postMessage'd to an injected script that owns highlighting and scroll and reports {matches,index} back. Registered in keymap.ts."
-      security: "iframe sandbox=allow-scripts without allow-same-origin is the security boundary; local CSS (including @import chains), classic JS, and raster references are rewritten to data URLs in rendered srcdoc. CSP intentionally permits all origins plus data/blob/file/views schemes, inline/eval runtimes, fetch, and WebSockets so artifact integrations work without policy tuning. Scripts still originate from null and can self-navigate their iframe, so artifacts are trusted task output rather than an untrusted-code boundary."
-      layout: "Desktop: right-side TaskWorkspacePane sibling with persisted width. Narrow: one-at-a-time artifact replaces terminal until closed."
-      standalone_overlay: "Opened from a surface with no workspace pane (the archived task modal) the viewer is hosted by App.tsx as a fixed z-[70] overlay: fullscreen is forced, its toggle is dropped, and Escape closes outright. It registers in the overlay-layer stack so the modal underneath does not consume the Escape first."
+      find_in_content: "Floating bar over the iframe (top-right); Cmd/Ctrl+F is the primary trigger while the modal lightbox is open, plus exactly ONE earned magnifier icon in the header that toggles it (explicit bible-section-10/11 exception -- the search field itself never moves into the header). The parent cannot reach the opaque-origin document, so query/step are postMessage'd to an injected script owning highlighting and scroll, reporting {matches,index} back. Registered in keymap.ts."
+      security: "iframe sandbox=allow-scripts without allow-same-origin is the security boundary; local CSS (including @import chains), classic JS and raster references are rewritten to data URLs in the rendered srcdoc. CSP deliberately permits all origins plus data/blob/file/views schemes, inline/eval runtimes, fetch and WebSockets so artifact integrations need no policy tuning. Scripts still originate from null and can self-navigate their iframe, so artifacts are trusted task output rather than an untrusted-code boundary."
+      layout: "Centred fixed z-[70] card on a scrim, ~90% of the viewport, hosted by App.tsx for every entry point -- never a pane sibling, so nothing behind it is relaid out. Narrow needs no special case."
+      escape: "Overlay-layer stack, one layer per press: find bar -> fullscreen -> close. That is what wins Escape against the archived task modal underneath."
+      no_focus_trap: "The one divergence from the image lightbox: an artifact may draw a form the user sends to the agent, and the opaque-origin iframe is not in the trap tabbable set, so a trap would put it out of keyboard reach."
       export: "No assets -> HTML download. Any --assets files -> STORE ZIP containing HTML plus safe asset paths relative to the HTML."
-      open_in_external_browser: "One neutral external-link icon in the viewer header, grouped with download (the hand-off pair). Desktop hands the stored HTML path to the OS default browser via RPC (relative assets resolve on disk); browser/remote opens a blob URL of the already-composed document in a new tab, synchronously inside the click so popup blockers allow it. Failure is a toast, never a native dialog. No keyboard shortcut."
-      evidence: ["src/mainview/components/TaskArtifactViewer.tsx", "src/mainview/components/TaskWorkspacePane.tsx", "src/bun/shared-artifacts.ts", "decisions/2026/07/09/task-html-artifacts.md"]
+      open_in_external_browser: "One neutral external-link icon in the viewer header, grouped with download (the hand-off pair). Desktop hands the stored HTML path to the OS default browser via RPC (relative assets resolve on disk); browser/remote opens a blob URL of the composed document in a new tab, synchronously inside the click so popup blockers allow it. Failure is a toast, never a native dialog. No keyboard shortcut."
+      evidence: ["src/mainview/components/TaskArtifactViewer.tsx", "src/mainview/components/TaskImageViewer.tsx", "src/bun/shared-artifacts.ts", "decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md"]
 
   action_types:
     primary_action:
@@ -682,7 +698,7 @@ ux_architecture:
       actions: "object + git + dev-server actions, scoped to the task"
     settings_screen:
       example: "GlobalSettings, ProjectSettings"
-      grouping: "GlobalSettings uses a left-nav list of eight Settings categories (Appearance, Tasks & Board, Keyboard, Terminal, Agents, Accounts, Workspace, System); ProjectSettings keeps its existing tabs. The Keyboard category owns every binding surface — the app-shortcut editor and the terminal keymap preset moved out of Terminal — so a user hunting for 'where do I change a key' has one destination"
+      grouping: "Ten categories: Appearance, Tasks & Board, Notifications, Keyboard, Terminal, Agents, Accounts, API models, Workspace, System. Project Settings keeps tabs; Keyboard owns bindings and Notifications owns alert delivery"
       registry: "src/mainview/settings-registry.ts is the declarative metadata source for Settings entries, localized search copy, category membership, anchors, and GlobalSettings field integrity"
       search: "localized title + description search groups matches by Settings category and jumps to the registered anchor"
       deep_links: "Route.section accepts current category ids plus legacy appearance/behavior/workspace/agents/proxy/developer ids, normalized by LEGACY_SETTINGS_CATEGORY_MAP"
@@ -760,6 +776,12 @@ ux_architecture:
       reject: ["kanban_board", "task_info_panel", "toolbar"]
       status: "observed"
       rationale: "Durable behavior changes live in settings, not in operational surfaces."
+    - id: "notification-preferences-have-one-settings-home"
+      when: { feature_class: "configuration", scope: "notification_delivery" }
+      place_in: ["global_settings.notifications"]
+      reject: ["tasks", "system", "toast_setup", "top_level_destination"]
+      status: "observed"
+      rationale: "One job: when and how task events reach the user."
     - id: "destructive-needs-friction"
       when: { feature_class: "destructive" }
       place_in: ["context_menu", "confirmation_dialog", "danger_zone", "overflow"]
@@ -856,7 +878,7 @@ ux_architecture:
       hover_terminal_preview: { narrow: "DISABLED on touch/narrow (no hover; popover obscures)", status: observed, evidence: "useTerminalPreview.ts hoverPreviewEnabled()" }
       toast: { narrow: "already max-w-[calc(100vw-2rem)] — OK", status: ok, evidence: "toast.tsx" }
       task_image_viewer: { narrow: "lightbox is full-bleed; filmstrip -> bottom horizontal-scroll strip; image area is live-content -> axis-arbitrated horizontal swipe + visible prev/next + dots (swipe never the only way); touch entry = inspector badge (>=44px) + palette action (native menu absent in remote). Clamp inner panels to max-w-[calc(100vw-2rem)]; prefers-reduced-motion snaps.", status: proposed }
-      task_artifact_workspace: { narrow: "one-at-a-time: artifact replaces terminal content until closed; header actions remain touch reachable; fullscreen is unchanged", status: observed, evidence: "TaskWorkspacePane.tsx useNarrowViewport, TaskArtifactViewer.tsx" }
+      task_artifact_viewer: { narrow: "no special case -- the card fills a small viewport; header actions stay touch reachable", status: observed, evidence: "TaskArtifactViewer.tsx" }
     navigation_touch:
       problem: "Keyboard-first nav is DEAD on touch (Cmd+K/Cmd+Shift+P palettes, Cmd+1..9, Cmd+/ hint overlay) and the native application menu is ABSENT in remote/browser mode."
       backbone: "breadcrumb spine stays the touch nav backbone (logo->dashboard, project->board, chevron->switcher, back/forward). Keep reachable (>=44px targets, right-0 dropdown fallback, not pushed off-screen by long task titles)."

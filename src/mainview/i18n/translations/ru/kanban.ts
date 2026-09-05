@@ -28,6 +28,10 @@ const kanban = {
 	"kanban.showMore": "Показать ещё ({count})",
 	"kanban.showLess": "Свернуть",
 	"kanban.renameColumn": "Переименовать колонку",
+	"kanban.mergedLaneProjects_one": "{count} проект",
+	"kanban.mergedLaneProjects_few": "{count} проекта",
+	"kanban.mergedLaneProjects_many": "{count} проектов",
+	"kanban.mergedLaneProjects_other": "{count} проектов",
 	"kanban.draftNotDroppable": "Это черновик — допишите описание и сохраните как задачу, прежде чем запускать.",
 
 	// CreateTaskModal
@@ -233,6 +237,7 @@ const kanban = {
 	"task.warnNeverPushed_few": "{count} коммита не запушено — будут потеряны",
 	"task.warnNeverPushed_many": "{count} коммитов не запушено — будут потеряны",
 	"task.warnNeverPushed_other": "{count} коммитов не запушено — будут потеряны",
+	"task.warnNeverPushedUnknownCount": "Ветки нет ни на одном remote, а посчитать её коммиты нельзя — они будут потеряны",
 	"task.warnUnpushed_one": "{count} незапушенный коммит — будет потерян",
 	"task.warnUnpushed_few": "{count} незапушенных коммита — будут потеряны",
 	"task.warnUnpushed_many": "{count} незапушенных коммитов — будут потеряны",
@@ -315,6 +320,13 @@ const kanban = {
 	"spawnAgent.spawning": "Добавляется…",
 	"spawnAgent.failed": "Не удалось добавить агента. {error}",
 	"spawnAgent.notInstalled": "{name} не установлен. Сначала установите.",
+	"spawnAgent.handoff": "Продолжить разговор этой задачи",
+	"spawnAgent.handoffDesc_one": "Новый агент получит пересказ сессии {agent} ({count} реплика): ваши запросы и его ответы дословно, действия — кратко. Агенты не умеют подхватывать сессии друг друга, поэтому переключение — это пересказ.",
+	"spawnAgent.handoffDesc_few": "Новый агент получит пересказ сессии {agent} ({count} реплики): ваши запросы и его ответы дословно, действия — кратко. Агенты не умеют подхватывать сессии друг друга, поэтому переключение — это пересказ.",
+	"spawnAgent.handoffDesc_many": "Новый агент получит пересказ сессии {agent} ({count} реплик): ваши запросы и его ответы дословно, действия — кратко. Агенты не умеют подхватывать сессии друг друга, поэтому переключение — это пересказ.",
+	"spawnAgent.handoffDesc_other": "Новый агент получит пересказ сессии {agent} ({count} реплик): ваши запросы и его ответы дословно, действия — кратко. Агенты не умеют подхватывать сессии друг друга, поэтому переключение — это пересказ.",
+	"spawnAgent.handoffSent": "Разговор передан — чтение пересказа станет первым ходом нового агента.",
+	"spawnAgent.handoffNotDelivered": "Агент запустился, но указатель на пересказ до него не дошёл. Пересказ лежит в {path} — покажите его агенту вручную.",
 
 	// Watch
 	"task.devStarting": "запуск",

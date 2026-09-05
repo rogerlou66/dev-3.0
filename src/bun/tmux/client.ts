@@ -14,6 +14,7 @@
  * app committed to, and mixed client/server versions break every command
  * (v1.29.1 ELOOP incident, decision 105).
  */
+import { randomUUID } from "node:crypto";
 import { spawn as defaultSpawn } from "../spawn";
 import {
 	dereferenceTmuxShim,
@@ -28,6 +29,7 @@ import { activeTmuxConfigPath, tmuxClientCwd } from "./config";
 import { TmuxError, TmuxSpawnError, TmuxTimeoutError } from "./errors";
 import type { TmuxFormat } from "./formats";
 import { PANE_ID_FORMAT, PANE_SIGHTING_FORMAT } from "./formats";
+import { removeTmuxSocketFile } from "./socket-files";
 
 type SpawnFn = typeof defaultSpawn;
 type SpawnedProcess = ReturnType<SpawnFn>;
@@ -176,6 +178,17 @@ export class TmuxClient {
 	/** `kill-session -t`. */
 	killSession(session: string, opts?: CommandOpts): Promise<void> {
 		return this.runCommand(opts?.socket, ["kill-session", "-t", session], opts);
+	}
+
+	/**
+	 * `kill-server`, then unlink the socket file it leaves behind. tmux never
+	 * removes that file itself, so whoever mints a socket name has to — this is
+	 * the one call that does both. Always best-effort: there may be no server.
+	 */
+	async killServer(opts?: SocketOpt): Promise<void> {
+		const socket = opts?.socket ?? this.defaultSocket;
+		await this.run(socket, ["kill-server"]).catch(() => undefined);
+		removeTmuxSocketFile(socket);
 	}
 
 	/** `list-sessions -F` parsed through a typed format declaration. */
@@ -452,6 +465,15 @@ export class TmuxClient {
 		return this.runCommand(opts?.socket, ["resize-pane", "-Z", "-t", target], opts);
 	}
 
+	/**
+	 * `swap-pane -D/-U -t` — trade places with the next/previous pane, exactly what
+	 * tmux's own `}` and `{` run. No `-d`, so focus travels with the pane.
+	 */
+	swapPaneStep(target: string, step: "next" | "prev", opts?: CommandOpts): Promise<void> {
+		const flag = step === "next" ? "-D" : "-U";
+		return this.runCommand(opts?.socket, ["swap-pane", flag, "-t", target], opts);
+	}
+
 	/** `select-pane -L/-R/-U/-D -t` — move focus by direction. */
 	selectPaneDirection(target: string, direction: "left" | "right" | "up" | "down", opts?: CommandOpts): Promise<void> {
 		const flag = { left: "-L", right: "-R", up: "-U", down: "-D" }[direction];
@@ -540,8 +562,22 @@ export class TmuxClient {
 
 	/**
 	 * Validate the pane's incarnation and send in ONE command list, so nothing can move
-	 * the pane in between; text travels as hex, so no tmux quoting can go wrong.
-	 * `{ sent: false }` means NOTHING went out — an unknown pane included (tmux exits 0).
+	 * the pane in between. `{ sent: false }` means NOTHING went out — an unknown pane
+	 * included (tmux exits 0).
+	 *
+	 * Literal text is loaded into a private tmux buffer and pasted with `paste-buffer -p`,
+	 * NOT typed with `send-keys`. Typed bytes reach the pane as whatever the kernel hands
+	 * the reader — measured: ~1 KB chunks — and an agent CLI's paste heuristic then slices
+	 * one message into several independent pastes, of which one can go missing (issue
+	 * #1608: heads arriving cut off mid-sentence). `-p` wraps the payload in bracketed
+	 * paste ONLY when the running app asked for it (DEC 2004), so the app takes it as one
+	 * atomic paste and a plain shell still receives plain text. `set-buffer` also carries
+	 * the text through argv instead of hex, so no tmux quoting can go wrong either.
+	 *
+	 * `-r` because paste-buffer otherwise replaces every LF with CR. An app that did not
+	 * ask for DEC 2004 gets no brackets and reads a bare CR as submit, so a multi-line
+	 * prompt would submit itself line by line; `-r` keeps the bytes identical to what
+	 * `send-keys -H` delivered.
 	 */
 	async sendKeysGuarded(
 		opts: {
@@ -560,10 +596,14 @@ export class TmuxClient {
 		if (!/^%\d+$/.test(opts.pane)) throw new Error(`unsafe tmux pane id: ${opts.pane}`);
 		if (!/^[A-Za-z0-9-]{1,64}$/.test(opts.serverToken)) throw new Error(`unsafe tmux server token: ${opts.serverToken}`);
 
+		// One buffer per literal chunk, named per send: tmux buffers are server-wide, so a
+		// fixed name would let two concurrent messages paste each other's text.
+		const buffers: { name: string; literal: string }[] = [];
 		const commands = opts.chunks.map((chunk) => {
 			if ("literal" in chunk) {
-				const hex = Buffer.from(chunk.literal, "utf8").toString("hex").match(/../g) ?? [];
-				return `send-keys -t ${opts.pane} -H ${hex.join(" ")}`;
+				const name = `dev3-paste-${randomUUID()}`;
+				buffers.push({ name, literal: chunk.literal });
+				return `paste-buffer -d -p -r -b ${name} -t ${opts.pane}`;
 			}
 			for (const key of chunk.keys) {
 				if (!/^[A-Za-z][A-Za-z-]*$/.test(key)) throw new Error(`unsafe tmux key name: ${key}`);
@@ -586,9 +626,39 @@ export class TmuxClient {
 			guard,
 			[...commands, `display-message -p ${GUARDED_SEND_MARKER}`].join(" ; "),
 		];
-		const result = await this.run(opts.socket, args, { timeoutMs: opts.timeoutMs, signal: opts.signal });
-		if (result.exitCode !== 0) throw new TmuxError(args, result.exitCode, result.stderr);
-		return { sent: result.stdout.includes(GUARDED_SEND_MARKER) };
+		// One send is now several tmux commands, so `timeoutMs` is the budget for ALL of
+		// them: spending it whole on each would let one stage run past the deadline its
+		// caller computed from the program's own budget.
+		const startedAt = Date.now();
+		const bounds = () =>
+			opts.timeoutMs === undefined
+				? { signal: opts.signal }
+				: { timeoutMs: Math.max(1, opts.timeoutMs - (Date.now() - startedAt)), signal: opts.signal };
+		let pasted = false;
+		try {
+			// Loading a buffer touches no pane, so it stays outside the guard; the paste that
+			// does touch the pane is inside it. `--` because a message may well start with a dash.
+			for (const buffer of buffers) {
+				const load = ["set-buffer", "-b", buffer.name, "--", buffer.literal];
+				const loaded = await this.run(opts.socket, load, bounds());
+				if (loaded.exitCode !== 0) throw new TmuxError(load, loaded.exitCode, loaded.stderr);
+			}
+			const result = await this.run(opts.socket, args, bounds());
+			if (result.exitCode !== 0) throw new TmuxError(args, result.exitCode, result.stderr);
+			pasted = result.stdout.includes(GUARDED_SEND_MARKER);
+			return { sent: pasted };
+		} finally {
+			// `-d` dropped every buffer that was actually pasted; a refused guard or a failure
+			// leaves one behind, and a message body must not linger in the server's buffer
+			// stack. Never awaited: cleanup may not extend a send that is already hanging.
+			if (!pasted) {
+				for (const buffer of buffers) {
+					void this.runCommand(opts.socket, ["delete-buffer", "-b", buffer.name], { bestEffort: true }).catch(
+						() => {},
+					);
+				}
+			}
+		}
 	}
 
 	/**

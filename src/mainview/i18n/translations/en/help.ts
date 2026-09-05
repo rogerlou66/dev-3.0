@@ -131,7 +131,10 @@ const help = {
 	"help.settings.appearance.body": "Theme, language, zoom and scrolling — how the app looks and feels.",
 	"help.settings.tasks.title": "Tasks & Board",
 	"help.settings.tasks.body":
-		"Board and task behavior defaults: where a dropped card lands in its column, the task-completion sound, focus mode, watch-by-default, and feature tips.",
+		"Board and task behavior defaults: where a dropped card lands in its column, how tasks open, review prompts, and feature tips.",
+	"help.settings.notifications.title": "Notifications",
+	"help.settings.notifications.body":
+		"Choose when task events get your attention and how this browser or device delivers them.",
 	"help.settings.keyboard.title": "Keyboard",
 	"help.settings.keyboard.body":
 		"Every app-level shortcut in one place. Click the keys shown on a row and type the combo you want; if another shortcut already owns it, you are told whose it is before you take it. Each shortcut also has an optional second combo. A few stay fixed — key sequences like `g d`, the ⌘1–9 project family, the hold-to-cycle task switcher and Esc — and each says why.",
@@ -143,7 +146,7 @@ const help = {
 		"Sign in to multiple accounts per agent (Claude Code, Codex), switch which one is active, and manage API-key profiles.",
 	"help.settings.system.title": "System",
 	"help.settings.system.body":
-		"App-level machinery: the update channel, keeping the machine awake while agents work, quit confirmation, and browser notifications.",
+		"App-level machinery: the update channel, keeping the machine awake while agents work, quit confirmation, proxy, and developer tools.",
 	"help.settings.workspace.title": "Workspace",
 	"help.settings.workspace.body":
 		"Where task worktrees live on disk, which external editors and apps power open-in, and your GitHub accounts.",
@@ -191,6 +194,9 @@ const help = {
 	"help.modal.addProject.title": "Add a project",
 	"help.modal.addProject.body":
 		"Point dev3 at a local git repo, clone a remote first, or create an Operations board — a virtual project whose tasks run agents in managed folders, without git.",
+	"help.modal.importConversations.title": "Import conversations",
+	"help.modal.importConversations.body":
+		"Claude Code and Codex conversations that ran in this project's folder outside dev3 become ordinary tasks: a title, a retelling of the conversation as the description, and the `imported` label. Claude names its own conversations; a Codex one is named after the first request. Work from the last week keeps a worktree; older work lands in Completed.",
 	"help.modal.spawnAgent.title": "Spawn an agent",
 	"help.modal.spawnAgent.body":
 		"Drop a second agent into this task's existing session — same worktree, same terminal. Useful to hand off to a different model or run a helper alongside the main agent.",
@@ -213,7 +219,7 @@ const help = {
 		"Screenshots and renders an agent surfaced with `dev3 show-image`, newest first. Step through the history, download an image (also on right-click), copy its path, or reveal the original file on disk.",
 	"help.viewer.artifact.title": "Artifact",
 	"help.viewer.artifact.body":
-		"An interactive HTML report an agent built with `dev3 show-artifact`, sandboxed beside the terminal. Resize it, go fullscreen, step through past artifacts, or download it as HTML (or a ZIP when it bundles images).",
+		"An interactive HTML report an agent built with `dev3 show-artifact`, sandboxed and opened as a popup over the task — the same way images open. Go fullscreen, step through past artifacts, or download it as HTML (or a ZIP when it bundles images). Escape closes it.",
 
 	// ── Terminal ──
 	"help.terminal.quickShell.title": "Project shell",
@@ -244,10 +250,10 @@ const help = {
 	"help.field.streamerMode.title": "Hide private info on stream",
 	"help.field.streamerMode.body":
 		"When on, identity-bearing values — account emails and names, organizations, home-folder paths, tunnel URLs, and the remote-access QR code — are blurred across the UI. Terminal content is NOT masked: panes print whatever agents output. Toggle it quickly from the ⇧⌘P command palette.",
-	"help.header.agentTraffic.title": "Agent traffic: who is talking, and who owes an answer",
-	"help.header.agentTraffic.body": "The glyph appears only while your agents have written to each other in the last hour. The number counts live pairs; open it to see each pair, and the task that received the last message is the one that has not answered yet.",
-	"help.traffic.log.title": "Every message your agents typed into each other",
-	"help.traffic.log.body": "The full history dev3 kept, newest first — a toast lasts 30 seconds, this lasts 30 days. Pick a pair on the left to read just that conversation, and \u201cUnproven only\u201d shows the messages dev3 could not prove reached the other pane.",
+	"help.header.agentTraffic.title": "Agent traffic: see your agents communicate",
+	"help.header.agentTraffic.body": "Select the purple message icon to open the live orbit, or press ⇧⌘M. It starts with the last 24 hours; the badge counts unread messages.",
+	"help.traffic.log.title": "Explore live agent traffic",
+	"help.traffic.log.body": "Select a task or message to inspect its recorded delivery status. Change the time window or load older history, retained for 30 days. The timeline filters messages; task columns remain current.",
 	"help.header.memory.title": "The memory pill shows what is LEFT",
 	"help.header.memory.body": "The number is free memory, not used — hover it to see who actually took the rest. dev-3.0 itself holds a few hundred megabytes; the gigabytes belong to the agents you launched, and to whatever else is running.",
 	"help.header.connectionQuality.title": "How slow this connection is",

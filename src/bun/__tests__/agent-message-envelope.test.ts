@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentReplyCommand, agentReplyRef, seqIsShared, wrapAgentMessage } from "../../shared/agent-message-envelope";
+import { agentReplyCommand, agentReplyRef, seqIsShared, wrapAgentMessage, wrapArtifactMessage } from "../../shared/agent-message-envelope";
 
 const PROJECT_A = "aaaaaaaa-1111-2222-3333-444455556666";
 const PROJECT_B = "bbbbbbbb-1111-2222-3333-444455556666";
@@ -16,13 +16,34 @@ describe("wrapAgentMessage", () => {
 				"<dev3-ai-message>",
 				"<from-task>seq:1310</from-task>",
 				"<from-title>Fix the parser</from-title>",
-				'<reply-with>dev3 message --task seq:1310 "your reply"</reply-with>',
+				'<reply-with>dev3 message --task seq:1310 --subject "what your reply is about" "your reply"</reply-with>',
 				"<message>",
 				"do the thing",
 				"</message>",
 				"</dev3-ai-message>",
 			].join("\n"),
 		);
+	});
+
+	it("carries the sender's subject, before the body", () => {
+		const out = wrapAgentMessage(
+			"all four contexts are green",
+			{ taskId: "t-1", seq: 1310, title: "CI watch", projectId: PROJECT_A },
+			PROJECT_A,
+			"PR 1577 merged, main green",
+		);
+		expect(out).toContain("<subject>PR 1577 merged, main green</subject>");
+		expect(out.indexOf("<subject>")).toBeLessThan(out.indexOf("<message>"));
+	});
+
+	it("escapes a subject that contains markup", () => {
+		const out = wrapAgentMessage("x", { taskId: "t-1", seq: 7 }, PROJECT_A, "fix <div> & span");
+		expect(out).toContain("<subject>fix &lt;div&gt; &amp; span</subject>");
+	});
+
+	it("omits the tag entirely for a message that has no subject", () => {
+		const out = wrapAgentMessage("x", { taskId: "t-1", seq: 7 }, PROJECT_A);
+		expect(out).not.toContain("<subject>");
 	});
 
 	it("keeps a multi-line body verbatim", () => {
@@ -36,20 +57,30 @@ describe("wrapAgentMessage", () => {
 		expect(out).toContain("<from-title>Fix &lt;div&gt; &amp; span</from-title>");
 	});
 
-	it("addresses a shared-seq sender by task id — the seq would be ambiguous", () => {
+	it("addresses a live variant group member by seq + --variant", () => {
 		const out = wrapAgentMessage(
 			"hi",
 			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: 1, seqShared: true },
 			PROJECT_A,
 		);
+		// `<from-task>` is an address, not a command, so it cannot carry a flag.
 		expect(out).toContain("<from-task>7a9e61f4-1111-2222-3333-444455556666</from-task>");
-		expect(out).toContain('<reply-with>dev3 message --task 7a9e61f4-1111-2222-3333-444455556666 "your reply"</reply-with>');
+		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --variant 1 --subject "what your reply is about" "your reply"</reply-with>');
+	});
+
+	it("still falls back to the id when a shared seq has no variant index to name", () => {
+		const out = wrapAgentMessage(
+			"hi",
+			{ taskId: "7a9e61f4-1111-2222-3333-444455556666", seq: 1575, variantIndex: null, seqShared: true },
+			PROJECT_A,
+		);
+		expect(out).toContain('<reply-with>dev3 message --task 7a9e61f4-1111-2222-3333-444455556666 --subject "what your reply is about" "your reply"</reply-with>');
 		expect(out).not.toContain("seq:1575");
 	});
 
 	it("keeps the seq address when the sender has no variant", () => {
 		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1575, variantIndex: null }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task seq:1575 "your reply"</reply-with>');
+		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --subject "what your reply is about" "your reply"</reply-with>');
 	});
 
 	it("keeps the seq address for a lone variant survivor", () => {
@@ -61,18 +92,20 @@ describe("wrapAgentMessage", () => {
 			PROJECT_A,
 		);
 		expect(out).toContain("<from-task>seq:490</from-task>");
-		expect(out).toContain('<reply-with>dev3 message --task seq:490 "your reply"</reply-with>');
+		expect(out).toContain('<reply-with>dev3 message --task seq:490 --subject "what your reply is about" "your reply"</reply-with>');
 		expect(out).not.toContain("824c6557");
 	});
 
-	it("falls back to the id for a record queued before seqShared existed", () => {
+	it("addresses a record queued before seqShared existed by seq + --variant", () => {
+		// The pessimistic legacy path assumes the seq is shared; --variant makes that
+		// assumption cheap instead of spending a UUID on it.
 		const out = wrapAgentMessage("hi", { taskId: "t-9", seq: 1575, variantIndex: 1 }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task t-9 "your reply"</reply-with>');
+		expect(out).toContain('<reply-with>dev3 message --task seq:1575 --variant 1 --subject "what your reply is about" "your reply"</reply-with>');
 	});
 
 	it("scopes the reply command when the sender sits on another board", () => {
 		const out = wrapAgentMessage("hi", { taskId: "t-1", seq: 1623, projectId: PROJECT_B }, PROJECT_A);
-		expect(out).toContain('<reply-with>dev3 message --task seq:1623 --project bbbbbbbb "your reply"</reply-with>');
+		expect(out).toContain('<reply-with>dev3 message --task seq:1623 --project bbbbbbbb --subject "what your reply is about" "your reply"</reply-with>');
 	});
 });
 
@@ -110,29 +143,71 @@ describe("agentReplyCommand", () => {
 
 	it("omits --project inside one project", () => {
 		expect(agentReplyCommand({ target, fromProjectId: PROJECT_B, quoted: "your message" })).toBe(
-			'dev3 message --task seq:42 "your message"',
+			'dev3 message --task seq:42 --subject "what your reply is about" "your message"',
 		);
 	});
 
 	it("adds an 8-char --project prefix across projects", () => {
 		expect(agentReplyCommand({ target, fromProjectId: PROJECT_A, quoted: "your message" })).toBe(
-			'dev3 message --task seq:42 --project bbbbbbbb "your message"',
+			'dev3 message --task seq:42 --project bbbbbbbb --subject "what your reply is about" "your message"',
 		);
 	});
 
 	it("stays bare when the target project is unknown", () => {
 		expect(
 			agentReplyCommand({ target: { id: "t-1", seq: 42 }, fromProjectId: PROJECT_A, quoted: "your reply" }),
-		).toBe('dev3 message --task seq:42 "your reply"');
+		).toBe('dev3 message --task seq:42 --subject "what your reply is about" "your reply"');
 	});
 
-	it("addresses a shared-seq target by id and still scopes it", () => {
+	it("addresses a shared-seq target with no variant index by id, and still scopes it", () => {
 		expect(
 			agentReplyCommand({
 				target: { id: "t-9", seq: 7, seqShared: true, projectId: PROJECT_B },
 				fromProjectId: PROJECT_A,
 				quoted: "your reply",
 			}),
-		).toBe('dev3 message --task t-9 --project bbbbbbbb "your reply"');
+		).toBe('dev3 message --task t-9 --project bbbbbbbb --subject "what your reply is about" "your reply"');
+	});
+
+	it("names a live variant group member by seq + --variant, before --project", () => {
+		expect(
+			agentReplyCommand({
+				target: { id: "t-9", seq: 7, seqShared: true, variantIndex: 0, projectId: PROJECT_B },
+				fromProjectId: PROJECT_A,
+				quoted: "your reply",
+			}),
+		).toBe('dev3 message --task seq:7 --variant 0 --project bbbbbbbb --subject "what your reply is about" "your reply"');
+	});
+
+	it("ignores the variant index once the seq stopped being shared", () => {
+		expect(
+			agentReplyCommand({
+				target: { id: "t-9", seq: 7, seqShared: false, variantIndex: 3 },
+				fromProjectId: PROJECT_A,
+				quoted: "your reply",
+			}),
+		).toBe('dev3 message --task seq:7 --subject "what your reply is about" "your reply"');
+	});
+});
+
+describe("wrapArtifactMessage", () => {
+	it("names the artifact and the version the human was looking at", () => {
+		expect(wrapArtifactMessage("Option B, and skip src/legacy/**", { title: "Rollout plan", version: 3, versionCount: 7 })).toBe(
+			[
+				"<dev3-artifact-message>",
+				"<artifact-title>Rollout plan</artifact-title>",
+				"<artifact-version>3 of 7</artifact-version>",
+				"<message>",
+				"Option B, and skip src/legacy/**",
+				"</message>",
+				"</dev3-artifact-message>",
+			].join("\n"),
+		);
+	});
+
+	it("escapes the title but passes the body through verbatim", () => {
+		const out = wrapArtifactMessage('use <b>bold</b> & "quotes"', { title: "A & B <report>", version: 1, versionCount: 1 });
+		expect(out).toContain("<artifact-title>A &amp; B &lt;report&gt;</artifact-title>");
+		expect(out).toContain('use <b>bold</b> & "quotes"');
 	});
 });

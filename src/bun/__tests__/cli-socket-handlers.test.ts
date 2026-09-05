@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
-import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type SharedArtifact, type SharedImage } from "../../shared/types";
+import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, TASK_REF_UNRESOLVED_PREFIX, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type TaskMovement, type SharedArtifact, type SharedImage } from "../../shared/types";
 
 // ---- Mocks ----
 
@@ -85,6 +85,7 @@ vi.mock("../rpc-handlers", () => {
 	return {
 		isActive: vi.fn((status: string) => ACTIVE.includes(status)),
 		activateTask: vi.fn(),
+		createTask: vi.fn(),
 		moveTask: vi.fn(),
 		runCleanupScript: vi.fn(),
 		emitTaskSound: vi.fn(),
@@ -97,6 +98,7 @@ vi.mock("../rpc-handlers", () => {
 		isTerminalFocusActive: vi.fn(() => false),
 		isNotificationSuppressed: vi.fn(() => false),
 		pushCliAttention: vi.fn(),
+		dropQueuedAttention: vi.fn(),
 		pushCliToast: vi.fn(),
 		pushCliShowImage: vi.fn(),
 		pushCliShowArtifact: vi.fn(),
@@ -105,6 +107,10 @@ vi.mock("../rpc-handlers", () => {
 		queueTerminalFocusToast: vi.fn(),
 	};
 });
+
+vi.mock("../task-start-ref", () => ({
+	resolveTaskStartRef: vi.fn(async () => undefined),
+}));
 
 vi.mock("../logger", () => ({
 	createLogger: () => ({
@@ -135,6 +141,11 @@ vi.mock("../agent-prompt-delivery", () => ({
 	deliverAgentPrompt: vi.fn(async () => ({ status: "delivered" })),
 }));
 
+vi.mock("../scheduled-message-scheduler", () => ({
+	sendMessageImmediately: vi.fn(async () => ({ status: "delivered" })),
+	scheduleMessage: vi.fn(async (_project: unknown, task: { scheduledMessages?: unknown[] }) => task),
+}));
+
 vi.mock("../vents", () => ({
 	addVent: vi.fn(() => ({ fileName: "2026-06-15_14-30_x.md", path: "/tmp/v/2026-06-15_14-30_x.md", name: "x" })),
 }));
@@ -143,6 +154,7 @@ vi.mock("../remote-access-server", () => ({
 	getAccessUrl: vi.fn(async () => "http://10.0.0.5:41234/?token=fresh"),
 	getServerPort: vi.fn(() => 0),
 	getStaticCode: vi.fn(() => null),
+	getSignInLink: vi.fn(async () => null),
 }));
 
 // `tunnelManager` too: `port-tunnels` registers its change hook at module scope,
@@ -171,10 +183,11 @@ vi.mock("node:fs", () => ({
 import * as data from "../data";
 import * as git from "../git";
 import * as pty from "../pty-server";
-import { activateTask, moveTask, runCleanupScript, emitTaskSound, getPushMessage, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "../rpc-handlers";
+import { activateTask, createTask, moveTask, runCleanupScript, emitTaskSound, getPushMessage, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, pushCliAttention, dropQueuedAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "../rpc-handlers";
 import { loadSettings } from "../settings";
 import { deliverAgentPrompt } from "../agent-prompt-delivery";
 import { runDevServer, stopDevServer, restartDevServer, getDevServerStatus } from "../rpc-handlers/tmux-pty";
+import { resolveTaskStartRef } from "../task-start-ref";
 import { flushAndEnd } from "../socket-backpressure";
 import { existsSync, readdirSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { addVent } from "../vents";
@@ -182,6 +195,7 @@ import { getServerPort } from "../remote-access-server";
 import { saveSharedImage } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
+import { scheduleMessage, sendMessageImmediately } from "../scheduled-message-scheduler";
 
 // `task.open` imports the window layer lazily; mocking it keeps electrobun out.
 vi.mock("../window-manager", () => ({
@@ -281,6 +295,65 @@ beforeEach(() => {
 	});
 });
 
+describe("message.send / message.schedule — the subject gate", () => {
+	// The app's half of the gate. The CLI checks first, so reaching here means an
+	// older `dev3` binary — and per the no-deprecation rule there is no path where
+	// a subject-less message still goes through.
+	beforeEach(() => {
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([makeTask()]);
+		vi.mocked(data.getTask).mockResolvedValue(makeTask());
+	});
+
+	function send(params: Record<string, unknown>) {
+		return handleRequest(makeRequest("message.send", { taskId: makeTask().id, projectId: "proj-1", ...params }));
+	}
+
+	it("delivers with the subject and hands it to the send seam", async () => {
+		const resp = await send({ text: "ping", subject: "CI green on main" });
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[4]).toMatchObject({ subject: "CI green on main" });
+	});
+
+	it("refuses a send with no subject, and never reaches the send seam", async () => {
+		const resp = await send({ text: "ping" });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("needs --subject");
+		expect(resp.error).toContain("dev3 update");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses a whitespace-only subject", async () => {
+		const resp = await send({ text: "ping", subject: "  " });
+		expect(resp.ok).toBe(false);
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses an over-limit subject rather than clipping it", async () => {
+		const resp = await send({ text: "ping", subject: "a".repeat(81) });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("too long");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("applies the same gate to a scheduled message", async () => {
+		const at = new Date(Date.now() + 60_000).toISOString();
+		const bad = await handleRequest(
+			makeRequest("message.schedule", { taskId: makeTask().id, projectId: "proj-1", text: "later", at }),
+		);
+		expect(bad.ok).toBe(false);
+		expect(scheduleMessage).not.toHaveBeenCalled();
+
+		const good = await handleRequest(
+			makeRequest("message.schedule", { taskId: makeTask().id, projectId: "proj-1", text: "later", at, subject: "wake-up ping" }),
+		);
+		expect(good.ok).toBe(true);
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ subject: "wake-up ping" });
+	});
+});
+
 describe("remote.accessUrl", () => {
 	it("errors when no remote-access server is bound (serverPort 0)", async () => {
 		vi.mocked(getServerPort).mockReturnValue(0);
@@ -298,6 +371,7 @@ describe("remote.accessUrl", () => {
 			port: 41234,
 			tunnelUrl: null,
 			staticCode: null,
+			signInLink: null,
 		});
 	});
 });
@@ -834,18 +908,18 @@ describe("task.update — priority", () => {
 });
 
 describe("task.create — priority", () => {
-	it("passes an explicit priority through to addTask", async () => {
+	it("passes an explicit priority through to creation", async () => {
 		const project = makeProject();
 		const task = makeTask({ status: "todo", priority: "P1" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.addTask).mockResolvedValue(task);
+		vi.mocked(createTask).mockResolvedValue(task);
 		vi.mocked(getPushMessage).mockReturnValue(vi.fn());
 
 		const resp = await handleRequest(
 			makeRequest("task.create", { projectId: "proj-1", title: "Urgent", priority: "P1" }),
 		);
 		expect(resp.ok).toBe(true);
-		expect(data.addTask).toHaveBeenCalledWith(project, "Urgent", "todo", { priority: "P1" });
+		expect(createTask).toHaveBeenCalledWith({ projectId: "proj-1", description: "Urgent", priority: "P1" });
 	});
 
 	it("rejects a garbage priority on create", async () => {
@@ -1168,14 +1242,14 @@ describe("task.create", () => {
 		const pushFn = vi.fn();
 
 		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.addTask).mockResolvedValue(task);
+		vi.mocked(createTask).mockResolvedValue(task);
 		vi.mocked(getPushMessage).mockReturnValue(pushFn);
 
 		const resp = await handleRequest(
 			makeRequest("task.create", { projectId: "proj-1", title: "New task" }),
 		);
 		expect(resp.ok).toBe(true);
-		expect(data.addTask).toHaveBeenCalledWith(project, "New task", "todo");
+		expect(createTask).toHaveBeenCalledWith({ projectId: "proj-1", description: "New task" });
 		expect(pushFn).toHaveBeenCalledWith("taskUpdated", { projectId: "proj-1", task });
 	});
 
@@ -1186,7 +1260,7 @@ describe("task.create", () => {
 		const pushFn = vi.fn();
 
 		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.addTask).mockResolvedValue(task);
+		vi.mocked(createTask).mockResolvedValue(task);
 		vi.mocked(data.updateTask).mockResolvedValue(updatedTask);
 		vi.mocked(getPushMessage).mockReturnValue(pushFn);
 
@@ -1198,7 +1272,7 @@ describe("task.create", () => {
 			}),
 		);
 		expect(resp.ok).toBe(true);
-		expect(data.addTask).toHaveBeenCalledWith(project, "Long detailed description\nwith multiple lines", "todo");
+		expect(createTask).toHaveBeenCalledWith({ projectId: "proj-1", description: "Long detailed description\nwith multiple lines" });
 		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, { customTitle: "Short title" });
 		expect(pushFn).toHaveBeenCalledWith("taskUpdated", { projectId: "proj-1", task: updatedTask });
 	});
@@ -1207,13 +1281,175 @@ describe("task.create", () => {
 		const project = makeProject();
 		const task = makeTask({ status: "todo" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.addTask).mockResolvedValue(task);
+		vi.mocked(createTask).mockResolvedValue(task);
 		vi.mocked(getPushMessage).mockReturnValue(null);
 
 		const resp = await handleRequest(
 			makeRequest("task.create", { projectId: "proj-1", title: "New task" }),
 		);
 		expect(resp.ok).toBe(true);
+	});
+
+	// The whole point of the flag: a task created with a type must carry the role
+	// brief in the description the agent reads, not just the badge on the card.
+	describe("--type", () => {
+		function wireCreate() {
+			const project = makeProject();
+			const task = makeTask({ status: "todo" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(createTask).mockResolvedValue(task);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+			vi.mocked(getPushMessage).mockReturnValue(vi.fn());
+			return { project, task };
+		}
+
+		it("writes the coordinator preamble above the description and stores the type", async () => {
+			const { project } = wireCreate();
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Run the board",
+				description: "coordinate my board",
+				taskType: "coordinator",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(createTask).toHaveBeenCalledWith({
+				projectId: project.id,
+				description: withPresetPrompt("coordinate my board", COORDINATOR_PROMPT),
+				taskType: "coordinator",
+			});
+			expect(data.getProject).toHaveBeenCalledWith(project.id);
+		});
+
+		it("writes the pr-review preamble and keeps the title off the preamble", async () => {
+			const { task } = wireCreate();
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Review PR 42",
+				taskType: "pr-review",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(vi.mocked(createTask).mock.calls[0]![0].description)
+				.toBe(withPresetPrompt("Review PR 42", DEFAULT_PR_REVIEW_PROMPT));
+			// Without a customTitle every review card would be named after the preamble.
+			expect(data.updateTask).toHaveBeenCalledWith(expect.anything(), task.id, { customTitle: "Review PR 42" });
+		});
+
+		it("carries a priority alongside the type", async () => {
+			wireCreate();
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Run the board",
+				taskType: "coordinator",
+				priority: "P0",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(vi.mocked(createTask).mock.calls[0]![0]).toMatchObject({ priority: "P0", taskType: "coordinator" });
+		});
+
+		it("treats standard as no type at all", async () => {
+			wireCreate();
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Ordinary task",
+				taskType: "standard",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(createTask).toHaveBeenCalledWith({ projectId: "proj-1", description: "Ordinary task" });
+		});
+
+		it("rejects an unknown type and creates nothing", async () => {
+			wireCreate();
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Nope",
+				taskType: "reviewer",
+			}));
+
+			expect(resp.ok).toBe(false);
+			expect(resp.error).toContain('Invalid task type "reviewer"');
+			expect(resp.error).toContain("coordinator, pr-review");
+			expect(createTask).not.toHaveBeenCalled();
+		});
+	});
+
+	// The CLI reaches GUI parity by handing the SAME creation function the same
+	// ref — `foreignCode` is derived from it there, and nowhere else.
+	describe("--pr / --branch", () => {
+		function wireCreate() {
+			const project = makeProject();
+			const task = makeTask({ status: "todo" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(createTask).mockResolvedValue(task);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+			vi.mocked(getPushMessage).mockReturnValue(vi.fn());
+			return { project, task };
+		}
+
+		it("passes the resolved pull-request ref to creation as existingBranch", async () => {
+			const { project } = wireCreate();
+			vi.mocked(resolveTaskStartRef).mockResolvedValue("arditti/fix/ctrl-o");
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Review of #1512",
+				taskType: "pr-review",
+				pr: "1512",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(resolveTaskStartRef).toHaveBeenCalledWith({ project, pr: "1512", branch: undefined });
+			expect(vi.mocked(createTask).mock.calls[0]![0]).toMatchObject({
+				existingBranch: "arditti/fix/ctrl-o",
+				taskType: "pr-review",
+			});
+		});
+
+		it("passes a --branch ref through the same seam", async () => {
+			wireCreate();
+			vi.mocked(resolveTaskStartRef).mockResolvedValue("origin/feat/x");
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Look at feat/x",
+				branch: "origin/feat/x",
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect(vi.mocked(createTask).mock.calls[0]![0]).toMatchObject({ existingBranch: "origin/feat/x" });
+		});
+
+		it("creates NOTHING when the ref does not resolve", async () => {
+			wireCreate();
+			vi.mocked(resolveTaskStartRef).mockRejectedValue(new Error(`${TASK_REF_UNRESOLVED_PREFIX}no pull request 999 in this project.`));
+
+			const resp = await handleRequest(makeRequest("task.create", {
+				projectId: "proj-1",
+				title: "Review of #999",
+				pr: "999",
+			}));
+
+			expect(resp.ok).toBe(false);
+			expect(resp.error).toContain(TASK_REF_UNRESOLVED_PREFIX);
+			expect(createTask).not.toHaveBeenCalled();
+		});
+
+		it("sends no existingBranch key at all when neither flag was passed", async () => {
+			wireCreate();
+			vi.mocked(resolveTaskStartRef).mockResolvedValue(undefined);
+
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Ordinary" }));
+
+			expect(vi.mocked(createTask).mock.calls[0]![0]).not.toHaveProperty("existingBranch");
+		});
 	});
 });
 
@@ -1806,6 +2042,27 @@ describe("ui control (notify / attention / state)", () => {
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ delivered: true, taskId: task.id });
 		expect(pushFn).toHaveBeenCalledWith("cliAttention", { taskId: task.id, reason: "PR ready" });
+	});
+
+	it("ui.attention --clear: lowers the badge even while focus mode suppresses new ones", async () => {
+		const project = makeProject();
+		const task = makeTask();
+		const pushFn = vi.fn();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(loadSettings).mockReturnValueOnce({ focusMode: true } as never);
+		vi.mocked(isNotificationSuppressed).mockReturnValue(true);
+
+		const resp = await handleRequest(
+			makeRequest("ui.attention", { taskId: task.id, projectId: project.id, reason: "", clear: true }),
+		);
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ delivered: true, taskId: task.id });
+		expect(dropQueuedAttention).toHaveBeenCalledWith(task.id);
+		expect(pushCliAttention).not.toHaveBeenCalled();
+		expect(pushFn).toHaveBeenCalledWith("cliAttention", { taskId: task.id, reason: "", clear: true });
 	});
 
 	it("ui.state: reports foreground and active context", async () => {
@@ -3626,7 +3883,7 @@ describe("startSocketServer", () => {
 		const splitAt = Math.floor(request.length / 2);
 
 		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.addTask).mockResolvedValue(task);
+		vi.mocked(createTask).mockResolvedValue(task);
 		vi.mocked(data.updateTask).mockResolvedValue(task);
 
 		await socketHandlers.data(socket, Buffer.from(request.slice(0, splitAt), "utf-8"));
@@ -3634,7 +3891,7 @@ describe("startSocketServer", () => {
 
 		await socketHandlers.data(socket, Buffer.from(request.slice(splitAt), "utf-8"));
 
-		expect(data.addTask).toHaveBeenCalledWith(project, description.trim(), "todo");
+		expect(createTask).toHaveBeenCalledWith({ projectId: project.id, description: description.trim() });
 		const flushCalls = vi.mocked(flushAndEnd).mock.calls;
 		const response = flushCalls[flushCalls.length - 1][1] as string;
 		expect(JSON.parse(response.trim())).toMatchObject({ id: "req-1", ok: true });
@@ -3843,5 +4100,420 @@ describe("task.open", () => {
 		const resp = await handleRequest(makeRequest("task.open", { taskId: "nope-1234", projectId: "proj-1" }));
 
 		expect(resp.ok).toBe(false);
+	});
+});
+
+// ---- `dev3 message --variant <i>` ----
+
+describe("message.send — --variant narrows a variant group", () => {
+	const V1 = "aaaaaaaa-1111-2222-3333-444444444444";
+	const V2 = "bbbbbbbb-1111-2222-3333-444444444444";
+
+	function group() {
+		return [
+			makeTask({ id: V1, seq: 42, groupId: "g1", variantIndex: 1 }),
+			makeTask({ id: V2, seq: 42, groupId: "g1", variantIndex: 2 }),
+		];
+	}
+
+	function scopeTo(tasks: Task[]) {
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue(tasks);
+	}
+
+	it("resolves the member carrying that index instead of rejecting the shared seq", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", variantIndex: 2, text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ taskId: V2 });
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[0]).toMatchObject({ id: V2 });
+	});
+
+	it("still rejects the shared seq when no --variant is given", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("matches 2 variant tasks");
+		expect(resp.error).toContain("--variant");
+	});
+
+	it("fails loudly on an index nobody carries, naming the ones that exist", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", variantIndex: 5, text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("has no variant 5");
+		expect(resp.error).toContain("Live variants: 1, 2");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("says the seq is not a group when the only task has no variant index", async () => {
+		scopeTo([makeTask({ id: V1, seq: 42 })]);
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", variantIndex: 1, text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("not a variant group");
+	});
+
+	it("still resolves a lone survivor by the index it was minted with", async () => {
+		// `variantIndex` is permanent, the collision that minted it is not — a
+		// reply command emitted while the siblings were alive keeps working.
+		scopeTo([makeTask({ id: V1, seq: 42, groupId: "g1", variantIndex: 1 })]);
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", variantIndex: 1, text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ taskId: V1 });
+	});
+
+	it("rejects --variant against an id ref, where it cannot mean anything", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: V1, projectId: "proj-1", variantIndex: 1, text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("--variant narrows a variant group addressed by seq");
+	});
+
+	it("rejects a non-integer --variant", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.send", { subject: "test subject", taskId: "seq:42", projectId: "proj-1", variantIndex: "one", text: "hi" }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("expected a non-negative integer");
+	});
+
+	it("narrows the same way when the message is scheduled", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("message.schedule", { subject: "test subject",
+				taskId: "seq:42",
+				projectId: "proj-1",
+				variantIndex: 1,
+				text: "hi",
+				at: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ taskId: V1 });
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[1]).toMatchObject({ id: V1 });
+	});
+
+	it("keeps looking on other boards when one carries the seq but not the variant", async () => {
+		const alpha = makeProject({ id: "proj-a", name: "Alpha", path: "/tmp/a" });
+		const beta = makeProject({ id: "proj-b", name: "Beta", path: "/tmp/b" });
+		vi.mocked(data.loadProjects).mockResolvedValue([alpha, beta]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockImplementation(async (p) =>
+			p.id === "proj-a"
+				? [makeTask({ id: V1, seq: 42, projectId: "proj-a" })]
+				: [makeTask({ id: V2, seq: 42, projectId: "proj-b", groupId: "g1", variantIndex: 1 })],
+		);
+
+		const resp = await handleRequest(makeRequest("message.send", { subject: "test subject", taskId: "seq:42", variantIndex: 1, text: "hi" }));
+
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toMatchObject({ taskId: V2 });
+	});
+
+	it("leaves every other command's resolution untouched", async () => {
+		scopeTo(group());
+
+		const resp = await handleRequest(
+			makeRequest("task.show", { taskId: "seq:42", projectId: "proj-1", variantIndex: 1 }),
+		);
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("matches 2 variant tasks");
+	});
+});
+
+describe("events.list — the board's memory channel", () => {
+	function note(id: string, createdAt: string, content = `note ${id}`): TaskNote {
+		return { id, content, source: "ai", createdAt, updatedAt: createdAt };
+	}
+
+	beforeEach(() => {
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+	});
+
+	// The whole reason the command exists: a live task can still message a
+	// coordinator, a finished one cannot, and its notes outlived its worktree.
+	it("includes notes from completed and cancelled tasks", async () => {
+		const now = new Date().toISOString();
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({ id: "t-live", seq: 1, status: "in-progress", notes: [note("n-live", now)] }),
+			makeTask({ id: "t-done", seq: 2, status: "completed", notes: [note("n-done", now)] }),
+			makeTask({ id: "t-dead", seq: 3, status: "cancelled", notes: [note("n-dead", now)] }),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", { cursor: null, limit: 100 }));
+
+		expect(resp.ok).toBe(true);
+		const ids = (resp.data as { events: Array<{ id: string }> }).events.map((e) => e.id);
+		expect(ids.sort()).toEqual(["n-dead", "n-done", "n-live"]);
+	});
+
+	it("carries the owning task's seq, title and status on every event", async () => {
+		const now = new Date().toISOString();
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({ id: "t-done", seq: 1738, title: "Add dev3 events", status: "completed", notes: [note("n1", now)] }),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", { cursor: null, limit: 100 }));
+
+		expect((resp.data as { events: unknown[] }).events[0]).toMatchObject({
+			kind: "note",
+			seq: 1738,
+			taskTitle: "Add dev3 events",
+			taskStatus: "completed",
+			projectName: "Test Project",
+		});
+	});
+
+	it("advances: a cursor from one read returns nothing, then exactly the new note", async () => {
+		const tasks = [makeTask({ id: "t1", notes: [note("n1", "2026-08-29T10:00:00.000Z")] })];
+		vi.mocked(data.loadTasks).mockResolvedValue(tasks);
+
+		const first = await handleRequest(makeRequest("events.list", {
+			cursor: "2026-01-01T00:00:00.000Z",
+			limit: 100,
+		}));
+		const cursorLine = (first.data as { cursor: string }).cursor;
+		expect(cursorLine).toBe("2026-08-29T10:00:00.000");
+
+		const second = await handleRequest(makeRequest("events.list", {
+			cursor: "2026-08-29T10:00:00.000Z",
+			limit: 100,
+		}));
+		expect((second.data as { events: unknown[] }).events).toHaveLength(0);
+
+		tasks[0] = makeTask({ id: "t1", notes: [note("n1", "2026-08-29T10:00:00.000Z"), note("n2", "2026-08-29T11:00:00.000Z")] });
+		const third = await handleRequest(makeRequest("events.list", {
+			cursor: "2026-08-29T10:00:00.000Z",
+			limit: 100,
+		}));
+		expect((third.data as { events: Array<{ id: string }> }).events.map((e) => e.id)).toEqual(["n2"]);
+	});
+
+	it("resolves an id prefix against the same scope it is about to read", async () => {
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({
+				id: "t1",
+				notes: [
+					note("8eb2da3d", "2026-08-29T10:00:00.000Z"),
+					note("cafe0001", "2026-08-29T11:00:00.000Z"),
+				],
+			}),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", { cursorId: "8eb2da3d", limit: 100 }));
+
+		expect(resp.ok).toBe(true);
+		const sel = resp.data as { events: Array<{ id: string }>; from: string };
+		expect(sel.events.map((e) => e.id)).toEqual(["cafe0001"]);
+		// Handed back so a quiet sweep started from an id still leaves a position.
+		expect(sel.from).toBe("2026-08-29T10:00:00.000");
+	});
+
+	it("fails an id that resolves to nothing instead of answering with a quiet board", async () => {
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({ id: "t1", notes: [note("8eb2da3d", "2026-08-29T10:00:00.000Z")] }),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", { cursorId: "deadbeef", limit: 100 }));
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("event-cursor-unresolved:");
+		expect(resp.error).toContain("deadbeef");
+	});
+
+	it("counts the cap instead of truncating in silence", async () => {
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({
+				id: "t1",
+				notes: Array.from({ length: 12 }, (_, i) => note(`n${String(i).padStart(2, "0")}`, `2026-08-29T${String(i).padStart(2, "0")}:00:00.000Z`)),
+			}),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", {
+			cursor: "2026-01-01T00:00:00.000Z",
+			limit: 5,
+		}));
+
+		const sel = resp.data as { events: Array<{ id: string }>; droppedNewer: number; matched: number };
+		expect(sel.events.map((e) => e.id)).toEqual(["n00", "n01", "n02", "n03", "n04"]);
+		expect(sel.droppedNewer).toBe(7);
+		expect(sel.matched).toBe(12);
+	});
+
+	it("keeps reading the other boards when one project is unreadable", async () => {
+		const alpha = makeProject({ id: "proj-a", name: "Alpha", path: "/tmp/a" });
+		const beta = makeProject({ id: "proj-b", name: "Beta", path: "/tmp/b" });
+		vi.mocked(data.loadProjects).mockResolvedValue([alpha, beta]);
+		vi.mocked(data.loadTasks).mockImplementation(async (p) => {
+			if (p.id === "proj-a") throw new Error("tasks.json is corrupt");
+			return [makeTask({ id: "t-b", projectId: "proj-b", notes: [note("n-b", new Date().toISOString())] })];
+		});
+
+		const resp = await handleRequest(makeRequest("events.list", { cursor: null, limit: 100 }));
+
+		expect(resp.ok).toBe(true);
+		expect((resp.data as { events: Array<{ id: string }> }).events.map((e) => e.id)).toEqual(["n-b"]);
+	});
+
+	it("skips a note whose timestamp cannot be read rather than dating it to 1970", async () => {
+		vi.mocked(data.loadTasks).mockResolvedValue([
+			makeTask({ id: "t1", createdAt: "not a date", notes: [note("n-bad", "not a date"), note("n-ok", new Date().toISOString())] }),
+		]);
+
+		const resp = await handleRequest(makeRequest("events.list", { cursor: null, limit: 100 }));
+
+		expect((resp.data as { events: Array<{ id: string }> }).events.map((e) => e.id)).toEqual(["n-ok"]);
+	});
+
+	describe("movements — the second kind", () => {
+		function move(id: string, at: string, extra: Partial<TaskMovement> = {}): TaskMovement {
+			return { id, at, kind: "status", from: "todo", to: "in-progress", ...extra };
+		}
+
+		// The point of the kind: a task that finished cannot message anyone, and the
+		// moves it made are as dead as its worktree unless they were recorded.
+		it("still reports a movement made by a task that has since completed", async () => {
+			vi.mocked(data.loadTasks).mockResolvedValue([
+				makeTask({
+					id: "t-done",
+					seq: 1675,
+					title: "Add board movements",
+					status: "completed",
+					movements: [
+						move("aaaa0001", "2026-08-29T10:00:00.000Z"),
+						move("aaaa0002", "2026-08-29T11:00:00.000Z", { from: "in-progress", to: "completed" }),
+					],
+				}),
+			]);
+
+			const resp = await handleRequest(makeRequest("events.list", { cursor: "2026-01-01T00:00:00.000Z", limit: 100 }));
+
+			const events = (resp.data as { events: Array<Record<string, unknown>> }).events;
+			expect(events.map((e) => e.id)).toEqual(["aaaa0001", "aaaa0002"]);
+			expect(events[1]).toMatchObject({
+				kind: "move",
+				seq: 1675,
+				taskTitle: "Add board movements",
+				taskStatus: "completed",
+				text: "Agent is Working → Completed",
+			});
+		});
+
+		it("separates the two kinds in both directions", async () => {
+			vi.mocked(data.loadTasks).mockResolvedValue([
+				makeTask({
+					id: "t1",
+					notes: [note("n1", "2026-08-29T10:00:00.000Z")],
+					movements: [move("aaaa0001", "2026-08-29T11:00:00.000Z")],
+				}),
+			]);
+			const read = async (kind?: string) =>
+				(await handleRequest(makeRequest("events.list", {
+					cursor: "2026-01-01T00:00:00.000Z",
+					limit: 100,
+					...(kind ? { kind } : {}),
+				}))).data as { events: Array<{ id: string; kind: string }> };
+
+			expect((await read()).events.map((e) => e.id)).toEqual(["n1", "aaaa0001"]);
+			expect((await read("note")).events.map((e) => e.id)).toEqual(["n1"]);
+			expect((await read("move")).events.map((e) => e.id)).toEqual(["aaaa0001"]);
+		});
+
+		it("advances over movements: same cursor, same board, nothing new", async () => {
+			const tasks = [makeTask({ id: "t1", movements: [move("aaaa0001", "2026-08-29T10:00:00.000Z")] })];
+			vi.mocked(data.loadTasks).mockResolvedValue(tasks);
+
+			const first = await handleRequest(makeRequest("events.list", { cursor: "2026-01-01T00:00:00.000Z", limit: 100, kind: "move" }));
+			expect((first.data as { cursor: string }).cursor).toBe("2026-08-29T10:00:00.000");
+
+			const second = await handleRequest(makeRequest("events.list", { cursor: "2026-08-29T10:00:00.000Z", limit: 100, kind: "move" }));
+			expect((second.data as { events: unknown[] }).events).toHaveLength(0);
+
+			tasks[0] = makeTask({
+				id: "t1",
+				movements: [move("aaaa0001", "2026-08-29T10:00:00.000Z"), move("aaaa0002", "2026-08-29T12:00:00.000Z")],
+			});
+			const third = await handleRequest(makeRequest("events.list", { cursor: "2026-08-29T10:00:00.000Z", limit: 100, kind: "move" }));
+			expect((third.data as { events: Array<{ id: string }> }).events.map((e) => e.id)).toEqual(["aaaa0002"]);
+		});
+
+		it("names the custom column rather than the status hiding under it", async () => {
+			vi.mocked(data.getProject).mockResolvedValue(
+				makeProject({ customColumns: [{ id: "col-hold", name: "On hold", color: "#fff", llmInstruction: "" }] }),
+			);
+			vi.mocked(data.loadProjects).mockResolvedValue([
+				makeProject({ customColumns: [{ id: "col-hold", name: "On hold", color: "#fff", llmInstruction: "" }] }),
+			]);
+			vi.mocked(data.loadTasks).mockResolvedValue([
+				makeTask({
+					id: "t1",
+					movements: [move("aaaa0001", "2026-08-29T10:00:00.000Z", {
+						kind: "column", from: "todo", to: "todo", toColumnId: "col-hold",
+					})],
+				}),
+			]);
+
+			const resp = await handleRequest(makeRequest("events.list", { cursor: "2026-01-01T00:00:00.000Z", limit: 100 }));
+
+			expect((resp.data as { events: Array<{ text: string }> }).events[0].text).toBe("To Do → On hold");
+		});
+
+		// A trimmed log presented as complete is the same silent loss a cursor exists
+		// to prevent — so the count is reported, and only when it falls in range.
+		it("reports evicted movements when they fall inside the answered range", async () => {
+			vi.mocked(data.loadTasks).mockResolvedValue([
+				makeTask({ id: "t1", movementsDropped: 7, movements: [move("aaaa0001", "2026-08-29T10:00:00.000Z")] }),
+			]);
+
+			const inRange = await handleRequest(makeRequest("events.list", { cursor: "2026-08-01T00:00:00.000Z", limit: 100 }));
+			expect((inRange.data as { movementsEvicted: number }).movementsEvicted).toBe(7);
+
+			// Reading from AFTER the oldest survivor: the evicted moves are older still,
+			// so they are outside what was asked for and must not be reported as a gap.
+			const afterwards = await handleRequest(makeRequest("events.list", { cursor: "2026-08-29T10:30:00.000Z", limit: 100 }));
+			expect((afterwards.data as { movementsEvicted: number }).movementsEvicted).toBe(0);
+		});
+
+		it("shows no movement at all for a task that predates the feature", async () => {
+			vi.mocked(data.loadTasks).mockResolvedValue([
+				makeTask({ id: "t-legacy", status: "completed", movedAt: "2026-08-29T10:00:00.000Z" }),
+			]);
+
+			const resp = await handleRequest(makeRequest("events.list", { cursor: "2026-01-01T00:00:00.000Z", limit: 100 }));
+
+			expect((resp.data as { events: unknown[] }).events).toEqual([]);
+		});
 	});
 });

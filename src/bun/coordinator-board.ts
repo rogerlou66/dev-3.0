@@ -1,5 +1,6 @@
 /**
- * Collect the `<dev3-board>` snapshot a coordinator receives on every turn.
+ * Collect the `<dev3-board>` snapshot a coordinator receives on every delivered
+ * message.
  *
  * The contract and the rendering live in `shared/coordinator-board`; this module
  * only gathers the facts. The design constraint that shapes it: this runs on
@@ -15,6 +16,7 @@
 import type { Project, Task } from "../shared/types";
 import {
 	compareTaskSortRank,
+	DEFAULT_PRIORITY,
 	getTaskTitle,
 	isCoordinatorTask,
 	STATUS_LABELS,
@@ -72,6 +74,7 @@ function toRow(task: Task, project: Project, sharedSeqs: Set<number>): BoardRow 
 		variantIndex: task.variantIndex ?? null,
 		seqShared: sharedSeqs.has(task.seq),
 		title: getTaskTitle(task),
+		priority: task.priority ?? DEFAULT_PRIORITY,
 		column: columnOf(task, project),
 		hibernated: task.hibernated === true,
 		draft: task.draft === true,

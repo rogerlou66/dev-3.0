@@ -29,6 +29,8 @@ const kanban = {
 	"kanban.showMore": "Show more ({count})",
 	"kanban.showLess": "Show less",
 	"kanban.renameColumn": "Rename column",
+	"kanban.mergedLaneProjects_one": "{count} project",
+	"kanban.mergedLaneProjects_other": "{count} projects",
 	"kanban.draftNotDroppable": "This is a draft — finish its description and save it as a task before starting it.",
 
 	// CreateTaskModal
@@ -228,6 +230,7 @@ const kanban = {
 	"task.warnUncommitted": "Uncommitted changes: +{insertions} / -{deletions} lines",
 	"task.warnNeverPushed_one": "{count} commit never pushed — will be lost",
 	"task.warnNeverPushed_other": "{count} commits never pushed — will be lost",
+	"task.warnNeverPushedUnknownCount": "This branch is on no remote and its commits cannot be counted — they will be lost",
 	"task.warnUnpushed_one": "{count} unpushed commit — will be lost",
 	"task.warnUnpushed_other": "{count} unpushed commits — will be lost",
 	"task.warnUnmerged_one": "{count} commit pushed but not merged into {branch}",
@@ -306,6 +309,11 @@ const kanban = {
 	"spawnAgent.spawning": "Adding…",
 	"spawnAgent.failed": "Unable to add the agent. {error}",
 	"spawnAgent.notInstalled": "{name} is not installed. Install it first.",
+	"spawnAgent.handoff": "Continue this task's conversation",
+	"spawnAgent.handoffDesc_one": "The new agent gets a retelling of the {agent} session so far ({count} turn): your prompts and its replies verbatim, its actions summarised. Agents cannot resume each other, so a retelling is what a switch is.",
+	"spawnAgent.handoffDesc_other": "The new agent gets a retelling of the {agent} session so far ({count} turns): your prompts and its replies verbatim, its actions summarised. Agents cannot resume each other, so a retelling is what a switch is.",
+	"spawnAgent.handoffSent": "The conversation was handed over — reading the retelling is the new agent's first turn.",
+	"spawnAgent.handoffNotDelivered": "The agent started but never got the pointer to the retelling. It is written at {path} — point the agent at it by hand.",
 
 	// Watch
 	"task.devStarting": "starting",

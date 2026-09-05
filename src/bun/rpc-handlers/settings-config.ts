@@ -13,7 +13,7 @@ import * as rosetta from "../rosetta";
 import * as repoConfig from "../repo-config";
 import * as pty from "../pty-server";
 import { tmux } from "../tmux";
-import { writeTmuxConfigs } from "../tmux/config";
+import { setTmuxPaneDimming, writeTmuxConfigs } from "../tmux/config";
 import { loadSettings, saveSettings } from "../settings";
 import { toggleFavorite } from "../../shared/favorites";
 import { DEV3_HOME } from "../paths";
@@ -27,6 +27,9 @@ import { agentBinaryPathOverride, isExecutableFile } from "../executable";
 import { harnessReadinessFrom } from "../harness-readiness";
 import { validateEnvMap } from "../../shared/env-text";
 import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH } from "../../shared/types";
+import type { LowBatteryStatus } from "../../shared/low-battery";
+import { installAgentSkills } from "../agent-skills";
+import { forceSelectLowBatteryStyle, lowBatteryStatus } from "../low-battery";
 
 /** Reject malformed env maps at the RPC boundary — the UI validates too, but
  *  saves must not depend on the client being well-behaved. */
@@ -189,23 +192,29 @@ function getShellAvailability(): ShellAvailability {
 }
 
 /**
- * Push the new shell everywhere a live process still reads the old one.
+ * Rewrite the tmux configs and source them into every live server, so a setting
+ * the config embeds takes effect without restarting the app.
  *
- * `$SHELL` is what the native backend launches (`defaultNativeShellLaunchSpec`)
- * and `default-shell` in the tmux config is what a pane the user splits off
- * inherits. Both are frozen at boot, so without this the picker only takes
- * effect after a restart while Settings already reports the new shell.
+ * `refreshShell` additionally updates `$SHELL`: it is what the native backend
+ * launches (`defaultNativeShellLaunchSpec`) and `default-shell` in the tmux
+ * config is what a pane the user splits off inherits. Both are frozen at boot,
+ * so without this the picker only takes effect after a restart while Settings
+ * already reports the new shell.
  *
  * The theme is re-applied, not chosen: sourcing the config into a live server
  * goes through `applyTmuxTheme`, which also pins the active themed config path.
  */
-async function applyShellChange(theme: "dark" | "light"): Promise<void> {
+async function applyTmuxConfigChange(
+	theme: "dark" | "light",
+	options: { refreshShell: boolean; dimInactivePanes: boolean },
+): Promise<void> {
 	try {
-		process.env.SHELL = getUserShell();
+		if (options.refreshShell) process.env.SHELL = getUserShell();
+		setTmuxPaneDimming(options.dimInactivePanes);
 		writeTmuxConfigs();
 		await pty.applyTmuxTheme(theme);
 	} catch (err) {
-		log.warn("Failed to push the shell change into tmux (non-fatal)", { error: String(err) });
+		log.warn("Failed to push the settings change into tmux (non-fatal)", { error: String(err) });
 	}
 }
 
@@ -225,11 +234,30 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	const stored = await loadSettings();
 	const next: GlobalSettings = { ...params, analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId };
 	await saveSettings(next);
+	// Apply the low-battery toggle straight away — a switch that only takes effect
+	// after an app restart does not mean what its label says. Flipping it off is a
+	// real uninstall of what dev3 wrote, so it must not wait either.
+	if ((stored.lowBatteryEnabled === true) !== (next.lowBatteryEnabled === true)) {
+		try {
+			// The installer owns both halves: the skill/style files and the always-on
+			// line inside dev3's managed block in ~/.agents/AGENTS.md. An explicit
+			// false here is a real uninstall, which is why the flag is passed, not
+			// left undefined.
+			installAgentSkills({ lowBattery: next.lowBatteryEnabled === true });
+		} catch (err) {
+			log.warn("Failed to apply the low-battery toggle (non-fatal)", { error: String(err) });
+		}
+	}
 	// `resolvedTheme` may be absent (nothing has called setTmuxTheme yet); the
 	// live in-memory theme is the fallback, never a hardcoded "dark" — that would
 	// flip a light-theme user's terminals on an unrelated shell change.
-	if (process.platform !== "win32" && stored.terminalShell !== next.terminalShell) {
-		await applyShellChange(next.resolvedTheme ?? getCurrentUiTheme());
+	const shellChanged = stored.terminalShell !== next.terminalShell;
+	const dimChanged = (stored.dimInactivePanes !== false) !== (next.dimInactivePanes !== false);
+	if (process.platform !== "win32" && (shellChanged || dimChanged)) {
+		await applyTmuxConfigChange(next.resolvedTheme ?? getCurrentUiTheme(), {
+			refreshShell: shellChanged,
+			dimInactivePanes: next.dimInactivePanes !== false,
+		});
 	}
 	getPushMessage()?.("globalSettingsUpdated", next);
 	log.info("← saveGlobalSettings done");
@@ -259,6 +287,12 @@ async function toggleFavoriteAgent(params: { agentId: string; configId: string }
  * freshly built CLI talking to the installed app is why new flags look broken.
  * See `writeDev3SelfShim` for why arming the second name — never `bin/dev3` —
  * is what keeps agent hooks out of a guest instance.
+ *
+ * DELIBERATELY NOT gated by `managedCliWriteAllowed`. That guard stops a build
+ * from claiming the shared CLI behind the user's back; this handler runs only
+ * because they pressed "Install dev3 CLI" in Settings, which is the whole point
+ * of the button on a dev build. It is the in-app twin of the
+ * `DEV3_INSTALL_MANAGED_CLI=1` env opt-in.
  */
 async function installDev3Cli(): Promise<{ installedFrom: string; selfShimPath: string; selfInstance: string }> {
 	log.info("→ installDev3Cli");
@@ -611,6 +645,19 @@ async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dar
 	await pty.applyTmuxTheme(params.theme);
 }
 
+async function getLowBatteryStatus(): Promise<LowBatteryStatus> {
+	const settings = await loadSettings();
+	return lowBatteryStatus(homedir(), settings.lowBatteryEnabled === true);
+}
+
+/** The user kept their own output style and then asked for low-battery anyway.
+ *  Only this path overwrites `outputStyle` — the installer never does. */
+async function selectLowBatteryStyle(): Promise<LowBatteryStatus> {
+	log.info("→ selectLowBatteryStyle");
+	forceSelectLowBatteryStyle(homedir());
+	return getLowBatteryStatus();
+}
+
 export const settingsConfigHandlers = {
 	getResolvedProject,
 	getProjectConfigs,
@@ -623,6 +670,8 @@ export const settingsConfigHandlers = {
 	getGitHubCliStatus,
 	getShellAvailability,
 	saveGlobalSettings,
+	getLowBatteryStatus,
+	selectLowBatteryStyle,
 	toggleFavoriteAgent,
 	installDev3Cli,
 	getAgents,

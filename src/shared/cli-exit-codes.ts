@@ -15,6 +15,12 @@ export const CLI_EXIT_CODE_ARTIFACT_ASSET_MISSING = 13;
 export const CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND = 14;
 export const CLI_EXIT_CODE_UPDATE_REFUSED = 15;
 export const CLI_EXIT_CODE_INSTANCE_NOT_FOUND = 16;
+export const CLI_EXIT_CODE_MESSAGE_SUBJECT_REQUIRED = 17;
+export const CLI_EXIT_CODE_TASK_REF_UNRESOLVED = 18;
+export const CLI_EXIT_CODE_EVENT_CURSOR_INVALID = 19;
+export const CLI_EXIT_CODE_NO_PROJECT_FOR_CWD = 20;
+export const CLI_EXIT_CODE_DEV_SERVER_ENV_INVALID = 21;
+export const CLI_EXIT_CODE_CANCELLATION_DECLINED = 22;
 
 export const CLI_EXIT_CODE_DEFINITIONS = [
 	{
@@ -113,5 +119,41 @@ export const CLI_EXIT_CODE_DEFINITIONS = [
 		code: CLI_EXIT_CODE_INSTANCE_NOT_FOUND,
 		description:
 			"`--instance <selector>` was well-formed but no running instance answers to it — or more than one does (a `seq:<N>` shared by variants, or a `task:` prefix matching two guests). The message lists what IS running. Distinct from exit 2, which means no instance is reachable at all, and from exit 3, which means the selector itself was misspelled. The command never falls back to another instance.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_MESSAGE_SUBJECT_REQUIRED",
+		code: CLI_EXIT_CODE_MESSAGE_SUBJECT_REQUIRED,
+		description:
+			"`dev3 message` was called without a usable `--subject`, or with one over the character limit. Nothing was sent and nothing was queued. Every message carries a one-line subject: it is stored with the message and it is the line the agent-traffic view shows, so it can be neither defaulted nor derived. The error prints the limit, a good and a bad example, and the corrected command. An over-limit subject is rejected, never truncated. Distinct from exit 3 so automation can recognise this one case and retry with a subject instead of treating it as a misspelled command.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_TASK_REF_UNRESOLVED",
+		code: CLI_EXIT_CODE_TASK_REF_UNRESOLVED,
+		description:
+			"`dev3 task create --pr <n>` or `--branch <ref>` could not resolve what the task is about, so NOTHING was created: no such pull request, no such ref, the pull request's fork could not be fetched, `gh` is missing or unauthenticated, or the project is not a GitHub repo. The task is not created half-right on the base branch — fix the argument and run it again. Distinct from exit 1, which means the task itself failed to be created.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_EVENT_CURSOR_INVALID",
+		code: CLI_EXIT_CODE_EVENT_CURSOR_INVALID,
+		description:
+			"`dev3 events --from <cursor>` was given a cursor it cannot parse, and NOTHING was read. Four shapes are accepted: an event id from the ID column (`8eb2da3d`, or an unambiguous prefix), a cursor as printed by a previous run (`2026-08-29T10:12:03.114`), a plain date or instant for a deliberately wider sweep, and a duration such as `2h`. The same code covers an id that resolves to nothing or to more than one event — a lost id must never be answered with 'nothing since then', which reads as a quiet board. Distinct from exit 3 so a caller that lost its cursor can recognise this one case and fall back to a bare `dev3 events` instead of treating it as a misspelled command. Never silently degraded into a time window — a cursor that quietly becomes 'the last day' skips everything older and reports success.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_NO_PROJECT_FOR_CWD",
+		code: CLI_EXIT_CODE_NO_PROJECT_FOR_CWD,
+		description:
+			"`dev3 import` was run in a directory no registered dev3 project owns. A conversation can only be imported into the project that owns the directory it ran in, so the project has to be added to the board first — there is deliberately no flag to import it somewhere else. The message names the directory checked, and says something more useful than 'add the repository' for the two directories agents actually live in: a dev3 worktree (whose conversation is already a task) and a virtual board's working dir (which has no repository at all).",
+	},
+	{
+		constant: "CLI_EXIT_CODE_DEV_SERVER_ENV_INVALID",
+		code: CLI_EXIT_CODE_DEV_SERVER_ENV_INVALID,
+		description:
+			"`dev3 dev-server start --env` / `restart --env` was given something it will not pass to the devScript, and NOTHING was started or restarted: an argument that is not `KEY=VALUE`, a key that is not a valid environment variable name, or one of the names dev3 owns (`PATH`, `HOME`, `SHELL`, `DEV3_TASK_ID`, `DEV3_WORKTREE_ROOT`, any `DEV3_PORT*`). A silently dropped pair is worse than a refusal — the server would come up on the wrong configuration and look correct. Distinct from exit 3 so a caller can tell a rejected variable from a misspelled command.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_CANCELLATION_DECLINED",
+		code: CLI_EXIT_CODE_CANCELLATION_DECLINED,
+		description:
+			"`dev3 task move --status cancelled` asked the user for approval and the user declined. The task keeps its current status and the session stays alive. Distinct from exit 6 so an agent cleaning up after itself can tell a refused cancellation apart from a refused completion — the two ask for very different things, and only cancellation throws the work away.",
 	},
 ] as const;

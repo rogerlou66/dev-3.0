@@ -1,11 +1,27 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import FilePreviewModal from "../FilePreviewModal";
 import { I18nProvider } from "../../i18n";
+import { installImmediateIntersectionObserver } from "../../test-utils/immediate-intersection";
 import type { FilePreviewResult } from "../../../shared/types";
 
 const readFilePreview = vi.fn<(params: { path: string }) => Promise<FilePreviewResult>>();
 const openTerminalPath = vi.hoisted(() => vi.fn());
 const androidRuntime = vi.hoisted(() => ({ enabled: false }));
+
+const mermaid = vi.hoisted(() => ({ initialize: vi.fn(), render: vi.fn() }));
+
+vi.mock("@streamdown/mermaid", () => ({
+	createMermaidPlugin: () => ({
+		name: "mermaid",
+		type: "diagram",
+		language: "mermaid",
+		getMermaid: (config?: unknown) => {
+			if (config) mermaid.initialize(config);
+			return mermaid;
+		},
+	}),
+}));
 
 // isElectrobun=false — the browser/remote case, where host-side open actions
 // must not render (they would act invisibly on the host machine).
@@ -24,6 +40,7 @@ vi.mock("../../rpc", () => ({
 vi.mock("../../android-client-bridge", () => ({
 	isAndroidAppHost: () => androidRuntime.enabled,
 }));
+installImmediateIntersectionObserver();
 
 function renderModal(path = "/wt/docs/guide.md", line?: number) {
 	return render(
@@ -37,6 +54,10 @@ describe("FilePreviewModal", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		androidRuntime.enabled = false;
+		mermaid.render.mockResolvedValue({
+			svg: '<svg data-testid="rendered-mermaid"></svg>',
+			diagramType: "flowchart-v2",
+		});
 	});
 
 	it("offers explicit computer-side open actions in the Android app", async () => {
@@ -82,6 +103,28 @@ describe("FilePreviewModal", () => {
 		);
 		expect(screen.getByRole("button", { name: "Raw" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+	});
+
+	it("renders a .mmd file as a Mermaid diagram, with the same Raw toggle", async () => {
+		const user = userEvent.setup();
+		readFilePreview.mockResolvedValue({
+			kind: "text",
+			content: "flowchart LR\nA --> B\n",
+			truncated: false,
+			size: 22,
+		});
+		renderModal("/wt/docs/chart.mmd");
+
+		await waitFor(() => expect(mermaid.render).toHaveBeenCalled());
+		expect(mermaid.render).toHaveBeenCalledWith(
+			expect.stringMatching(/^mermaid-/),
+			"flowchart LR\nA --> B\n",
+		);
+		expect(screen.getByTestId("rendered-mermaid")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Raw" }));
+		expect(screen.getByText("flowchart LR")).toBeInTheDocument();
+		expect(screen.queryByTestId("rendered-mermaid")).not.toBeInTheDocument();
 	});
 
 	it("renders code with line numbers and highlights the target line", async () => {

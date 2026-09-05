@@ -30,6 +30,7 @@ import { PrConversationBlock } from "./pr-review/PrConversationBlock";
 import { GithubThreadView, OutdatedThreadsGroup, type ThreadSendState } from "./pr-review/GithubThreadView";
 import { buildThreadFixPrompt, groupGithubThreadsByFile, isLineRenderedInDiff, locateThread, partitionThreadsForDiff } from "./pr-review/mapping";
 import { MarkdownDocument } from "./pr-review/markdown";
+import { isMermaidPath, isRenderableDocPath, toRenderableMarkdown } from "./pr-review/markdown-files";
 import {
 	MarkdownRichDiff,
 	useMarkdownDiffBlocks,
@@ -994,6 +995,7 @@ function MarkdownPreviewReview({
 	const commentedLines = useMemo(() => commentedLinesBySide(comments), [comments]);
 	const threads = useMemo(() => collectMarkdownPreviewThreads(comments), [comments]);
 	const documentSide = getMarkdownPreviewSide(file);
+	const documentPath = diffFilePath(file);
 
 	// The button follows the live selection; the composer, once open, keeps the
 	// range it was opened with even after the browser drops the highlight.
@@ -1053,10 +1055,14 @@ function MarkdownPreviewReview({
 						)
 						: (
 							<MarkdownDocument
-								body={previewSource}
+								body={toRenderableMarkdown(previewSource, documentPath)}
 								imageBaseDir={imageBaseDir}
 								imageRootDir={imageRootDir}
-								sourceLines={{ lineOffset: 1, commentedLines: commentedLines[documentSide] }}
+								// A fenced diagram is one block whose lines no longer line up
+								// with the file's, so `.mmd` carries no line anchors.
+								sourceLines={isMermaidPath(documentPath)
+									? null
+									: { lineOffset: 1, commentedLines: commentedLines[documentSide] }}
 							/>
 						)
 					: <div className="text-sm text-fg-muted">{t("infoPanel.diffMdPreviewEmpty")}</div>}
@@ -1338,16 +1344,23 @@ function findDiffFileByPath(files: TaskDiffFile[], path: string | undefined): Ta
 	)) ?? null;
 }
 
-/** Markdown files get a per-file source-diff ↔ rendered-preview toggle (issue #1063). */
+function diffFilePath(file: TaskDiffFile): string {
+	return file.newPath ?? file.oldPath ?? file.displayPath;
+}
+
+/** Renderable documents — markdown and `.mmd` diagrams — get a per-file
+ * source-diff ↔ rendered-preview toggle (issue #1063). */
 export function isMarkdownDiffFile(file: TaskDiffFile): boolean {
-	const path = file.newPath ?? file.oldPath ?? file.displayPath;
-	return /\.(md|markdown)$/i.test(path);
+	return isRenderableDocPath(diffFilePath(file));
 }
 
 /** Only a two-sided change has something to colour: added/untracked files are
- * all-new and deleted files all-gone, so those preview as a plain document. */
+ * all-new and deleted files all-gone, so those preview as a plain document. A
+ * `.mmd` file has no prose blocks to diff — it always previews as the diagram. */
 export function isMarkdownRichDiffFile(file: TaskDiffFile): boolean {
-	return isMarkdownDiffFile(file) && file.status !== "added" && file.status !== "untracked" && file.status !== "deleted";
+	return isMarkdownDiffFile(file)
+		&& !isMermaidPath(diffFilePath(file))
+		&& file.status !== "added" && file.status !== "untracked" && file.status !== "deleted";
 }
 
 /** Preview renders what the change produced: the new content, or for deletions
@@ -4136,7 +4149,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 													{pendingReviewExportEntries.length}
 													{sentReviewCommentCount > 0 && (
 														<span data-testid="review-export-sent-count" className="text-success">
-															{` · ${t("infoPanel.diffReviewSentCount", { count: String(sentReviewCommentCount) })}`}
+															{` · ${t.plural("infoPanel.diffReviewSentCount", sentReviewCommentCount)}`}
 														</span>
 													)}
 												</span>
@@ -4407,13 +4420,19 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 				)}
 
 				{/* An empty diff means "nothing changed" only when the comparison ran.
-				    A compare ref that is not in this repo produces the same emptiness
-				    and must say so instead. */}
+				    A compare ref that is not in this repo, or one that shares no
+				    history with HEAD, produces the same emptiness and must say so
+				    instead. */}
 				{!error && !isBusy && payload && visibleFiles.length === 0 && visibleSkippedFiles.length === 0 && hiddenTestCount === 0 && (
 					payload.fallbackReason === "missing-compare-ref"
 						? renderState(
 							t("infoPanel.diffMissingCompareRef"),
 							t("infoPanel.diffMissingCompareRefBody", { ref: payload.compareLabel }),
+						)
+						: payload.fallbackReason === "no-merge-base"
+						? renderState(
+							t("infoPanel.diffNoMergeBase"),
+							t("infoPanel.diffNoMergeBaseBody", { ref: payload.compareLabel }),
 						)
 						: renderState(
 							t("infoPanel.diffNoChanges"),

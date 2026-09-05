@@ -210,6 +210,12 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 			return;
 		}
 
+		case "project-import-conversations": {
+			const projectId = currentProjectId(state);
+			if (projectId) window.dispatchEvent(new CustomEvent("menu:import-conversations", { detail: { projectId } }));
+			return;
+		}
+
 		// ── Project: git ──
 		case "project-pull-main": {
 			const projectId = currentProjectId(state);
@@ -374,6 +380,8 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "term-split-h":
 		case "term-split-v":
 		case "term-zoom-pane":
+		case "term-swap-next":
+		case "term-swap-prev":
 		case "term-layout-tiled":
 		case "term-layout-even-h":
 		case "term-layout-even-v":
@@ -457,7 +465,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"debug-play-sound-completed", "debug-play-sound-cancelled", "debug-push-sound-completed",
 	"open-new-task", "open-add-project", "open-project-switch", "open-command-palette",
 	// Project
-	"project-settings", "project-pull-main", "project-create-pr",
+	"project-settings", "project-import-conversations", "project-pull-main", "project-create-pr",
 	"project-dev-server-start", "project-dev-server-stop", "project-dev-server-restart", "project-dev-server-status",
 	// Task (safe, non-destructive)
 	"task-toggle-watch", "task-run-script", "task-open-in-finder", "task-copy-worktree-path",
@@ -465,7 +473,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	// Destructive, but always behind the terminal-move confirmation.
 	"task-mark-completed", "task-mark-cancelled",
 	// Terminal
-	"term-split-h", "term-split-v", "term-zoom-pane", "term-close-pane",
+	"term-split-h", "term-split-v", "term-zoom-pane", "term-close-pane", "term-swap-next", "term-swap-prev",
 	"term-layout-tiled", "term-layout-even-h", "term-layout-even-v", "term-layout-main-h", "term-layout-main-v", "term-layout-cycle",
 	"term-toggle-project-terminal", "term-open-quick-shell", "term-cheat-sheet",
 	// Help
@@ -478,6 +486,8 @@ const PANE_ACTION_MAP: Record<string, TaskPaneAction> = {
 	"term-split-h": { kind: "splitH" },
 	"term-split-v": { kind: "splitV" },
 	"term-zoom-pane": { kind: "zoom", mode: "toggle" },
+	"term-swap-next": { kind: "swapStep", step: "next" },
+	"term-swap-prev": { kind: "swapStep", step: "prev" },
 	"term-layout-tiled": { kind: "layoutPreset", preset: "tiled" },
 	"term-layout-even-h": { kind: "layoutPreset", preset: "evenH" },
 	"term-layout-even-v": { kind: "layoutPreset", preset: "evenV" },

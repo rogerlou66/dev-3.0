@@ -1,9 +1,10 @@
 import type { PaneSessionEntry, Task } from "../shared/types";
-import type { PaneInputOutcome, PaneInputStage } from "../shared/pane-input";
+import { type PaneInputOutcome, type PaneInputStage, utf8Length } from "../shared/pane-input";
 import { type AgentPromptDelivery, agentPromptHeld } from "../shared/agent-prompt-delivery";
 import type { AgentPromptEpilogue } from "./agent-prompt-delivery";
 import { sendPaneInput } from "./pane-input";
 import { agentMessageHoldKey, holdAgentMessage } from "./agent-message-hold";
+import { AGENT_MESSAGE_BURST_SEPARATOR } from "../shared/agent-message-envelope";
 import { DEFAULT_TMUX_SOCKET, tmux, taskSessionName, PANE_ID_FORMAT, TMUX_AGENT_PANE_OPTION, TMUX_LAST_AGENT_PANE_OPTION } from "./tmux";
 import { createLogger } from "./logger";
 
@@ -170,8 +171,8 @@ export function scheduleAgentPromptSubmit(send: () => void | Promise<void>, cont
  *
  * Two stages rather than one, because Claude Code's input layer reads a fast
  * "text Enter" as a single paste — newline included — and never submits. The
- * text is a text step, so the tmux adapter sends it with `-l` and a prompt whose
- * content reads like a key name (`C-c`, `Escape`) is typed rather than pressed.
+ * text is a text step, so the tmux adapter pastes it from a buffer and a prompt whose
+ * content reads like a key name (`C-c`, `Escape`) is delivered rather than pressed.
  */
 function agentPromptStages(prompt: string): PaneInputStage[] {
 	return [
@@ -189,9 +190,14 @@ function agentMessageTextStages(prompt: string): PaneInputStage[] {
  * The submit-only program the Enter that ends a burst is delivered as. Separate from
  * the text because the seam caps a program's in-band delays at two seconds
  * ({@link PANE_INPUT_LIMITS}) and the quiet window is many times that.
+ *
+ * It still carries the hand-off's own gap: two back-to-back `send-keys` are milliseconds
+ * apart, and Claude Code then reads the burst's last paste and the CR as one paste with a
+ * newline in it — the text sits in the box unsubmitted, and every later message stacks
+ * onto it.
  */
 function agentPromptSubmitStages(): PaneInputStage[] {
-	return [{ steps: [{ kind: "key", key: "enter" }] }];
+	return [{ delayBeforeMs: AGENT_PROMPT_ENTER_DELAY_MS, steps: [{ kind: "key", key: "enter" }] }];
 }
 
 /**
@@ -213,22 +219,33 @@ function holdAgentMessageForPane(
 	const delayMs = holdAgentMessage(
 		agentMessageHoldKey("tmux", task.id, paneId),
 		{
-			deliver: async () => {
-				const text = await sendPaneInput(task, paneId, agentMessageTextStages(prompt), { idPrefix: "agent-prompt" });
+			deliver: async (separator) => {
+				const text = await sendPaneInput(task, paneId, agentMessageTextStages(`${separator}${prompt}`), { idPrefix: "agent-prompt" });
 				if (text.status !== "delivered") {
 					log.warn("held agent message text did not land", { ...context, status: text.status });
 				}
 				return text.status === "delivered";
 			},
+			bytes: utf8Length(prompt),
 			...(epilogue
 				? {
-					epilogue: async () => {
+					epilogue: async (budgetBytes) => {
 						const trailer = await epilogue();
 						if (!trailer) return false;
+						if (utf8Length(trailer) > budgetBytes) {
+							// A board that does not fit would split the turn, and the piece the
+							// receiver drops is the first one — the messages, not the snapshot.
+							log.info("board trailer dropped: it would push the turn past one terminal read", {
+								...context,
+								trailerBytes: String(utf8Length(trailer)),
+								budgetBytes: String(budgetBytes),
+							});
+							return false;
+						}
 						const sent = await sendPaneInput(
 							task,
 							paneId,
-							agentMessageTextStages(`\n${trailer}`),
+							agentMessageTextStages(`${AGENT_MESSAGE_BURST_SEPARATOR}${trailer}`),
 							{ idPrefix: "agent-epilogue" },
 						);
 						return sent.status === "delivered";

@@ -304,7 +304,7 @@ describe("AgentAccountIndicator", () => {
 
 		// System login is unlimited; the managed account has no snapshot at all.
 		expect(await screen.findByText("∞ unlimited")).toBeTruthy();
-		expect(screen.getByText("no recent usage data")).toBeTruthy();
+		expect(screen.getByText("no recent data")).toBeTruthy();
 	});
 
 	it("shows reset countdowns and the captured note inline", async () => {
@@ -379,7 +379,7 @@ describe("AgentAccountIndicator", () => {
 		await user.click(await screen.findByTestId("agent-account-trigger"));
 		await screen.findByText("34% used"); // system row has data…
 		// …but the API row gets neither bars nor a misleading "no data" note.
-		expect(screen.queryByText("no recent usage data")).toBeNull();
+		expect(screen.queryByText("no recent data")).toBeNull();
 	});
 
 	it("exposes the popover as a keyboard-reachable radio menu", async () => {
@@ -414,7 +414,7 @@ describe("AgentAccountIndicator", () => {
 							label: "shared@example.com",
 							identity: {
 								email: "shared@example.com",
-								organization: "Wix",
+								organization: "Acme",
 								plan: "enterprise_cbp_usage_based",
 								planLabel: "Enterprise",
 								accountId: "81b5a3a4-9199-40e2-bcde-a6d3ebc9d654",
@@ -433,6 +433,6 @@ describe("AgentAccountIndicator", () => {
 		renderIndicator(codexAgent);
 
 		await user.click(await screen.findByTestId("agent-account-trigger"));
-		expect(screen.getByText("Workspace Wix")).toBeTruthy();
+		expect(screen.getByText("Workspace Acme")).toBeTruthy();
 	});
 });

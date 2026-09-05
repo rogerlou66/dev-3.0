@@ -177,9 +177,15 @@ const terminal = {
 	"tmuxSessions.orphaned": "orphaned",
 	"tmuxSessions.killAll": "Kill All",
 	"tmuxSessions.killAllConfirmTitle": "Kill all tmux sessions",
-	"tmuxSessions.killAllConfirmMessage": "Kill all {count} dev3 tmux sessions? This will terminate all processes in them.",
+	"tmuxSessions.killAllConfirmMessage_one": "Kill the {count} dev3 tmux session? This will terminate all processes in it.",
+	"tmuxSessions.killAllConfirmMessage_other": "Kill all {count} dev3 tmux sessions? This will terminate all processes in them.",
 	"tmuxSessions.killAllConfirmLabel": "Kill all sessions",
 	"tmuxSessions.refresh": "Refresh",
+	"tmuxSessions.sortLabel": "Sort",
+	"tmuxSessions.sortByMemory": "Memory",
+	"tmuxSessions.sortByCpu": "CPU",
+	"tmuxSessions.live": "live",
+	"tmuxSessions.liveHint": "CPU and memory refresh every 2 seconds while this list is open.",
 
 	// Spawn Agent
 	"tmux.spawnExtraAgent": "+ Agent",
@@ -241,12 +247,15 @@ const terminal = {
 	"terminal.composerCollapse": "Collapse editor",
 	"terminal.composerScheduleLater": "Send later",
 	"terminal.rawKeyboard": "Direct keyboard input",
+	"terminal.scrollToLatest": "Back to latest output",
 	"terminal.backspace": "Backspace",
 
 	// File path links in terminal output (Cmd/Ctrl+Click)
 	"terminal.pathLinkFolderBrowser": "Folders can't be opened from the browser — use the desktop app.",
 	"terminal.pathLinkOpenedOnComputer": "Opened on your computer.",
 	"terminal.pathLinkOpenFailed": "Couldn't open path: {error}",
+	"terminal.fileLinkNotFound": "Can't open {path} — it's missing, or outside the allowed folders.",
+	"terminal.fileLinkUnreadable": "That link isn't a readable file path: {uri}",
 	"terminal.filePreviewLoading": "Loading preview…",
 	"terminal.filePreviewNotFound": "File not found — it may have been moved or deleted.",
 	"terminal.filePreviewBinary": "Binary file ({size}) — no preview available.",

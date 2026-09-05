@@ -177,9 +177,15 @@ const terminal = {
 	"tmuxSessions.orphaned": "huérfana",
 	"tmuxSessions.killAll": "Terminar todas",
 	"tmuxSessions.killAllConfirmTitle": "Terminar todas las sesiones tmux",
-	"tmuxSessions.killAllConfirmMessage": "¿Terminar las {count} sesiones dev3? Esto cerrará todos los procesos.",
+	"tmuxSessions.killAllConfirmMessage_one": "¿Terminar la {count} sesión dev3? Esto cerrará todos sus procesos.",
+	"tmuxSessions.killAllConfirmMessage_other": "¿Terminar las {count} sesiones dev3? Esto cerrará todos los procesos.",
 	"tmuxSessions.killAllConfirmLabel": "Terminar todas las sesiones",
 	"tmuxSessions.refresh": "Actualizar",
+	"tmuxSessions.sortLabel": "Orden",
+	"tmuxSessions.sortByMemory": "Memoria",
+	"tmuxSessions.sortByCpu": "CPU",
+	"tmuxSessions.live": "en vivo",
+	"tmuxSessions.liveHint": "La CPU y la memoria se actualizan cada 2 segundos mientras esta lista está abierta.",
 
 	// Spawn Agent
 	"tmux.spawnExtraAgent": "+ agente",
@@ -241,12 +247,15 @@ const terminal = {
 	"terminal.composerCollapse": "Contraer editor",
 	"terminal.composerScheduleLater": "Enviar más tarde",
 	"terminal.rawKeyboard": "Entrada directa de teclado",
+	"terminal.scrollToLatest": "Volver a la salida más reciente",
 	"terminal.backspace": "Retroceso",
 
 	// File path links in terminal output (Cmd/Ctrl+Click)
 	"terminal.pathLinkFolderBrowser": "Las carpetas no se pueden abrir desde el navegador — usa la aplicación de escritorio.",
 	"terminal.pathLinkOpenedOnComputer": "Se abrió en tu ordenador.",
 	"terminal.pathLinkOpenFailed": "No se pudo abrir la ruta: {error}",
+	"terminal.fileLinkNotFound": "No se puede abrir {path}: no existe o está fuera de las carpetas permitidas.",
+	"terminal.fileLinkUnreadable": "Ese enlace no es una ruta de archivo legible: {uri}",
 	"terminal.filePreviewLoading": "Cargando vista previa…",
 	"terminal.filePreviewNotFound": "Archivo no encontrado — puede que se haya movido o eliminado.",
 	"terminal.filePreviewBinary": "Archivo binario ({size}) — vista previa no disponible.",

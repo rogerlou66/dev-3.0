@@ -10,6 +10,10 @@
  *  - ONE hold per pane, never a queue of Enters. Several messages stack their TEXTS
  *    in arrival order and end in exactly one Enter; two Enters for two stacked
  *    messages would split the burst again, which is the original defect.
+ *  - Every message after the first is typed behind a blank line. An envelope ends
+ *    without a newline, so a burst used to reach the receiver as
+ *    `</dev3-ai-message><dev3-ai-message>` on one line, with no boundary between two
+ *    senders' reports (issue #1608).
  *  - The newest registration wins the submit closure, because it carries the freshest
  *    pane pin; the ceiling deadline stays with the FIRST undelivered message.
  *  - A MESSAGE-driven hold keeps the ceiling; a HUMAN-driven one has none, and its quiet
@@ -28,6 +32,9 @@
  * PR, commit, rebase, bug-hunter prompts — type and submit at once.
  */
 
+import { AGENT_MESSAGE_BURST_SEPARATOR } from "../shared/agent-message-envelope";
+import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES } from "../shared/types";
+import { utf8Length } from "../shared/pane-input";
 import {
 	AGENT_MESSAGE_HOLD_CEILING_MS,
 	AGENT_MESSAGE_HOLD_HUMAN_IDLE_MS,
@@ -37,18 +44,34 @@ import { createLogger } from "./logger";
 
 const log = createLogger("agent-message-hold");
 
-/** One message waiting for a pane: how to type it, and how to submit the burst. */
+/** One message waiting for a pane: how to type it, how big it is, and how to submit the burst. */
 export interface HeldAgentMessage {
-	/** Types this message's text. True when it provably landed. */
-	deliver: () => boolean | Promise<boolean>;
+	/**
+	 * Types this message's text, prefixed by `separator`. The hold passes the empty
+	 * string to the message that opens a burst and
+	 * {@link AGENT_MESSAGE_BURST_SEPARATOR} to every one after it: position in the
+	 * burst is knowable here and nowhere else. True when it provably landed.
+	 */
+	deliver: (separator: string) => boolean | Promise<boolean>;
+	/**
+	 * UTF-8 bytes this message types. The receiving CLI chunks what ONE pty read hands
+	 * it, not what one paste contained, so three messages released together are one
+	 * stream to it — and the cap that keeps a single message inside one read means
+	 * nothing unless the burst obeys it too. See {@link release}.
+	 */
+	bytes: number;
 	/**
 	 * Optional trailer typed ONCE after the whole burst, just before the Enter —
 	 * the coordinator's board snapshot. It belongs here rather than on each
 	 * message for both reasons that matter: a burst is one agent turn and must
 	 * carry one snapshot, and the text is built at release time, so a message
 	 * that waited a full minute still ends on a board that is seconds old.
+	 *
+	 * `budgetBytes` is what is left of one pty read after the messages. A trailer
+	 * that does not fit is dropped by the adapter: a stale board costs a snapshot,
+	 * a split stream can cost the messages themselves.
 	 */
-	epilogue?: () => boolean | Promise<boolean>;
+	epilogue?: (budgetBytes: number) => boolean | Promise<boolean>;
 	/** The single Enter that ends the whole burst. */
 	submit: () => void | Promise<void>;
 }
@@ -59,8 +82,8 @@ interface Hold {
 	firstAt: number;
 	/** Set by the first human keystroke that pushed this hold back; the ceiling then stops applying. */
 	humanHeld: boolean;
-	/** Every message waiting for this pane, in arrival order. */
-	deliveries: HeldAgentMessage["deliver"][];
+	/** Every message waiting for this pane, in arrival order, with the bytes each types. */
+	deliveries: { deliver: HeldAgentMessage["deliver"]; bytes: number }[];
 	/** Typed once after them all; the newest registration wins, like `submit`. */
 	epilogue: HeldAgentMessage["epilogue"];
 	submit: HeldAgentMessage["submit"];
@@ -109,7 +132,7 @@ export function holdAgentMessage(key: string, message: HeldAgentMessage, context
 		submit: message.submit,
 		context,
 	};
-	hold.deliveries.push(message.deliver);
+	hold.deliveries.push({ deliver: message.deliver, bytes: message.bytes });
 	hold.epilogue = message.epilogue;
 	hold.submit = message.submit;
 	hold.context = context;
@@ -169,10 +192,32 @@ export function flushHeldAgentMessagesForTask(taskId: string): number {
 	return flushed;
 }
 
+/** Bytes the boundary between two messages costs, counted like the messages themselves. */
+const SEPARATOR_BYTES = utf8Length(AGENT_MESSAGE_BURST_SEPARATOR);
+
 /**
- * Type every message this hold gathered, in arrival order, then submit them as one
- * turn. A message that arrives while this is running starts a fresh hold — the pane is
- * mid-delivery, so joining it could interleave two pastes.
+ * How many of `deliveries` may be typed in one turn: as many as fit one pty read, and
+ * never fewer than one — a message already sized to the cap must still go out.
+ *
+ * The cap is per RELEASE, not per message, because the receiving CLI splits what one
+ * read hands it: three 600-byte envelopes released together are 1 800 bytes of one
+ * stream, and its first chunk is exactly the piece that gets dropped (issue #1608).
+ */
+function burstFitCount(deliveries: Hold["deliveries"]): number {
+	let typed = 0;
+	for (const [index, delivery] of deliveries.entries()) {
+		const cost = delivery.bytes + (index === 0 ? 0 : SEPARATOR_BYTES);
+		if (index > 0 && typed + cost > AGENT_MESSAGE_SPILL_THRESHOLD_BYTES) return index;
+		typed += cost;
+	}
+	return deliveries.length;
+}
+
+/**
+ * Type the messages this hold gathered that fit one pty read, in arrival order, then
+ * submit them as one turn. Whatever did not fit stays held and lands in the next quiet
+ * window as its own turn. A message that arrives while this is running starts a fresh
+ * hold — the pane is mid-delivery, so joining it could interleave two pastes.
  */
 async function release(key: string, hold: Hold): Promise<void> {
 	// A newer hold may already own this pane; only the current one may release.
@@ -180,23 +225,44 @@ async function release(key: string, hold: Hold): Promise<void> {
 	holds.delete(key);
 	if (hold.timer) clearTimeout(hold.timer);
 
+	const fits = burstFitCount(hold.deliveries);
+	const going = hold.deliveries.slice(0, fits);
+	const waiting = hold.deliveries.slice(fits);
+	let typed = 0;
 	let landed = false;
-	for (const deliver of hold.deliveries) {
+	for (const [index, delivery] of going.entries()) {
+		// The first message opens the turn; every later one needs a visible boundary,
+		// because an envelope ends without a newline and would weld onto its predecessor.
 		try {
-			if (await deliver()) landed = true;
+			if (await delivery.deliver(index === 0 ? "" : AGENT_MESSAGE_BURST_SEPARATOR)) landed = true;
+			typed += delivery.bytes + (index === 0 ? 0 : SEPARATOR_BYTES);
 		} catch (err) {
 			log.warn("held agent message text failed", { ...hold.context, error: String(err) });
 		}
+	}
+	if (waiting.length > 0) {
+		log.info("held agent message burst split to stay inside one terminal read", {
+			...hold.context,
+			typedBytes: String(typed),
+			sent: String(going.length),
+			waiting: String(waiting.length),
+		});
+		// Its own turn, its own Enter, after another quiet window: the same closures the
+		// newest registration left, so the next release still types against a fresh pin.
+		const next: Hold = { ...hold, timer: null, firstAt: Date.now(), deliveries: waiting };
+		holds.set(key, next);
+		rearm(key, next, Date.now());
 	}
 	if (!landed) {
 		log.warn("held agent message landed nowhere; sending no Enter", hold.context);
 		return;
 	}
 	// After the messages, before the Enter — so the burst is one turn that ends on
-	// the board. A trailer that fails costs the snapshot, never the messages.
+	// the board. A trailer that fails costs the snapshot, never the messages, and one
+	// that would push the turn past a single read is dropped by the adapter.
 	if (hold.epilogue) {
 		try {
-			await hold.epilogue();
+			await hold.epilogue(Math.max(0, AGENT_MESSAGE_SPILL_THRESHOLD_BYTES - typed - SEPARATOR_BYTES));
 		} catch (err) {
 			log.warn("held agent message epilogue failed", { ...hold.context, error: String(err) });
 		}

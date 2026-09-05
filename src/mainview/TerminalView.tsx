@@ -4,6 +4,7 @@ import { useT } from "./i18n";
 import { toast } from "./toast";
 import { api, isElectrobun } from "./rpc";
 import { getShiftKeySequence } from "./shift-key-sequences";
+import { debugLog } from "./debug-log";
 import { encodeResizeSequence } from "../shared/resize-protocol";
 import {
 	claimMessage,
@@ -17,6 +18,12 @@ import {
 import type { TerminalCopyDiagnostics } from "./terminal-copy-diagnostics";
 import { installTerminalCopyDiagnostics } from "./terminal-copy-diagnostics";
 import { getEffectiveZoom, ZOOM_CHANGED_EVENT } from "./zoom";
+import {
+	effectiveTerminalFontSize,
+	terminalFontScale,
+	terminalFontStack,
+	TERMINAL_FONT_CHANGED_EVENT,
+} from "./terminal-font";
 import {
 	getTerminalBidiEnabled,
 	TERMINAL_BIDI_CHANGED_EVENT,
@@ -40,8 +47,11 @@ import { imageFilesFromClipboard } from "./utils/clipboardImageFiles";
 import { createAnsiThemeFilter } from "./utils/ansi-theme-adapt";
 import { submitPastedText } from "./terminal-submit";
 import { createFilePathLinkProvider, type FilePathLinkProvider } from "./terminal-file-links";
+import { createOsc8Tracker, createOsc8LinkProvider } from "./terminal-osc8-links";
+import { cellFromMouseEvent } from "./terminal-cell-hit";
+import { installOsc8HoverTooltip, type Osc8HoverHandle } from "./terminal-osc8-hover";
 import { installFilePathUnderlines, type FilePathUnderlinesHandle } from "./terminal-link-underlines";
-import { activateTerminalPath } from "./terminal-path-open";
+import { activateTerminalPath, activateOsc8Uri } from "./terminal-path-open";
 import { isRemote } from "./utils/platform";
 import { paneHighlightRect, type PaneRectPct } from "./utils/paneHighlight";
 import TerminalSearchBar, { type TerminalSearchBarHandle } from "./components/TerminalSearchBar";
@@ -92,8 +102,6 @@ const LIGHT_TERMINAL_THEME = {
 	brightCyan: "#3192aa",
 	brightWhite: "#d1d5da",
 };
-
-const TERMINAL_BASE_FONT_SIZE = 14;
 
 export function syncTerminalImeAnchor(
 	textarea: HTMLTextAreaElement,
@@ -151,6 +159,20 @@ export function installTerminalImeInputBridge(
 	};
 }
 
+/**
+ * What ghostty is told: the user's size, narrowed to the reference font's cell if
+ * this family is wider, then scaled by app zoom.
+ *
+ * A trimmed font keeps its exact fractional size. Rounding it hands the trim
+ * straight back — ghostty's cell is `ceil(measureText("M").width)`, so `round`
+ * erased the clamp entirely at sizes like 15 and 20 and the terminal came out one
+ * pixel per column wider than the reference after all. An untrimmed font (scale 1,
+ * nine of the fifteen) still rounds exactly as it always did.
+ */
+function scaledTerminalFontSize(zoom: number = getEffectiveZoom()): number {
+	const exact = effectiveTerminalFontSize() * zoom;
+	return terminalFontScale() < 1 ? exact : Math.round(exact);
+}
 /**
  * A terminal teardown longer than this blocked the renderer for that long: every
  * dispose on the path is synchronous. One frame at 60 Hz is 16 ms, so 50 ms is
@@ -305,6 +327,8 @@ export interface TerminalHandle {
 	blur: () => void;
 	/** Native backend only: take the writer lease from whoever holds it. No-op on tmux. */
 	claimWriter: () => void;
+	/** Return to the live tail: leave tmux copy-mode, or scroll ghostty's own buffer to the bottom. */
+	scrollToBottom: () => void;
 }
 
 /** Set once the user has seen the one-time "select text to copy" hint toast. */
@@ -334,9 +358,20 @@ interface TerminalViewProps {
 	 * the ⌨ raw toggle on ExtraKeyBar flips this off for direct typing.
 	 */
 	touchComposeMode?: boolean;
+	/**
+	 * Fires when the pane enters or leaves scrolled-into-history (tmux copy-mode
+	 * after a wheel-up / drag, or ghostty `viewportY > 0`). Hosts render the
+	 * touch scroll-to-latest button from it, and pass it ONLY on touch input:
+	 * its presence is what arms the copy-mode poll, so a pointer host (where a
+	 * click already leaves copy-mode) costs no tmux calls at all.
+	 */
+	onScrolledIntoHistory?: (scrolledUp: boolean) => void;
 }
 
-function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSessionLost, touchComposeMode }: TerminalViewProps) {
+/** How often to ask tmux whether the pane is still in copy-mode while we believe it is. */
+const COPY_MODE_POLL_MS = 1500;
+
+function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSessionLost, touchComposeMode, onScrolledIntoHistory }: TerminalViewProps) {
 	const t = useT();
 	// Rebuild budget for a dead ghostty renderer (see recoverFromRendererCrash).
 	const [terminalGeneration, setTerminalGeneration] = useState(0);
@@ -387,6 +422,64 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	// jump to live output. Remember when that mode may be active so the next
 	// plain click can return to live input without requiring Escape.
 	const tmuxCopyModeMayBeActiveRef = useRef(false);
+	// Scrolled-into-history signal for the host (touch scroll-to-latest button).
+	// tmux cannot tell us when a swipe reaching the bottom ended copy-mode, so
+	// while the flag is up we poll pane_in_mode and drop it when tmux did.
+	const onScrolledIntoHistoryRef = useRef(onScrolledIntoHistory);
+	onScrolledIntoHistoryRef.current = onScrolledIntoHistory;
+	const scrolledIntoHistoryRef = useRef(false);
+	const copyModePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const stopCopyModePoll = useCallback(() => {
+		if (copyModePollRef.current) clearInterval(copyModePollRef.current);
+		copyModePollRef.current = null;
+	}, []);
+	const setScrolledIntoHistory = useCallback((scrolledUp: boolean) => {
+		if (!scrolledUp) stopCopyModePoll();
+		if (scrolledIntoHistoryRef.current === scrolledUp) return;
+		scrolledIntoHistoryRef.current = scrolledUp;
+		onScrolledIntoHistoryRef.current?.(scrolledUp);
+	}, [stopCopyModePoll]);
+	const markTmuxCopyModeMayBeActive = useCallback(() => {
+		tmuxCopyModeMayBeActiveRef.current = true;
+		// No host listening (pointer input) → no signal and no poll. The flag above
+		// still matters: it is what the desktop click-to-leave-copy-mode path reads.
+		if (!onScrolledIntoHistoryRef.current) return;
+		setScrolledIntoHistory(true);
+		if (copyModePollRef.current) return;
+		copyModePollRef.current = setInterval(() => {
+			api.request.tmuxPanesInMode({ taskId }).then(({ inMode }) => {
+				if (inMode || !tmuxCopyModeMayBeActiveRef.current) return;
+				tmuxCopyModeMayBeActiveRef.current = false;
+				setScrolledIntoHistory(false);
+			}).catch(() => {
+				// Best effort — a missing session just leaves the button until the next tick.
+			});
+		}, COPY_MODE_POLL_MS);
+	}, [setScrolledIntoHistory, taskId]);
+	useEffect(() => stopCopyModePoll, [stopCopyModePoll]);
+	// A cancel already on the wire. Held so a second send inside that round trip
+	// awaits the SAME request instead of reading the already-cleared flag and
+	// taking the synchronous path — its keys would still land in copy-mode.
+	const copyModeExitRef = useRef<Promise<void> | null>(null);
+	/** True while a scroll-up is unresolved: either the flag is up or a cancel is in flight. */
+	const copyModePending = useCallback(
+		() => tmuxCopyModeMayBeActiveRef.current || copyModeExitRef.current !== null,
+		[],
+	);
+	/** Leave tmux copy-mode if a scroll may have entered it; resolves once tmux has been told. */
+	const exitCopyModeIfNeeded = useCallback((): Promise<void> => {
+		if (copyModeExitRef.current) return copyModeExitRef.current;
+		if (!tmuxCopyModeMayBeActiveRef.current) return Promise.resolve();
+		tmuxCopyModeMayBeActiveRef.current = false;
+		setScrolledIntoHistory(false);
+		const pending = api.request.exitCopyModeAllPanes({ taskId })
+			.then(() => undefined)
+			// Best effort — the pane may already have returned to live input.
+			.catch(() => undefined)
+			.finally(() => { copyModeExitRef.current = null; });
+		copyModeExitRef.current = pending;
+		return pending;
+	}, [setScrolledIntoHistory, taskId]);
 	const mouseGestureDraggedRef = useRef(false);
 	const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">(
 		() => (document.documentElement.dataset.theme as "dark" | "light") || "dark",
@@ -551,7 +644,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			// \x1b)B     = Designate G1 as US-ASCII
 			// \x1b[!p    = DECSTR (Soft Terminal Reset)
 			ws.send("\x0f\x1b(B\x1b)B\x1b[!p");
-			console.log("[TerminalView] Soft reset sent");
+			debugLog("terminal", "[TerminalView] Soft reset sent");
 		}
 
 		function handleHardReset() {
@@ -564,7 +657,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					term.reset();
 					term.renderer?.remeasureFont();
 				} catch { /* disposed */ }
-				console.log("[TerminalView] Hard reset: term.reset() + remeasureFont()");
+				debugLog("terminal", "[TerminalView] Hard reset: term.reset() + remeasureFont()");
 			}
 
 			if (ws?.readyState !== WebSocket.OPEN) return;
@@ -586,7 +679,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					}, 50);
 				} catch { /* disposed */ }
 			}
-			console.log("[TerminalView] Hard reset sent");
+			debugLog("terminal", "[TerminalView] Hard reset sent");
 		}
 
 		window.addEventListener("rpc:terminalSoftReset", handleSoftReset);
@@ -646,7 +739,11 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		let imeTerminatorCleanup: (() => void) | undefined;
 		let syncImeAnchor = () => {};
 		let linkUnderlines: FilePathUnderlinesHandle | null = null;
+		let osc8Hover: Osc8HoverHandle | null = null;
 		let filePathLinks: FilePathLinkProvider | null = null;
+		// URI capture for OSC 8 hyperlinks — the wasm terminal never exposes a
+		// link's URI back to JS, so it is remembered from the raw PTY stream.
+		const osc8Tracker = createOsc8Tracker();
 		let nativeSelectionClipboardCleanup: (() => void) | undefined;
 		const termSubs: Array<{ dispose(): void }> = [];
 		const diagnosticsId = `terminal-copy-${taskId}-${Math.random().toString(36).slice(2, 8)}`;
@@ -688,14 +785,14 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			log: logCopyEvent,
 		});
 
-		console.log("[TerminalView] useEffect fired", { ptyUrl, taskId: taskId.slice(0, 8) });
+		debugLog("terminal", "[TerminalView] useEffect fired", { ptyUrl, taskId: taskId.slice(0, 8) });
 
 		// Preload bundled font before creating the terminal.
 		// Canvas rendering doesn't trigger CSS @font-face loading, so the
 		// font must be ready before ghostty-web measures it for cell metrics.
-		const TERMINAL_FONT = "'JetBrainsMono Nerd Font Mono', 'SF Mono', 'Menlo', monospace";
-		document.fonts.load(`${TERMINAL_BASE_FONT_SIZE}px ${TERMINAL_FONT}`).then(() => {
-			console.log("[TerminalView] Font preloaded, starting setup");
+		const TERMINAL_FONT = terminalFontStack();
+		document.fonts.load(`${effectiveTerminalFontSize()}px ${TERMINAL_FONT}`).then(() => {
+			debugLog("terminal", "[TerminalView] Font preloaded, starting setup");
 			if (!disposed) setup();
 		}).catch(() => {
 			console.warn("[TerminalView] Font preload failed, starting setup with fallback");
@@ -711,23 +808,22 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				return;
 			}
 
-			console.log("[TerminalView] Creating ghostty-web Terminal instance...");
-			const zoomLevel = getEffectiveZoom();
+			debugLog("terminal", "[TerminalView] Creating ghostty-web Terminal instance...");
 			const term = new Terminal({
-				fontSize: Math.round(TERMINAL_BASE_FONT_SIZE * zoomLevel),
+				fontSize: scaledTerminalFontSize(),
 				fontFamily: TERMINAL_FONT,
 				cursorBlink: true,
 				cursorStyle: "bar",
 				theme: resolvedTheme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
 			});
 
-			console.log("[TerminalView] Terminal created, loading FitAddon...");
+			debugLog("terminal", "[TerminalView] Terminal created, loading FitAddon...");
 			fitAddon = new FitAddon();
 			fitAddon.proposeDimensions = proposeDimensionsWithoutScrollbarReserve.bind(fitAddon);
 			fitAddonRef.current = fitAddon;
 			term.loadAddon(fitAddon);
 
-			console.log("[TerminalView] Opening terminal in DOM...");
+			debugLog("terminal", "[TerminalView] Opening terminal in DOM...");
 			try {
 				term.open(containerRef.current);
 			} catch (err) {
@@ -739,7 +835,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				});
 				return;
 			}
-			console.log("[TerminalView] Terminal opened in DOM successfully");
+			debugLog("terminal", "[TerminalView] Terminal opened in DOM successfully");
 			const hiddenTextarea = term.textarea ?? containerRef.current.querySelector("textarea");
 			if (hiddenTextarea) {
 				hiddenTextarea.style.position = "absolute";
@@ -881,6 +977,32 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				onResolutionsChanged: () => linkUnderlines?.requestRedraw(),
 			});
 			term.registerLinkProvider(filePathLinks);
+			// OSC 8 hyperlinks (agents wrap markdown links in them). ghostty-web
+			// underlines them on hover by itself but cannot recover the URI from
+			// wasm, so this provider resolves it via the stream tracker.
+			const osc8Provider = createOsc8LinkProvider({
+				getLine: (y) => term.buffer.active.getLine(y) ?? undefined,
+				isRowWrapped: (y) => {
+					// ghostty-web reports every scrollback row as unwrapped; return
+					// "unknown" there so the provider still stitches scrolled links.
+					const scrollback = Math.max(0, term.buffer.active.length - term.rows);
+					if (y < scrollback) return undefined;
+					return term.buffer.active.getLine(y)?.isWrapped;
+				},
+				uriFor: osc8Tracker.uriFor,
+				cellFromEvent: (event) => cellFromMouseEvent(term, event),
+				onActivate: (uri) => {
+					void activateOsc8Uri(uri, { t: tRef.current, taskId, projectId });
+				},
+			});
+			term.registerLinkProvider(osc8Provider);
+			// Label and destination are independent in OSC 8 — show the resolved
+			// target on hover so a mismatch is visible before the click.
+			osc8Hover = installOsc8HoverTooltip({
+				term,
+				container: containerRef.current,
+				linkAt: osc8Provider.linkAt,
+			});
 			linkUnderlines = installFilePathUnderlines({
 				term,
 				container: containerRef.current,
@@ -1221,7 +1343,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 						return;
 					}
 					didInitialFit = true;
-					console.log("[TerminalView] Container has dimensions, fitting terminal", {
+					debugLog("terminal", "[TerminalView] Container has dimensions, fitting terminal", {
 						width: el.clientWidth,
 						height: el.clientHeight,
 					});
@@ -1244,7 +1366,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 								const seq = getShiftKeySequence(event);
 								if (seq) {
 									const hex = Array.from(seq, c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
-									console.log(`[ShiftKey] intercepted ${event.code} → sending ${seq.length}B: ${hex}`);
+									debugLog("terminal", `[ShiftKey] intercepted ${event.code} → sending ${seq.length}B: ${hex}`);
 									if (wsRef.current?.readyState === WebSocket.OPEN) {
 										wsRef.current.send(seq);
 									}
@@ -1270,8 +1392,22 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 								}
 							}));
 
+							// ghostty's own scrollback (native backend / tmux without mouse mode).
+							termSubs.push(term.onScroll(() => {
+								if (disposed) return;
+								try {
+									if (term.viewportY > 0) setScrolledIntoHistory(true);
+									else if (!tmuxCopyModeMayBeActiveRef.current) setScrolledIntoHistory(false);
+								} catch { /* disposed */ }
+							}));
+
 							// Expose terminal handle for external input (ExtraKeyBar, TerminalComposer)
 							onReady?.({
+								scrollToBottom: () => {
+									void exitCopyModeIfNeeded();
+									try { term.scrollToBottom(); } catch { /* disposed */ }
+									setScrolledIntoHistory(false);
+								},
 								claimWriter: () => {
 									if (wsRef.current?.readyState === WebSocket.OPEN) {
 										wsRef.current.send(claimMessage());
@@ -1284,9 +1420,16 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 								},
 								// ghostty's paste() wraps in \x1b[200~…\x1b[201~ only when the
 								// running app enabled DEC 2004 and routes through onData → WS.
-								paste: (data: string) => { try { term.paste(data); } catch { /* disposed */ } },
+								// Text typed while the pane sits in tmux copy-mode would be eaten as
+								// copy-mode keys, so a pending scroll-up is cleared first (async only
+								// when there is something to clear — the common path stays sync).
+								paste: (data: string) => {
+									const run = () => { try { term.paste(data); } catch { /* disposed */ } };
+									if (copyModePending()) void exitCopyModeIfNeeded().then(run);
+									else run();
+								},
 								submit: (data: string) => {
-									submitPastedText(data, {
+									const run = () => submitPastedText(data, {
 										paste: (value) => term.paste(value),
 										sendInput: (value) => {
 											if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1295,6 +1438,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 										},
 										hasBracketedPaste: () => term.hasBracketedPaste(),
 									});
+									if (copyModePending()) void exitCopyModeIfNeeded().then(run);
+									else run();
 								},
 								// In browser mode focus the hidden textarea directly: term.focus()
 								// lands on ghostty's container div, which never summons the OSK.
@@ -1307,7 +1452,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 								blur: () => { try { hiddenTextarea?.blur(); } catch { /* disposed */ } },
 							});
 
-							console.log("[TerminalView] Terminal fitted, connecting PTY...");
+							debugLog("terminal", "[TerminalView] Terminal fitted, connecting PTY...");
 							connectPty(term, fitAddon!);
 						} catch (err) {
 							console.error("[TerminalView] Post-layout setup FAILED:", err);
@@ -1405,7 +1550,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					const [col, row] = cellCoords(e);
 					sgrMouse(btn | altBit(e), col, row, false);
 					if (btn === 0 && mouseGestureDraggedRef.current) {
-						tmuxCopyModeMayBeActiveRef.current = true;
+						markTmuxCopyModeMayBeActive();
 					}
 				} catch { /* disposed */ }
 			}
@@ -1551,7 +1696,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					const lines = Math.trunc(scrollAccumulator / threshold);
 					if (lines !== 0) {
 						scrollAccumulator -= lines * threshold;
-						if (lines < 0) tmuxCopyModeMayBeActiveRef.current = true;
+						if (lines < 0) markTmuxCopyModeMayBeActive();
 						const direction: 1 | -1 = lines < 0 ? -1 : 1;
 						// Paced and sent as one write — an unpaced flick overruns the
 						// PTY's 1022-byte read window and TUIs paste the sliced tail
@@ -1695,6 +1840,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		 */
 		function writeToTerminal(data: string, fromSocket: boolean) {
 			if (disposed || !batchTerm) return;
+			// OSC 8 URIs are unrecoverable from the terminal after the write, so
+			// capture them from the raw stream (replays included) before filtering.
+			osc8Tracker.feed(data);
 			// The filter carries an incomplete CSI across calls, so chunking is safe.
 			const batch = themeFilter(data, resolvedThemeRef.current);
 			if (!batch) return;
@@ -1822,7 +1970,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				writeToTerminal("\x1bc", false);
 			}
 			const diagnosticPtyUrl = ptyUrl.replace(/([?&]token=)[^&]+/, "$1***");
-			console.log("[TerminalView] Creating WebSocket connection to", diagnosticPtyUrl);
+			debugLog("terminal", "[TerminalView] Creating WebSocket connection to", diagnosticPtyUrl);
 			let socket: WebSocket;
 			try {
 				socket = new WebSocket(ptyUrlWithSince(ptyUrl, nativeSeqRef.current));
@@ -1834,15 +1982,15 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			}
 			ws = socket;
 			wsRef.current = ws;
-			console.log("[TerminalView] WebSocket created, readyState:", ws.readyState);
+			debugLog("terminal", "[TerminalView] WebSocket created, readyState:", ws.readyState);
 
 			socket.onopen = () => {
 				if (socket !== ws) return;
-				console.log("[TerminalView] WebSocket OPEN");
+				debugLog("terminal", "[TerminalView] WebSocket OPEN");
 				if (disposed) return;
 				reconnectAttempt = 0;
 				const dims = fit.proposeDimensions();
-				console.log("[TerminalView] Proposed dimensions:", dims);
+				debugLog("terminal", "[TerminalView] Proposed dimensions:", dims);
 				if (dims) {
 					// See buildResizeDance() — row-nudge keeps text wrapping
 					// identical between the two paints. See decision 041.
@@ -1999,7 +2147,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		// setup() is called after font preload above — not here directly
 
 		return () => {
-			console.log("[TerminalView] Cleanup (unmount/re-render)", { taskId: taskId.slice(0, 8) });
+			debugLog("terminal", "[TerminalView] Cleanup (unmount/re-render)", { taskId: taskId.slice(0, 8) });
 			// term.dispose() and fitAddon.dispose() are synchronous, so a slow one blocks
 			// the renderer for its whole duration. A duration logged afterwards can only
 			// describe a cleanup that FINISHED, so a permanent hang would leave no trace
@@ -2012,7 +2160,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			// only evidence a permanent hang can produce. Console AND the durable sink:
 			// the console does not survive a restart, and the sink does not survive a
 			// dead bridge (decision 199).
-			console.debug("[TerminalView] cleanup started", { taskId: taskId.slice(0, 8) });
+			debugLog("terminal", "[TerminalView] cleanup started", { taskId: taskId.slice(0, 8) });
 			// info, not debug: prod/staging/canary run the logger at a minimum of info,
 			// so a debug line never reaches the file and the marker would not be durable.
 			logDiagnostic("terminal-dispose", "info", "cleanup started");
@@ -2048,8 +2196,11 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			imeAnchorCleanup?.();
 			linkUnderlines?.dispose();
 			linkUnderlines = null;
+			osc8Hover?.dispose();
+			osc8Hover = null;
 			filePathLinks?.dispose();
 			filePathLinks = null;
+			osc8Tracker.dispose();
 			nativeSelectionClipboardCleanup?.();
 			// Dispose terminal event subscriptions (onData, onResize) before
 			// closing the WebSocket or disposing the terminal to prevent
@@ -2088,7 +2239,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				termRef.current = null;
 			}
 			const disposeMs = Math.round(performance.now() - disposeStartedAt);
-			console.debug("[TerminalView] cleanup finished", { taskId: taskId.slice(0, 8), disposeMs });
+			debugLog("terminal", "[TerminalView] cleanup finished", { taskId: taskId.slice(0, 8), disposeMs });
 			logDiagnostic("terminal-dispose", "info", "cleanup finished", { disposeMs });
 			if (disposeMs >= TERMINAL_DISPOSE_BUDGET_MS) {
 				console.warn("[TerminalView] cleanup exceeded its budget", {
@@ -2227,6 +2378,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			if (matchesShortcut(e, "pane-close", ctx)) pane({ kind: "close" });
 			else if (matchesShortcut(e, "pane-split-vertical", ctx)) pane({ kind: "splitV" });
 			else if (matchesShortcut(e, "pane-split-horizontal", ctx)) pane({ kind: "splitH" });
+			else if (matchesShortcut(e, "pane-zoom", ctx)) pane({ kind: "zoom", mode: "toggle" });
+			else if (matchesShortcut(e, "pane-swap-next", ctx)) pane({ kind: "swapStep", step: "next" });
+			else if (matchesShortcut(e, "pane-swap-prev", ctx)) pane({ kind: "swapStep", step: "prev" });
 			else if (matchesShortcut(e, "tmux-new-window", ctx)) {
 				fire(() => void api.request.tmuxNewWindow({ taskId }).catch(() => {}));
 			}
@@ -2324,13 +2478,37 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			const term = termRef.current;
 			if (term) {
 				try {
-					term.options.fontSize = Math.round(TERMINAL_BASE_FONT_SIZE * (e as CustomEvent).detail);
+					term.options.fontSize = scaledTerminalFontSize((e as CustomEvent).detail);
 					fitAddonRef.current?.fit();
 				} catch { /* disposed */ }
 			}
 		}
 		window.addEventListener(ZOOM_CHANGED_EVENT, onZoomChanged);
 		return () => window.removeEventListener(ZOOM_CHANGED_EVENT, onZoomChanged);
+	}, []);
+
+	// Apply a Settings → Terminal font change live, on every open terminal. The font
+	// must be loaded before ghostty measures it, or the cell metrics come out of the
+	// fallback and the grid is wrong until the next reopen.
+	useEffect(() => {
+		function onFontChanged(e: Event) {
+			const { size, stack } = (e as CustomEvent<{ size: number; stack: string }>).detail;
+			const apply = () => {
+				const term = termRef.current;
+				if (!term) return;
+				try {
+					// Read the live stack, not the one this event carried: two quick picks
+					// race on `document.fonts.load`, and the slower load resolving last
+					// would otherwise re-apply the font the user already moved off.
+					term.options.fontFamily = terminalFontStack();
+					term.options.fontSize = scaledTerminalFontSize();
+					fitAddonRef.current?.fit();
+				} catch { /* disposed */ }
+			};
+			document.fonts.load(`${size}px ${stack}`).then(apply).catch(apply);
+		}
+		window.addEventListener(TERMINAL_FONT_CHANGED_EVENT, onFontChanged);
+		return () => window.removeEventListener(TERMINAL_FONT_CHANGED_EVENT, onFontChanged);
 	}, []);
 
 	// Apply the BiDi setting live: install or restore the visual-order view and
@@ -2521,12 +2699,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			mouseGestureDraggedRef.current = false;
 			return;
 		}
-		if (!tmuxCopyModeMayBeActiveRef.current) return;
-
-		tmuxCopyModeMayBeActiveRef.current = false;
-		api.request.exitCopyModeAllPanes({ taskId }).catch(() => {
-			// Best effort — the pane may already have returned to live input.
-		});
+		void exitCopyModeIfNeeded();
 	}
 
 	return (

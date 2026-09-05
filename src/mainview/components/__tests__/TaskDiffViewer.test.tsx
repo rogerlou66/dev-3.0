@@ -3689,6 +3689,27 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			expect(within(preview).getByTestId("markdown-document").querySelector("h1")?.textContent).toBe("Gone");
 		});
 
+		it("previews a modified .mmd file as the diagram, never as a rich prose diff", async () => {
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({
+				id: "docs/chart.mmd",
+				displayPath: "docs/chart.mmd",
+				oldPath: "docs/chart.mmd",
+				newPath: "docs/chart.mmd",
+				oldContent: "flowchart LR\nA --> B\n",
+				newContent: "flowchart LR\nA --> C\n",
+			}));
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			expect(screen.getByRole("button", { name: /toggle markdown preview for docs\/chart\.mmd/i }))
+				.toHaveAttribute("aria-pressed", "true");
+			// Diagram source has no prose blocks to colour, and the fenced diagram
+			// carries no per-line anchors for selection comments.
+			expect(within(preview).queryByTestId("markdown-rich-diff")).toBeNull();
+			const document = within(preview).getByTestId("markdown-document");
+			expect(document.querySelector("[data-md-line-start]")).toBeNull();
+		});
+
 		it("shows a placeholder when previewing an empty markdown file", async () => {
 			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({
 				status: "added",

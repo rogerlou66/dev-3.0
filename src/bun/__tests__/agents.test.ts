@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveAgentCommand, supportsResume, supportsPreAssignedSessionId, buildResumeCommand, skillInvocationPrefix, mergeMcpApproval, mergeWithDefaults, applyBinaryPathOverride, applyLayoutResync, migrateOldFormat, applyModelOverride, applyProviderModel, resolveLaunchConfig, claudeModelFamily, __setCodexProfileV2Override, type TemplateContext } from "../agents";
+import { resolveAgentCommand, supportsResume, supportsPreAssignedSessionId, buildResumeCommand, skillInvocationPrefix, mergeMcpApproval, mergeWithDefaults, applyBinaryPathOverride, applyLayoutResync, migrateOldFormat, applyModelOverride, applyProviderModel, resolveLaunchConfig, claudeModelFamily, claudeDefaultEnv, getDefaultEnvForAgent, __setCodexProfileV2Override, type TemplateContext } from "../agents";
 import type { AgentConfiguration, CodingAgent } from "../../shared/types";
 import { DEFAULT_AGENTS } from "../../shared/types";
 import { ENV_UNSET } from "../../shared/agent-accounts";
@@ -1108,9 +1108,32 @@ describe("mergeWithDefaults — preserves user-defined order", () => {
 		expect(mergedCodex.configurations.some((config) => interimIds.includes(config.id))).toBe(false);
 	});
 
+	it("upgrades the previous Codex default to Astra Medium and puts Astra first", () => {
+		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
+		const stored: CodingAgent[] = [{
+			...codex,
+			configurations: [
+				codex.configurations.find((config) => config.model === "gpt-5.6-sol")!,
+				{
+					id: "codex-default", name: "GPT-5.6 Luna Bypass [X-High] — Default",
+					model: "gpt-5.6-luna", version: 9,
+					additionalArgs: ["-c", 'model_reasoning_effort="xhigh"'],
+				},
+			],
+		}];
+		const updated = applyLayoutResync(mergeWithDefaults(stored))
+			.find((agent) => agent.id === "builtin-codex")!;
+		expect(updated.configurations[0].id).toBe(updated.defaultConfigId);
+		expect(updated.configurations[0].model).toBe("gpt-6-astra");
+		expect(updated.configurations[0].additionalArgs).toContain('model_reasoning_effort="medium"');
+		expect(updated.configurations.find((config) => config.id === "codex-5.6-luna-xhigh-bypass")?.model)
+			.toBe("gpt-5.6-luna");
+	});
+
 	it("ships canonical model labels on every Codex preset", () => {
 		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
 		const expectedLabels: Record<string, string> = {
+			"gpt-6-astra": "GPT-6 Astra",
 			"gpt-5.6-sol": "GPT-5.6 Sol",
 			"gpt-5.6-terra": "GPT-5.6 Terra",
 			"gpt-5.6-luna": "GPT-5.6 Luna",
@@ -1399,6 +1422,31 @@ describe("claudeModelFamily", () => {
 		expect(claudeModelFamily("claude-sonnet-5")).toBe("sonnet");
 		expect(claudeModelFamily("claude-haiku-4-5")).toBe("haiku");
 		expect(claudeModelFamily("claude-fable-5")).toBe("fable");
+		expect(claudeModelFamily("claude-fable-5-1[1m]")).toBe("fable");
 		expect(claudeModelFamily("openrouter/deepseek-v4")).toBeNull();
+	});
+});
+
+describe("claudeDefaultEnv — Claude's bypass guard under uid 0", () => {
+	it("declares the sandbox when running as root on a non-Windows box", () => {
+		expect(claudeDefaultEnv(0, "linux").IS_SANDBOX).toBe("1");
+	});
+
+	it("stays out of the way for an ordinary user", () => {
+		expect(claudeDefaultEnv(501, "linux").IS_SANDBOX).toBeUndefined();
+		expect(claudeDefaultEnv(0, "win32").IS_SANDBOX).toBeUndefined();
+		expect(claudeDefaultEnv(undefined, "linux").IS_SANDBOX).toBeUndefined();
+	});
+
+	it("keeps the other Claude defaults in every case", () => {
+		for (const env of [claudeDefaultEnv(0, "linux"), claudeDefaultEnv(501, "darwin")]) {
+			expect(env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS).toBe("1");
+			expect(env.CLAUDE_CODE_NO_FLICKER).toBe("1");
+		}
+	});
+
+	it("reaches a Claude launch's env, and only a Claude one", () => {
+		expect(getDefaultEnvForAgent(makeAgent())).toEqual(claudeDefaultEnv());
+		expect(getDefaultEnvForAgent(makeAgent({ baseCommand: "codex" }))).toEqual({});
 	});
 });

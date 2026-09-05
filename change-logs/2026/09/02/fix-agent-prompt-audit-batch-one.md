@@ -1,0 +1,3 @@
+Short: Clearer coordinator and review prompts
+
+The coordinator preamble is regrouped into five headed blocks (role, reporting, relaying, permissions, the board block), gains a template for briefing child tasks and treats a child's "done" as a claim until the artefact is seen, and no longer assumes the user's gender. The PR-review preamble ranks findings as blocker / worth fixing / nitpick, keeps the review off GitHub and records it with `dev3 note add`; the AI-review column prompt asks for the type-check and tests before committing a fix; and the Claude `dev3` skill description stops demanding a mandatory invoke when the protocol is already in the system prompt.

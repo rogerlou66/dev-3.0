@@ -10,8 +10,10 @@ import * as portPool from "../port-pool";
 import * as repoConfig from "../repo-config";
 import { buildProcessTree, clearDevServerSummaryForTask, clearPortDataForTask, collectDescendants, collectTaskPids, findPortHolders, getLsofOutput, getPortsForTask, getSessionPanePids, parseLsofOutput, scanTaskPorts, schedulePortScanSoon, waitForPortsFree } from "../port-scanner";
 import { classifyAgainstStartSnapshot, clearDevServerStart, mergePortInfos, recordDevServerStart } from "../dev-server-ports";
+import { clearDevServerEnv, readDevServerEnv, saveDevServerEnv } from "../dev-server-env-store";
+import { sanitizeDevServerEnv } from "../../shared/dev-server-env";
 import { getPidCwd, terminatePidsVerified } from "../process-reaper";
-import { getResourceUsage } from "../resource-monitor";
+import { boostResourceMonitor, clearResourceMonitorBoost, getResourceUsage } from "../resource-monitor";
 import { throughputSnapshot } from "../pty-throughput";
 import { loadSettings, recordFavoriteUsages } from "../settings";
 import { getUserShell } from "../shell-env";
@@ -58,6 +60,8 @@ import {
 import { setSplitRatio, splitCreatedBySplitting } from "../../shared/split-tree";
 import { deliverAgentPrompt } from "../agent-prompt-delivery";
 import { agentPromptMayHaveLanded, type AgentPromptDelivery } from "../../shared/agent-prompt-delivery";
+import { handoffPrompt, prepareTaskHandoff, previewTaskHandoff } from "../conversation-handoff";
+import type { HandoffPreview, SpawnAgentResult } from "../../shared/conversation-handoff-model";
 import {
 	auxPaneAlive,
 	auxPaneTitle,
@@ -71,7 +75,7 @@ import {
 	type AuxPaneHandle,
 	type AuxPanePlacement,
 } from "../task-aux-panes";
-import { getPushMessage, isActive, buildAgentEnv, buildAgentRetryWrapper, buildCmdScript, buildSetupRerunScript, buildSetupStartupWrapper, buildScriptRunnerCommand, buildTaskLifecycleEnv, generatedScriptLaunch, generatedScriptName, log, resolveBinaryPath, writeLaunchScript } from "./shared-pure";
+import { getPushMessage, isActive, AGENT_ENV_DEFAULTS, buildAgentEnv, buildAgentRetryWrapper, buildCmdScript, buildSetupRerunScript, buildSetupStartupWrapper, buildScriptRunnerCommand, buildTaskLifecycleEnv, generatedScriptLaunch, generatedScriptName, log, resolveBinaryPath, writeLaunchScript } from "./shared-pure";
 import { assertPosixLaunchDialect, launchDialect } from "../../shared/platform-launch";
 import { buildDevServerScript } from "../dev-server-script";
 import { resolveOperationalProjectConfig } from "./settings-config";
@@ -388,6 +392,7 @@ async function buildDevServerStatus(task: Task, projectId: string, hasDevScript:
 			devPorts: [],
 			publishedPorts: [],
 			portConflicts: [],
+			extraEnvKeys: Object.keys(readDevServerEnv(task.id)).sort(),
 			tmuxError: err.message,
 		};
 	}
@@ -455,6 +460,7 @@ async function buildDevServerStatus(task: Task, projectId: string, hasDevScript:
 		devPorts,
 		publishedPorts,
 		portConflicts,
+		extraEnvKeys: Object.keys(readDevServerEnv(task.id)).sort(),
 		resourceUsage,
 	};
 }
@@ -722,6 +728,13 @@ export async function launchTaskPty(
 		if (!skipSessionPersist) {
 			const effectiveSessionId = resume ? sessionId
 				: (agents.supportsPreAssignedSessionId(resolvedBaseCmd, resolvedAgentFamily) ? freshSessionId : null);
+			// This write replaces pane[0] wholesale, so an origin store the resolver
+			// still needs has to be carried across it. It belongs to one specific id:
+			// a substituted id was found in this worktree's own store, so it drops.
+			const priorMain = task.sessionState?.panes?.[0];
+			const carriedOriginCwd = resume && effectiveSessionId && effectiveSessionId === priorMain?.sessionId
+				? priorMain.sessionOriginCwd ?? undefined
+				: undefined;
 			const paneEntry = {
 				agentCmd: resolvedBaseCmd,
 				sessionId: effectiveSessionId ?? null,
@@ -729,6 +742,7 @@ export async function launchTaskPty(
 				configId: configId ?? task.configId,
 				accountId: task.accountId,
 				agentFamily: resolvedAgentFamily,
+				sessionOriginCwd: carriedOriginCwd,
 			};
 			mainPaneEntry = paneEntry;
 			const sessionState = { panes: [paneEntry] };
@@ -755,10 +769,11 @@ export async function launchTaskPty(
 	// below: a git-ignored hook (e.g. installed by the b44 CLI into
 	// .dev3/config.local.json) only exists at the project root, so the script
 	// command must be resolvable as "$DEV3_PROJECT_PATH/.dev3/<hook>.sh".
-	// Project env (Project Settings / .dev3 config) first — overridable by
-	// lifecycle DEV3_* vars and per-agent-config env.
+	// dev3's own defaults first, then project env (Project Settings / .dev3
+	// config) — overridable by lifecycle DEV3_* vars and per-agent-config env.
 	const projectEnv = await repoConfig.resolveProjectEnv(project, worktreePath, { foreignCode: task.foreignCode });
 	const env = {
+		...AGENT_ENV_DEFAULTS,
 		...projectEnv,
 		...buildTaskLifecycleEnv(project, task, worktreePath, opts?.branchName),
 		...buildAgentEnv(extraEnv, task.id),
@@ -1023,6 +1038,7 @@ export async function launchColumnAgent(
 	});
 
 	const env = {
+		...AGENT_ENV_DEFAULTS,
 		...(await repoConfig.resolveProjectEnv(project, worktreePath, { foreignCode: task.foreignCode })),
 		...buildAgentEnv(extraEnv, task.id),
 		...ensureArtifactTemplateEnv(project, task, worktreePath),
@@ -1066,10 +1082,17 @@ export function cleanupTaskTmuxState(taskId: string): void {
 	devViewerPaneIds.delete(taskId);
 }
 
-export async function runDevServer(params: { taskId: string; projectId: string; opId?: string }): Promise<DevServerStatus> {
+/**
+ * `env` is the caller's own extra environment (`dev3 dev-server start --env
+ * KEY=VALUE`). Absent means "no extra env for this run" and CLEARS whatever the
+ * previous run stored — a start defines its configuration whole. Only
+ * `restartDevServer` carries the previous set forward.
+ */
+export async function runDevServer(params: { taskId: string; projectId: string; opId?: string; env?: Record<string, string> }): Promise<DevServerStatus> {
 	// Echo the renderer's correlation id so a click that never reached a handler is
 	// distinguishable from one that did (seq 1407).
-	log.info("→ runDevServer", params);
+	// Values redacted: an extra env pair can carry a secret and this log is a file.
+	log.info("→ runDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined });
 	try {
 		const project = await data.getProject(params.projectId);
 		const task = await data.getTask(project, params.taskId);
@@ -1077,6 +1100,11 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 
 		if (!resolved.devScript.trim()) throw new Error("No dev script configured");
 		if (!task.worktreePath) throw new Error("Task has no worktree");
+
+		// Never trust the caller: `devServer.start` is reachable from the CLI, the
+		// renderer, and any other socket client, and only the CLI validates.
+		const callerEnv = sanitizeDevServerEnv(params.env);
+		saveDevServerEnv(task.id, callerEnv);
 
 		const native = taskTerminalBackendIdentity(task) === "native";
 		const devSession = devServerSessionName(task.id);
@@ -1138,6 +1166,12 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 			devScript: resolved.devScript,
 			envGroups: [
 				resolved.env ?? {},
+				// The caller's own env, so it can override a project `env` entry it
+				// disagrees with — and no more than that. It sits BEFORE the two groups
+				// below deliberately: neither the task's identity nor its assigned ports
+				// may be moved from outside, or `--wait` polls a port the server was
+				// told not to bind.
+				callerEnv,
 				// Same workspace env the setup/cleanup hooks get, so a devScript can
 				// reference root-resolved hooks ("$DEV3_PROJECT_PATH/...") too.
 				buildTaskLifecycleEnv(project, task, task.worktreePath),
@@ -1283,6 +1317,9 @@ export async function stopDevServer(params: { taskId: string; projectId: string;
 		const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
 		const taskSession = taskSessionName(task.id);
 		const native = taskTerminalBackendIdentity(task) === "native";
+		// The run is over, so its extra env is too — a later plain `start` must not
+		// silently inherit it. `restartDevServer` reads the store before it calls us.
+		clearDevServerEnv(task.id);
 		// The pane border only exists to title the tmux viewer split.
 		const clearPaneBorder = () =>
 			native
@@ -1325,8 +1362,14 @@ export async function stopDevServer(params: { taskId: string; projectId: string;
 // tearing down, avoiding redraw glitches in the viewer pane.
 const DEV_SERVER_RESTART_DELAY_MS = 250;
 
-export async function restartDevServer(params: { taskId: string; projectId: string }): Promise<DevServerStatus> {
-	log.info("→ restartDevServer", params);
+/**
+ * `env` replaces the extra env of the run being restarted; omitting it REUSES
+ * that run's env. This is what makes the UI's Restart button (and a bare `dev3
+ * dev-server restart`) come back on the same configuration instead of quietly
+ * dropping to the project defaults.
+ */
+export async function restartDevServer(params: { taskId: string; projectId: string; env?: Record<string, string> }): Promise<DevServerStatus> {
+	log.info("→ restartDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined });
 	if (isSelfHostedByTask(params.taskId)) {
 		// A self-hosted instance cannot outlive the teardown a restart requires —
 		// the start half would never run (this was the "restart left the server
@@ -1339,9 +1382,12 @@ export async function restartDevServer(params: { taskId: string; projectId: stri
 			+ "\"dev3 dev-server stop\" followed by \"dev3 dev-server start\".",
 		);
 	}
+	// Read before the stop: `stopDevServer` clears the store, so a bare restart
+	// must capture the previous run's env first.
+	const env = params.env ?? readDevServerEnv(params.taskId);
 	await stopDevServer(params);
 	await new Promise((resolve) => setTimeout(resolve, DEV_SERVER_RESTART_DELAY_MS));
-	const status = await runDevServer(params);
+	const status = await runDevServer({ ...params, env });
 	log.info("← restartDevServer done");
 	return status;
 }
@@ -1629,6 +1675,7 @@ function resolveResumeTarget(task: Task, pane: PaneSessionEntry, label: string):
 		pane.sessionId,
 		undefined,
 		pane.agentFamily ?? undefined,
+		pane.sessionOriginCwd,
 	);
 	if (target.substituted) {
 		log.warn("Stored session id has no transcript — resuming the newest conversation instead", {
@@ -2051,6 +2098,16 @@ async function listTmuxSessions(): Promise<TmuxSessionInfo[]> {
 	sessions.sort((a, b) => b.createdAt - a.createdAt);
 	log.debug("← listTmuxSessions", { count: sessions.length });
 	return sessions;
+}
+
+/**
+ * Renewed on a heartbeat while the tmux sessions popover is open, cleared when
+ * it closes. See the boost's own TTL — this handler never has to be trusted to
+ * send the `false`.
+ */
+async function setResourceMonitorBoost(params: { active: boolean }): Promise<void> {
+	if (params.active) boostResourceMonitor();
+	else clearResourceMonitorBoost();
 }
 
 async function killTmuxSession(params: { sessionName: string }): Promise<void> {
@@ -2490,6 +2547,23 @@ async function tmuxAltClickMoveCursor(params: { taskId: string; col: number; row
 	return { moved: true };
 }
 
+/**
+ * Every tmux session whose panes a terminal key owns: the session itself, plus
+ * the task's detached dev-server sibling (the window users most often scroll).
+ * Registry-aware, so a quick shell resolves to its own `dev3-pt-<id>` instead of
+ * a task name that cannot exist — asking `tmuxSessionExists` here reported "no
+ * session" for every quick shell and made copy-mode invisible there.
+ */
+async function copyModeSessions(key: string, socket: string): Promise<string[]> {
+	const found: string[] = [];
+	const own = pty.getSessionTmuxName(key);
+	if (await tmux.hasSession(own, { socket })) found.push(own);
+	if (pty.isProjectSessionKey(key)) return found;
+	const devSession = devServerSessionName(key);
+	if (await tmux.hasSession(devSession, { socket })) found.push(devSession);
+	return found;
+}
+
 async function exitCopyModeInSession(socket: string, tmuxSession: string): Promise<number> {
 	let panesInMode: string[];
 	try {
@@ -2507,22 +2581,30 @@ async function exitCopyModeInSession(socket: string, tmuxSession: string): Promi
 	return panesInMode.length;
 }
 
+/**
+ * Is any pane of the task's tmux session still in copy-mode? The touch
+ * scroll-to-latest button polls this while it believes the pane is scrolled
+ * into history: tmux leaves copy-mode on its own when a swipe reaches the
+ * bottom, and the renderer has no other way to notice.
+ */
+async function tmuxPanesInMode(params: { taskId: string }): Promise<{ inMode: boolean }> {
+	const socket = pty.getSessionSocket(params.taskId);
+	for (const session of await copyModeSessions(params.taskId, socket)) {
+		try {
+			const rows = await tmux.listPanes(PANE_IN_MODE_FORMAT, { target: session, scope: "session", socket });
+			if (rows.some((row) => row.paneId && row.inMode)) return { inMode: true };
+		} catch (err) {
+			if (!(err instanceof TmuxError)) throw err;
+		}
+	}
+	return { inMode: false };
+}
+
 async function exitCopyModeAllPanes(params: { taskId: string }): Promise<{ panesExited: number }> {
 	const socket = pty.getSessionSocket(params.taskId);
-	const taskSession = pty.getSessionTmuxName(params.taskId);
-	const devSession = devServerSessionName(params.taskId);
-
-	// dev-server lives in a separate tmux session (dev3-dev-<id>) — the user's
-	// scroll-mode is typically there, not in the agent session. Hit both. Copy
-	// mode is a tmux concept, so a native task has neither session to visit and
-	// this whole handler is a no-op for it.
-	const sessions: string[] = [];
-	if (await pty.tmuxSessionExists(params.taskId, socket)) {
-		sessions.push(taskSession);
-	}
-	if (await tmux.hasSession(devSession, { socket })) {
-		sessions.push(devSession);
-	}
+	// Copy mode is a tmux concept, so a native task owns no session here and this
+	// whole handler is a no-op for it.
+	const sessions = await copyModeSessions(params.taskId, socket);
 
 	let total = 0;
 	for (const session of sessions) {
@@ -2612,8 +2694,16 @@ async function tmuxSearchCancel(params: { taskId: string; paneId: string }): Pro
 	await tmux.exitCopyMode(params.paneId, { socket, bestEffort: true });
 }
 
-async function spawnAgentInTask(params: { taskId: string; projectId: string; agentId: string | null; configId: string | null; accountId?: string | null }): Promise<void> {
-	log.info("→ spawnAgentInTask", { taskId: params.taskId.slice(0, 8), agentId: params.agentId, configId: params.configId });
+async function spawnAgentInTask(params: {
+	taskId: string;
+	projectId: string;
+	agentId: string | null;
+	configId: string | null;
+	accountId?: string | null;
+	/** Hand the new agent a retelling of this task's newest conversation. */
+	handoff?: boolean;
+}): Promise<SpawnAgentResult> {
+	log.info("→ spawnAgentInTask", { taskId: params.taskId.slice(0, 8), agentId: params.agentId, configId: params.configId, handoff: params.handoff === true });
 
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
@@ -2622,9 +2712,22 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 		throw new Error("Task has no worktree — cannot spawn agent");
 	}
 
+	// Written BEFORE the split on purpose: a conversation that cannot be retold
+	// must fail with no pane opened, rather than leave a bare agent standing where
+	// the user asked for a takeover.
+	const handoff = params.handoff ? await prepareTaskHandoff(task) : null;
+	if (params.handoff && !handoff) {
+		throw new Error("Nothing to hand over: no parseable agent transcript has been written for this task yet.");
+	}
+
+	// The pointer rides the new agent's own command line, the way a task's first
+	// launch carries its description. It used to be typed into the pane afterwards
+	// and held until the pane went quiet — but the hold is deferred by ANY human
+	// keystroke in the task, and the user is invariably still typing in the pane he
+	// spawned this from, so the pointer sat there until he pressed Enter (seq 1775).
 	const ctx: agents.TemplateContext = {
 		taskTitle: "",
-		taskDescription: "",
+		taskDescription: handoff ? handoffPrompt(handoff) : "",
 		projectName: project.name,
 		projectPath: project.path,
 		worktreePath: task.worktreePath,
@@ -2654,7 +2757,9 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 		const resolved = await agents.resolveCommandForProject(
 			project,
 			task.title,
-			task.description,
+			// A takeover replaces the brief: the retelling already carries the original
+			// request, so re-launching on the raw description would start the work twice.
+			handoff ? ctx.taskDescription : task.description,
 			task.worktreePath,
 			undefined,
 			cmdOptions,
@@ -2677,6 +2782,7 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 	});
 
 	const env: Record<string, string> = {
+		...AGENT_ENV_DEFAULTS,
 		...(await repoConfig.resolveProjectEnv(project, task.worktreePath, { foreignCode: task.foreignCode })),
 		...buildAgentEnv(extraEnv, task.id),
 		...ensureArtifactTemplateEnv(project, task, task.worktreePath),
@@ -2755,7 +2861,33 @@ async function spawnAgentInTask(params: { taskId: string; projectId: string; age
 	// Bump the favorite usage counter if this launched combo is starred (best-effort).
 	void recordFavoriteUsages([{ agentId: launchedAgentId, configId: launchedConfigId }]);
 
+	let handoffResult: SpawnAgentResult["handoff"] = null;
+	if (handoff) {
+		// Nothing is typed and nothing waits: the pointer went in as the launch
+		// prompt above, so it is the agent's first turn the moment it boots. Typing
+		// into the pane is what could not be timed — the launch cannot miss.
+		const delivery: AgentPromptDelivery = { status: "delivered", reason: "launch-prompt" };
+		handoffResult = { path: handoff.path, chars: handoff.chars, source: handoff.source, delivery };
+		log.info("Handed the conversation to the spawned agent", {
+			taskId: params.taskId.slice(0, 8),
+			chars: handoff.chars,
+			delivery: delivery.status,
+		});
+	}
+
 	log.info("← spawnAgentInTask done", { taskId: params.taskId.slice(0, 8) });
+	return { handoff: handoffResult };
+}
+
+/**
+ * What a handoff from this task would retell. Answered from the transcripts on
+ * disk, so a task whose agent never wrote one gets a plain null and the picker
+ * offers nothing rather than an option that would fail on click.
+ */
+async function previewTaskHandoffHandler(params: { taskId: string; projectId: string }): Promise<HandoffPreview | null> {
+	const project = await data.getProject(params.projectId);
+	const task = await data.getTask(project, params.taskId);
+	return previewTaskHandoff(task);
 }
 
 /** How long the hunter agents get to boot before their prompt is typed in. */
@@ -2871,6 +3003,7 @@ async function spawnSingleBugHunterPane(opts: {
 	});
 
 	const env: Record<string, string> = {
+		...AGENT_ENV_DEFAULTS,
 		...(await repoConfig.resolveProjectEnv(opts.project, opts.worktreePath, { foreignCode: opts.task.foreignCode })),
 		...buildAgentEnv(extraEnv, opts.task.id),
 		...ensureArtifactTemplateEnv(opts.project, opts.task, opts.worktreePath),
@@ -3279,15 +3412,18 @@ export const tmuxPtyHandlers = {
 	getTaskPorts,
 	getPortAllocations,
 	listTmuxSessions,
+	setResourceMonitorBoost,
 	killTmuxSession,
 	tmuxLayout,
 	tmuxWindowNavigate,
 	tmuxAltClickMoveCursor,
 	exitCopyModeAllPanes,
+	tmuxPanesInMode,
 	tmuxSearchUpdate,
 	tmuxSearchStep,
 	tmuxSearchCancel,
 	spawnAgentInTask,
+	previewTaskHandoff: previewTaskHandoffHandler,
 	spawnBugHuntersInTask,
 	resumeTask,
 	restartTask,

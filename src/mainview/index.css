@@ -20,7 +20,23 @@ html {
 	font-size: 16px !important;
 }
 
-/* ---- Bundled terminal font (JetBrainsMono Nerd Font Mono) ---- */
+/* ---- Bundled terminal fonts ----
+   The 15 most-installed Nerd Fonts, Regular weight only; bold is synthesized.
+   Only the reference font ships a real Bold, because `font-mono` uses it for app
+   chrome too. Every Nerd Font face is the fixed-advance `NerdFontMono` variant —
+   see terminal-font.ts for why, and for the per-font width normalization.
+
+   Plus unpatched JetBrains Mono, the only non-Nerd face here: the Nerd Font
+   variant carries thousands of extra icon glyphs the upstream family does not,
+   and someone who wants the plain typeface had no way to ask for it. Its metrics
+   are identical to the patched face (issue #1625). */
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('./assets/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
 @font-face {
 	font-family: 'JetBrainsMono Nerd Font Mono';
 	src: url('./assets/fonts/JetBrainsMonoNerdFontMono-Regular.woff2') format('woff2');
@@ -36,11 +52,117 @@ html {
 	font-display: swap;
 }
 
+@font-face {
+	font-family: 'MesloLGS Nerd Font Mono';
+	src: url('./assets/fonts/MesloLGSNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Hack Nerd Font Mono';
+	src: url('./assets/fonts/HackNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'FiraCode Nerd Font Mono';
+	src: url('./assets/fonts/FiraCodeNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'BlexMono Nerd Font Mono';
+	src: url('./assets/fonts/BlexMonoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'SauceCodePro Nerd Font Mono';
+	src: url('./assets/fonts/SauceCodeProNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: '0xProto Nerd Font Mono';
+	src: url('./assets/fonts/0xProtoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'CaskaydiaMono Nerd Font Mono';
+	src: url('./assets/fonts/CaskaydiaMonoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'DroidSansM Nerd Font Mono';
+	src: url('./assets/fonts/DroidSansMNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'GoMono Nerd Font Mono';
+	src: url('./assets/fonts/GoMonoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'ComicShannsMono Nerd Font Mono';
+	src: url('./assets/fonts/ComicShannsMonoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'CaskaydiaCove Nerd Font Mono';
+	src: url('./assets/fonts/CaskaydiaCoveNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Iosevka Nerd Font Mono';
+	src: url('./assets/fonts/IosevkaNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IosevkaTerm Nerd Font Mono';
+	src: url('./assets/fonts/IosevkaTermNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'FiraMono Nerd Font Mono';
+	src: url('./assets/fonts/FiraMonoNerdFontMono-Regular.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
 /* ---- Theme tokens (space-separated RGB for Tailwind alpha support) ----
    Both themes are authored in OKLCH and emitted as sRGB: surfaces share one
    hue with a monotonic lightness ramp, the text ladder is spaced by APCA
    contrast, and hover tokens move in the direction their role needs
    (fills deepen, text lifts on dark). See DESIGN.md for the measured table. */
+/* The monospace stack every `font-mono` utility resolves to. terminal-font.ts
+   rewrites it when the user picks a font; this default is what the app has always
+   rendered, so the first paint never flashes an unstyled fallback. */
+:root {
+	--dev3-mono-stack: 'JetBrainsMono Nerd Font Mono', 'SF Mono', 'Menlo', monospace;
+}
+
 :root,
 [data-theme="dark"] {
 	/* ---- Surfaces (opaque fallbacks, used outside kanban) ----
@@ -722,10 +844,9 @@ html[data-image-viewer="open"] [data-terminal="true"] {
 	visibility: hidden;
 }
 
-/* Fullscreen HTML artifacts use the same WKWebView overlay workaround. In the
-   docked split the terminal stays visible; only fullscreen hides its WebGL
-   plane so it cannot paint over the artifact iframe. */
-html[data-artifact-viewer="fullscreen"] [data-terminal="true"] {
+/* The HTML artifact lightbox is the same modal card over the same scrim, so it
+   needs the identical workaround — whether or not it is expanded fullscreen. */
+html[data-artifact-viewer="open"] [data-terminal="true"] {
 	visibility: hidden;
 }
 

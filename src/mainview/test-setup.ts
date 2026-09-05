@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { createElement } from "react";
 import { _resetPendingToastsForTests } from "./toast";
+import { storageIsWritable } from "./utils/storage";
 
 // Toasts raised without a mounted host are queued for the next host (see toast.tsx),
 // so drop the queue between tests instead of leaking them into the next render.
@@ -16,12 +17,17 @@ afterEach(() => {
 // desktop keymap (e.g. ⌘Q, zoom) set the flag themselves AND mock rpc — see
 // App.test.tsx / zoom.test.ts / KeyboardShortcutsModal.test.tsx.
 
-// Node 26 exposes an experimental global `localStorage` that is undefined unless
-// --localstorage-file is passed, and it shadows happy-dom's on both globalThis
-// and window (sessionStorage is unaffected). Substitute an in-memory Storage —
-// setupFiles run per test file, so each file gets a fresh, isolated store, which
-// is the isolation happy-dom's own storage provided.
-if (typeof globalThis.localStorage === "undefined") {
+// Node's experimental localStorage may shadow happy-dom with an unusable object.
+// A write/read/delete probe distinguishes it; each setup file gets a fresh store.
+function localStorageWorks(): boolean {
+	try {
+		return storageIsWritable(globalThis.localStorage, "__dev3_test_setup_probe__");
+	} catch {
+		return false;
+	}
+}
+
+if (!localStorageWorks()) {
 	const store = new Map<string, string>();
 	const storage: Storage = {
 		get length() {
@@ -110,3 +116,96 @@ process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
 	_suppressAbortErrors = false;
 	return _origStderrWrite(chunk, ...args as []);
 }) as typeof process.stderr.write;
+
+// Collapse React's act(...) warnings into one tallied line per test file.
+//
+// The warning itself is worth keeping — a stray update means a test asserted before
+// its component settled, which is how flakes are born. What is not worth keeping is
+// React re-printing the same seven-line boilerplate for every single occurrence: one
+// renderer run emitted 680 of them, ~4.7k lines, which buried everything else in the
+// output. The tally below names every offending component and how often it fired, so
+// nothing is hidden — it is the same signal at 1% of the volume.
+const _actTally = new Map<string, number>();
+const _origConsoleError = console.error.bind(console);
+
+/** Component name lands either inlined or as React's `%s` argument. */
+export function _actOffenderForTests(args: unknown[]): string | null {
+	const format = typeof args[0] === "string" ? args[0] : "";
+	if (/^A suspended resource finished loading inside a test/.test(format)) {
+		return "<suspended resource>";
+	}
+	// A stray update that landed after the test's act environment was torn down.
+	if (/^The current testing environment is not configured to support act/.test(format)) {
+		return "<after teardown>";
+	}
+	const inlined = /^An update to (\S+) inside a test was not wrapped in act/.exec(format);
+	if (!inlined) return null;
+	return inlined[1] === "%s" ? String(args[1] ?? "unknown") : inlined[1];
+}
+
+console.error = ((...args: unknown[]) => {
+	const offender = _actOffenderForTests(args);
+	if (offender === null) {
+		_origConsoleError(...args);
+		return;
+	}
+	_actTally.set(offender, (_actTally.get(offender) ?? 0) + 1);
+}) as typeof console.error;
+
+// Recharts measures its container and warns when it comes back 0×0. happy-dom has no
+// layout engine, so every chart in every test is 0×0 and the warning can never mean
+// anything here — unlike in a browser, where it is a real finding.
+const _origConsoleWarn = console.warn.bind(console);
+
+export function _isUnlayoutableChartWarning(args: unknown[]): boolean {
+	const first = typeof args[0] === "string" ? args[0] : "";
+	return /The width\(0\) and height\(0\) of chart should be greater than 0/.test(first);
+}
+
+console.warn = ((...args: unknown[]) => {
+	if (_isUnlayoutableChartWarning(args)) return;
+	_origConsoleWarn(...args);
+}) as typeof console.warn;
+
+// No unit test makes a real HTTP request. Two separate leaks were doing exactly that:
+//
+//  - analytics.ts asks telemetryEnabled(), which is "on" unless something opts out, and
+//    nothing does under vitest — so every renderer run fired ~24 Google Analytics hits
+//    and an ipify lookup from the dev machine and from every CI runner, and printed
+//    happy-dom's CORS refusal for each.
+//  - importing rpc.ts is enough to POST /rpc, which happy-dom resolves against its
+//    default origin localhost:3000 where nothing listens — 15 raw ECONNREFUSED dumps
+//    per run, from files that never meant to talk to a server.
+//
+// No suite in src/mainview starts a server of its own (no Bun.serve, no createServer),
+// so blocking every http(s) call costs nothing and a test that needs one mocks it.
+const _origFetch = globalThis.fetch;
+
+export function _isBlockedTestUrl(input: unknown): boolean {
+	const raw = typeof input === "string"
+		? input
+		: input instanceof URL
+			? input.href
+			: typeof (input as { url?: unknown })?.url === "string"
+				? (input as { url: string }).url
+				: "";
+	// Relative URLs count: happy-dom resolves them against its own origin and dials it.
+	return /^https?:/i.test(raw) || raw.startsWith("/");
+}
+
+if (typeof _origFetch === "function") {
+	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+		if (_isBlockedTestUrl(input)) {
+			return Promise.reject(new Error("network blocked in tests"));
+		}
+		return _origFetch(input, init);
+	}) as typeof fetch;
+}
+
+
+afterAll(() => {
+	if (_actTally.size === 0) return;
+	const tally = [..._actTally].map(([name, count]) => `${name}×${count}`).join(", ");
+	_actTally.clear();
+	_origConsoleError(`act(): updates outside act(...) — ${tally}`);
+});

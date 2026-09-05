@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseClaudeTranscript, parseCodexTranscript } from "../../shared/conversation-parsers";
 import { normalizeToolCall, describeToolCall, filesTouched } from "../../shared/conversation-tools";
-import { renderHandoff } from "../../shared/conversation-render";
+import { HANDOFF_FILE_LIMIT, renderHandoff, renderHandoffFile, renderImportedDescription } from "../../shared/conversation-render";
 import { toolCallsOf } from "../../shared/conversation-model";
 
 function jsonl(...records: unknown[]): string {
@@ -251,5 +251,119 @@ describe("renderHandoff", () => {
 			"/r.jsonl",
 		);
 		expect(renderHandoff(codex)).toContain("encrypted");
+	});
+});
+
+describe("renderImportedDescription", () => {
+	function conversationWith(turns: number, promptLength = 40): string {
+		const records: unknown[] = [{ type: "ai-title", aiTitle: "Imported", sessionId: "s" }];
+		for (let i = 0; i < turns; i++) {
+			records.push({
+				type: "user",
+				uuid: `u${i}`,
+				sessionId: "s",
+				cwd: "/w",
+				gitBranch: "main",
+				timestamp: "2026-08-20T10:00:00.000Z",
+				message: { role: "user", content: [{ type: "text", text: `${i === 0 ? "FIRST" : "later"} ${"x".repeat(promptLength)}` }] },
+			});
+			records.push({
+				type: "assistant",
+				uuid: `a${i}`,
+				parentUuid: `u${i}`,
+				sessionId: "s",
+				timestamp: "2026-08-20T10:01:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: `answer ${i} ${"y".repeat(promptLength)}` }] },
+			});
+		}
+		return jsonl(...records);
+	}
+
+	it("leads with the user's first request, in full, before the context block", () => {
+		const parsed = parseClaudeTranscript(conversationWith(3), "/t.jsonl");
+		const text = renderImportedDescription(parsed);
+		expect(text).toContain("## The request that started this");
+		expect(text.indexOf("FIRST")).toBeLessThan(text.indexOf("## Context"));
+	});
+
+	it("stays under the cap and says how many turns it dropped", () => {
+		const parsed = parseClaudeTranscript(conversationWith(400, 400), "/t.jsonl");
+		const text = renderImportedDescription(parsed, { limit: 20_000 });
+		expect(text.length).toBeLessThanOrEqual(20_000);
+		expect(text).toMatch(/The first \d+ of \d+ turns are omitted/);
+		// The point of the work survives the shrinking.
+		expect(text).toContain("FIRST");
+	});
+
+	it("marks the cut when even one turn does not fit", () => {
+		const parsed = parseClaudeTranscript(conversationWith(2, 5_000), "/t.jsonl");
+		const text = renderImportedDescription(parsed, { limit: 2_000 });
+		expect(text.length).toBeLessThanOrEqual(2_000);
+		expect(text).toContain("more characters cut");
+	});
+
+	it("keeps a short conversation whole", () => {
+		const parsed = parseClaudeTranscript(conversationWith(2), "/t.jsonl");
+		const text = renderImportedDescription(parsed);
+		expect(text).toContain("answer 0");
+		expect(text).toContain("answer 1");
+		expect(text).not.toMatch(/turns are omitted/);
+	});
+
+	it("names the source agent's own store in the cut marker", () => {
+		const codex = parseCodexTranscript(
+			jsonl(
+				{ type: "session_meta", payload: { id: "s", cwd: "/w" } },
+				{ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(5_000) }] } },
+			),
+			"/t.jsonl",
+		);
+		expect(renderImportedDescription(codex, { limit: 1_000 })).toContain("Codex's own transcript");
+	});
+
+	describe("renderHandoffFile", () => {
+		it("frames the file as a takeover and stamps the parser that wrote it", () => {
+			const parsed = parseClaudeTranscript(conversationWith(3), "/t.jsonl");
+			const text = renderHandoffFile(parsed);
+			expect(text).toContain("You are taking over work that ran in Claude Code");
+			expect(text).toContain("Retold from a claude transcript by dev3 (parser");
+			expect(text).toContain("Fidelity:");
+		});
+
+		it("leads with the request that started the work, like a description does", () => {
+			const parsed = parseClaudeTranscript(conversationWith(3), "/t.jsonl");
+			const text = renderHandoffFile(parsed);
+			expect(text.indexOf("FIRST")).toBeLessThan(text.indexOf("## Context"));
+		});
+
+		it("fits a huge conversation under the file budget and says what it dropped", () => {
+			const parsed = parseClaudeTranscript(conversationWith(400, 2_000), "/t.jsonl");
+			const text = renderHandoffFile(parsed);
+			expect(text.length).toBeLessThanOrEqual(HANDOFF_FILE_LIMIT);
+			expect(text).toMatch(/The first \d+ of \d+ turns are omitted/);
+			expect(text).toContain("FIRST");
+		});
+
+		it("carries more of each tool's output than a task description does", () => {
+			const records: unknown[] = [
+				{ type: "ai-title", aiTitle: "T", sessionId: "s" },
+				{
+					type: "user", uuid: "u0", sessionId: "s", cwd: "/w", timestamp: "2026-08-20T10:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: "run it" }] },
+				},
+				{
+					type: "assistant", uuid: "a0", parentUuid: "u0", sessionId: "s", timestamp: "2026-08-20T10:00:01.000Z",
+					message: { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "Bash", input: { command: "ls" } }] },
+				},
+				{
+					type: "user", uuid: "r0", parentUuid: "a0", sessionId: "s", timestamp: "2026-08-20T10:00:02.000Z",
+					message: { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "z".repeat(700) }] },
+				},
+			];
+			const parsed = parseClaudeTranscript(jsonl(...records), "/t.jsonl");
+			// 700 characters of output: over a description's 400-char cap, under the file's 800.
+			expect(renderImportedDescription(parsed)).toContain("more characters cut]");
+			expect(renderHandoffFile(parsed)).toContain("z".repeat(700));
+		});
 	});
 });

@@ -5,6 +5,7 @@ import HelpSpot from "./HelpSpot";
 import TerminalView from "../TerminalView";
 import type { TerminalHandle } from "../TerminalView";
 import ExtraKeyBar from "./ExtraKeyBar";
+import ScrollToLatestButton from "./ScrollToLatestButton";
 import TerminalComposer, { type TerminalComposerApi } from "./TerminalComposer";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
@@ -27,6 +28,9 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	// Same touch input model as TaskTerminal: compose mode by default, ⌨ raw toggle.
 	const touchInput = !isElectrobun && navigator.maxTouchPoints > 0;
 	const androidComposer = isAndroidAppHost();
+	const [scrolledUp, setScrolledUp] = useState(false);
+	// Undefined off touch: its absence keeps the copy-mode poll from arming on a pointer.
+	const scrollSignal = touchInput ? setScrolledUp : undefined;
 	const [termHandle, setTermHandle] = useState<TerminalHandle | null>(null);
 	const [rawMode, setRawMode] = useState(false);
 	const composerApiRef = useRef<TerminalComposerApi | null>(null);
@@ -152,7 +156,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 					<HelpSpot topicId="terminal.quick-shell" />
 				</div>
 			</div>
-			<div className="flex-1 min-h-0 overflow-hidden">
+			<div className="relative flex-1 min-h-0 overflow-hidden">
 				{ptyUrl ? (
 					<TerminalView
 						ptyUrl={ptyUrl}
@@ -160,6 +164,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 						projectId={projectId}
 						onReady={setTermHandle}
 						touchComposeMode={touchInput && !rawMode}
+						onScrolledIntoHistory={scrollSignal}
 					/>
 				) : (
 					<div className="flex items-center justify-center h-full">
@@ -168,6 +173,9 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 							<span className="text-fg-3 text-sm">{t("terminal.connecting")}</span>
 						</div>
 					</div>
+				)}
+				{scrolledUp && termHandle && (
+					<ScrollToLatestButton onClick={() => termHandle.scrollToBottom()} />
 				)}
 			</div>
 			{/* Keep the composer mounted in raw mode (hidden) so a draft survives the toggle. */}

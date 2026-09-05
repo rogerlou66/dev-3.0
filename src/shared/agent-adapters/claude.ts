@@ -1,6 +1,6 @@
 /** Claude Code adapter. */
 import { CLAUDE_SKILL_BODY } from "../agent-skill-content";
-import { claudeEncodePath } from "../conversation-search-core";
+import { claudeTranscriptDir } from "../conversation-search-core";
 import { modelArgs, providerArgs } from "./common";
 import { shellEscape, quoteIfUnsafe } from "./shell";
 import { buildTaskPrompt } from "./template";
@@ -49,7 +49,13 @@ export const claudeAdapter: AgentAdapter = {
 		}
 
 		if (!options?.skipSystemPrompt) {
-			args.push("--append-system-prompt", shellEscape(CLAUDE_SKILL_BODY));
+			// The body is ~34 000 characters, which is past the Windows command-line
+			// ceiling on its own, so there it travels as a file the backend wrote.
+			if (options?.systemPromptFile) {
+				args.push("--append-system-prompt-file", quoteIfUnsafe(options.systemPromptFile));
+			} else {
+				args.push("--append-system-prompt", shellEscape(CLAUDE_SKILL_BODY));
+			}
 		}
 
 		// Route statusLine through `dev3 statusline` (rate-limit capture), unless
@@ -77,8 +83,11 @@ export const claudeAdapter: AgentAdapter = {
 		return sessionId ? `${baseCmd} --resume ${sessionId}` : `${baseCmd} --continue`;
 	},
 
-	transcriptStore(worktreePath, home) {
-		return { dir: `${home}/.claude/projects/${claudeEncodePath(worktreePath)}`, ext: ".jsonl" };
+	transcriptStore(worktreePath, configDirs) {
+		return {
+			dirs: configDirs.map((configDir) => claudeTranscriptDir(configDir, worktreePath)),
+			ext: ".jsonl",
+		};
 	},
 
 	hooksSpec(options) {

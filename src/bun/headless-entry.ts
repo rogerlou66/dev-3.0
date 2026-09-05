@@ -1,3 +1,4 @@
+import { stopAgentMessageLogWatches } from "./agent-message-log-watch";
 /**
  * Headless entry point for `dev3 remote`.
  *
@@ -24,9 +25,10 @@ import { handlers, setPushMessage, getPushMessage, handleBellAutoStatus, isTaskI
 import { createLogger, getLogPath } from "./logger";
 import { DEV3_HOME } from "./paths";
 import { ensureDev3CliSymlink } from "./cli-self-install";
+import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { applyFullShellEnvToProcess, getUserShell, resolveShellEnv } from "./shell-env";
 import { startSocketServer, stopSocketServer } from "./cli-socket-server";
-import { startRemoteAccessServer, pushToBrowserClients, getServerPort, getAccessUrl } from "./remote-access-server";
+import { startRemoteAccessServer, pushToBrowserClients, getServerPort, getAccessUrl, getStaticCode } from "./remote-access-server";
 import { startTunnel, stopTunnel, isTunnelBinaryAvailable, getTunnelUrl } from "./cloudflare-tunnel";
 import { renderHeadlessBanner, startQrAutoRefresh, stopQrAutoRefresh, markQrConsumed, printExposedPortsLive } from "./remote-console";
 import { writeRemoteState, clearRemoteStateIfOwnedBy, readRemoteHandoff, readRemoteState, carriedOverState } from "./remote-state";
@@ -175,7 +177,11 @@ if (!process.env.DEV3_VIEWS_DIR) {
 // the CLI by that absolute path (agent-hooks.ts `DEV3_CLI`). The GUI keeps it
 // current; a headless `dev3 remote` box otherwise inherits a stale/dangling
 // entry, so every hook fails with "…/.dev3.0/bin/dev3: not found".
-ensureDev3CliSymlink(DEV3_HOME, process.execPath);
+//
+// Not from a source checkout, though: there `process.execPath` IS the `bun`
+// binary, so this used to aim the shared name at bun and every `dev3` command
+// on the machine died with `Script not found "tasks"`. See managed-cli-guard.ts.
+if (managedCliWriteAllowed(process.execPath, DEV3_HOME)) ensureDev3CliSymlink(DEV3_HOME, process.execPath);
 
 // ── Resolve shell PATH + LANG + key gh config vars (same as GUI entry) ──
 process.env.SHELL = getUserShell();
@@ -306,7 +312,7 @@ try {
 		port: getServerPort(),
 		socketPath: cliSocketPath,
 		tunnelRequested: wantTunnel,
-		staticCode: process.env.DEV3_REMOTE_STATIC_CODE || null,
+		staticCode: getStaticCode(),
 		logFile: process.env.DEV3_REMOTE_LOG_FILE || null,
 		startedAt: new Date().toISOString(),
 		version: BUILD_VERSION,
@@ -420,19 +426,16 @@ async function isPortListening(port: number): Promise<boolean> {
 }
 
 // ── Banner + QR + auto-refresh ──
-const staticCode = process.env.DEV3_REMOTE_STATIC_CODE || null;
 await renderHeadlessBanner({
 	port: getServerPort(),
 	tunnelUrl: getTunnelUrl(),
 	tunnelRequested: wantTunnel,
 	accessUrl: await getAccessUrl(),
-	staticCode,
+	staticCode: getStaticCode(),
 });
-// Skip the rolling JWT refresh when a static code is in effect — the URL is
-// stable, so there is nothing to refresh.
-if (!staticCode) {
-	startQrAutoRefresh(() => getAccessUrl());
-}
+// The URL always carries a one-time QR token now — a static code never rides
+// in it — so the rolling refresh runs regardless of whether a code is set.
+startQrAutoRefresh(() => getAccessUrl());
 
 // ── Background pollers ──
 await rehydrateTaskLifecycles();
@@ -527,6 +530,7 @@ setOnPaneExited((taskId, paneId) => {
 // ── Graceful shutdown ──
 function shutdown(signal: string): void {
 	log.info(`Received ${signal}, shutting down`);
+	stopAgentMessageLogWatches();
 	stopQrAutoRefresh();
 	stopPortScanPoller();
 	stopResourceMonitor();

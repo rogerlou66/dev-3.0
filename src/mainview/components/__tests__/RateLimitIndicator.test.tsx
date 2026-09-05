@@ -59,6 +59,13 @@ function getIndicator() {
 	return screen.getByRole("button", { name: /Agent rate limits/ });
 }
 
+/** Per-account details live in the pill's own flyout panel. Hover opens it
+ *  read-only; the CLICK pins it, and pinned is what makes its rows choosable. */
+async function openUsagePanel() {
+	await userEvent.click(getIndicator());
+	return await screen.findByTestId("agent-usage-panel");
+}
+
 beforeEach(() => {
 	mockedGet.mockReset();
 	mockedAccounts.mockReset();
@@ -173,14 +180,57 @@ describe("RateLimitIndicator", () => {
 		expect(getIndicator().getAttribute("aria-label")).toContain("42% used");
 	});
 
-	it("opens agent accounts settings when the usage indicator is clicked", async () => {
+	it("opens the usage panel anchored to the indicator, not a centred dialog", async () => {
+		mockedGet.mockResolvedValue(report(42));
+		renderIndicator();
+		await act(async () => {});
+		const panel = await openUsagePanel();
+		// Anchored + portaled: fixed-position panel, no full-screen backdrop over the app.
+		expect(panel.className).toContain("fixed");
+		expect(panel.textContent).toContain("Claude");
+		expect(document.querySelector(".bg-black\\/50")).toBeNull();
+	});
+
+	it("keeps the account rows inert while the panel is only hovered", async () => {
+		mockedGet.mockResolvedValue(report(42));
+		mockedAccounts.mockResolvedValue({
+			claude: {
+				accounts: [
+					{ id: "work", kind: "claude", label: "Work Claude", identity: null, auth: "oauth", api: null, createdAt: 0 },
+				],
+				activeId: null,
+				systemIdentity: null,
+			},
+			codex: { accounts: [], activeId: null, currentIdentity: null },
+		});
+		renderIndicator();
+		await act(async () => {});
+		// Hover only — the gesture a pointer passing through the header makes.
+		await userEvent.hover(getIndicator());
+		const panel = await screen.findByTestId("agent-usage-panel");
+		const rows = panel.querySelectorAll("[role='radio']");
+		expect(rows.length).toBeGreaterThan(0);
+		expect([...rows].every((row) => row.getAttribute("aria-disabled") === "true")).toBe(true);
+
+		// Clicking the pill pins it, and the non-default row becomes choosable.
+		await userEvent.click(getIndicator());
+		const pinned = await screen.findByTestId("agent-usage-panel");
+		const live = [...pinned.querySelectorAll("[role='radio']")].filter(
+			(row) => row.getAttribute("aria-disabled") !== "true",
+		);
+		expect(live.length).toBe(1);
+		expect(live[0]?.textContent).toContain("Work Claude");
+	});
+
+	it("opens agent accounts settings from the panel's account-settings button", async () => {
 		mockedGet.mockResolvedValue(report(42));
 		const onOpenSettings = vi.fn();
 		window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpenSettings);
 		try {
 			renderIndicator();
 			await act(async () => {});
-			await userEvent.click(getIndicator());
+			await openUsagePanel();
+			await userEvent.click(screen.getByRole("button", { name: "Account settings" }));
 
 			expect(onOpenSettings).toHaveBeenCalledTimes(1);
 			expect((onOpenSettings.mock.calls[0]?.[0] as CustomEvent).detail).toBe("accounts");
@@ -189,11 +239,11 @@ describe("RateLimitIndicator", () => {
 		}
 	});
 
-	it("spells out '<n>% used' on each Claude window row in the tooltip", async () => {
+	it("spells out '<n>% used' on each Claude window row in the usage panel", async () => {
 		mockedGet.mockResolvedValue(report(42));
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		expect(await screen.findByText("5h")).toBeTruthy();
 		expect(screen.getByText("5% used")).toBeTruthy();
 		expect(screen.getByText("7d")).toBeTruthy();
@@ -204,10 +254,10 @@ describe("RateLimitIndicator", () => {
 		mockedGet.mockResolvedValue(report(97));
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		await screen.findByText("5h");
-		const tooltip = screen.getByRole("tooltip");
-		const fills = tooltip.querySelectorAll("[class*='rounded-full'] > span");
+		const dialog = screen.getByRole("dialog");
+		const fills = dialog.querySelectorAll("[class*='rounded-full'] > span");
 		expect(fills.length).toBe(2);
 		expect((fills[0] as HTMLElement).className).toContain("bg-accent");
 		expect((fills[0] as HTMLElement).style.width).toBe("5%");
@@ -231,8 +281,8 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
-		// One match in the pill label, one as the tooltip card chip.
+		await openUsagePanel();
+		// One match in the pill label, one as the panel card chip.
 		expect((await screen.findAllByText("∞ unlimited")).length).toBe(2);
 		expect(screen.queryByText(/credits: unlimited/)).toBeNull();
 	});
@@ -252,8 +302,10 @@ describe("RateLimitIndicator", () => {
 		mockedGet.mockResolvedValue(report(42));
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
-		expect(await screen.findByText("captured just now")).toBeTruthy();
+		await openUsagePanel();
+		// Provenance rides the last quota line as a "· now" suffix; the full
+		// sentence is its title.
+		expect(await screen.findByTitle("captured just now")).toBeTruthy();
 	});
 
 	it("flags a stale reading with its age and the warning tint", async () => {
@@ -275,8 +327,8 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
-		const note = await screen.findByText("captured 20m ago");
+		await openUsagePanel();
+		const note = await screen.findByTitle("captured 20m ago");
 		expect(note.className).toContain("text-warning");
 	});
 
@@ -401,11 +453,11 @@ describe("RateLimitIndicator", () => {
 
 		expect(screen.getByText("97%")).toBeTruthy();
 		expect(getIndicator().getAttribute("aria-label")).toContain("monthly credits");
-		await userEvent.tab();
+		await openUsagePanel();
 		expect(await screen.findByText(/329.53 \/ 8,824/)).toBeTruthy();
 	});
 
-	it("shows the system-login account identity and plan in the tooltip", async () => {
+	it("shows the system-login account identity and plan in the usage panel", async () => {
 		mockedGet.mockResolvedValue(report(42));
 		mockedAccounts.mockResolvedValue({
 			claude: {
@@ -423,7 +475,7 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		expect(await screen.findByText("alice@example.com")).toBeTruthy();
 		expect(screen.getByText("Max 5x")).toBeTruthy();
 	});
@@ -456,7 +508,7 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		expect(await screen.findByText("Work account")).toBeTruthy();
 		expect(screen.getByText("Pro")).toBeTruthy();
 	});
@@ -495,7 +547,7 @@ describe("RateLimitIndicator", () => {
 
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		expect(await screen.findByText("Work Claude")).toBeTruthy();
 		expect(screen.getByText("Personal Claude")).toBeTruthy();
 		expect(screen.getByText("Enterprise Codex")).toBeTruthy();
@@ -508,7 +560,7 @@ describe("RateLimitIndicator", () => {
 				accounts: [],
 				activeId: null,
 				systemIdentity: {
-					email: "arseny@wix.com",
+					email: "dev@example.com",
 					organization: "Acme Workspace",
 					plan: "default_claude_max_5x",
 					planLabel: "Max 5x",
@@ -519,8 +571,8 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
-		expect(await screen.findByText("arseny@wix.com")).toBeTruthy();
+		await openUsagePanel();
+		expect(await screen.findByText("dev@example.com")).toBeTruthy();
 		expect(screen.getByText("· Acme Workspace")).toBeTruthy();
 	});
 
@@ -545,8 +597,8 @@ describe("RateLimitIndicator", () => {
 					{
 						id: "acc-cdx",
 						kind: "codex",
-						label: "arsenyp@wix.com (Wix)",
-						identity: { email: "arsenyp@wix.com", organization: "Wix", plan: "enterprise", planLabel: "Enterprise", accountId: "acc-cdx" },
+						label: "dev@example.com (Acme)",
+						identity: { email: "dev@example.com", organization: "Acme", plan: "enterprise", planLabel: "Enterprise", accountId: "acc-cdx" },
 						auth: "oauth",
 						api: null,
 						createdAt: 0,
@@ -558,11 +610,11 @@ describe("RateLimitIndicator", () => {
 		});
 		renderIndicator();
 		await act(async () => {});
-		await userEvent.tab();
+		await openUsagePanel();
 		// The verbose "email (workspace)" parenthetical is collapsed to email …
-		expect(await screen.findByText("arsenyp@wix.com")).toBeTruthy();
-		expect(screen.queryByText("arsenyp@wix.com (Wix)")).toBeNull();
+		expect(await screen.findByText("dev@example.com")).toBeTruthy();
+		expect(screen.queryByText("dev@example.com (Acme)")).toBeNull();
 		// … and the workspace shows exactly once as the chip.
-		expect(screen.getAllByText("· Wix")).toHaveLength(1);
+		expect(screen.getAllByText("· Acme")).toHaveLength(1);
 	});
 });

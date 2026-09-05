@@ -13,6 +13,7 @@
 <p align="center">
   <a href="https://github.com/h0x91b/dev-3.0/releases"><img src="https://img.shields.io/github/v/release/h0x91b/dev-3.0?style=flat-square&color=4496ff" alt="Release"></a>
   <a href="https://github.com/h0x91b/dev-3.0/stargazers"><img src="https://img.shields.io/github/stars/h0x91b/dev-3.0?style=flat-square&color=4496ff" alt="Stars"></a>
+  <a href="https://github.com/h0x91b/dev-3.0/commits/main"><img src="https://img.shields.io/github/commit-activity/m/h0x91b/dev-3.0?logo=github&style=flat-square&color=4496ff"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-4496ff?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-4496ff?style=flat-square" alt="Platform: macOS, Linux and Windows">
 </p>
@@ -191,7 +192,7 @@ disturbing it.
 dev3 attention "Need a decision on the schema"    # red badge on the card
 dev3 show-image before.png --caption "the bug"    # in-app image viewer
 dev3 peek --task seq:1383                         # read-only look at a peer's terminal
-dev3 message --task seq:1383 --in 30m "status?"   # type into a live agent, now or later
+dev3 message --task seq:1383 --in 30m --subject "status check" "status?"   # type into a live agent, now or later
 dev3 doctor --worktrees --prune-orphans           # reclaim disk from dead worktrees
 ```
 
@@ -332,7 +333,7 @@ rate-limit tracking and skill directories differ per agent — the full grid is 
 |---|---|
 | [Your first task](https://dev3.h0x91b.com/first-task.html) | The guided first-run tour, screen by screen — the fastest way to see what using dev-3.0 feels like |
 | [Install guide](docs/install.md) | Every install path, tmux versions on Linux, cloud-VM caveats, build from source |
-| [Remote access](docs/remote-access.md) | `dev3 remote` in depth — tunnels, systemd, sessions, exposed ports |
+| [Remote access](docs/remote-access.md) | `dev3 remote` in depth — tunnels, systemd, sessions, exposed ports, phone notifications |
 | [Troubleshooting](docs/troubleshooting.md) | `dev3 doctor`, disk reclamation, Full Disk Access, terminal colors and agent themes |
 | [Keyboard shortcuts](docs/keyboard-shortcuts.md) | The complete list, mirroring the in-app ⌘/ panel |
 | [Agent support matrix](agent-support-matrix.md) | What each agent supports, feature by feature |
@@ -347,7 +348,7 @@ The app reports usage analytics so the project can see what is actually used:
 
 | Channel | What it sends |
 |---|---|
-| Google Analytics 4 | App launch, version, OS, screen resolution, language, screen navigation, a 10-minute heartbeat, agent launches, and unhandled errors. Identified by a random per-install id, geolocated via a public-IP lookup against `api.ipify.org`. Project *names* and file paths are deliberately never sent — only internal ids. |
+| Google Analytics 4 | App launch, version and build channel, OS and its major version, screen resolution, language, CPU architecture, how the app was installed, which screen you are on, a 10-minute heartbeat, agent launches, and unhandled errors. How many projects and tasks you have is sent only as a coarse bucket (`6-15`, `201-1000`), and how long ago you installed dev3 only as an age band (`day-0`, `week-03`). Your country is derived from your computer's timezone — your IP address is never looked up and never sent as data, and no city or region is sent. Identified by a random per-install id. Project *names*, task titles and file paths are deliberately never sent, and no project or task identifier goes into the page address either. |
 | PostHog | Task and project actions (created, moved, merged, pushed …) plus unhandled errors, under a random per-install id. Also delivers feature flags. Live in the official release builds; a build from source has no key and stays off. |
 
 Neither channel sends your project names, task titles, file paths, prompts, diffs or terminal
@@ -356,8 +357,8 @@ crash reports before they are sent — the local log file keeps the untouched te
 
 ### Turning it off
 
-Any **one** of these switches off everything at once: no GA4 hits, no public-IP lookup, no PostHog
-client, no crash reports. Feature flags then fall back to their shipped defaults.
+Any **one** of these switches off everything at once: no GA4 hits, no PostHog client, no crash
+reports. Feature flags then fall back to their shipped defaults.
 
 | How | Where | Takes effect |
 |---|---|---|

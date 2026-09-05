@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { GlobalSettings, RemoteTunnelSettings } from "../../../shared/types";
 import type { UpdateChannel } from "../../../shared/update-channel";
 import type { TFunction } from "../../i18n";
-import BrowserNotificationsSetting from "./BrowserNotificationsSetting";
 import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
 import SettingsToggle from "./SettingsToggle";
+import { MIN_REMOTE_STATIC_CODE_LENGTH, remoteStaticCodeError } from "../../../shared/remote-static-code";
+import RemoteAccessDownNotice, { useRemoteAccessStatus } from "../RemoteAccessDownNotice";
+import { api } from "../../rpc";
 
 export default function SystemSettingsSection({
 	t,
@@ -14,7 +16,9 @@ export default function SystemSettingsSection({
 	canaryAvailable,
 	onUpdateChannelChange,
 	onRemoteTunnelChange,
+	onRemotePortChange,
 	onRemoteSilentUpdateToggle,
+	onStaticAccessCodeChange,
 	onPreventSleepToggle,
 	onConfirmBeforeQuitToggle,
 }: {
@@ -25,10 +29,19 @@ export default function SystemSettingsSection({
 	canaryAvailable: boolean;
 	onUpdateChannelChange: (channel: UpdateChannel) => void;
 	onRemoteTunnelChange: (tunnel: RemoteTunnelSettings | undefined) => void;
+	onRemotePortChange: (port: number | undefined) => void;
 	onRemoteSilentUpdateToggle: (enabled: boolean) => void;
+	/** Empty string clears the code. */
+	onStaticAccessCodeChange: (code: string) => void;
 	onPreventSleepToggle: (enabled: boolean) => void;
 	onConfirmBeforeQuitToggle: (enabled: boolean) => void;
 }) {
+	const [remoteAccessStatus, setRemoteAccessStatus] = useRemoteAccessStatus();
+	const retryRemoteAccess = useCallback(
+		async () => setRemoteAccessStatus(await api.request.retryRemoteAccess()),
+		[setRemoteAccessStatus],
+	);
+
 	return (
 		<SettingsSection title={t("settings.categorySystem")} helpTopicId="settings.system">
 			<SettingsEntry anchor="update-channel">
@@ -58,6 +71,10 @@ export default function SystemSettingsSection({
 				</div>
 			</SettingsEntry>
 
+			{/* Not a setting, so no registry entry: a status that only exists while
+			    remote access is down, sitting above the controls that fix it. */}
+			<RemoteAccessDownNotice status={remoteAccessStatus} onRetry={retryRemoteAccess} />
+
 			<SettingsEntry anchor="remote-tunnel">
 				<div>
 					<label htmlFor="remote-tunnel-provider" className="block text-fg text-sm font-semibold mb-2">
@@ -85,6 +102,26 @@ export default function SystemSettingsSection({
 					{globalSettings.remoteTunnel?.provider === "custom" ? (
 						<CustomTunnelFields t={t} tunnel={globalSettings.remoteTunnel} onChange={onRemoteTunnelChange} />
 					) : null}
+				</div>
+			</SettingsEntry>
+
+			<SettingsEntry anchor="static-access-code">
+				<StaticAccessCodeField
+					t={t}
+					value={globalSettings.staticAccessCode ?? ""}
+					onChange={onStaticAccessCodeChange}
+				/>
+			</SettingsEntry>
+
+			<SettingsEntry anchor="remote-port">
+				<div>
+					<label htmlFor="remote-port" className="block text-fg text-sm font-semibold mb-2">
+						{t("settings.remotePort")}
+					</label>
+					<p className="text-fg-3 text-sm mb-3">
+						{t("settings.remotePortDesc")}
+					</p>
+					<RemotePortField t={t} port={globalSettings.remotePort} onChange={onRemotePortChange} />
 				</div>
 			</SettingsEntry>
 
@@ -158,10 +195,6 @@ export default function SystemSettingsSection({
 					/>
 				</div>
 			</SettingsEntry>
-
-			<SettingsEntry anchor="browser-notifications">
-				<BrowserNotificationsSetting t={t} />
-			</SettingsEntry>
 		</SettingsSection>
 	);
 }
@@ -229,5 +262,126 @@ function CustomTunnelFields({
 				<p className="text-fg-muted text-xs mt-1">{t("settings.remoteTunnelUrlPatternHint")}</p>
 			</div>
 		</div>
+	);
+}
+
+/**
+ * The permanent remote-access sign-in code. Persisted on blur so a half-typed
+ * value never becomes the live credential, and shown as a password field
+ * because this screen gets screenshotted and screen-shared.
+ *
+ * Deliberately NOT a strength meter or a generator: the code is whatever the
+ * owner wants it to be, and the minimum length is enforced by the host.
+ */
+function StaticAccessCodeField({
+	t,
+	value,
+	onChange,
+}: {
+	t: TFunction;
+	value: string;
+	onChange: (code: string) => void;
+}) {
+	const [draft, setDraft] = useState(value);
+	const [revealed, setRevealed] = useState(false);
+	const trimmed = draft.trim();
+	// The host drops a code that fails this check and falls back to QR links, so
+	// saving one would produce a field that looks set and a feature that is off.
+	// Same validator the CLI and the server use — the floor lives in one place.
+	const problem = trimmed ? remoteStaticCodeError(trimmed) : null;
+
+	return (
+		<div>
+			<label htmlFor="static-access-code" className="block text-fg text-sm font-semibold mb-2">
+				{t("settings.staticAccessCode")}
+			</label>
+			<p className="text-fg-3 text-sm mb-3">{t("settings.staticAccessCodeDesc")}</p>
+			<div className="flex items-center gap-2">
+				<input
+					id="static-access-code"
+					data-testid="static-access-code"
+					type={revealed ? "text" : "password"}
+					autoComplete="off"
+					value={draft}
+					placeholder={t("settings.staticAccessCodePlaceholder")}
+					onChange={(event) => setDraft(event.target.value)}
+					onBlur={() => { if (!problem) onChange(trimmed); }}
+					aria-invalid={problem !== null}
+					aria-describedby={problem ? "static-access-code-error" : undefined}
+					className={`flex-1 px-4 py-3 bg-raised border rounded-xl text-fg text-sm font-mono outline-none transition-colors streamer-private ${
+						problem ? "border-danger" : "border-edge focus:border-accent/40"
+					}`}
+				/>
+				<button
+					type="button"
+					data-testid="static-access-code-reveal"
+					onClick={() => setRevealed((on) => !on)}
+					className="px-3 py-3 rounded-xl border border-edge text-fg-2 text-xs hover:text-fg hover:bg-elevated hover:border-edge-active transition-[color,background-color,border-color,transform] active:scale-[0.96]"
+				>
+					{t(revealed ? "settings.staticAccessCodeHide" : "settings.staticAccessCodeReveal")}
+				</button>
+			</div>
+			{problem ? (
+				<p id="static-access-code-error" data-testid="static-access-code-error" role="alert" className="text-danger text-xs mt-2 leading-snug">
+					{t("settings.staticAccessCodeTooShort", { min: String(MIN_REMOTE_STATIC_CODE_LENGTH) })}
+				</p>
+			) : trimmed ? (
+				<p data-testid="static-access-code-warning" className="text-warning-strong text-xs mt-2 leading-snug">
+					{t("settings.staticAccessCodeTunnelWarning")}
+				</p>
+			) : null}
+			<p className="text-fg-muted text-xs mt-2 leading-snug">{t("settings.staticAccessCodeEnvHint")}</p>
+		</div>
+	);
+}
+
+/**
+ * The port is the one remote-access knob a Finder launch cannot be given: every
+ * `DEV3_*` key is stripped out of the IMPORTED login-shell environment, so a
+ * shell profile never reaches the app. Blank ⇒ a free port each launch;
+ * anything outside 1-65535 is refused rather than silently persisted.
+ */
+function RemotePortField({
+	t,
+	port,
+	onChange,
+}: {
+	t: TFunction;
+	port: number | undefined;
+	onChange: (port: number | undefined) => void;
+}) {
+	const [value, setValue] = useState(port === undefined ? "" : String(port));
+
+	// Settings load asynchronously AFTER this mounts, and this section renders
+	// unconditionally — so the initial state is "" on any route that opens
+	// straight into System, and blurring would then persist undefined and unpin
+	// a port that was set. Adopt the stored value whenever it arrives or changes.
+	useEffect(() => {
+		setValue(port === undefined ? "" : String(port));
+	}, [port]);
+
+	function persist() {
+		const trimmed = value.trim();
+		if (!trimmed) return onChange(undefined);
+		const n = Number.parseInt(trimmed, 10);
+		if (String(n) !== trimmed || n < 1 || n > 65535) {
+			setValue(port === undefined ? "" : String(port)); // reject, keep what is stored
+			return;
+		}
+		onChange(n);
+	}
+
+	return (
+		<input
+			id="remote-port"
+			data-testid="remote-port"
+			type="text"
+			inputMode="numeric"
+			value={value}
+			placeholder={t("settings.remotePortAuto")}
+			onChange={(event) => setValue(event.target.value)}
+			onBlur={persist}
+			className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm font-mono outline-none focus:border-accent/40 transition-colors"
+		/>
 	);
 }

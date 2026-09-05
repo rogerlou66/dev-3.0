@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, routeTaskId, projectIdForRoute, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
+import { useAppState, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
+import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
 import { useT, useLocale } from "./i18n";
@@ -8,12 +9,13 @@ import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { isRemote } from "./utils/platform";
 import { isTypingContext } from "./utils/typing-context";
+import { installHorizontalWheelBridge } from "./utils/horizontal-wheel";
 import { matchesShortcut } from "./keymap";
 import { setShortcutOverrides } from "./keymap-store";
 import { syncTerminalBidiFromGlobalSettings } from "./terminal-bidi/flag";
@@ -27,6 +29,7 @@ import AppMenuBar from "./components/AppMenuBar";
 import GlobalSettings from "./components/GlobalSettings";
 import Dashboard from "./components/Dashboard";
 import AddProjectModal from "./components/AddProjectModal";
+import ImportConversationsModal from "./components/ImportConversationsModal";
 import CreateTaskModal from "./components/CreateTaskModal";
 import LaunchVariantsModal from "./components/LaunchVariantsModal";
 import ProjectView from "./components/ProjectView";
@@ -41,6 +44,7 @@ import ProductivityStatsView from "./components/ProductivityStatsView";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
 import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
+import { useSpaces } from "./useSpaces";
 import AgentTrafficLog from "./components/agent-traffic/AgentTrafficLog";
 import { noteTrafficArrival } from "./agent-traffic";
 import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "./agent-traffic-events";
@@ -51,8 +55,10 @@ import FolderPickerHost from "./components/FolderPickerModal";
 import KeyboardShortcutsModal, { type ShortcutsTab } from "./components/KeyboardShortcutsModal";
 import UpdatePopoverSimulatorModal from "./components/UpdatePopoverSimulatorModal";
 import RemoteAccessDialog from "./components/RemoteAccessDialog";
+import RemoteAccessDownNotice from "./components/RemoteAccessDownNotice";
+import RemoteSignIn from "./components/RemoteSignIn";
 import RemoteAccessExposedPorts from "./components/RemoteAccessExposedPorts";
-import { ConfirmHost, confirm } from "./confirm";
+import { ConfirmHost, confirm, whenConfirmHostMounted } from "./confirm";
 import AgentLaunchRequestModal from "./components/AgentLaunchRequestModal";
 import AboutModal from "./components/AboutModal";
 import FilePreviewModal from "./components/FilePreviewModal";
@@ -61,6 +67,7 @@ import RosettaWarningModal from "./components/RosettaWarningModal";
 import { initTaskSoundPlayback, playTaskCompletionSound, playTaskSoundFromPush, setTaskCompletionSoundEnabled } from "./task-sounds";
 import { offerMergeCompletion } from "./utils/offerMergeCompletion";
 import { taskDialogInfoFromSubject } from "./utils/taskDialogInfo";
+import { unsavedWorkWarning } from "./utils/confirmTaskCompletion";
 import { createAgentRequestAbort } from "./utils/agentRequestAbort";
 import { getRecentProjectIds, orderByRecency, recordProjectJump } from "./utils/recentProjects";
 import type { NavigationGuard } from "./navigation-guard";
@@ -88,9 +95,13 @@ import { getAdjacentAliveVariant } from "./utils/variantGroups";
 import { isTaskTerminalRoute } from "./utils/terminalFullscreen";
 import WorkspaceTaskOverlay from "./components/WorkspaceTaskOverlay";
 import { closeTopBackLayer } from "./back-navigation";
+import PushEnrollmentInvite from "./components/PushEnrollmentInvite";
 
 /** Command shown when cloudflared is missing (Cloudflare Tunnel remote access). */
 const CLOUDFLARED_INSTALL_CMD = "brew install cloudflared";
+
+/** QR box in the Remote Access modal: 14rem, shrinking on short windows so it stays a scannable share of the height. */
+const QR_BOX_SIZE = "w-[min(14rem,26vh)] h-[min(14rem,26vh)]";
 
 /** QR token rotation period; the token's own TTL (`QR_TOKEN_TTL_S`) adds 5s headroom. */
 const QR_REFRESH_SECONDS = 60;
@@ -106,6 +117,12 @@ type RemoteAccessQRData = {
 	tunnelFailureReason?: string | null;
 	interfaces?: RemoteNetInterface[];
 	selectedHost?: string;
+	/** A permanent access code is configured on the host — the code itself never travels here. */
+	staticCodeActive?: boolean;
+	/** Bookmarkable link carrying the code in its fragment; copied, never displayed. */
+	signInLink?: string | null;
+	/** Whether the server behind this modal is actually listening. */
+	serverStatus?: RemoteAccessStatus;
 };
 
 interface WorkspaceTaskTarget {
@@ -219,6 +236,10 @@ function App() {
 		skipNextTerminalCopyResetRef.current = false;
 	}, [terminalImmersiveVisible]);
 
+	// A plain mouse has no horizontal axis, so horizontal-only containers (the
+	// board above all) were unreachable without a trackpad.
+	useEffect(() => installHorizontalWheelBridge(), []);
+
 	useEffect(() => {
 		return () => {
 			setWebNotificationsSuppressed(false);
@@ -226,6 +247,7 @@ function App() {
 			void api.request.setTerminalFocus?.({ active: false })?.catch?.(() => { /* best-effort */ });
 		};
 	}, []);
+
 	useViewport(state.route);
 	// A phone scales differently per screen: dense inside a task, roomy on the
 	// screens the user only browses. No-op on a desktop-width viewport.
@@ -399,10 +421,19 @@ function App() {
 	const [showAddProjectModal, setShowAddProjectModal] = useState(false);
 	// Spaces a project created from a space flow should join on creation.
 	const [addProjectSpaceIds, setAddProjectSpaceIds] = useState<string[]>([]);
+	// Projects waiting for the import dialog. A queue because the local tab adds
+	// several folders at once and each gets its own answer. `autoOffer` separates
+	// the two ways in: dev3's own one-time offer, which vanishes silently when it
+	// has nothing to say, and the user asking, which always answers.
+	const [importOfferQueue, setImportOfferQueue] = useState<{ project: Project; autoOffer: boolean }[]>([]);
+	const enqueueImportOffer = useCallback((project: Project, autoOffer: boolean) => {
+		setImportOfferQueue((q) => (q.some((entry) => entry.project.id === project.id) ? q : [...q, { project, autoOffer }]));
+	}, []);
 	const [openAddProjectOnDashboard, setOpenAddProjectOnDashboard] = useState(false);
 	const [showProjectSwitch, setShowProjectSwitch] = useState(false);
 	const [workspaceBoardRequest, setWorkspaceBoardRequest] = useState(0);
 	const [dashboardHeaderSlot, setDashboardHeaderSlot] = useState<HTMLDivElement | null>(null);
+	const { spaces: appSpaces } = useSpaces();
 	// Cmd/Ctrl+O picker when no app is chosen yet (or the chosen one is gone).
 	const [openInPicker, setOpenInPicker] = useState<{ path: string; taskId?: string } | null>(null);
 	const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -434,9 +465,10 @@ function App() {
 	// vanish on the same tick. It only ever grows while the viewer stays open.
 	const [imageViewer, setImageViewer] = useState<{ taskId: string; images: SharedImage[]; index: number; newIds: string[] } | null>(null);
 	const [filePreview, setFilePreview] = useState<OpenFilePreviewDetail | null>(null);
-	// `standalone` requests come from surfaces with no workspace pane to dock into
-	// (the archived task modal) and are hosted as an overlay here instead.
-	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; artifacts: SharedArtifact[]; index: number; standalone?: boolean } | null>(null);
+	// Lightbox for artifacts an agent surfaced via `dev3 show-artifact`. Hosted
+	// here — never inside a task pane — so every surface that can open one (task
+	// workspace, archived task modal, a toast) gets the identical popup.
+	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number } | null>(null);
 	const markSharedItemsRead = useCallback((
 		projectId: string,
 		taskId: string,
@@ -497,6 +529,7 @@ function App() {
 	// so waiting for the rpc:authFailed event alone would miss it and leave the
 	// user on an eternal "Loading…" spinner.
 	const [authFailed, setAuthFailed] = useState(() => getRpcConnectionState() === "auth-failed");
+	const [signInLinkCopied, setSignInLinkCopied] = useState(false);
 
 	useEffect(() => {
 		function onAuthFailed() { setAuthFailed(true); }
@@ -546,6 +579,7 @@ function App() {
 	useEffect(() => {
 		if (helpMode) markHelpDiscovered();
 	}, [helpMode, markHelpDiscovered]);
+
 
 	// ── Guided tours ──
 	// Owned here rather than by a screen: a tour walks across the board, two modals
@@ -665,6 +699,11 @@ function App() {
 	const navigationGuardRef = useRef<NavigationGuard | null>(null);
 	const [pendingNavigation, setPendingNavigation] = useState<PendingTransition | null>(null);
 
+	// Completion dialogs this window already has on screen, so the push and the
+	// on-connect replay of the same request cannot stack two confirms.
+	const completionDialogsShowingRef = useRef<Set<string>>(new Set());
+	const cancellationDialogsShowingRef = useRef<Set<string>>(new Set());
+
 	// Latest route mirror — async event handlers read this to make routing decisions
 	// without re-subscribing every navigation.
 	const routeRef = useRef<Route>(state.route);
@@ -676,7 +715,9 @@ function App() {
 	}, [state.route.screen]);
 
 	// Drive document.title from the current route so the browser tab shows the
-	// project/task name — the only orientation cue in remote (browser) mode.
+	// project/task name — the only orientation cue in remote (browser) mode. The
+	// same context also goes to the host, which titles this window natively (the
+	// only way to tell several windows apart in Mission Control / Window menu).
 	// Streamer mode locks every project the user flagged `sensitive`: it cannot be
 	// entered, so a stray click during a recording cannot expose it.
 	const streamerModeOn = useStreamerMode();
@@ -697,25 +738,26 @@ function App() {
 		const { route } = state;
 		if (!baseTitleRef.current) baseTitleRef.current = document.title;
 		const base = baseTitleRef.current || "dev-3.0";
-		let prefix = "";
+		let context: string | null = null;
 		// A tab title cannot be blurred (CSS reaches the document, not the chrome),
 		// so a sensitive project's context is replaced rather than masked.
 		const locked = workspaceTaskTarget
 			? isRouteLocked({ screen: "project", projectId: workspaceTaskTarget.projectId })
 			: isRouteLocked(route);
 		if (locked) {
-			prefix = `${t("streamer.privateTitle")} · `;
+			context = t("streamer.privateTitle");
 		} else if (workspaceTaskTarget) {
 			const task = workspaceTaskTarget.tasks.find((candidate) => candidate.id === workspaceTaskTarget.taskId);
-			if (task) prefix = `${getTaskTitle(task)} · `;
+			if (task) context = getTaskTitle(task);
 		} else if (route.screen === "project" || route.screen === "project-terminal" || route.screen === "project-settings") {
 			const project = state.projects.find((p) => p.id === route.projectId);
-			if (project) prefix = `${project.name} · `;
+			if (project) context = project.name;
 		} else if (route.screen === "task") {
 			const task = state.currentProjectTasks.find((task) => task.id === route.taskId);
-			if (task) prefix = `${getTaskTitle(task)} · `;
+			if (task) context = getTaskTitle(task);
 		}
-		document.title = prefix ? `${prefix}${base}` : base;
+		document.title = context ? `${context} · ${base}` : base;
+		void api.request.setWindowTitleContext?.({ context })?.catch?.(() => { /* best-effort */ });
 	}, [state.route, state.currentProjectTasks, state.projects, isRouteLocked, t, workspaceTaskTarget]);
 
 	// Route persistence is enabled only after the initial restore attempt has
@@ -859,10 +901,10 @@ function App() {
 
 
 	useEffect(() => {
-		if (terminalImmersive && !isTaskTerminalRoute(state.route)) {
+		if (terminalImmersive && !isTaskTerminalRoute(state.route) && !workspaceTaskTarget) {
 			setTerminalImmersiveActive(false);
 		}
-	}, [state.route, setTerminalImmersiveActive, terminalImmersive]);
+	}, [state.route, setTerminalImmersiveActive, terminalImmersive, workspaceTaskTarget]);
 
 	// Deep-link into a Global Settings section (e.g. clicking a proxy-gated
 	// preset in the launch picker dispatches this). Kept as a window event so no
@@ -874,7 +916,12 @@ function App() {
 				navigate({ screen: "settings", section: detail });
 				return;
 			}
-			navigate({ screen: "settings", section: detail.section, preset: detail.preset });
+			navigate({
+				screen: "settings",
+				section: detail.section,
+				anchor: detail.anchor,
+				preset: detail.preset,
+			});
 		}
 		window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpenSettingsSection);
 		return () => window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onOpenSettingsSection);
@@ -936,13 +983,17 @@ function App() {
 				openTaskFromNotification(nav.taskId, nav.projectId);
 			} else if (nav.kind === "project") {
 				navigateToProject(nav.projectId);
+			} else if (nav.kind === "space") {
+				// The backend already picked a member project that exists here, so this
+				// never has to re-resolve; a dead space never reaches the renderer.
+				navigate({ screen: "project", projectId: nav.projectId, spaceId: nav.spaceId });
 			} else {
 				navigateToProject(nav.projectId);
 				setCreateTaskInitialText(nav.text);
 				setCreateTaskProjectId(nav.projectId);
 			}
 		},
-		[navigateToProject, openTaskFromNotification],
+		[navigate, navigateToProject, openTaskFromNotification],
 	);
 
 	const cycleVariant = useCallback((direction: -1 | 1): boolean => {
@@ -1100,9 +1151,31 @@ function App() {
 		if (!projectId) return false;
 		if (!state.projects.some((project) => project.id === projectId && !project.deleted)) return false;
 		if (document.querySelector('[data-create-task-modal="true"]')) return false;
-		setCreateTaskProjectId((current) => current ?? projectId);
+		// On a space board the anchor project is an accident of how the user got
+		// here, so the field starts on the project they last created in on THIS
+		// board — and falls back to the anchor when that project has left.
+		const spaceId = routeSpaceId(state.route);
+		const remembered = spaceId ? lastProjectForSpace(spaceId) : null;
+		const start = remembered && state.projects.some((p) => p.id === remembered) ? remembered : projectId;
+		setCreateTaskProjectId((current) => current ?? start);
 		return true;
 	}, [getProjectIdForRoute, state.projects, state.route]);
+
+	/**
+	 * Open a space's unified board. A space is a SUBJECT, so the route still names
+	 * a project — the first member this machine actually has, which is what keeps
+	 * every existing `projectIdForRoute` reader working.
+	 */
+	const navigateToSpace = useCallback((spaceId: string) => {
+		const space = appSpaces.find((candidate) => candidate.id === spaceId);
+		const anchorId = space?.projectIds.find((id) => state.projects.some((p) => p.id === id));
+		if (!anchorId) {
+			toast.info(t("spaces.boardGone"));
+			navigate({ screen: "dashboard" });
+			return;
+		}
+		navigate({ screen: "project", projectId: anchorId, spaceId });
+	}, [appSpaces, navigate, state.projects, t]);
 
 	const openAddProject = useCallback(() => {
 		if (state.route.screen === "dashboard") {
@@ -1147,17 +1220,39 @@ function App() {
 		// Cmd+K / Cmd+Shift+P keydown handlers below own the toggle behavior.
 		const onProjectSwitch = () => setShowProjectSwitch(true);
 		const onCommandPalette = () => setShowCommandPalette(true);
+		const onImportConversations = (e: Event) => {
+			const projectId = (e as CustomEvent<{ projectId: string }>).detail?.projectId;
+			const project = state.projects.find((p) => p.id === projectId);
+			if (project) enqueueImportOffer(project, false);
+		};
+		window.addEventListener("menu:import-conversations", onImportConversations);
 		window.addEventListener("menu:open-new-task", onNewTask);
 		window.addEventListener("menu:open-add-project", onAddProject);
 		window.addEventListener("menu:open-project-switch", onProjectSwitch);
 		window.addEventListener("menu:open-command-palette", onCommandPalette);
 		return () => {
+			window.removeEventListener("menu:import-conversations", onImportConversations);
 			window.removeEventListener("menu:open-new-task", onNewTask);
 			window.removeEventListener("menu:open-add-project", onAddProject);
 			window.removeEventListener("menu:open-project-switch", onProjectSwitch);
 			window.removeEventListener("menu:open-command-palette", onCommandPalette);
 		};
-	}, [openCreateTaskModal, openAddProject]);
+	}, [openCreateTaskModal, openAddProject, enqueueImportOffer, state.projects]);
+
+	// The one unprompted offer, for a project that predates the feature: the first
+	// time its board is opened, dev3 looks for conversations it could import and
+	// asks once. `conversationImportOfferedAt` is written whatever the answer is,
+	// so this never asks a second time. The ref covers the gap between closing the
+	// dialog and that flag arriving back through `projectUpdated`.
+	const offeredThisSession = useRef<Set<string>>(new Set());
+	useEffect(() => {
+		const projectId = projectIdForRoute(state.route);
+		if (!projectId || offeredThisSession.current.has(projectId)) return;
+		const project = state.projects.find((p) => p.id === projectId);
+		if (!project || project.kind === "virtual" || project.conversationImportOfferedAt) return;
+		offeredThisSession.current.add(projectId);
+		enqueueImportOffer(project, true);
+	}, [state.route, state.projects, enqueueImportOffer]);
 
 	// Global app shortcuts — capture phase so the terminal can't swallow them.
 	//
@@ -1286,6 +1381,13 @@ function App() {
 				e.preventDefault();
 				e.stopPropagation();
 				openWorkspaceBoard();
+			} else if (matchesShortcut(e, "zoom-out-to-space")) {
+				// The header owns the rule (one space → go, several → ask) so the button
+				// and the key can never disagree.
+				e.preventDefault();
+				e.stopPropagation();
+				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
+				window.dispatchEvent(new CustomEvent("dev3:zoomOutToSpace"));
 			} else if (matchesShortcut(e, "go-to-project")) {
 				// Project quick-switch palette (Slack/Linear/VSCode "go to anything").
 				// Not Cmd+T: that's the universal new-tab key and the live terminal
@@ -1627,8 +1729,14 @@ function App() {
 	// the terminal bell, but carries a hoverable reason.
 	useEffect(() => {
 		function onCliAttention(e: Event) {
-			const { taskId, projectId, reason } = (e as CustomEvent).detail as { taskId: string; projectId?: string; reason: string };
+			const { taskId, projectId, reason, clear } = (e as CustomEvent).detail as { taskId: string; projectId?: string; reason: string; clear?: boolean };
 			if (!taskId) return;
+			// Clearing shows nothing, so a silenced project must not keep a stale
+			// badge lit; only raising a badge is gated on display silencing.
+			if (clear) {
+				dispatch({ type: "clearBell", taskId });
+				return;
+			}
 			if (isProjectSilencedForDisplay(projectId)) return;
 			addBellUnlessFocused(taskId, reason ?? "");
 		}
@@ -1690,18 +1798,20 @@ function App() {
 				taskId,
 				onClick: () => openTaskFromNotification(taskId, projectId),
 			});
-			// The header readout and the traffic log read the persisted log, not this
-			// push — the row on disk carries the full body and the delivery verdict,
-			// which the preview does not. So the arrival only triggers a re-read.
-			// No reader while the beta is off, so no re-read either — the toast above
-			// is unaffected and keeps working exactly as before.
-			if (!getAgentTrafficEnabled()) return;
-			noteTrafficArrival(projectId);
-			if (fromProjectId && fromProjectId !== projectId) noteTrafficArrival(fromProjectId);
 		}
 		window.addEventListener("rpc:agentMessage", onAgentMessage);
 		return () => window.removeEventListener("rpc:agentMessage", onAgentMessage);
 	}, [openTaskFromNotification, t]);
+
+	useEffect(() => {
+		function onLogChanged(event: Event) {
+			if (!getAgentTrafficEnabled()) return;
+			const { projectId } = (event as CustomEvent<{ projectId: string }>).detail;
+			noteTrafficArrival(projectId);
+		}
+		window.addEventListener("rpc:agentMessageLogChanged", onLogChanged);
+		return () => window.removeEventListener("rpc:agentMessageLogChanged", onLogChanged);
+	}, []);
 
 	// Everything that opens the traffic log goes through one event: the header
 	// readout, the native View menu and the command palette all fire it.
@@ -1808,9 +1918,7 @@ function App() {
 			const alreadyOpenForTask = artifactViewerRef.current?.taskId === taskId;
 			if (alreadyOpenForTask || (viewingThisTask && foreground)) {
 				markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-				// An already-open standalone overlay keeps its host; it has no pane to dock into.
-				const standalone = alreadyOpenForTask ? artifactViewerRef.current?.standalone : undefined;
-				setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1, standalone });
+				setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1 });
 				return;
 			}
 			const context = taskToastContext(taskSeq, projectName, taskTitle);
@@ -1829,16 +1937,16 @@ function App() {
 
 	useEffect(() => {
 		function onOpenArtifactViewer(e: Event) {
-			const { taskId, projectId, artifacts, index, standalone } = (e as CustomEvent).detail as {
+			const { taskId, taskStatus, projectId, artifacts, index } = (e as CustomEvent).detail as {
 				taskId: string;
+				taskStatus?: TaskStatus;
 				projectId: string;
 				artifacts: SharedArtifact[];
 				index?: number;
-				standalone?: boolean;
 			};
 			if (!taskId || !projectId || !artifacts?.length) return;
 			markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-			setArtifactViewer({ taskId, artifacts, index: index ?? artifacts.length - 1, standalone });
+			setArtifactViewer({ taskId, taskStatus, artifacts, index: index ?? artifacts.length - 1 });
 		}
 		window.addEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
 		return () => window.removeEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
@@ -1988,13 +2096,22 @@ function App() {
 	// Listen for agent-initiated completion requests — the CLI is blocked on a
 	// socket waiting for the user's decision, so always respond, even on cancel.
 	useEffect(() => {
-		async function onAgentCompletionRequested(e: Event) {
-			const { requestId, taskId, taskTitle, subject } = (e as CustomEvent).detail as {
-				requestId: string;
-				taskId: string;
-				taskTitle: string;
-				subject?: TaskDialogSubject;
-			};
+		// One dialog per request on this client. The push and the on-connect replay
+		// can both name the same request (a reload that raced the push), and two
+		// stacked confirms for one approval is worse than the bug being fixed. The
+		// set lives in a ref because this effect re-runs on every `t`/`navigate`
+		// identity change — a set rebuilt per run would forget what is on screen.
+		const showing = completionDialogsShowingRef.current;
+
+		async function showCompletionDialog(request: {
+			requestId: string;
+			taskId: string;
+			taskTitle: string;
+			subject?: TaskDialogSubject;
+		}) {
+			const { requestId, taskId, taskTitle, subject } = request;
+			if (showing.has(requestId)) return;
+			showing.add(requestId);
 			let approved = false;
 			// The same dialog is up on every connected client; the first answer
 			// closes the rest (see createAgentRequestAbort).
@@ -2014,6 +2131,7 @@ function App() {
 				console.error("[App] confirm (agent-completion) failed:", err);
 			} finally {
 				abort.cleanup();
+				showing.delete(requestId);
 			}
 			// Answered on another client — that client owns every side effect, and
 			// the CLI already has its decision.
@@ -2032,8 +2150,111 @@ function App() {
 				console.error("respondToAgentCompletionRequest failed:", err),
 			);
 		}
+
+		function onAgentCompletionRequested(e: Event) {
+			void showCompletionDialog((e as CustomEvent).detail);
+		}
 		window.addEventListener("rpc:agentCompletionRequested", onAgentCompletionRequested);
+
+		// The push above is a one-shot event. A window that reloads before answering
+		// would otherwise never be offered the dialog again — the blocked agent's
+		// retry joins the same request instead of triggering a new push — so the
+		// request would sit unanswerable for the rest of the app session. Ask what
+		// is still pending as soon as this client is listening.
+		api.request.listPendingCompletionRequests({}).then(async (pending) => {
+			if (pending.length === 0) return;
+			// `confirm()` is fail-closed, and this runs during startup: calling it
+			// before ConfirmHost has mounted would resolve `false` with no dialog on
+			// screen and answer "declined" for a user who was never asked. Rather
+			// than auto-decline, leave the request pending — the next window to
+			// connect replays it again.
+			if (!await whenConfirmHostMounted()) {
+				console.error("[App] pending completion dialogs skipped — ConfirmHost never mounted");
+				return;
+			}
+			for (const request of pending) void showCompletionDialog(request);
+		}).catch((err) => console.error("listPendingCompletionRequests failed:", err));
+
 		return () => window.removeEventListener("rpc:agentCompletionRequested", onAgentCompletionRequested);
+	}, [dispatch, navigate, t]);
+
+	// Agent-initiated CANCELLATION requests. Same blocked-CLI contract as the
+	// completion effect above, deliberately its own dialog: cancelling throws the
+	// worktree and everything uncommitted in it away, so the prompt is red from
+	// border to badge, Cancel is autofocused, and the local git check is streamed
+	// in with the confirm button gated until it settles — a mis-click cannot get
+	// past a warning that has not arrived yet.
+	useEffect(() => {
+		const showing = cancellationDialogsShowingRef.current;
+
+		async function showCancellationDialog(request: {
+			requestId: string;
+			taskId: string;
+			projectId: string;
+			taskTitle: string;
+			subject?: TaskDialogSubject;
+		}) {
+			const { requestId, taskId, projectId, taskTitle, subject } = request;
+			if (showing.has(requestId)) return;
+			showing.add(requestId);
+			let approved = false;
+			const abort = createAgentRequestAbort(requestId);
+			try {
+				const unsaved = api.request.getUnsavedWork({ taskId, projectId });
+				approved = await confirm({
+					title: t("app.agentCancellationTitle"),
+					message: t("app.agentCancellationMessage"),
+					info: taskDialogInfoFromSubject(taskTitle, subject),
+					confirmLabel: t("app.agentCancellationConfirm"),
+					cancelLabel: t("app.agentCancellationCancel"),
+					danger: true,
+					tone: "danger",
+					agentInitiated: true,
+					deferred: {
+						pending: t("task.checkingBranchState"),
+						unknown: t("task.branchStateUnknown"),
+						gateConfirm: true,
+						promise: unsaved.then((status) => unsavedWorkWarning(status, t)),
+					},
+					signal: abort.signal,
+				});
+			} catch (err) {
+				console.error("[App] confirm (agent-cancellation) failed:", err);
+			} finally {
+				abort.cleanup();
+				showing.delete(requestId);
+			}
+			if (abort.signal.aborted) return;
+			if (approved) {
+				// Leave the task's view BEFORE the worktree is destroyed, same as the
+				// completion path.
+				const openMode = getTaskOpenMode();
+				const dest = routeAfterTaskClosed(routeRef.current, taskId, openMode);
+				if (dest) navigate(dest);
+				dispatch({ type: "clearBell", taskId });
+			}
+			api.request.respondToAgentCancellationRequest({ requestId, approved }).catch((err) =>
+				console.error("respondToAgentCancellationRequest failed:", err),
+			);
+		}
+
+		function onAgentCancellationRequested(e: Event) {
+			void showCancellationDialog((e as CustomEvent).detail);
+		}
+		window.addEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
+
+		// Replayed for the same reason as the completion dialogs: the push is
+		// one-shot and an agent's retry joins the pending request.
+		api.request.listPendingCancellationRequests({}).then(async (pending) => {
+			if (pending.length === 0) return;
+			if (!await whenConfirmHostMounted()) {
+				console.error("[App] pending cancellation dialogs skipped — ConfirmHost never mounted");
+				return;
+			}
+			for (const request of pending) void showCancellationDialog(request);
+		}).catch((err) => console.error("listPendingCancellationRequests failed:", err));
+
+		return () => window.removeEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
 	}, [dispatch, navigate, t]);
 
 	// An agent wants to set another task running. Queued, never stacked: two
@@ -2553,15 +2774,7 @@ function App() {
 	);
 
 	if (authFailed) {
-		return (
-			<div className="h-full w-full flex items-center justify-center bg-base">
-				<div className="bg-raised border border-edge rounded-lg p-6 max-w-sm w-full space-y-3 text-center">
-					<div className="text-3xl">{"\uD83D\uDD12"}</div>
-					<h2 className="text-fg text-lg font-semibold">{t("remote.authFailed")}</h2>
-					<p className="text-fg-3 text-sm">{t("remote.authFailedDesc")}</p>
-				</div>
-			</div>
-		);
+		return <RemoteSignIn onSignedIn={() => setAuthFailed(false)} />;
 	}
 
 	// Requirements check failed \u2014 a real, actionable screen; keep it ahead of the
@@ -2638,6 +2851,13 @@ function App() {
 	const createTaskProject = createTaskProjectId
 		? state.projects.find((project) => project.id === createTaskProjectId) ?? null
 		: null;
+	// On a space board the field offers the space's members and nothing else: work
+	// started from this board cannot land outside the space by a mis-click.
+	const createTaskSpaceId = routeSpaceId(state.route);
+	const createTaskSpace = createTaskSpaceId ? appSpaces.find((sp) => sp.id === createTaskSpaceId) ?? null : null;
+	const createTaskProjects = createTaskSpace
+		? state.projects.filter((p) => createTaskSpace.projectIds.includes(p.id))
+		: state.projects;
 	// While the public tunnel is still coming up, the QR and the URL still point at
 	// the LAN address. Scanned from another network that link just fails, so publish
 	// nothing until the tunnel hostname lands.
@@ -2690,7 +2910,12 @@ function App() {
 			)}
 			<main className="flex-1 min-h-0 flex flex-col overflow-hidden" inert={workspaceTaskTarget && !terminalImmersiveVisible ? true : undefined}>
 				{routeH1 && <h1 className="sr-only">{routeH1}</h1>}
-				{terminalImmersiveVisible ? renderTerminalImmersiveScreen() : renderScreen()}
+				{route.screen === "dashboard" ? (
+					<>
+						<div hidden={terminalImmersiveVisible} className={terminalImmersiveVisible ? "hidden" : "flex min-h-0 flex-1 flex-col"}>{renderScreen()}</div>
+						{terminalImmersiveVisible && renderTerminalImmersiveScreen()}
+					</>
+				) : terminalImmersiveVisible ? renderTerminalImmersiveScreen() : renderScreen()}
 			</main>
 			{!terminalImmersiveVisible && (
 			<>
@@ -2709,8 +2934,6 @@ function App() {
 						dismissWorkspaceTask();
 					}}
 					navigationGuardRef={navigationGuardRef}
-					artifactViewer={artifactViewer?.standalone ? null : artifactViewer}
-					onCloseArtifactViewer={closeArtifactViewer}
 					skipCopyModeReset={skipTerminalCopyReset}
 				/>
 			)}
@@ -2746,6 +2969,10 @@ function App() {
 						setShowProjectSwitch(false);
 						navigateToProject(projectId);
 					}}
+					onSelectSpace={(spaceId) => {
+						setShowProjectSwitch(false);
+						navigateToSpace(spaceId);
+					}}
 					onClose={() => setShowProjectSwitch(false)}
 				/>
 			)}
@@ -2773,16 +3000,28 @@ function App() {
 				<AddProjectModal
 					dispatch={dispatch}
 					initialSpaceIds={addProjectSpaceIds}
+					onGitProjectsAdded={(projects) => projects.forEach((p) => enqueueImportOffer(p, true))}
 					onClose={() => {
 						setShowAddProjectModal(false);
 						setAddProjectSpaceIds([]);
 					}}
 				/>
 			)}
+			{importOfferQueue.length > 0 && (
+				<ImportConversationsModal
+					key={importOfferQueue[0].project.id}
+					project={importOfferQueue[0].project}
+					autoOffer={importOfferQueue[0].autoOffer}
+					onClose={() => setImportOfferQueue((q) => q.slice(1))}
+				/>
+			)}
 			{createTaskProject && (
 				<CreateTaskModal
 					project={createTaskProject}
-					projects={state.projects}
+					projects={createTaskProjects}
+					onProjectChange={(projectId) => {
+						if (createTaskSpaceId) rememberProjectForSpace(createTaskSpaceId, projectId);
+					}}
 					dispatch={dispatch}
 					initialText={createTaskInitialText}
 					onClose={() => {
@@ -2898,15 +3137,82 @@ function App() {
 				</div>
 			)}
 			{remoteQR && (
-				<RemoteAccessDialog titleId="remote-access-dialog-title" onClose={closeRemoteQR}>
+				<RemoteAccessDialog
+					titleId="remote-access-dialog-title"
+					onClose={closeRemoteQR}
+					header={<h2 id="remote-access-dialog-title" className="text-fg text-lg font-semibold">{t("remote.title")}</h2>}
+					footer={remoteQR.serverStatus && !remoteQR.serverStatus.running ? undefined : (
+						<div className="flex items-center justify-center gap-2">
+							<button
+								type="button"
+								onClick={async () => {
+									if (qrConsumed || tunnelUrlPending || remoteUrlCopyState === "copying") return;
+									setRemoteUrlCopyState("copying");
+									try {
+										await navigator.clipboard.writeText(remoteQR.accessUrl);
+										setRemoteUrlCopyState("copied");
+										setTimeout(() => setRemoteUrlCopyState("idle"), 2000);
+									} catch {
+										setRemoteUrlCopyState("idle");
+									}
+								}}
+								disabled={qrConsumed || tunnelUrlPending || remoteUrlCopyState === "copying"}
+								aria-label={t(remoteCopyLabel)}
+								className={`inline-flex min-w-[7.25rem] items-center justify-center gap-1.5 px-4 py-2 text-sm rounded-lg transition-[background-color,color,transform] active:scale-[0.98] ${qrConsumed || tunnelUrlPending ? "bg-elevated text-fg-3 cursor-not-allowed" : remoteUrlCopyState === "copying" ? "bg-accent/80 text-white cursor-wait" : remoteUrlCopyState === "copied" ? "bg-success-fill text-white hover:bg-success-fill-hover" : "bg-accent-fill text-white hover:bg-accent-fill-hover"}`}
+							>
+								{remoteUrlCopyState === "copying" && (
+									<svg
+										className="w-3.5 h-3.5 animate-spin"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										aria-hidden="true"
+									>
+										<circle cx="12" cy="12" r="9" strokeWidth="3" opacity="0.25" />
+										<path d="M21 12a9 9 0 0 1-9 9" strokeWidth="3" strokeLinecap="round" />
+									</svg>
+								)}
+								{remoteUrlCopyState === "copied" && (
+									<span
+										aria-hidden="true"
+										className="leading-none"
+										style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
+									>
+										{"\uF00C"}
+									</span>
+								)}
+								{t(remoteCopyLabel)}
+							</button>
+							<button
+								type="button"
+								onClick={closeRemoteQR}
+								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
+							>
+								{t("remote.close")}
+							</button>
+						</div>
+					)}
+				>
+					{remoteQR.serverStatus && !remoteQR.serverStatus.running ? (
+						// Nothing is listening, so there is no URL and no QR to show — a code
+						// minted on port 0 would look scannable and go nowhere.
+						<>
+							<RemoteAccessDownNotice
+								status={remoteQR.serverStatus}
+								onOpenSettings={() => {
+									closeRemoteQR();
+									navigate({ screen: "settings", section: "system" });
+								}}
+							/>
+						</>
+					) : (
 					<>
-						<h2 id="remote-access-dialog-title" className="text-fg text-lg font-semibold">{t("remote.title")}</h2>
 						<p className="text-fg-2 text-sm">{t("remote.subtitle")}</p>
 						<div className="flex justify-center relative">
 							{tunnelUrlPending ? (
 								<div
 									data-testid="remote-qr-pending"
-									className="w-56 h-56 rounded-lg bg-base border border-edge flex flex-col items-center justify-center gap-3 px-4"
+									className={`${QR_BOX_SIZE} rounded-lg bg-base border border-edge flex flex-col items-center justify-center gap-3 px-4`}
 								>
 									<svg className="w-7 h-7 animate-spin text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
 										<circle cx="12" cy="12" r="9" strokeWidth="3" opacity="0.25" />
@@ -2916,7 +3222,7 @@ function App() {
 									<span className="text-fg-muted text-xs leading-snug">{t("remote.qrWaitingTunnelHint")}</span>
 								</div>
 							) : (
-								<img src={remoteQR.qrDataUrl} alt="QR Code" className={`w-56 h-56 rounded-lg transition-[opacity,filter] duration-500 streamer-private-media ${qrConsumed ? "opacity-20 grayscale" : ""}`} />
+								<img src={remoteQR.qrDataUrl} alt="QR Code" className={`${QR_BOX_SIZE} rounded-lg transition-[opacity,filter] duration-500 streamer-private-media ${qrConsumed ? "opacity-20 grayscale" : ""}`} />
 							)}
 							{qrConsumed && !tunnelUrlPending && (
 								<div className="absolute inset-0 flex items-center justify-center">
@@ -2969,7 +3275,50 @@ function App() {
 						)}
 						{!tunnelUrlPending && (
 							<div className={`bg-base rounded-lg p-3 ${qrConsumed ? "opacity-40" : ""}`}>
-								<code className={`text-xs break-all streamer-private ${qrConsumed ? "text-fg-3" : "text-fg select-all"}`}>{remoteQR.accessUrl}</code>
+								{/* Clamped: a tunnel URL with a sign-in token wraps over seven lines and
+								    pushed the action row off screen. The copy button below carries it. */}
+								<code
+									data-testid="remote-access-url"
+									title={remoteQR.accessUrl}
+									className={`text-xs break-all line-clamp-2 streamer-private ${qrConsumed ? "text-fg-3" : "text-fg select-all"}`}
+								>
+									{remoteQR.accessUrl}
+								</code>
+							</div>
+						)}
+
+						{/* A permanent access code is a second, always-open door — say so here,
+						    because otherwise it is discoverable only from a CLI command. */}
+						{remoteQR.staticCodeActive && (
+							<div data-testid="remote-static-code-active" className="bg-base rounded-lg p-3 text-left space-y-1">
+								<p className="text-fg text-xs font-semibold">{t("remote.staticCodeActive")}</p>
+								<p className="text-fg-3 text-xs leading-snug">{t("remote.staticCodeActiveDesc")}</p>
+								{isRemoteTunnelActive(remoteQR.tunnelState) && (
+									<p data-testid="remote-static-code-tunnel-warning" className="text-warning-strong text-xs leading-snug">
+										{t("remote.staticCodeTunnelWarning")}
+									</p>
+								)}
+								{remoteQR.signInLink && (
+									<>
+										<p className="text-fg-muted text-xs leading-snug pt-1">{t("remote.signInLinkHint")}</p>
+										{/* Copied, never rendered: the link holds the code, and this modal
+										    is the one people screenshot to share the QR. */}
+										<button
+											type="button"
+											data-testid="remote-copy-sign-in-link"
+											onClick={async () => {
+												try {
+													await navigator.clipboard.writeText(remoteQR.signInLink!);
+													setSignInLinkCopied(true);
+													setTimeout(() => setSignInLinkCopied(false), 2000);
+												} catch { /* clipboard blocked — nothing copied, nothing claimed */ }
+											}}
+											className="w-full min-h-8 px-3 py-1.5 rounded-lg border border-edge text-fg-2 text-xs hover:text-fg hover:bg-elevated hover:border-edge-active transition-[color,background-color,border-color,transform] active:scale-[0.96]"
+										>
+											{t(signInLinkCopied ? "remote.copySignInLinkDone" : "remote.copySignInLink")}
+										</button>
+									</>
+								)}
 							</div>
 						)}
 
@@ -3135,57 +3484,8 @@ function App() {
 						</div>
 
 						<RemoteAccessExposedPorts />
-
-						<div className="flex items-center justify-center gap-2">
-							<button
-								type="button"
-								onClick={async () => {
-									if (qrConsumed || tunnelUrlPending || remoteUrlCopyState === "copying") return;
-									setRemoteUrlCopyState("copying");
-									try {
-										await navigator.clipboard.writeText(remoteQR.accessUrl);
-										setRemoteUrlCopyState("copied");
-										setTimeout(() => setRemoteUrlCopyState("idle"), 2000);
-									} catch {
-										setRemoteUrlCopyState("idle");
-									}
-								}}
-								disabled={qrConsumed || tunnelUrlPending || remoteUrlCopyState === "copying"}
-								aria-label={t(remoteCopyLabel)}
-								className={`inline-flex min-w-[7.25rem] items-center justify-center gap-1.5 px-4 py-2 text-sm rounded-lg transition-[background-color,color,transform] active:scale-[0.98] ${qrConsumed || tunnelUrlPending ? "bg-elevated text-fg-3 cursor-not-allowed" : remoteUrlCopyState === "copying" ? "bg-accent/80 text-white cursor-wait" : remoteUrlCopyState === "copied" ? "bg-success-fill text-white hover:bg-success-fill-hover" : "bg-accent-fill text-white hover:bg-accent-fill-hover"}`}
-							>
-								{remoteUrlCopyState === "copying" && (
-									<svg
-										className="w-3.5 h-3.5 animate-spin"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										aria-hidden="true"
-									>
-										<circle cx="12" cy="12" r="9" strokeWidth="3" opacity="0.25" />
-										<path d="M21 12a9 9 0 0 1-9 9" strokeWidth="3" strokeLinecap="round" />
-									</svg>
-								)}
-								{remoteUrlCopyState === "copied" && (
-									<span
-										aria-hidden="true"
-										className="leading-none"
-										style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
-									>
-										{"\uF00C"}
-									</span>
-								)}
-								{t(remoteCopyLabel)}
-							</button>
-							<button
-								type="button"
-								onClick={closeRemoteQR}
-								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
-							>
-								{t("remote.close")}
-							</button>
-						</div>
 					</>
+					)}
 				</RemoteAccessDialog>
 			)}
 			<StuckPreparationPopover tasks={effectiveTasks} />
@@ -3205,10 +3505,10 @@ function App() {
 					onRespond={(approved, launch) => respondToLaunchRequest(launchRequests[0]!.requestId, approved, launch)}
 				/>
 			)}
-			{artifactViewer?.standalone && (
+			{artifactViewer && (
 				<TaskArtifactViewer
-					standalone
 					taskId={artifactViewer.taskId}
+					taskStatus={artifactViewer.taskStatus}
 					artifacts={artifactViewer.artifacts}
 					initialIndex={artifactViewer.index}
 					onClose={closeArtifactViewer}
@@ -3255,6 +3555,7 @@ function App() {
 			{showDiagnostics && <DiagnosticsPanel onClose={() => setShowDiagnostics(false)} />}
 			{/* Toasts are transient feedback, not immersive chrome; notification toasts
 			    must remain clickable so their handler can exit fullscreen first. */}
+			<PushEnrollmentInvite t={t} />
 			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} />
 			{/* Agent traffic log — an overlay over any screen (the nav budget is spent),
 			    opened from the header readout, ⇧⌘M, the View menu and the palette. */}
@@ -3290,8 +3591,6 @@ function App() {
 					presentation="immersive"
 				isTerminalFullscreen
 				onToggleTerminalFullscreen={toggleTerminalImmersive}
-				artifactViewer={null}
-				onCloseArtifactViewer={closeArtifactViewer}
 				skipCopyModeReset={skipTerminalCopyReset}
 				openUnresolvedComments={route.screen === "task" ? route.openUnresolvedComments : undefined}
 			/>
@@ -3319,6 +3618,7 @@ function App() {
 				return (
 					<ProjectView
 						projectId={route.projectId}
+						spaceId={route.spaceId}
 						projects={state.projects}
 						tasks={state.currentProjectTasks}
 						dispatch={dispatch}
@@ -3332,8 +3632,6 @@ function App() {
 						activeTaskId={route.activeTaskId}
 						taskView={route.taskView}
 						navigationGuardRef={navigationGuardRef}
-						artifactViewer={artifactViewer?.standalone ? null : artifactViewer}
-						onCloseArtifactViewer={closeArtifactViewer}
 						isTerminalFullscreen={terminalImmersiveVisible}
 						onToggleTerminalFullscreen={toggleTerminalImmersive}
 						skipCopyModeReset={skipTerminalCopyReset}
@@ -3363,8 +3661,6 @@ function App() {
 						navigate={navigate}
 						dispatch={dispatch}
 						navigationGuardRef={navigationGuardRef}
-						artifactViewer={artifactViewer?.standalone ? null : artifactViewer}
-						onCloseArtifactViewer={closeArtifactViewer}
 						isTerminalFullscreen={terminalImmersiveVisible}
 						onToggleTerminalFullscreen={toggleTerminalImmersive}
 						skipCopyModeReset={skipTerminalCopyReset}
@@ -3385,7 +3681,7 @@ function App() {
 					/>
 				);
 			case "settings":
-				return <GlobalSettings section={route.section} preset={route.preset} />;
+				return <GlobalSettings section={route.section} anchor={route.anchor} preset={route.preset} />;
 			case "changelog":
 				return (
 					<Changelog

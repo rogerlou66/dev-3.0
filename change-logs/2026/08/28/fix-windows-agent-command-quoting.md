@@ -1,0 +1,3 @@
+Short: Agents launch on Windows again
+
+Starting or resuming an agent on Windows failed twice over: the command line was quoted for a POSIX shell, so the apostrophe in the dev3 system prompt ended the PowerShell string literal, and the prompt itself was longer than a whole Windows command line. Command lines are now quoted in the platform's launch dialect, the dev3 protocol was rewritten about a quarter shorter and capped by a test that fails when it grows past the Windows limit, Claude receives it as a file on Windows, and a binary whose path contains a space (`C:\Users\John Smith\...`) launches correctly on every platform.

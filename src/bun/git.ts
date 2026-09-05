@@ -961,6 +961,41 @@ async function reclaimStaleWorktreeDir(project: Project, wtPath: string): Promis
 	await run(["git", "worktree", "prune"], project.path);
 }
 
+const WORKTREE_ADD_RETRY_DELAYS_MS = [200, 500, 1_200];
+
+/** Lock files git creates per-operation: another git process holds one right now. */
+function isGitLockContention(stderr: string): boolean {
+	return /could not lock config file/i.test(stderr)
+		|| (/\.lock/.test(stderr) && /File exists/i.test(stderr));
+}
+
+/**
+ * `git worktree add` writes the new branch's tracking config into the repo-wide
+ * .git/config, so variants of one task starting together lose the race for
+ * config.lock ("could not lock config file … File exists"). The loser only has
+ * to wait — but the failed attempt already created the branch, so every retry
+ * re-runs the same reclaim the first attempt did.
+ */
+async function worktreeAddWithRetry(
+	args: string[],
+	project: Project,
+	wtPath: string,
+	createdBranch: string | undefined,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+	let result = await run(args, project.path);
+	for (const delayMs of WORKTREE_ADD_RETRY_DELAYS_MS) {
+		if (result.ok || !isGitLockContention(result.stderr)) break;
+		log.warn("Worktree add hit git lock contention, retrying", { wtPath, delayMs, stderr: result.stderr });
+		await new Promise((resolve) => setTimeout(resolve, delayMs));
+		await reclaimStaleWorktreeDir(project, wtPath);
+		if (createdBranch && await localBranchExists(project.path, createdBranch)) {
+			await run(["git", "branch", "-D", createdBranch], project.path);
+		}
+		result = await run(args, project.path);
+	}
+	return result;
+}
+
 export async function createWorktree(
 	project: Project,
 	task: Task,
@@ -986,14 +1021,20 @@ export async function createWorktree(
 		await reclaimStaleWorktreeDir(project, wtPath);
 		// A leftover variant branch (re-run of a task that kept its branch) is
 		// checked out instead of recreated, so its commits survive the re-run.
-		const variantAddArgs = await localBranchExists(project.path, variantBranchName)
+		const variantBranchSurvived = await localBranchExists(project.path, variantBranchName);
+		const variantAddArgs = variantBranchSurvived
 			? ["git", "worktree", "add", wtPath, variantBranchName]
 			: ["git", "worktree", "add", "-b", variantBranchName, wtPath, resolvedBase];
 
 		const result = await measureGitStep(
 			"createWorktree.variant.worktreeAdd",
 			{ taskId: task.id.slice(0, 8), wtPath, variantBranchName, base: resolvedBase },
-			() => run(variantAddArgs, project.path),
+			() => worktreeAddWithRetry(
+				variantAddArgs,
+				project,
+				wtPath,
+				variantBranchSurvived ? undefined : variantBranchName,
+			),
 		);
 
 		if (!result.ok) {
@@ -1022,9 +1063,11 @@ export async function createWorktree(
 		const result = await measureGitStep(
 			"createWorktree.existing.worktreeAdd",
 			{ taskId: task.id.slice(0, 8), wtPath, resolvedBranch, isRemoteRef },
-			() => run(
+			() => worktreeAddWithRetry(
 				["git", "worktree", "add", wtPath, resolvedBranch],
-				project.path,
+				project,
+				wtPath,
+				undefined,
 			),
 		);
 
@@ -1042,9 +1085,11 @@ export async function createWorktree(
 				const trackResult = await measureGitStep(
 					"createWorktree.existing.trackRemoteBranch",
 					{ taskId: task.id.slice(0, 8), wtPath, resolvedBranch, existingBranch },
-					() => run(
+					() => worktreeAddWithRetry(
 						["git", "worktree", "add", "--track", "-b", resolvedBranch, wtPath, existingBranch],
-						project.path,
+						project,
+						wtPath,
+						resolvedBranch,
 					),
 				);
 				if (!trackResult.ok) {
@@ -1064,9 +1109,11 @@ export async function createWorktree(
 				const fallbackResult = await measureGitStep(
 					"createWorktree.existing.fallbackBranch",
 					{ taskId: task.id.slice(0, 8), wtPath, taskBranch, resolvedBranch },
-					() => run(
+					() => worktreeAddWithRetry(
 						["git", "worktree", "add", "-b", taskBranch, wtPath, resolvedBranch],
-						project.path,
+						project,
+						wtPath,
+						taskBranch,
 					),
 				);
 				if (!fallbackResult.ok) {
@@ -1162,9 +1209,11 @@ export async function createWorktree(
 	const result = await measureGitStep(
 		"createWorktree.default.worktreeAdd",
 		{ taskId: task.id.slice(0, 8), wtPath, branch, resolvedBase },
-		() => run(
+		() => worktreeAddWithRetry(
 			["git", "worktree", "add", "-b", branch, wtPath, resolvedBase],
-			project.path,
+			project,
+			wtPath,
+			branch,
 		),
 	);
 
@@ -1701,24 +1750,51 @@ export function _resetFetchState(): void {
 	fetchProjectQueue.clear();
 }
 
+/**
+ * Is there a commit both `ref` and HEAD descend from? Everything the git bar
+ * shows about a branch is measured from that fork point, so its absence is a
+ * fact the caller has to know rather than paper over.
+ *
+ * A local clone that is shallow (or grafted) is the way this happens in
+ * practice: truncated history hides the common ancestor, and then the two
+ * commands that ask for it diverge in the worst possible way — `git diff
+ * ref...HEAD` dies with "no merge base", while `git rev-list --count
+ * --left-right ref...HEAD` silently degrades to the FULL symmetric difference
+ * and answers with the size of each side's whole history. Arseny's bar read
+ * "1889 ahead · 6 behind" for a branch that was 2 ahead of a 1894-commit main.
+ */
+async function hasMergeBase(worktreePath: string, ref: string): Promise<boolean> {
+	const result = await run(["git", "merge-base", ref, "HEAD"], worktreePath);
+	return result.ok && result.stdout.length > 0;
+}
+
 export async function getBranchStatus(
 	worktreePath: string,
 	baseBranch: string,
-): Promise<{ ahead: number; behind: number }> {
+): Promise<{ ahead: number; behind: number; baseUnreachable: boolean }> {
 	const result = await run(
 		["git", "rev-list", "--count", "--left-right", `${baseBranch}...HEAD`],
 		worktreePath,
 	);
 	if (!result.ok) {
 		log.warn("getBranchStatus failed", { stderr: result.stderr });
-		return { ahead: 0, behind: 0 };
+		return { ahead: 0, behind: 0, baseUnreachable: false };
 	}
 	// Output is "behind\tahead" (left = remote, right = local)
 	const parts = result.stdout.split("\t");
-	return {
-		behind: parseInt(parts[0], 10) || 0,
-		ahead: parseInt(parts[1], 10) || 0,
-	};
+	const behind = parseInt(parts[0], 10) || 0;
+	const ahead = parseInt(parts[1], 10) || 0;
+	// The probe never misses: with no fork point both sides are the whole history
+	// of their end, so both are necessarily non-zero. Skipping it when either is
+	// zero costs nothing in accuracy and spares the extra spawn on every poll of
+	// a branch that is purely ahead or purely behind.
+	if (ahead > 0 && behind > 0 && !await hasMergeBase(worktreePath, baseBranch)) {
+		log.warn("getBranchStatus: no merge base — reporting the counts as unknown", {
+			worktreePath, baseBranch, degradedAhead: ahead, degradedBehind: behind,
+		});
+		return { ahead: 0, behind: 0, baseUnreachable: true };
+	}
+	return { behind, ahead, baseUnreachable: false };
 }
 
 export async function getUncommittedChanges(
@@ -2017,6 +2093,42 @@ export async function getUnpushedCount(
 	return parseInt(result.stdout, 10) || 0;
 }
 
+/**
+ * Commits that exist on no remote — the honest answer to "what would deleting
+ * this worktree destroy". Same -1/0/N contract as {@link getUnpushedCount}, and
+ * the same answer whenever `origin/<branch>` exists.
+ *
+ * The name-based check alone called preserved work lost: `git push origin
+ * HEAD:other-name` leaves no `origin/<branch>`, so a branch whose every commit
+ * is on the remote reported the never-pushed sentinel (issue #1545). Fall back
+ * to reachability from ANY remote ref — a fork or a configured upstream counts,
+ * because both are remote refs. A repo with no remote refs at all preserves
+ * nothing, and there the reachability count is the whole history, so it stays
+ * -1 exactly as before.
+ *
+ * Anything not fully preserved keeps the -1 sentinel rather than a partial
+ * count: the loss warning must stay loud, and only the provably-safe case is
+ * allowed to go quiet.
+ *
+ * Deliberately separate from {@link getUnpushedCount}: merge detection and PR
+ * polling ask the name-based question on purpose, and -1 is what keeps a
+ * brand-new branch out of their content-merge path.
+ */
+export async function getUnpreservedCount(
+	worktreePath: string,
+	branchName: string,
+): Promise<number> {
+	const named = await getUnpushedCount(worktreePath, branchName);
+	if (named >= 0) return named;
+
+	const anywhere = await run(
+		["git", "rev-list", "--count", "HEAD", "--not", "--remotes"],
+		worktreePath,
+	);
+	if (!anywhere.ok) return -1;
+	return parseInt(anywhere.stdout, 10) === 0 ? 0 : -1;
+}
+
 export async function getBehindOriginCount(
 	worktreePath: string,
 	branchName: string,
@@ -2184,15 +2296,23 @@ export async function getTaskDiff(
 	}
 
 	/**
-	 * A compare ref that is not in the repo makes `git diff` fail, and a failed
-	 * diff arrives here as an empty one — "no changes to show" for a comparison
-	 * that never happened. Checked only when the diff came back empty, so the
-	 * normal path pays nothing.
+	 * Two ways a comparison never happens, both arriving here as an empty diff —
+	 * "no changes to show" for a question nobody answered. A compare ref that is
+	 * not in the repo makes `git diff` fail; so does a ref that exists but shares
+	 * no ancestor with HEAD (`fatal: ...: no merge base`, typically a shallow
+	 * clone). Checked only when the diff came back empty, so the normal path pays
+	 * nothing.
 	 */
 	const withMissingRefCheck = async (result: TaskDiffResponse): Promise<TaskDiffResponse> => {
 		if (result.files.length > 0 || result.skippedFiles.length > 0 || result.summary.files > 0) return result;
-		if (await refExists(worktreePath, defaultCompareRef)) return result;
-		return { ...result, fallbackReason: "missing-compare-ref", summary: { files: 0, insertions: 0, deletions: 0 } };
+		const empty = { files: 0, insertions: 0, deletions: 0 };
+		if (!await refExists(worktreePath, defaultCompareRef)) {
+			return { ...result, fallbackReason: "missing-compare-ref", summary: empty };
+		}
+		if (!await hasMergeBase(worktreePath, defaultCompareRef)) {
+			return { ...result, fallbackReason: "no-merge-base", summary: empty };
+		}
+		return result;
 	};
 
 	if (mode === "unpushed") {

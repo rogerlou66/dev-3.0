@@ -19,6 +19,10 @@ vi.mock("../rpc", () => ({
 			getRosettaWarning: vi.fn().mockResolvedValue(null),
 			checkGhAvailable: vi.fn().mockResolvedValue({ available: true, notInstalled: false }),
 			getProjects: vi.fn().mockResolvedValue([]),
+			// Opening a project board asks once whether there is anything to import.
+			scanImportableConversations: vi.fn().mockResolvedValue({ conversations: [] }),
+			markConversationImportOffered: vi.fn().mockResolvedValue({ project: null }),
+			getSpaces: vi.fn().mockResolvedValue({ version: 1, spaces: [], order: [] }),
 			getLastRoute: vi.fn().mockResolvedValue({ route: null }),
 			saveLastRoute: vi.fn().mockResolvedValue(undefined),
 			quitApp: vi.fn().mockResolvedValue(undefined),
@@ -27,6 +31,7 @@ vi.mock("../rpc", () => ({
 			consumePendingNotificationNav: vi.fn().mockResolvedValue(null),
 			openNewWindow: vi.fn().mockResolvedValue(undefined),
 			hideApp: vi.fn().mockResolvedValue(undefined),
+			setWindowTitleContext: vi.fn().mockResolvedValue(undefined),
 			listTmuxSessions: vi.fn().mockResolvedValue([]),
 			getProjectCurrentBranch: vi.fn().mockResolvedValue({ branch: "main", isBaseBranch: true, isDirty: false }),
 			pullProjectMain: vi.fn(),
@@ -53,6 +58,10 @@ vi.mock("../rpc", () => ({
 			markTaskSharedItemsRead: vi.fn().mockResolvedValue({ id: "updated-task" }),
 			listAgentSkills: vi.fn().mockResolvedValue([]),
 			respondToAgentCompletionRequest: vi.fn().mockResolvedValue(undefined),
+			listPendingCompletionRequests: vi.fn().mockResolvedValue([]),
+			respondToAgentCancellationRequest: vi.fn().mockResolvedValue(undefined),
+			listPendingCancellationRequests: vi.fn().mockResolvedValue([]),
+			getUnsavedWork: vi.fn().mockResolvedValue({ insertions: 0, deletions: 0, unpushed: 0, ahead: 0, baseUnreachable: false }),
 			respondToAgentLaunchRequest: vi.fn().mockResolvedValue(undefined),
 			checkAgentAvailability: vi.fn().mockResolvedValue([]),
 			getRemoteAccessQR: vi.fn().mockResolvedValue({
@@ -64,6 +73,9 @@ vi.mock("../rpc", () => ({
 				tunnelFailureReason: null,
 				interfaces: [],
 				selectedHost: "127.0.0.1",
+				staticCodeActive: false,
+				signInLink: null,
+				serverStatus: { running: true, port: 51473, failure: null },
 			}),
 			stopTunnel: vi.fn().mockResolvedValue(undefined),
 			readArtifactContent: vi.fn().mockResolvedValue({ html: "<p>artifact</p>", assets: [] }),
@@ -143,7 +155,6 @@ vi.mock("../components/ProjectView", () => ({
 		activeTaskId?: string;
 		taskView?: boolean;
 		bellCounts?: Map<string, number>;
-		artifactViewer?: { artifacts: Array<{ title?: string }>; index: number } | null;
 	}) => (
 		<div
 			data-testid="project-screen"
@@ -151,9 +162,6 @@ vi.mock("../components/ProjectView", () => ({
 			data-active-task-id={props.activeTaskId ?? ""}
 			data-task-view={props.taskView ? "true" : "false"}
 			data-bell-count={String(props.bellCounts?.get("t-overflow") ?? 0)}
-			data-artifact-count={String(props.artifactViewer?.artifacts.length ?? 0)}
-			data-artifact-index={String(props.artifactViewer?.index ?? -1)}
-			data-artifact-title={props.artifactViewer?.artifacts[props.artifactViewer.index]?.title ?? ""}
 		/>
 	),
 }));
@@ -190,6 +198,9 @@ import { confirm } from "../confirm";
 vi.mock("../confirm", () => ({
 	confirm: vi.fn().mockResolvedValue(false),
 	ConfirmHost: () => null,
+	// The stubbed host is always "mounted" here — the real readiness wait is
+	// covered in confirm.test.tsx against the real ConfirmHost.
+	whenConfirmHostMounted: vi.fn().mockResolvedValue(true),
 }));
 import { initTaskSoundPlayback, playTaskSoundFromPush, setTaskCompletionSoundEnabled } from "../task-sounds";
 import { adjustZoom, applyZoom, ZOOM_STEP, DEFAULT_ZOOM } from "../zoom";
@@ -519,6 +530,21 @@ describe("App keyboard shortcuts", () => {
 
 			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
 			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+		});
+
+		it("keeps the dashboard mounted while its workspace enters and exits immersive mode", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			const board = screen.getByTestId("dashboard-screen");
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			await userEvent.keyboard("{F11}");
+			expect(screen.getByTestId("terminal-immersive-chrome")).toBeInTheDocument();
+			expect(screen.getByTestId("dashboard-screen")).toBe(board);
+			expect(board).not.toBeVisible();
+			await userEvent.keyboard("{F11}");
+			expect(screen.queryByTestId("terminal-immersive-chrome")).not.toBeInTheDocument();
+			expect(screen.getByTestId("workspace-task-overlay")).toBeInTheDocument();
+			expect(screen.getByTestId("dashboard-screen")).toBe(board);
 		});
 
 		it("runs overlay close through the shared unsaved-changes guard", async () => {
@@ -1204,7 +1230,9 @@ describe("App keyboard shortcuts", () => {
 			createdAt: 0,
 		});
 
-		it("hosts a standalone artifact overlay itself instead of handing it to the workspace pane", async () => {
+		// The viewer is a popup App owns, never a surface handed down to a screen —
+		// decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md.
+		it("hosts the artifact popup itself, over whichever screen is open", async () => {
 			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
 				route: JSON.stringify({ screen: "project", projectId: "p1" }),
@@ -1213,13 +1241,15 @@ describe("App keyboard shortcuts", () => {
 			await renderApp();
 			act(() => {
 				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
-					detail: { taskId: "t-archived", projectId: "p1", artifacts: [artifact("a")], index: 0, standalone: true },
+					detail: { taskId: "t-archived", projectId: "p1", artifacts: [artifact("a")], index: 0 },
 				}));
 			});
 
-			expect(await screen.findByTestId("artifact-viewer")).toHaveAttribute("data-fullscreen", "true");
-			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-artifact-count", "0");
-			expect(screen.queryByTestId("artifact-viewer-fullscreen")).toBeNull();
+			const card = await screen.findByTestId("artifact-viewer");
+			expect(card).toHaveAttribute("data-fullscreen", "false");
+			expect(card.parentElement).toHaveClass("fixed", "inset-0");
+			expect(screen.getByTestId("artifact-viewer-fullscreen")).toBeInTheDocument();
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
 		});
 
 		it("replaces an open viewer with the latest artifact even when the window loses focus", async () => {
@@ -1234,7 +1264,7 @@ describe("App keyboard shortcuts", () => {
 					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a"), artifact("b")], index: 1 },
 				}));
 			});
-			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-artifact-title", "Artifact b"));
+			await waitFor(() => expect(screen.getByText("Artifact b")).toBeInTheDocument());
 			expect(api.request.markTaskSharedItemsRead).toHaveBeenCalledWith({
 				projectId: "p1",
 				taskId: "t-artifact",
@@ -1256,9 +1286,8 @@ describe("App keyboard shortcuts", () => {
 				});
 
 				await waitFor(() => {
-					expect(screen.getByTestId("project-screen")).toHaveAttribute("data-artifact-count", "3");
-					expect(screen.getByTestId("project-screen")).toHaveAttribute("data-artifact-index", "2");
-					expect(screen.getByTestId("project-screen")).toHaveAttribute("data-artifact-title", "Artifact c");
+					expect(screen.getByText("Artifact c")).toBeInTheDocument();
+					expect(screen.getByText("3 / 3")).toBeInTheDocument();
 				});
 			} finally {
 				hasFocus.mockRestore();
@@ -1308,7 +1337,7 @@ describe("App keyboard shortcuts", () => {
 
 			expect(screen.getByText("#7 Coordinator → #42 Receiver")).toBeInTheDocument();
 			await userEvent.click(
-				await screen.findByRole("button", { name: "#7 Coordinator → #42 Receiver — “check the payload”" }),
+				await screen.findByRole("button", { name: "#7 Coordinator → #42 Receiver — check the payload" }),
 			);
 			await waitFor(() => {
 				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
@@ -1404,6 +1433,32 @@ describe("App keyboard shortcuts", () => {
 			for (let index = 1; index <= 5; index += 1) dispatchToast(`Overflow ${index}`);
 
 			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-bell-count", "2"));
+		});
+
+		it("lowers the badge when `dev3 attention --clear` arrives", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:cliAttention", {
+					detail: { taskId: "t-overflow", projectId: "p1", reason: "blocked" },
+				}));
+				window.dispatchEvent(new CustomEvent("rpc:cliAttention", {
+					detail: { taskId: "t-overflow", projectId: "p1", reason: "still blocked" },
+				}));
+			});
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-bell-count", "2"));
+
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:cliAttention", {
+					detail: { taskId: "t-overflow", projectId: "p1", reason: "", clear: true },
+				}));
+			});
+
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-bell-count", "0"));
 		});
 	});
 
@@ -2162,6 +2217,129 @@ describe("App keyboard shortcuts", () => {
 			await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 		});
 
+		// A permanent access code is a second, always-open door into the box. Before
+		// this it was visible only from `dev3 remote status` on the host.
+		it("names an active access code, and warns while the public tunnel is up", async () => {
+			await renderApp();
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,tunnel",
+					accessUrl: "https://foo.trycloudflare.com/?token=t",
+					tunnelState: "connected",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+					staticCodeActive: true,
+				},
+			}));
+
+			expect(await screen.findByTestId("remote-static-code-active")).toBeInTheDocument();
+			expect(screen.getByTestId("remote-static-code-tunnel-warning")).toBeInTheDocument();
+			// The code itself never reaches the renderer — only the fact that one is set.
+			expect(document.body.textContent).not.toContain("sesame");
+		});
+
+		// The link is copied, never rendered: this modal is the one people
+		// screenshot to share the QR, and the link holds the permanent code.
+		it("copies the sign-in link without ever putting it on screen", async () => {
+			await renderApp();
+			const link = "https://foo.trycloudflare.com/?token=one-time#code=sesame-open-up";
+			const writeText = vi.fn().mockResolvedValue(undefined);
+			Object.assign(navigator, { clipboard: { writeText } });
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,tunnel",
+					accessUrl: "https://foo.trycloudflare.com/?token=one-time",
+					tunnelState: "connected",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+					staticCodeActive: true,
+					signInLink: link,
+				},
+			}));
+
+			const button = await screen.findByTestId("remote-copy-sign-in-link");
+			expect(document.body.textContent).not.toContain("sesame-open-up");
+
+			await userEvent.click(button);
+			expect(writeText).toHaveBeenCalledWith(link);
+			expect(await screen.findByText("Sign-in link copied")).toBeInTheDocument();
+		});
+
+		it("offers no sign-in link when the host has no access code", async () => {
+			await renderApp();
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,local",
+					accessUrl: "http://192.168.0.1:1234/?token=t",
+					tunnelState: "idle",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
+				},
+			}));
+
+			await screen.findByRole("dialog");
+			expect(screen.queryByTestId("remote-copy-sign-in-link")).not.toBeInTheDocument();
+		});
+
+		it("says nothing about an access code when none is configured", async () => {
+			await renderApp();
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,local",
+					accessUrl: "http://192.168.0.1:1234/?token=t",
+					tunnelState: "idle",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
+				},
+			}));
+
+			await screen.findByRole("dialog");
+			expect(screen.queryByTestId("remote-static-code-active")).not.toBeInTheDocument();
+		});
+
+		// With nothing listening the port is 0, so a QR minted anyway encodes
+		// http://host:0/ — a code that looks scannable and goes nowhere.
+		it("shows the failure instead of a QR when the server never bound its port", async () => {
+			await renderApp();
+
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "",
+					accessUrl: "",
+					tunnelState: "idle",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: {
+						running: false,
+						port: 0,
+						failure: { port: 45999, reason: "port-in-use" as const, message: "Is port 45999 in use?" },
+					},
+				},
+			}));
+
+			await screen.findByRole("dialog");
+			expect(screen.getByTestId("remote-access-down")).toHaveTextContent("45999");
+			expect(screen.queryByAltText("QR Code")).not.toBeInTheDocument();
+			expect(screen.getByTestId("remote-access-down-settings-link")).toBeInTheDocument();
+		});
+
 		it("stops the tunnel and clears the toggle from the Stop button", async () => {
 			await renderApp();
 			vi.mocked(api.request.getRemoteAccessQR).mockResolvedValue({
@@ -2173,6 +2351,9 @@ describe("App keyboard shortcuts", () => {
 				tunnelFailureReason: null,
 				interfaces: [],
 				selectedHost: "192.168.0.1",
+				staticCodeActive: false,
+				signInLink: null,
+				serverStatus: { running: true, port: 51473, failure: null },
 			});
 
 			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
@@ -2256,6 +2437,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 				});
 
 				await act(async () => {
@@ -2283,6 +2467,9 @@ describe("App keyboard shortcuts", () => {
 				tunnelFailureReason: null,
 				interfaces: [],
 				selectedHost: "",
+				staticCodeActive: false,
+				signInLink: null,
+				serverStatus: { running: true, port: 51473, failure: null },
 			});
 
 			// The button/menu open the modal immediately with the local QR and
@@ -2297,6 +2484,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 					autoStartTunnel: true,
 				},
 			}));
@@ -2326,6 +2516,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 					autoStartTunnel: true,
 				},
 			}));
@@ -2345,6 +2538,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 				});
 			});
 
@@ -2366,6 +2562,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "192.168.0.1",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 				},
 			}));
 			await waitFor(() => expect(screen.getByAltText("QR Code")).toBeInTheDocument());
@@ -2391,6 +2590,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces: [],
 					selectedHost: "",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 					autoStartTunnel: true,
 				},
 			}));
@@ -2444,6 +2646,9 @@ describe("App keyboard shortcuts", () => {
 				tunnelFailureReason: null,
 				interfaces,
 				selectedHost: "127.0.0.1",
+				staticCodeActive: false,
+				signInLink: null,
+				serverStatus: { running: true, port: 51473, failure: null },
 			});
 			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
 				detail: {
@@ -2455,6 +2660,9 @@ describe("App keyboard shortcuts", () => {
 					tunnelFailureReason: null,
 					interfaces,
 					selectedHost: "192.168.0.1",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 				},
 			}));
 
@@ -2510,6 +2718,9 @@ describe("App keyboard shortcuts", () => {
 						{ name: "loopback", address: "127.0.0.1", internal: true },
 					],
 					selectedHost: "192.168.0.1",
+					staticCodeActive: false,
+					signInLink: null,
+					serverStatus: { running: true, port: 51473, failure: null },
 				},
 			}));
 			await waitFor(() => expect(screen.getByText("Copy URL")).toBeInTheDocument());
@@ -2852,6 +3063,138 @@ describe("App keyboard shortcuts", () => {
 		});
 	});
 
+	// Cancellation is deliberately NOT the completion dialog: it throws the work
+	// away, so it is red from border to badge and gates its confirm on the local
+	// git check.
+	describe("agent cancellation request dialog", () => {
+		// `mockResolvedValue` outlives `clearAllMocks`, so a pending list left
+		// behind here would draw a cancel dialog inside the next describe's tests.
+		afterEach(() => {
+			vi.mocked(api.request.listPendingCancellationRequests).mockResolvedValue([]);
+		});
+
+		const fireAgentCancellationRequested = (requestId: string, taskId: string, projectId: string) =>
+			act(async () => {
+				window.dispatchEvent(
+					new CustomEvent("rpc:agentCancellationRequested", {
+						detail: { requestId, taskId, projectId, taskTitle: "Junk task" },
+					}),
+				);
+			});
+
+		it("responds with approved:true, navigates away, and asks with danger chrome", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "task", projectId: "p1", taskId: "t1" }),
+			});
+			vi.mocked(confirm).mockResolvedValue(true);
+
+			await renderApp();
+			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+
+			await fireAgentCancellationRequested("req-c1", "t1", "p1");
+
+			await waitFor(() => {
+				expect(api.request.respondToAgentCancellationRequest).toHaveBeenCalledWith({
+					requestId: "req-c1",
+					approved: true,
+				});
+			});
+			expect(screen.getByTestId("project-screen")).toBeInTheDocument();
+			// The move happens in the bun process, never here.
+			expect(api.request.moveTask).not.toHaveBeenCalled();
+			const opts = vi.mocked(confirm).mock.calls[0][0];
+			expect(opts).toMatchObject({ agentInitiated: true, danger: true, tone: "danger" });
+			// The confirm button stays unavailable until the git check settles — a
+			// mis-click must not get past a warning that has not arrived yet.
+			expect(opts.deferred?.gateConfirm).toBe(true);
+			expect(api.request.getUnsavedWork).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1" });
+		});
+
+		it("responds with approved:false and stays in place when declined", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "task", projectId: "p1", taskId: "t1" }),
+			});
+			vi.mocked(confirm).mockResolvedValue(false);
+
+			await renderApp();
+			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+
+			await fireAgentCancellationRequested("req-c2", "t1", "p1");
+
+			await waitFor(() => {
+				expect(api.request.respondToAgentCancellationRequest).toHaveBeenCalledWith({
+					requestId: "req-c2",
+					approved: false,
+				});
+			});
+			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+			expect(api.request.moveTask).not.toHaveBeenCalled();
+		});
+
+		it("draws a dialog for a cancellation pushed before this window existed", async () => {
+			vi.mocked(api.request.listPendingCancellationRequests).mockResolvedValue([
+				{ requestId: "req-c-orphan", taskId: "t1", projectId: "p1", taskTitle: "Stranded junk", subject: undefined },
+			] as never);
+			vi.mocked(confirm).mockResolvedValue(false);
+
+			await renderApp();
+
+			await waitFor(() => {
+				expect(api.request.respondToAgentCancellationRequest).toHaveBeenCalledWith({
+					requestId: "req-c-orphan",
+					approved: false,
+				});
+			});
+		});
+	});
+
+	// `agentCompletionRequested` is a one-shot push, so a window that reloads
+	// before answering never sees it again — and the blocked agent's retry joins
+	// the same request rather than pushing a second time. A connecting client asks
+	// what is still pending, which is what makes the request answerable at all.
+	describe("pending completion requests on connect", () => {
+		it("draws a dialog for a request that was pushed before this window existed", async () => {
+			vi.mocked(api.request.listPendingCompletionRequests).mockResolvedValue([
+				{ requestId: "req-orphan", taskId: "t1", projectId: "p1", taskTitle: "Stranded task", subject: undefined },
+			] as never);
+			vi.mocked(confirm).mockResolvedValue(false);
+
+			await renderApp();
+
+			await waitFor(() => {
+				expect(api.request.respondToAgentCompletionRequest).toHaveBeenCalledWith({
+					requestId: "req-orphan",
+					approved: false,
+				});
+			});
+		});
+
+		it("does not stack two dialogs when the push and the replay name the same request", async () => {
+			vi.mocked(api.request.listPendingCompletionRequests).mockResolvedValue([
+				{ requestId: "req-dup", taskId: "t1", projectId: "p1", taskTitle: "Same task", subject: undefined },
+			] as never);
+			// Never settles, so the first dialog is still open when the push arrives.
+			vi.mocked(confirm).mockImplementation((() => new Promise<boolean>(() => {})) as never);
+
+			await renderApp();
+			await waitFor(() => expect(vi.mocked(confirm)).toHaveBeenCalledTimes(1));
+
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent("rpc:agentCompletionRequested", {
+					detail: { requestId: "req-dup", taskId: "t1", projectId: "p1", taskTitle: "Same task" },
+				}));
+			});
+
+			expect(vi.mocked(confirm)).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	// Both agent dialogs are broadcast to every connected client (second window,
 	// remote browser). The first answer wins; the rest must close silently.
 	describe("agent request answered on another client", () => {
@@ -2910,6 +3253,38 @@ describe("App keyboard shortcuts", () => {
 
 			expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 			expect(api.request.respondToAgentLaunchRequest).not.toHaveBeenCalled();
+		});
+	});
+
+	// The route context reaches two places: this window's tab title, and the host,
+	// which turns it into the native window title — the only way to tell several
+	// windows apart in Mission Control.
+	describe("window title", () => {
+		// App captures whatever document.title holds at mount as the base title, so
+		// a previous test's title would otherwise become this one's suffix.
+		beforeEach(() => {
+			document.title = "dev-3.0";
+		});
+
+		it("reports the project name on a board route", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1" }),
+			});
+
+			await renderApp();
+
+			expect(document.title).toBe("Alpha · dev-3.0");
+			expect(api.request.setWindowTitleContext).toHaveBeenCalledWith({ context: "Alpha" });
+		});
+
+		it("reports no context on the dashboard", async () => {
+			await renderApp();
+
+			expect(document.title).toBe("dev-3.0");
+			expect(api.request.setWindowTitleContext).toHaveBeenCalledWith({ context: null });
 		});
 	});
 });

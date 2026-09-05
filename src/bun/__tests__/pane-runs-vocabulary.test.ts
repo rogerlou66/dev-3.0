@@ -8,7 +8,9 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+	PANE_RUN_AUTO_CLOSE_SECONDS,
 	PANE_RUN_COMMAND_MAX_LENGTH,
+	PANE_RUN_FAILED_AUTO_CLOSE_SECONDS,
 	PANE_RUN_TAIL_DEFAULT_LINES,
 	PANE_RUN_TAIL_MAX_LINES,
 	clampPaneRunTail,
@@ -16,6 +18,7 @@ import {
 	isPaneRunId,
 	isPaneRunLabel,
 	paneRunCommandProblem,
+	paneRunDismissal,
 	paneRunOutcomeLine,
 	paneRunTail,
 	renderPaneRunListing,
@@ -173,6 +176,32 @@ describe("status decoding", () => {
 		const decoded = decodePaneRunStatus({ runId: "run-0123456789ab", state: "exited", exitCode: null });
 		expect(decoded?.exitCode).toBeNull();
 		expect(decoded?.state).toBe("exited");
+	});
+});
+
+describe("what a finished pane does with itself", () => {
+	it("closes a clean run on the timer, and says how long it has", () => {
+		const plan = paneRunDismissal(0);
+		expect(plan.autoCloseMs).toBe(PANE_RUN_AUTO_CLOSE_SECONDS * 1000);
+		expect(plan.message).toContain(`${PANE_RUN_AUTO_CLOSE_SECONDS}s`);
+	});
+
+	it("gives a failed run the long window — its output is the whole point", () => {
+		const plan = paneRunDismissal(1);
+		expect(plan.autoCloseMs).toBe(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS * 1000);
+		expect(plan.message).toContain("30m");
+	});
+
+	it("holds a failure far longer than a success — but every outcome is bounded", () => {
+		for (const exitCode of [0, 1, 137, null]) {
+			expect(paneRunDismissal(exitCode).autoCloseMs).toBeGreaterThan(0);
+		}
+		expect(paneRunDismissal(1).autoCloseMs).toBeGreaterThan(paneRunDismissal(0).autoCloseMs * 10);
+	});
+
+	it("treats an unreadable outcome as a failure, never as a success", () => {
+		// null is what a signal death writes: killed is not clean.
+		expect(paneRunDismissal(null).autoCloseMs).toBe(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS * 1000);
 	});
 });
 

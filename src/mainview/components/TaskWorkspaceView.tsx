@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject } from "react";
-import type { Project, SharedArtifact, Task } from "../../shared/types";
+import type { Project, Task } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import type { NavigationGuard } from "../navigation-guard";
 import { api } from "../rpc";
@@ -18,10 +18,7 @@ interface TaskWorkspaceViewProps {
 	navigate: (route: Route) => void;
 	dispatch: Dispatch<AppAction>;
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
-	artifactViewer?: { taskId: string; artifacts: SharedArtifact[]; index: number } | null;
-	onCloseArtifactViewer?: () => void;
 	presentation?: "full-page" | "overlay" | "immersive";
-	immersive?: boolean;
 	isTerminalFullscreen?: boolean;
 	onToggleTerminalFullscreen?: () => void;
 	skipCopyModeReset?: boolean;
@@ -38,17 +35,14 @@ function TaskWorkspaceView({
 	navigate,
 	dispatch,
 	navigationGuardRef,
-	artifactViewer,
-	onCloseArtifactViewer,
 	presentation = "full-page",
-	immersive: immersiveProp = false,
 	isTerminalFullscreen,
 	onToggleTerminalFullscreen,
 	skipCopyModeReset,
 	openUnresolvedComments,
 	loadTasks = true,
 }: TaskWorkspaceViewProps) {
-	const immersive = immersiveProp || presentation === "immersive";
+	const immersive = presentation === "immersive";
 	const task = tasks.find((item) => item.id === taskId);
 	const project = projects.find((item) => item.id === projectId);
 	const inlineDiff = useTaskInlineDiffState(route ?? taskId, dispatch);
@@ -117,8 +111,6 @@ function TaskWorkspaceView({
 					inlineDiffRequest={inlineDiff.request}
 					onCloseInlineDiff={inlineDiff.close}
 					navigationGuardRef={navigationGuardRef}
-					artifactViewer={artifactViewer}
-					onCloseArtifactViewer={onCloseArtifactViewer}
 					skipCopyModeReset={skipCopyModeReset}
 				/>
 			</div>

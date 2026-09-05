@@ -134,7 +134,7 @@ function EditTable({
 	children,
 }: { columns: string[]; actionsLabel: string; children: React.ReactNode }) {
 	return (
-		<div className="overflow-x-auto rounded-xl border border-edge bg-raised">
+		<div data-wheel-x className="overflow-x-auto rounded-xl border border-edge bg-raised">
 			<table className="w-full text-sm border-collapse">
 				<thead>
 					<tr className="border-b border-edge">
@@ -281,7 +281,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 			message: presets > 0
 				? t("catalog.removeProviderInUse", { models: String(orphans.length), presets: String(presets) })
 				: orphans.length > 0
-					? t("catalog.removeProviderOrphans", { count: String(orphans.length) })
+					? t.plural("catalog.removeProviderOrphans", orphans.length)
 					: t("catalog.removeProviderBody"),
 			confirmLabel: t("catalog.removeProvider"),
 			danger: true,
@@ -451,7 +451,7 @@ export default function ModelCatalogSection({ t }: { t: TFunction }) {
 						{listError ? (
 							<span className="text-xs text-warning-strong">{t("catalog.listUnavailable")}</span>
 						) : available === null ? null : available.length > 0 ? (
-							<span className="text-xs text-fg-3">{t("catalog.listLoaded", { count: String(available.length) })}</span>
+							<span className="text-xs text-fg-3">{t.plural("catalog.listLoaded", available.length)}</span>
 						) : (
 							<span className="text-xs text-warning-strong">{t("catalog.listEmpty")}</span>
 						)}

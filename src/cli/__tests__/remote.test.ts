@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleRemote, printAccessForState, computeDetachedChildArgs, awaitTunnelReady, isTunnelLive, REMOTE_TUNNEL_WAIT } from "../commands/remote";
 import type { ParsedArgs } from "../args";
+import { MIN_REMOTE_STATIC_CODE_LENGTH } from "../../shared/remote-static-code";
 
 /**
  * On the happy path `handleRemote` boots the headless server in-process via
@@ -220,11 +221,30 @@ async function withRemoteEnvRestored(fn: () => Promise<void>): Promise<void> {
 	}
 }
 
-describe("dev3 remote --static-code safety gate", () => {
-	it("rejects --static-code on a default-on public tunnel", async () => {
+describe("dev3 remote --static-code on a public tunnel", () => {
+	it("starts anyway and warns", async () => {
 		await withRemoteEnvRestored(async () => {
-			await expect(handleRemote(undefined, args({ "static-code": "secret123" }))).rejects.toThrow("__exit__");
-			expect(stderrText()).toContain("cannot be combined with a public tunnel");
+			await handleRemote(undefined, args({ "static-code": "secret123", "no-detach": "true" }));
+			expect(process.env.DEV3_REMOTE_STATIC_CODE).toBe("secret123");
+			expect(process.env.DEV3_REMOTE_NO_TUNNEL).toBeUndefined();
+			expect(stderrText()).toContain("public tunnel is on");
+		});
+	});
+
+	// The old gate read only the flag, so the same combination arriving through an
+	// exported env var was waved through silently. Both spellings warn now.
+	it("warns for a code inherited from the environment too", async () => {
+		await withRemoteEnvRestored(async () => {
+			process.env.DEV3_REMOTE_STATIC_CODE = "from-the-env";
+			await handleRemote(undefined, args({ "no-detach": "true" }));
+			expect(stderrText()).toContain("public tunnel is on");
+		});
+	});
+
+	it("stays quiet with --no-tunnel", async () => {
+		await withRemoteEnvRestored(async () => {
+			await handleRemote(undefined, args({ "static-code": "secret123", "no-tunnel": "true", "no-detach": "true" }));
+			expect(stderrText()).not.toContain("public tunnel is on");
 		});
 	});
 
@@ -236,10 +256,42 @@ describe("dev3 remote --static-code safety gate", () => {
 		});
 	});
 
-	it("still enforces the 4-char minimum", async () => {
+	it("still enforces the minimum length", async () => {
 		await withRemoteEnvRestored(async () => {
 			await expect(handleRemote(undefined, args({ "static-code": "ab", "no-tunnel": "true" }))).rejects.toThrow("__exit__");
-			expect(stderrText()).toContain("at least 4 characters");
+			expect(stderrText()).toContain(`at least ${MIN_REMOTE_STATIC_CODE_LENGTH} characters`);
+		});
+	});
+
+	// The code is a long-lived, multi-use bearer credential fronting a terminal,
+	// so its length is the whole search space. Literal 7/8, NOT the constant: a
+	// boundary written in terms of MIN_… moves with it and survives a lowering.
+	it("rejects a 7-character code — the minimum is pinned at 8", async () => {
+		expect(MIN_REMOTE_STATIC_CODE_LENGTH).toBe(8);
+		await withRemoteEnvRestored(async () => {
+			await expect(
+				handleRemote(undefined, args({ "static-code": "abcdefg", "no-tunnel": "true" })),
+			).rejects.toThrow("__exit__");
+		});
+		await withRemoteEnvRestored(async () => {
+			await handleRemote(undefined, args({ "static-code": "abcdefgh", "no-tunnel": "true", "no-detach": "true" }));
+			expect(process.env.DEV3_REMOTE_STATIC_CODE).toBe("abcdefgh");
+		});
+	});
+
+	it("rejects one character below the minimum and accepts exactly the minimum", async () => {
+		await withRemoteEnvRestored(async () => {
+			const tooShort = "a".repeat(MIN_REMOTE_STATIC_CODE_LENGTH - 1);
+			await expect(
+				handleRemote(undefined, args({ "static-code": tooShort, "no-tunnel": "true" })),
+			).rejects.toThrow("__exit__");
+			expect(stderrText()).toContain(`at least ${MIN_REMOTE_STATIC_CODE_LENGTH} characters`);
+		});
+
+		await withRemoteEnvRestored(async () => {
+			const exact = "a".repeat(MIN_REMOTE_STATIC_CODE_LENGTH);
+			await handleRemote(undefined, args({ "static-code": exact, "no-tunnel": "true", "no-detach": "true" }));
+			expect(process.env.DEV3_REMOTE_STATIC_CODE).toBe(exact);
 		});
 	});
 });
@@ -345,6 +397,41 @@ describe("dev3 remote url", () => {
 		const out = stdoutText();
 		expect(out).toContain("QR-ASCII");
 		expect(out).toContain("http://192.168.1.5:41234/?token=abc");
+	});
+
+	// The bookmarkable link is the whole answer to "do I really retype 30
+	// characters on my phone every time" — if it stops being printed, the feature
+	// is unreachable for anyone not opening the desktop modal.
+	it("prints the bookmarkable sign-in link when a code is set", async () => {
+		mockReadState.mockReturnValue(liveState());
+		mockIsAlive.mockReturnValue(true);
+		mockSendRequest.mockResolvedValue({
+			id: "x", ok: true,
+			data: {
+				url: "http://192.168.1.5:41234/?token=abc",
+				tunnelUrl: null,
+				port: 41234,
+				staticCode: "sesame-open-up",
+				signInLink: "http://192.168.1.5:41234/?token=abc#code=sesame-open-up",
+			},
+		});
+		await expect(handleRemote("url", args())).rejects.toThrow("__exit__");
+		const out = stdoutText();
+		expect(out).toContain("#code=sesame-open-up");
+		// Both halves of the trade, or the user cannot judge whether to bookmark it.
+		expect(out).toContain("never sent to a server");
+		expect(out).toContain("live in the bookmark");
+	});
+
+	it("prints no link when no code is set", async () => {
+		mockReadState.mockReturnValue(liveState());
+		mockIsAlive.mockReturnValue(true);
+		mockSendRequest.mockResolvedValue({
+			id: "x", ok: true,
+			data: { url: "http://192.168.1.5:41234/?token=abc", tunnelUrl: null, port: 41234, staticCode: null, signInLink: null },
+		});
+		await expect(handleRemote("url", args())).rejects.toThrow("__exit__");
+		expect(stdoutText()).not.toContain("#code=");
 	});
 });
 

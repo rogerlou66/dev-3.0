@@ -45,7 +45,21 @@ const UX_DIR = fileURLToPath(new URL("../../../docs/ux", import.meta.url));
  */
 const BUDGET_KB: Record<string, number> = {
 	"PRODUCT_UX_BIBLE.md": 128,
-	"ux-architecture.yaml": 114,
+	// 114 → 115 for `global_header.agent_rate_limit_indicator`: the header gained a second
+	// mutation (the default-account switch, pinned-only) and an undocumented mutation on an
+	// ambient readout is exactly what this manifest exists to prevent. Compaction was the
+	// alternative and it meant deleting other rules' why — the failure the note above names.
+	// Reasoning: decisions/2026/08/29/default-account-switch-lives-in-the-usage-flyout.md.
+	//
+	// 115 → 116 for one token: `git_status_badge` in `surfaces.sidebar.allowed`, because the
+	// Active Tasks row now carries the task_card PR cluster. Twenty bytes, and the smallest
+	// manifest change there is — but `main` had 7 bytes of headroom left, so the merge came to
+	// 115.013 KB. Compaction ran first and found nothing free: no trailing whitespace, no
+	// duplicate evidence paths, no blank-line runs, so the next 13 bytes would have come out of
+	// another rule's why. `allowed` is the gate ux-principal reads to decide placement, so
+	// leaving the token out would have made the shipped badge read as unsanctioned.
+	// Reasoning: decisions/2026/08/30/sidebar-pr-badge-without-discovery-poll.md.
+	"ux-architecture.yaml": 116,
 	"UX_DECISIONS.md": 80,
 };
 
@@ -113,7 +127,34 @@ const BUDGET_KB: Record<string, number> = {
  * reaches for the disable path and ships a permanently dead row. The why in full lives in
  * `decisions/2026/08/26/gate-agent-traffic-behind-an-experimental-setting.md`.
  */
-const TOTAL_BUDGET_KB = 320;
+/**
+ * The terminal-font picker's placement rule spends the headroom left above rather than
+ * ratcheting again: its log entry was drafted full, then folded to a two-line pointer once
+ * its record existed, ~0.2 KB.
+ */
+/**
+ * 320 → 340, on Arseny's own ruling, for the rule that a conditional header slot keys off data and
+ * not off having been read (bible §5.9 / yaml `agent_traffic_readout`) — and to stop this number
+ * being re-litigated every week.
+ *
+ * The change itself is small and was compacted first: the new rule and the two entries it supersedes
+ * were rewritten three times, taking its footprint from ~690 bytes to ~420, with the reverted-rule
+ * history left only in `decisions/2026/08/26/header-slot-presence-follows-data-not-unread.md`. That
+ * compaction stays; the headroom is not a licence to put the narration back.
+ *
+ * What earns twenty KB rather than one is that the previous number had stopped being a budget. `main`
+ * alone had reached 319.58 of 320, so ANY addition failed the aggregate job — this branch was red
+ * twice from unrelated PRs landing docs growth while it was open — and the four ratchets before this
+ * one each bought a single KB and were spent within days. Ten bytes of slack is a counter, not a
+ * budget.
+ *
+ * Note for whoever hits the next wall: it will not be this number. The three PER-FILE caps sum to
+ * 322 KB and have ~2 KB of combined room left (bible 127.6/128, yaml 113.8/114, log 78.6/80), so
+ * they are the binding constraint from here, and the tree cap is what it was designed to be — a
+ * backstop against a fourth file appearing. Per-file caps are deliberately untouched: they are what
+ * keeps one document from bloating, and lowering one is still always welcome.
+ */
+const TOTAL_BUDGET_KB = 340;
 
 const entries = readdirSync(UX_DIR, { withFileTypes: true });
 const kb = (name: string) => statSync(`${UX_DIR}/${name}`).size / 1024;

@@ -120,16 +120,35 @@
     window.addEventListener("resize", applyStickyOffset);
   }
 
-  // Report code owns sorting; the shell owns only the visible sort state, so
-  // every artifact shows which column is sorted and in which direction.
+  // A `<table data-sortable>` sorts its own rows in place, so a report whose
+  // rows live in the markup needs no JavaScript at all. The `data-sort` value
+  // of a cell wins over its text, so "1.2 GB" can still order numerically.
+  function sortRowsInPlace(table, heading, direction) {
+    const index = [...heading.parentElement.children].indexOf(heading);
+    const key = (row) => {
+      const cell = row.children[index];
+      return cell ? cell.dataset.sort ?? cell.textContent.trim() : "";
+    };
+    table.querySelectorAll("tbody").forEach((body) => {
+      [...body.rows]
+        .sort((a, b) => key(a).localeCompare(key(b), undefined, { numeric: true, sensitivity: "base" }) * direction)
+        .forEach((row) => body.appendChild(row));
+    });
+  }
+
+  // The shell owns the visible sort state, so every artifact shows which column
+  // is sorted and in which direction; report code owns the data unless the
+  // table asked the shell to sort its rows.
   function initializeSortIndicators() {
     document.querySelectorAll("thead").forEach((head) => {
       const headings = [...head.querySelectorAll("th[data-sort]")];
       if (!headings.length) return;
+      const table = head.closest("table");
       const mark = (heading) => {
         const next = heading.getAttribute("aria-sort") === "ascending" ? "descending" : "ascending";
         headings.forEach((item) => item.removeAttribute("aria-sort"));
         heading.setAttribute("aria-sort", next);
+        if (table?.hasAttribute("data-sortable")) sortRowsInPlace(table, heading, next === "ascending" ? 1 : -1);
       };
       headings.forEach((heading) => {
         heading.addEventListener("click", () => mark(heading));
@@ -369,10 +388,38 @@
     });
   }
 
+  // A narrow table stacks each row into labelled lines, and the label has to come
+  // from the column heading. The shell copies it onto every cell so report markup
+  // stays a plain <table> with no per-cell label attribute to keep in sync.
+  function labelTableCells(root = document) {
+    root.querySelectorAll("table").forEach((table) => {
+      const headings = Array.from(table.querySelectorAll("thead tr:last-of-type th"), (th) => th.textContent.trim());
+      if (!headings.length) return;
+      table.querySelectorAll("tbody tr").forEach((row) => {
+        Array.from(row.cells).forEach((cell, index) => {
+          // A spanning cell (empty state, total) belongs to no single column.
+          if (cell.colSpan > 1) return;
+          const label = headings[index];
+          if (label) cell.setAttribute("data-dev3-label", label);
+        });
+      });
+    });
+  }
+
+  let queuedLabelPass = 0;
+  function scheduleTableLabels() {
+    if (queuedLabelPass) return;
+    queuedLabelPass = requestAnimationFrame(() => {
+      queuedLabelPass = 0;
+      labelTableCells();
+    });
+  }
+
   function enhanceControls(root = document) {
     initializePopovers(root);
     initializeSelects(root);
     initializeSliders(root);
+    labelTableCells(root);
   }
 
   function setControlValue(control, value) {
@@ -405,7 +452,14 @@
     const axisLabel = { color: tokenColor("--dev3-text-muted"), fontSize: scaledFont(12) };
     const softSplit = { lineStyle: { color: tokenColor("--dev3-border", .6) } };
     window.echarts.registerTheme("dev3", {
-      color: [tokenColor("--dev3-accent"), tokenColor("--dev3-success"), tokenColor("--dev3-warning"), tokenColor("--dev3-danger"), tokenColor("--dev3-text-secondary")],
+      // Categorical, never semantic: the old default painted series three yellow
+      // and series four red, so a chart claimed a warning and a failure purely
+      // from series order. The viz ramp sits at one lightness, so no series
+      // outshouts its neighbours either.
+      color: [
+        tokenColor("--dev3-viz-1"), tokenColor("--dev3-viz-2"), tokenColor("--dev3-viz-3"),
+        tokenColor("--dev3-viz-4"), tokenColor("--dev3-viz-5"), tokenColor("--dev3-viz-6"),
+      ],
       backgroundColor: "transparent",
       textStyle: { fontFamily: CHART_FONT, color: tokenColor("--dev3-text-secondary"), fontSize: scaledFont(12) },
       categoryAxis: { axisLine: { lineStyle: { color: tokenColor("--dev3-border") } }, axisTick: { show: false }, axisLabel, splitLine: { show: false } },
@@ -461,8 +515,27 @@
     });
   }
 
+  // Misuse throws here with the fix in the message. Left to ECharts, an id string
+  // surfaces as `t.appendChild is not a function` from minified library code, and
+  // an argument passed to update()/remount() is silently ignored — both cost a
+  // debug loop because neither says what to write instead.
+  function assertNoArgument(name, args) {
+    if (args.length === 0) return;
+    throw new TypeError(`dev3Artifact.chart(...).${name}() takes no arguments — it re-reads the option factory passed to chart(). Update the data your factory reads, then call ${name}().`);
+  }
+
   function dev3Chart(element, optionFactory) {
-    const unavailable = { chart: null, update() {}, resize() {}, remount() {} };
+    if (typeof element === "string") {
+      throw new TypeError(`dev3Artifact.chart(element, optionFactory) needs an element, not an id — pass document.getElementById("${element}").`);
+    }
+    // Offline and missing-host handles keep the argument guard: an author who hits
+    // the misuse while cdnjs is unreachable must still be told, not silently no-opped.
+    const unavailable = {
+      chart: null,
+      update() { assertNoArgument("update", arguments); },
+      resize() {},
+      remount() { assertNoArgument("remount", arguments); },
+    };
     if (!element) return unavailable;
     if (!chartsAvailable) {
       element.innerHTML = '<div class="chart-unavailable">Charts need network access to cdnjs.cloudflare.com — reconnect and reload.</div>';
@@ -472,6 +545,7 @@
     const entry = {
       chart: null,
       update() {
+        assertNoArgument("update", arguments);
         entry.chart.setOption(chartShellOption(factory()));
         syncChartViewBox(element);
       },
@@ -481,6 +555,7 @@
         syncChartViewBox(element);
       },
       remount() {
+        assertNoArgument("remount", arguments);
         if (entry.chart) entry.chart.dispose();
         entry.chart = window.echarts.init(element, "dev3", { renderer: "svg" });
         entry.update();
@@ -531,6 +606,21 @@
   trackStickyOffset();
   initializeSortIndicators();
   enhanceControls();
+
+  // report.js renders and re-renders rows after the shell has run, so relabel
+  // whenever a table's contents change. childList only — writing the attribute
+  // must not retrigger the pass. A report usually writes the whole table at once
+  // into a plain host div, and then the mutation target is that div, not a cell.
+  function recordTouchesTable(record) {
+    if (record.target instanceof Element && record.target.closest("table")) return true;
+    return Array.from(record.addedNodes).some(
+      (node) => node instanceof Element && (node.matches("table") || node.querySelector("table")),
+    );
+  }
+
+  new MutationObserver((records) => {
+    if (records.some(recordTouchesTable)) scheduleTableLabels();
+  }).observe(document.body, { childList: true, subtree: true });
 
   // ---- generic shell controls -----------------------------------------------
   let themeMode = "auto";
@@ -626,7 +716,28 @@
     };
   }
 
+  // ---- local assets ---------------------------------------------------------
+  // The in-app viewer rewrites asset references by scanning the stored HTML, so a
+  // src built by report code is never rewritten and resolves to nothing inside the
+  // opaque-origin iframe. The viewer publishes its resolved map instead; over
+  // file:// and in the downloaded ZIP there is no map and the path is already right.
+  function assetUrl(path) {
+    if (typeof path !== "string" || !path) return path;
+    const map = window.__dev3ArtifactAssets;
+    if (!map) return path;
+    const clean = path.trim().split(/[?#]/)[0];
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#|\/)/i.test(clean)) return path;
+    const segments = [];
+    for (const segment of clean.split("/")) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") { segments.pop(); continue; }
+      segments.push(segment);
+    }
+    return map[segments.join("/")] || path;
+  }
+
   window.dev3Artifact = Object.freeze({
+    asset: assetUrl,
     chart: dev3Chart,
     color: tokenColor,
     enhance: enhanceControls,

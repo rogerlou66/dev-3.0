@@ -4,6 +4,7 @@ import GlobalSettings from "../GlobalSettings";
 import { I18nProvider } from "../../i18n";
 import type { CodingAgent, GlobalSettings as GlobalSettingsType } from "../../../shared/types";
 import type { SettingsSectionId } from "../../state";
+import type { SettingsEntryAnchor } from "../../settings-registry";
 
 vi.mock("../../zoom", () => ({
 	getZoom: vi.fn(() => 1.0),
@@ -25,8 +26,18 @@ vi.mock("../../rpc", () => ({
 			getAgents: vi.fn(),
 			saveAgents: vi.fn(),
 			getGlobalSettings: vi.fn(),
+			getRemoteAccessStatus: vi.fn().mockResolvedValue({ running: true, port: 51473, failure: null }),
+			retryRemoteAccess: vi.fn().mockResolvedValue({ running: true, port: 51473, failure: null }),
 			saveGlobalSettings: vi.fn(),
 			checkAgentAvailability: vi.fn().mockResolvedValue([]),
+			getLowBatteryStatus: vi.fn().mockResolvedValue({
+				enabled: true,
+				revision: "0".repeat(40),
+				styleInstalled: true,
+				skillInstalled: true,
+				outcome: { kind: "selected" },
+			}),
+			selectLowBatteryStyle: vi.fn(),
 			setTmuxTheme: vi.fn().mockResolvedValue(undefined),
 			checkCaffeinateAvailable: vi.fn().mockResolvedValue({ available: true }),
 			checkCanaryChannelAvailable: vi.fn().mockResolvedValue({ available: true }),
@@ -91,10 +102,10 @@ const mockGlobalSettings: GlobalSettingsType = {
 	updateChannel: "stable",
 };
 
-function renderGlobalSettings(section?: SettingsSectionId) {
+function renderGlobalSettings(section?: SettingsSectionId, anchor?: SettingsEntryAnchor) {
 	return render(
 		<I18nProvider>
-			<GlobalSettings section={section} />
+			<GlobalSettings section={section} anchor={anchor} />
 		</I18nProvider>,
 	);
 }
@@ -190,6 +201,7 @@ describe("GlobalSettings", () => {
 
 			expect(screen.getByRole("button", { name: "Appearance" })).toBeInTheDocument();
 			expect(screen.getByRole("button", { name: "Tasks & Board" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
 			expect(screen.getByRole("button", { name: "System" })).toBeInTheDocument();
 		expect(document.getElementById("settings-category-title")!).toHaveTextContent("Appearance");
 			expect(screen.getByText("Dark")).toBeInTheDocument();
@@ -361,14 +373,14 @@ describe("GlobalSettings", () => {
 		});
 	});
 
-		describe("watch default", () => {
+	describe("watch default", () => {
 		function getWatchDefaultSwitch() {
 			return screen.getByRole("switch", { name: "Watch tasks by default" });
 		}
 
 		it("is off when no preference is stored", async () => {
 			setupMocks();
-			renderGlobalSettings("tasks");
+			renderGlobalSettings("notifications");
 			await waitForLoad();
 
 			expect(getWatchDefaultSwitch()).toHaveAttribute("aria-checked", "false");
@@ -377,7 +389,7 @@ describe("GlobalSettings", () => {
 		it("saves the global preference without changing a task", async () => {
 			setupMocks();
 			const user = userEvent.setup();
-			renderGlobalSettings("tasks");
+			renderGlobalSettings("notifications");
 			await waitForLoad();
 
 			await user.click(getWatchDefaultSwitch());
@@ -905,6 +917,28 @@ describe("GlobalSettings", () => {
 
 			expect(document.getElementById("settings-category-title")).toHaveTextContent("System");
 			expect(screen.getByText("Token-saving proxy (experimental)")).toBeInTheDocument();
+		});
+	});
+
+	describe("notification settings", () => {
+		it("gives push notifications their own deep-link target", async () => {
+			setupMocks();
+			const scrollIntoView = vi.fn();
+			const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+			Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+				configurable: true,
+				value: scrollIntoView,
+			});
+			try {
+				renderGlobalSettings("notifications", "push-notifications");
+				await waitForLoad();
+
+				expect(document.querySelector('[data-settings-entry="push-notifications"]')).not.toBeNull();
+				await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" }));
+			} finally {
+				if (original) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", original);
+				else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+			}
 		});
 	});
 

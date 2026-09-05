@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { api } from "../rpc";
 import { OPEN_SETTINGS_SECTION_EVENT } from "../state";
 import { useT } from "../i18n";
-import Tooltip from "./Tooltip";
+import { useHeaderFlyout } from "../hooks/useHeaderFlyout";
+import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import BottomSheet from "./BottomSheet";
+import HeaderFlyoutPanel from "./HeaderFlyoutPanel";
+import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import type { AgentRateLimitsReport } from "../../shared/rate-limits";
 import {
 	RATE_LIMIT_DANGER_PERCENT,
@@ -15,10 +19,14 @@ import {
 } from "../../shared/rate-limits";
 import type { AgentAccountsState } from "../../shared/agent-accounts";
 import { AGENT_ACCOUNTS_CHANGED_EVENT } from "./AgentAccountIndicator";
-import { AccountCard, SOURCE_NAMES, resolveAccount, severityFill } from "./rate-limit-ui";
+import { SOURCE_NAMES, severityFill } from "./rate-limit-ui";
+import AgentUsagePanel from "./AgentUsagePanel";
 
 /** The pill stacks one mini bar per account, capped to keep the header slim. */
 const MAX_PILL_BARS = 4;
+
+/** Panel width in px — wide enough for a "label · bar · % · reset" line. */
+const PANEL_WIDTH = 26 * 16;
 
 /**
  * Ambient agent rate-limit indicator (global header, stateful-indicators zone).
@@ -26,15 +34,21 @@ const MAX_PILL_BARS = 4;
  * dev running many parallel agents is never blindsided by hitting a limit.
  * Hidden until usable data exists; shows the most constrained window for the
  * most recently active account and treats unlimited credits as 0% used.
- * Details for every recently active account live in the tooltip as per-account
- * quota cards with usage bars. Codex monthly credits come from a cached
- * app-server account read; all other data comes from local files — see
- * rate-limit-monitor.ts.
+ * Hovering drops its panel below the pill — read-only while it is merely
+ * hovered. A click PINS it, and only then do its per-account cards become the
+ * settings screen's radio control for the default account: a durable setting
+ * must not be one stray click away from a panel the pointer passed through.
+ * Codex monthly credits come from a cached app-server account read; all other
+ * data comes from local files — see rate-limit-monitor.ts.
  */
 function RateLimitIndicator({ compact = false }: { compact?: boolean }) {
 	const t = useT();
 	const [report, setReport] = useState<AgentRateLimitsReport | null>(null);
 	const [accounts, setAccounts] = useState<AgentAccountsState | null>(null);
+	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	// Same open/pin/position machinery as the memory-headroom readout: hover drops
+	// the panel below the pill, a click pins it — and pinned is what unlocks its rows.
+	const flyout = useHeaderFlyout({ variant: "bar", isNarrow, repositionKey: report });
 
 	useEffect(() => {
 		api.request.getAgentRateLimits().then(setReport).catch(() => {
@@ -79,8 +93,8 @@ function RateLimitIndicator({ compact = false }: { compact?: boolean }) {
 			: windowLabel(latestWindow)
 		: null;
 	const ariaLabel = unlimited
-		? `${t("rateLimits.tooltipTitle")}: ${SOURCE_NAMES[latestSnapshot.source] ?? latestSnapshot.source} ${t("rateLimits.unlimited")}`
-		: `${t("rateLimits.tooltipTitle")}: ${SOURCE_NAMES[latestSnapshot.source] ?? latestSnapshot.source}${latestLabel ? ` ${latestLabel}` : ""} ${t("rateLimits.percentUsed", { percent })}${latestReset ? `, ${t("rateLimits.resetsIn", { time: latestReset })}` : ""}`;
+		? `${t("rateLimits.panelTitle")}: ${SOURCE_NAMES[latestSnapshot.source] ?? latestSnapshot.source} ${t("rateLimits.unlimited")}`
+		: `${t("rateLimits.panelTitle")}: ${SOURCE_NAMES[latestSnapshot.source] ?? latestSnapshot.source}${latestLabel ? ` ${latestLabel}` : ""} ${t("rateLimits.percentUsed", { percent })}${latestReset ? `, ${t("rateLimits.resetsIn", { time: latestReset })}` : ""}`;
 	const interactiveAriaLabel = `${ariaLabel}. ${t("rateLimits.openAccounts")}`;
 
 	const pillSnapshots = report.snapshots.slice(0, MAX_PILL_BARS);
@@ -95,32 +109,32 @@ function RateLimitIndicator({ compact = false }: { compact?: boolean }) {
 		window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: "accounts" }));
 	};
 
+	const panel = (
+		<AgentUsagePanel
+			report={report}
+			accounts={accounts}
+			// A sheet is opened deliberately and has no hover state to pass through;
+			// the desktop flyout has to be pinned first.
+			interactive={isNarrow || flyout.pinned}
+			onOpenSettings={() => {
+				flyout.close();
+				openAccountsSettings();
+			}}
+		/>
+	);
+
 	return (
-		<Tooltip
-			content={t("rateLimits.tooltipTitle")}
-			wide
-			detail={
-				<div className="flex w-[24rem] max-w-[calc(100vw-3rem)] flex-col gap-1.5">
-					{report.snapshots.map((snap) => (
-						<AccountCard
-							key={`${snap.source}:${snap.accountId ?? "system"}`}
-							snap={snap}
-							account={resolveAccount(snap.source, accounts, snap.accountId)}
-							now={now}
-						/>
-					))}
-				</div>
-			}
-		>
+		<>
 			<button
+				ref={flyout.anchorRef}
 				type="button"
 				aria-label={interactiveAriaLabel}
 				data-help-id="header.rateLimits"
-				onClick={openAccountsSettings}
 				className={`header-anim flex cursor-pointer select-none items-center gap-1.5 px-1.5 py-1 rounded-lg border transition-colors ${colorClasses}`}
+				{...flyout.triggerProps}
 			>
 				{/* One mini bar per recently active account, top-to-bottom in the
-				    same order as the tooltip cards. Unlimited accounts render a
+				    same order as the panel cards. Unlimited accounts render a
 				    full success bar (matching the ∞ chip) instead of a fake 0%.
 				    In compact mode the bars ARE the whole pill. */}
 				<span aria-hidden="true" className="flex w-7 shrink-0 flex-col gap-[0.0625rem]">
@@ -153,7 +167,28 @@ function RateLimitIndicator({ compact = false }: { compact?: boolean }) {
 					</span>
 				)}
 			</button>
-		</Tooltip>
+			{isNarrow ? (
+				<BottomSheet
+					open={flyout.open}
+					onClose={flyout.close}
+					title={t("rateLimits.panelTitle")}
+					testId="agent-usage-sheet"
+				>
+					{panel}
+				</BottomSheet>
+			) : (
+				flyout.open && (
+					<HeaderFlyoutPanel
+						flyout={flyout}
+						width={PANEL_WIDTH}
+						ariaLabel={t("rateLimits.panelTitle")}
+						testId="agent-usage-panel"
+					>
+						{panel}
+					</HeaderFlyoutPanel>
+				)
+			)}
+		</>
 	);
 }
 

@@ -32,6 +32,14 @@ export interface ConfirmOptions {
 	 */
 	agentInitiated?: boolean;
 	/**
+	 * Colour the dialog's own chrome — border, agent badge, subject card — rather
+	 * than only the confirm button. `danger` exists for the one dialog that must
+	 * not be answered on muscle memory: an agent asking to throw a task and its
+	 * worktree away. A red button inside otherwise-accent chrome reads as the
+	 * ordinary agent prompt, which is exactly the misread to prevent.
+	 */
+	tone?: "accent" | "danger";
+	/**
 	 * Optional highlighted subject card rendered between the title and the
 	 * message — an accent-tinted panel with a prominent title (e.g. the task
 	 * name) and an optional secondary line (e.g. the task overview). Use it
@@ -120,6 +128,32 @@ export function confirm(options: ConfirmOptions): Promise<boolean | string> {
 	});
 }
 
+/**
+ * Resolves once `<ConfirmHost />` can actually draw a dialog, or `false` if it
+ * has not mounted within `timeoutMs`.
+ *
+ * `confirm()` is fail-closed: with no host it resolves `false` immediately and
+ * draws nothing. For a user-triggered confirm that is right — the host is long
+ * mounted by then. For anything fired during startup it is not: a caller that
+ * treats `false` as "the user said no" would answer on the user's behalf for a
+ * dialog nobody ever saw. Such callers wait for this first.
+ */
+export function whenConfirmHostMounted(timeoutMs = 10_000): Promise<boolean> {
+	if (listener) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		const started = Date.now();
+		const poll = setInterval(() => {
+			if (listener) {
+				clearInterval(poll);
+				resolve(true);
+			} else if (Date.now() - started >= timeoutMs) {
+				clearInterval(poll);
+				resolve(false);
+			}
+		}, 50);
+	});
+}
+
 export function ConfirmHost() {
 	const [pending, setPending] = useState<PendingConfirm | null>(null);
 
@@ -191,6 +225,7 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 	const cancelLabel = pending.cancelLabel ?? t("confirmDialog.cancel");
 	const deferredState = useDeferredBlock(pending.deferred);
 	const gateActive = Boolean(pending.deferred?.gateConfirm) && !deferredState.settled;
+	const dangerTone = pending.tone === "danger";
 
 	// Auto-close when the caller's signal aborts (task resolved elsewhere).
 	useEffect(() => {
@@ -222,11 +257,15 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 				className={`bg-overlay border rounded-2xl shadow-2xl max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4 outline-none ${
 					pending.outcomeCards ? "w-[34rem]" : pending.alternativeAction ? "w-[30rem]" : "w-[26.25rem]"
 				} ${
-					pending.agentInitiated ? "border-accent/40" : "border-edge"
+					dangerTone
+						? "border-danger ring-2 ring-danger/30"
+						: pending.agentInitiated ? "border-accent/40" : "border-edge"
 				}`}
 			>
 				{pending.agentInitiated && (
-					<div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-accent/15 text-accent text-xs font-medium">
+					<div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+						dangerTone ? "bg-danger/15 text-danger" : "bg-accent/15 text-accent"
+					}`}>
 						<span
 							className="text-sm leading-none"
 							style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}
@@ -244,7 +283,7 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 						{pending.outcomeCards.kicker}
 					</div>
 				)}
-				<h2 id="confirm-dialog-title" className={`text-fg font-semibold ${pending.outcomeCards ? "text-xl tracking-[-0.015em]" : "text-lg"}`}>
+				<h2 id="confirm-dialog-title" className={`font-semibold ${dangerTone ? "text-danger" : "text-fg"} ${pending.outcomeCards ? "text-xl tracking-[-0.015em]" : "text-lg"}`}>
 					{pending.title}
 				</h2>
 				{pending.outcomeCards && (
@@ -258,7 +297,7 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 						projectName={pending.info.projectName}
 						priority={pending.info.priority}
 						labels={pending.info.labels}
-						tone={pending.outcomeCards ? "neutral" : "accent"}
+						tone={dangerTone ? "danger" : pending.outcomeCards ? "neutral" : "accent"}
 						{...(pending.info.onClick ? {
 							onTitleClick: () => {
 								close(false);

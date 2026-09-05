@@ -8,6 +8,7 @@
 // `OWNS_HELP` below).
 
 import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES, MAX_SCHEDULED_MESSAGE_LENGTH } from "../shared/types";
+import { MAX_MESSAGE_SUBJECT_LENGTH, MESSAGE_SUBJECT_WORD_GUIDANCE } from "../shared/agent-message-subject";
 
 /** One subcommand of a command group (e.g. `task create`). */
 export interface SubcommandHelp {
@@ -75,16 +76,34 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "create",
-				usage: 'dev3 task create --title "..." [--description "..." | --description -] | dev3 task create --scratch --run',
+				usage: 'dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard] | dev3 task create --scratch --run',
 				summary: "Create a task in To Do, or ask the user to start a scratch peer agent.",
 				details: [
 					"--title <text>        Task title (required).",
 					"--description <text>  Longer description (optional); use - to read it from stdin.",
 					"Positional content (or @file) becomes the description; its first line",
 					"is used as the title when --title is omitted.",
+					"--pr <number|url>     The pull request the task is about. dev3 fetches its head",
+					"                      branch (a fork too) and the worktree starts there, so the",
+					"                      diff is present; implies --type pr-review. Reviewing a PR",
+					"                      WITHOUT this lands the task on the base branch.",
+					"--branch <ref>        Start on a ref that is not a pull request: `origin/feat/x`,",
+					"                      a fork remote's `owner/feat/x`, or a local branch. Must",
+					"                      already exist locally — --pr fetches, --branch does not.",
+					"--type coordinator|pr-review|standard  Create the task with its type already set",
+					"                      (standard = no type, the default). The role preamble goes",
+					"                      into the description now, so a task launched straight away",
+					"                      is told what it is. Same values as `task update --type`.",
+					"                      coordinator = manages other tasks; pr-review = reviews code",
+					"                      somebody else wrote, and needs --pr to have anything to read.",
+					'Review a pull request:  dev3 task create --pr 1497 --title "Review of #1497"',
+					"Unresolvable --pr/--branch creates nothing and exits 18.",
 					"--scratch --run       Ask the user to start a throwaway peer agent — no title,",
 					"                      no prompt. Blocks up to 10 min on their approval in the",
 					"                      app; exit 10 if declined. Drive it with `dev3 message`.",
+					"--handoff-file <path> Append this file's text to the handoff note the new agent",
+					"                      receives, for standing instructions you would otherwise",
+					"                      message by hand. Launches only; unreadable/empty exits 3.",
 				],
 			},
 			{
@@ -94,6 +113,8 @@ const COMMANDS: CommandHelp[] = [
 				details: [
 					"--title <text>        New title (cannot be empty).",
 					'--description <text>  New description ("" clears it); use - to read it from stdin.',
+					"                      A running agent never sees this — the description is its first prompt at",
+					"                      launch and nothing re-delivers it; send `dev3 message` as well.",
 					"--priority <P0..P4>   Set importance (P0 highest … P4 lowest); applies to the whole variant group.",
 					"                      Only set priority when the user asks — never on your own initiative.",
 					"--manual-completion on|off  Control whether merge detection suggests completing this task.",
@@ -116,7 +137,11 @@ const COMMANDS: CommandHelp[] = [
 					"Built-in: todo, in-progress, user-questions, review-by-ai, review-by-user.",
 					'"completed" asks the user for approval; "cancelled" is forbidden via CLI.',
 					"Starting SOMEONE ELSE'S task (--task <other> + an active status) also asks",
-					"the user, who picks the agent; exit 10 if they decline.",
+					"the user, who picks the agent; exit 10 if they decline. The task it starts is",
+					"told by default to report back as a file and message you only the path.",
+					"--handoff-file <path>    Append this file's text to that handoff note, for",
+					"                         standing instructions you would otherwise message by",
+					"                         hand. Only read when the move becomes a launch.",
 				],
 			},
 			{
@@ -137,14 +162,17 @@ const COMMANDS: CommandHelp[] = [
 		subcommands: [
 			{
 				name: "list",
-				usage: "dev3 tasks list [--status <s>] [--label <id>] [--limit <n>] [--offset <n>]",
+				usage: "dev3 tasks list [--status <s>] [--label <id>] [--priority <P0..P4>] [--sort priority|seq] [--limit <n>] [--offset <n>]",
 				summary: "List tasks: live work, then To Do, then completed, then cancelled (default 50 per page).",
 				details: [
-					"Newest first (highest seq) inside each group.",
-					"--status <s>   Filter by status.",
-					"--label <id>   Filter by label id (8-char prefix works).",
-					"--limit <n>    Page size (default 50).",
-					"--offset <n>   Skip n tasks, for paging.",
+					"Highest priority first inside each group, exactly as the board ranks a column; newest (highest seq) breaks ties.",
+					"The PRI column is the task's priority, P0 (highest) … P4 (lowest).",
+					"--status <s>       Filter by status.",
+					"--label <id>       Filter by label id (8-char prefix works).",
+					"--priority <list>  Keep only these priorities, comma-separated: --priority P0,P1.",
+					"--sort priority|seq  Order inside each group (default priority).",
+					"--limit <n>        Page size (default 50).",
+					"--offset <n>       Skip n tasks, for paging.",
 				],
 			},
 		],
@@ -177,6 +205,28 @@ const COMMANDS: CommandHelp[] = [
 				usage: "dev3 note delete <id> [--task <id>]",
 				summary: "Delete a note (8-char prefix works).",
 			},
+		],
+	},
+	{
+		name: "events",
+		summary: "Cross-task feed of what happened on the board — notes and column moves — addressed by a cursor.",
+		subcommands: [],
+		usage: "dev3 events [--from <id|cursor|instant|duration>] [--limit <n>] [--project <ref>|all] [--kind all|note|move] [--json]",
+		details: [
+			"Every note and every board movement from EVERY task, including completed and cancelled ones — a finished task cannot message you, what it left behind is all that survived.",
+			"--from <x>       An event id from the ID column (`8eb2da3d`, or any unambiguous prefix), a cursor (`2026-08-29T10:12:03.114`, the `Cursor:` line of a previous run), a plain date/instant, or a duration like 2h / 30m / 3d / 1w.",
+			"An id is the shortest form to carry, but notes can be deleted and a task keeps only its 50 most recent — a vanished id exits 19 rather than reporting a quiet board.",
+			"--limit <n>      Cap the lines, 1..1000 (default 100). The OLDEST matches are kept and the dropped newer ones are counted.",
+			"--project <ref>  One board; `--project all` sweeps every board. Defaults to the current worktree's project.",
+			"--kind all|note|move  `note` is something written down; `move` is the card changing column — created, a status change (completed and cancelled included), or a custom-column move.",
+			"A cursor from a filtered run covers that kind ONLY: reusing it without the same --kind skips the other kinds in the same span. The command says so on every filtered run.",
+			"Movements are recorded from the version that shipped them onward. Moves made before that were never stored by any version and are gone — the feed shows no movement older than your upgrade, and never invents one.",
+			"A task keeps its 50 most recent movements. When the cap has destroyed moves inside the range you asked for, the run says so rather than presenting a trimmed log as complete.",
+			"--json           Emit the raw selection object (events, droppedNewer, olderThanWindow, movementsEvicted, cursor).",
+			"With no --from it shows the last 24 hours and says, as a number, how many events are OLDER than that window.",
+			"The cursor is never guessed: an unparseable --from exits 19 and reads nothing, rather than falling back to a window.",
+			"Cursor precision is milliseconds on purpose — 73 individual seconds on this board carry more than one note, so a second-precision cursor would skip or repeat them.",
+			"One line per event — `dev3 note show <id> --task <seq>` prints the full body.",
 		],
 	},
 	{
@@ -279,6 +329,33 @@ const COMMANDS: CommandHelp[] = [
 		],
 	},
 	{
+		name: "import",
+		summary: "Put the conversation you are running inside onto the board as a task.",
+		subcommands: [],
+		usage: "dev3 import [--json]",
+		details: [
+			"Run it from the agent's own shell. The working directory decides which",
+			"project owns the work, and CLAUDE_CODE_SESSION_ID decides which",
+			"conversation — so there is nothing to pass and nothing to pick.",
+			"",
+			"A conversation is imported into the project that owns the directory it ran",
+			"in, and nowhere else. If no project owns this directory, add the repository",
+			"to dev3 first (exit 20).",
+			"",
+			"Two things worth knowing before you run it on a conversation that is still",
+			"going. The task's description is this transcript AS IT STANDS NOW: it does",
+			"not follow the rest of the session, and a second run answers \"already on the",
+			"board\" rather than refreshing it — so import when the work is worth keeping,",
+			"not at the first idea. And a recently active conversation arrives with a git",
+			"worktree of its own, branched from the branch it ran on, ready to be picked",
+			"up; no terminal and no agent are started.",
+			"",
+			"To import PAST conversations in bulk instead, use `dev3 conversations import`.",
+			"",
+			"--json        Print the result as JSON.",
+		],
+	},
+	{
 		name: "conversations",
 		summary: "Search past task conversations, or parse this task's transcripts into JSON.",
 		subcommands: [
@@ -315,6 +392,19 @@ const COMMANDS: CommandHelp[] = [
 				],
 			},
 			{
+				name: "import",
+				usage: "dev3 conversations import [--project <id>] [--dry-run] [--sessions <id,id>] [--json]",
+				summary: "Turn Claude Code and Codex conversations that ran in this project's directory into tasks.",
+				details: [
+					"Only conversations that belong to no dev3 task are offered, and an already",
+					"imported one is never offered again. Work from the last week lands in Has",
+					"Questions with a worktree; older work lands in Completed as archive.",
+					"--dry-run          List what would be imported and create nothing (needs no running app).",
+					"--sessions IDS     Import only these session ids (comma-separated). Default: everything found.",
+					"--json             Machine-readable output.",
+				],
+			},
+			{
 				name: "search",
 				usage: 'dev3 conversations search "<query>" [--limit N] [--all-statuses] [--json]',
 				summary: "Search completed/cancelled task conversations for relevant prior work.",
@@ -332,8 +422,11 @@ const COMMANDS: CommandHelp[] = [
 		subcommands: [
 			{
 				name: "start",
-				usage: "dev3 dev-server start [task-id] [--wait] [--timeout <sec>]",
-				summary: "Start a task's dev server. --wait blocks until it is listening on an assigned DEV3_PORT* (default timeout 120s).",
+				usage: "dev3 dev-server start [task-id] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
+				summary:
+					"Start a task's dev server. --wait blocks until it is listening on an assigned DEV3_PORT* (default timeout 120s)."
+					+ " --env passes extra variables to the devScript (repeatable); it overrides the project's own env but never"
+					+ " DEV3_TASK_ID, DEV3_WORKTREE_ROOT or DEV3_PORT*.",
 			},
 			{
 				name: "stop",
@@ -342,8 +435,10 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "restart",
-				usage: "dev3 dev-server restart [task-id] [--wait] [--timeout <sec>]",
-				summary: "Restart a task's dev server. --wait blocks until the NEW server is listening on an assigned DEV3_PORT*.",
+				usage: "dev3 dev-server restart [task-id] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
+				summary:
+					"Restart a task's dev server. --wait blocks until the NEW server is listening on an assigned DEV3_PORT*."
+					+ " Without --env it reuses the env of the last start; with --env it replaces it. A stop clears it.",
 			},
 			{
 				name: "status",
@@ -435,12 +530,15 @@ const COMMANDS: CommandHelp[] = [
 	},
 	{
 		name: "attention",
-		summary: "Light the red attention badge on a task card, with an optional reason.",
+		summary: "Light the red attention badge on a task card, or clear it.",
 		subcommands: [],
-		usage: 'dev3 attention "reason" [--task <id>]',
+		usage: 'dev3 attention "reason" | --clear [--task <id>]',
 		details: [
 			"Same visual surface as the terminal bell; the reason shows on hover.",
-			"The badge clears when the user opens the task.",
+			"Reasons accumulate (newest 5 kept) until the badge is cleared.",
+			"--clear      Lower the badge now and drop every accumulated reason.",
+			"The badge also clears when the user opens the task.",
+			"--clear takes no reason; clear a resolved alert, then raise a new one if needed.",
 			"Targets the current worktree's task; override with --task <id>.",
 		],
 	},
@@ -448,11 +546,21 @@ const COMMANDS: CommandHelp[] = [
 		name: "message",
 		summary: "Send text to the task's live agent now, or schedule it for later.",
 		subcommands: [],
-		usage: 'dev3 message "text" [--in <dur> | --at <hh:mm>] [--task <id>]',
+		usage: 'dev3 message --subject "<what it is about>" "text" [--in <dur> | --at <hh:mm>] [--task <id>] [--variant <i>]',
 		details: [
+			`--subject <text>  REQUIRED. One line saying what the message is about: about`,
+			`                  ${MESSAGE_SUBJECT_WORD_GUIDANCE} words, ${MAX_MESSAGE_SUBJECT_LENGTH} characters at most (hard limit — an over-limit`,
+			"                  subject is rejected, never shortened for you). It is stored with",
+			"                  the message and it is the line the agent-traffic view shows, so",
+			"                  do NOT repeat who is talking — that view already shows the pair.",
+			'                    good:  --subject "PR 1577 merged, main green"',
+			'                    bad:   --subject "Seq 1722 -> Coordinator: PR 1577 merged"',
+			"                  Omitting it exits 17 with the corrected command.",
 			"Bare form delivers the text into the live agent immediately (types it + Enter).",
 			"--in <dur>    Schedule after a delay, e.g. 30m, 2h, 1h30m (Send later).",
 			"--at <hh:mm>  Schedule at the next occurrence of a local time (today or tomorrow).",
+			"--variant <i> Pick one member of a variant group; needs --task seq:<N>, since a group",
+			"              shares its seq. The index is the card's <seq>-<i> suffix.",
 			"Text can be a positional arg, --message, or @file. An agent may schedule its own wake-up.",
 			"Targets the current worktree's task; override with --task <id>.",
 			"Messaging ANOTHER task from a worktree wraps the text in a <dev3-ai-message> envelope",
@@ -465,9 +573,10 @@ const COMMANDS: CommandHelp[] = [
 		name: "show-artifact",
 		summary: "Surface a task-bound HTML artifact in the running app.",
 		subcommands: [],
-		usage: 'dev3 show-artifact <file.html> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]',
+		usage: 'dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]',
 		details: [
-			"--assets <paths...>   Copy local CSS, classic JS, and raster assets; all following paths belong to the artifact until the next flag.",
+			"<report-dir>          Publish the directory: its index.html plus every CSS, classic JS, and raster file under it.",
+			"--assets <paths...>   Name local CSS, classic JS, and raster assets by hand; all following paths belong to the artifact until the next flag.",
 			"--title <text>        Viewer title (defaults to the HTML filename).",
 			"--artifact-id <slug>  Group versions under a stable id, so re-wording the title does not fork a second artifact.",
 			"--new                 Publish a separate artifact instead of a new version of the matching one.",
@@ -607,6 +716,10 @@ const COMMANDS: CommandHelp[] = [
 ];
 
 const COMMAND_INDEX: Map<string, CommandHelp> = new Map(COMMANDS.map((c) => [c.name, c]));
+
+// Command aliases: the singular `project` forwards to `projects` in main.ts, so
+// its help must resolve too — otherwise the hint and the command disagree.
+COMMAND_INDEX.set("project", COMMAND_INDEX.get("projects") as CommandHelp);
 
 /** Whether the registry knows how to render help for this command. */
 export function hasCommandHelp(command: string): boolean {

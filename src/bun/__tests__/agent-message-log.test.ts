@@ -9,6 +9,9 @@ vi.mock("../logger", () => ({
 	createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 
+const push = vi.hoisted(() => vi.fn());
+vi.mock("../rpc-handlers/shared-pure", () => ({ getPushMessage: () => push }));
+
 import type { Project } from "../../shared/types";
 import {
 	AGENT_MESSAGE_LOG_MAX_ROW_BYTES,
@@ -48,6 +51,7 @@ function makeRow(overrides: Partial<AgentMessageLogInput> = {}): AgentMessageLog
 
 beforeEach(() => {
 	resetAgentMessageLogPruneState();
+	push.mockReset();
 	rmSync(messageLogDir(project), { recursive: true, force: true });
 });
 
@@ -132,6 +136,40 @@ describe("append and read", () => {
 		expect(page.rows.map((r) => r.body)).toEqual(["second", "first"]);
 	});
 
+	it("stores the subject on disk and reads it back", () => {
+		const day = new Date(2026, 7, 23, 12, 0, 0);
+		appendAgentMessageLog(project, makeRow({ subject: "PR 1577 merged, main green" }), day);
+
+		// Read the bytes, not the API: a subject that only exists in memory would
+		// be worthless to the traffic view, which is the whole reason it is stored.
+		const raw = readFileSync(`${messageLogDir(project)}/2026-08-23.jsonl`, "utf8");
+		expect(JSON.parse(raw.trim()).subject).toBe("PR 1577 merged, main green");
+		expect(readAgentMessageLog(project).rows[0]?.subject).toBe("PR 1577 merged, main green");
+	});
+
+	it("keeps the subject when a huge body is clamped away", () => {
+		const day = new Date(2026, 7, 23, 12, 0, 0);
+		appendAgentMessageLog(
+			project,
+			makeRow({ subject: "backfill finished", body: "x".repeat(AGENT_MESSAGE_LOG_MAX_ROW_BYTES * 2) }),
+			day,
+		);
+		const row = readAgentMessageLog(project).rows[0]!;
+		expect(row.subject).toBe("backfill finished");
+		expect(row.body.endsWith(AGENT_MESSAGE_LOG_TRUNCATION_MARK)).toBe(true);
+	});
+
+	it("reads a row written before subjects existed, with no subject on it", () => {
+		const day = new Date(2026, 7, 23, 12, 0, 0);
+		const { subject: _dropped, ...legacy } = makeRow({ body: "an old message" }) as AgentMessageLogInput & {
+			subject?: string;
+		};
+		appendAgentMessageLog(project, legacy, day);
+		const row = readAgentMessageLog(project).rows[0]!;
+		expect(row.subject).toBeUndefined();
+		expect(row.body).toBe("an old message");
+	});
+
 	it("answers an empty page for a project that has never sent a message", () => {
 		const page = readAgentMessageLog(project);
 		expect(page).toEqual({ rows: [], oldestDay: null, retentionDays: AGENT_MESSAGE_LOG_RETENTION_DAYS, hasMore: false });
@@ -170,6 +208,7 @@ describe("retention", () => {
 		const expired = new Date(now.getTime() - 400 * 24 * 60 * 60 * 1000);
 		appendAgentMessageLog(project, makeRow({ body: "ancient" }), expired);
 		resetAgentMessageLogPruneState();
+	push.mockReset();
 		appendAgentMessageLog(project, makeRow({ body: "today" }), now);
 		expect(readAgentMessageLog(project).rows.map((r) => r.body)).toEqual(["today"]);
 	});
@@ -180,5 +219,26 @@ describe("retention", () => {
 		writeFileSync(`${messageLogDir(project)}/README.txt`, "hands off");
 		expect(pruneAgentMessageLog(project, new Date(2027, 0, 1))).toBe(1);
 		expect(readFileSync(`${messageLogDir(project)}/README.txt`, "utf8")).toBe("hands off");
+	});
+});
+
+
+describe("durable append notifications", () => {
+	it.each(["delivered", "held", "unconfirmed", "not-delivered"] as const)("announces %s only after its row is readable", (status) => {
+		push.mockImplementation((name, payload) => {
+			expect(name).toBe("agentMessageLogChanged");
+			expect(payload).toEqual({ projectId: project.id });
+			expect(readAgentMessageLog(project).rows[0].status).toBe(status);
+		});
+		appendAgentMessageLog(project, makeRow({ status }));
+		expect(push).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not announce an append that failed", () => {
+		mkdirSync(messageLogDir(project), { recursive: true });
+		const now = new Date(2026, 7, 23);
+		mkdirSync(`${messageLogDir(project)}/2026-08-23.jsonl`);
+		appendAgentMessageLog(project, makeRow(), now);
+		expect(push).not.toHaveBeenCalled();
 	});
 });

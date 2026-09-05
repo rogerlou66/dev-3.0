@@ -14,6 +14,11 @@ export const SETTINGS_CATEGORIES = [
 		descriptionKey: "settings.categoryTasksDesc",
 	},
 	{
+		id: "notifications",
+		labelKey: "settings.categoryNotifications",
+		descriptionKey: "settings.categoryNotificationsDesc",
+	},
+	{
 		id: "keyboard",
 		labelKey: "settings.categoryKeyboard",
 		descriptionKey: "settings.categoryKeyboardDesc",
@@ -162,7 +167,7 @@ export const SETTINGS_ENTRIES = [
 	},
 	{
 		id: "watch-by-default",
-		category: "tasks",
+		category: "notifications",
 		titleKey: "settings.watchByDefault",
 		descriptionKey: "settings.watchByDefaultDesc",
 		anchor: "watch-by-default",
@@ -198,7 +203,7 @@ export const SETTINGS_ENTRIES = [
 	},
 	{
 		id: "task-complete-sound",
-		category: "tasks",
+		category: "notifications",
 		titleKey: "settings.taskCompleteSound",
 		descriptionKey: "settings.taskCompleteSoundDesc",
 		anchor: "task-complete-sound",
@@ -207,7 +212,7 @@ export const SETTINGS_ENTRIES = [
 	},
 	{
 		id: "focus-mode",
-		category: "tasks",
+		category: "notifications",
 		titleKey: "settings.focusMode",
 		descriptionKey: "settings.focusModeDesc",
 		anchor: "focus-mode",
@@ -267,6 +272,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "sidecar",
 	},
 	{
+		id: "terminal-dim-inactive-panes",
+		category: "terminal",
+		titleKey: "settings.dimInactivePanes",
+		descriptionKey: "settings.dimInactivePanesDesc",
+		anchor: "terminal-dim-inactive-panes",
+		globalField: "dimInactivePanes",
+		storage: "global",
+	},
+	{
 		id: "terminal-shell",
 		category: "terminal",
 		titleKey: "settings.terminalShell",
@@ -283,6 +297,22 @@ export const SETTINGS_ENTRIES = [
 		anchor: "terminal-path-open-mode",
 		globalField: "terminalPathOpenMode",
 		storage: "global",
+	},
+	{
+		id: "terminal-font",
+		category: "terminal",
+		titleKey: "settings.terminalFont",
+		descriptionKey: "settings.terminalFontDesc",
+		anchor: "terminal-font",
+		storage: "local",
+	},
+	{
+		id: "terminal-font-size",
+		category: "terminal",
+		titleKey: "settings.terminalFontSize",
+		descriptionKey: "settings.terminalFontSizeDesc",
+		anchor: "terminal-font-size",
+		storage: "local",
 	},
 	{
 		id: "terminal-scroll-speed",
@@ -317,6 +347,15 @@ export const SETTINGS_ENTRIES = [
 		descriptionKey: "settings.agentsDesc",
 		anchor: "agents-editor",
 		storage: "surface",
+	},
+	{
+		id: "low-battery",
+		category: "agents",
+		titleKey: "settings.lowBattery",
+		descriptionKey: "settings.lowBatteryDesc",
+		anchor: "low-battery",
+		globalField: "lowBatteryEnabled",
+		storage: "global",
 	},
 	{
 		id: "rate-limit-tracking",
@@ -380,6 +419,24 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "static-access-code",
+		category: "system",
+		titleKey: "settings.staticAccessCode",
+		descriptionKey: "settings.staticAccessCodeDesc",
+		anchor: "static-access-code",
+		globalField: "staticAccessCode",
+		storage: "global",
+	},
+	{
+		id: "remote-port",
+		category: "system",
+		titleKey: "settings.remotePort",
+		descriptionKey: "settings.remotePortDesc",
+		anchor: "remote-port",
+		globalField: "remotePort",
+		storage: "global",
+	},
+	{
 		id: "remote-silent-update",
 		category: "system",
 		titleKey: "settings.remoteSilentUpdate",
@@ -408,10 +465,18 @@ export const SETTINGS_ENTRIES = [
 	},
 	{
 		id: "browser-notifications",
-		category: "system",
+		category: "notifications",
 		titleKey: "settings.browserNotifications",
 		descriptionKey: "settings.browserNotificationsDesc",
 		anchor: "browser-notifications",
+		storage: "browser",
+	},
+	{
+		id: "push-notifications",
+		category: "notifications",
+		titleKey: "settings.pushNotifications",
+		descriptionKey: "settings.pushNotificationsDesc",
+		anchor: "push-notifications",
 		storage: "browser",
 	},
 	{
@@ -459,6 +524,13 @@ export const SETTINGS_ENTRIES = [
 	},
 ] as const satisfies readonly SettingsEntry[];
 
+/** Stable scroll targets that callers may deep-link to inside Settings. */
+export type SettingsEntryAnchor = (typeof SETTINGS_ENTRIES)[number] extends infer Entry
+	? Entry extends { readonly anchor: infer Anchor extends string }
+		? Anchor
+		: never
+	: never;
+
 /** GlobalSettings fields intentionally kept outside the visible settings registry. */
 export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"resolvedTheme",
@@ -475,6 +547,10 @@ export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"helpModeDiscovered",
 	// Which guided tours have already run. Progress, not a preference.
 	"completedTours",
+	// Legacy low-battery keys from the default-on era. Never read; kept on disk only
+	// so an older co-installed build keeps its own opt-out and announce flag.
+	"lowBatteryDisabled",
+	"lowBatteryAnnounced",
 ] as const satisfies readonly (keyof GlobalSettings)[];
 
 /** Runtime list used by the registry integrity test; the type check catches schema drift. */
@@ -486,6 +562,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"theme",
 	"resolvedTheme",
 	"analyticsDistinctId",
+	"staticAccessCode",
 	"cloneBaseDirectory",
 	"customBinaryPaths",
 	"agentBinaryPaths",
@@ -505,6 +582,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"skipQuitDialog",
 	"importShellEnv",
 	"terminalShell",
+	"dimInactivePanes",
 	"focusMode",
 	"agentRateLimitTracking",
 	"watchByDefault",
@@ -514,10 +592,14 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"agentsLayoutRevision",
 	"pxpipeProxyEnabled",
 	"remoteTunnel",
+	"remotePort",
 	"favorites",
 	"keyboardShortcuts",
 	"reviewModePrompt",
 	"coordinatorPrompt",
+	"lowBatteryEnabled",
+	"lowBatteryDisabled",
+	"lowBatteryAnnounced",
 ] as const satisfies readonly (keyof GlobalSettings)[];
 
 type RegisteredGlobalSettingsField = (typeof SETTINGS_ENTRIES)[number] extends infer Entry

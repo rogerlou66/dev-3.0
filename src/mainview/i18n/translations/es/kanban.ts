@@ -28,6 +28,8 @@ const kanban = {
 	"kanban.showMore": "Mostrar más ({count})",
 	"kanban.showLess": "Mostrar menos",
 	"kanban.renameColumn": "Renombrar columna",
+	"kanban.mergedLaneProjects_one": "{count} proyecto",
+	"kanban.mergedLaneProjects_other": "{count} proyectos",
 	"kanban.draftNotDroppable": "Esto es un borrador: completa su descripción y guárdalo como tarea antes de iniciarlo.",
 
 	// CreateTaskModal
@@ -227,6 +229,7 @@ const kanban = {
 	"task.warnUncommitted": "Cambios sin confirmar: +{insertions} / -{deletions} líneas",
 	"task.warnNeverPushed_one": "{count} commit nunca enviado — se perderá",
 	"task.warnNeverPushed_other": "{count} commits nunca enviados — se perderán",
+	"task.warnNeverPushedUnknownCount": "Esta rama no está en ningún remoto y sus commits no se pueden contar — se perderán",
 	"task.warnUnpushed_one": "{count} commit sin enviar — se perderá",
 	"task.warnUnpushed_other": "{count} commits sin enviar — se perderán",
 	"task.warnUnmerged_one": "{count} commit enviado pero no fusionado en {branch}",
@@ -305,6 +308,11 @@ const kanban = {
 	"spawnAgent.spawning": "Agregando…",
 	"spawnAgent.failed": "No se pudo agregar el agente. {error}",
 	"spawnAgent.notInstalled": "{name} no está instalado. Instálalo primero.",
+	"spawnAgent.handoff": "Continuar la conversación de esta tarea",
+	"spawnAgent.handoffDesc_one": "El nuevo agente recibe un resumen narrado de la sesión de {agent} ({count} turno): tus mensajes y sus respuestas literales, sus acciones resumidas. Los agentes no pueden retomar la sesión de otro, así que cambiar es narrar.",
+	"spawnAgent.handoffDesc_other": "El nuevo agente recibe un resumen narrado de la sesión de {agent} ({count} turnos): tus mensajes y sus respuestas literales, sus acciones resumidas. Los agentes no pueden retomar la sesión de otro, así que cambiar es narrar.",
+	"spawnAgent.handoffSent": "La conversación se entregó — leer el resumen es el primer turno del nuevo agente.",
+	"spawnAgent.handoffNotDelivered": "El agente arrancó pero nunca recibió el puntero al resumen. Está escrito en {path} — indícaselo a mano.",
 
 	// Watch
 	"task.devStarting": "iniciando",

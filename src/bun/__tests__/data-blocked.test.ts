@@ -21,6 +21,16 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("persisted task blocking", () => {
+	it("does not publish no-op column movements for holds, but records real status changes while held", async () => {
+		const task = await addTask(project, "Review", "review-by-user");
+		const held = await updateTask(project, task.id, { blocked: true });
+		expect(held.movements).toEqual(task.movements);
+		const promoted = await updateTask(project, task.id, { status: "review-by-colleague" });
+		expect(promoted.movements?.slice(-1)[0]).toMatchObject({ kind: "status", from: "review-by-user", to: "review-by-colleague" });
+		expect(promoted.blocked).toBe(true);
+		const unblocked = await updateTask(project, task.id, { blocked: false });
+		expect(unblocked.movements).toEqual(promoted.movements);
+	});
 	it("keeps status, workspace, priority and unknown additive fields across reload", async () => {
 		const task = await addTask(project, "Review", "review-by-user");
 		await updateTask(project, task.id, { worktreePath: "/tmp/preserved", priority: "P1", hibernated: true });

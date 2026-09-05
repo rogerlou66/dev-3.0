@@ -1,6 +1,7 @@
 import type { TFunction } from "./i18n";
 import { api, isElectrobun } from "./rpc";
 import { toast } from "./toast";
+import { fileUriToLocalPath, safeFileUri } from "./terminal-osc8-links";
 import type { ResolvedTerminalPath, TerminalPathOpenMode } from "../shared/types";
 import { isAndroidAppHost } from "./android-client-bridge";
 
@@ -54,6 +55,46 @@ export async function activateTerminalPath(resolved: ResolvedTerminalPath, t: TF
 		} else {
 			await api.request.openTerminalPath({ path: resolved.path, mode });
 		}
+	} catch (err) {
+		toast.error(t("terminal.pathLinkOpenFailed", { error: String(err) }), { taskId, source: "terminal" });
+	}
+}
+
+export interface Osc8ActivateContext {
+	t: TFunction;
+	taskId?: string;
+	projectId?: string;
+}
+
+/**
+ * Activate an OSC 8 hyperlink. Agents wrap printed file paths in `file://`
+ * links (Claude Code does since FORCE_HYPERLINK=1); those open like a
+ * Cmd+Clicked plain path, through the same resolve + allowed-roots gate on the
+ * backend. Anything else is an external URL.
+ *
+ * A `file:` URI that cannot be turned into a path never reaches `window.open`:
+ * it would be the dead click this whole flow exists to remove, and the desktop
+ * new-window intercept forwards nothing but http(s) anyway.
+ */
+export async function activateOsc8Uri(uri: string, ctx: Osc8ActivateContext): Promise<void> {
+	const { t, taskId, projectId } = ctx;
+	const file = fileUriToLocalPath(uri);
+	if (!file) {
+		if (safeFileUri(uri)) {
+			toast.error(t("terminal.fileLinkUnreadable", { uri }), { taskId, source: "terminal" });
+			return;
+		}
+		window.open(uri, "_blank", "noopener,noreferrer");
+		return;
+	}
+	try {
+		const { resolved } = await api.request.resolveTerminalPaths({ taskId, projectId, paths: [file.path] });
+		const target = resolved[file.path];
+		if (!target) {
+			toast.error(t("terminal.fileLinkNotFound", { path: file.path }), { taskId, source: "terminal" });
+			return;
+		}
+		await activateTerminalPath(target, t, file.line, taskId);
 	} catch (err) {
 		toast.error(t("terminal.pathLinkOpenFailed", { error: String(err) }), { taskId, source: "terminal" });
 	}

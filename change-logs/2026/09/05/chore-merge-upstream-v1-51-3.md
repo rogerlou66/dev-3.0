@@ -1,0 +1,1 @@
+Merge upstream v1.51.3 while preserving the fork's workspace board, focused task overlay, Blocked reviews, compact header, Android client, Antigravity support, CJK input fixes, manual updates, and disabled external telemetry. Integrate the new shared space-board lanes and artifact popup without changing the fork's task-opening workflow.

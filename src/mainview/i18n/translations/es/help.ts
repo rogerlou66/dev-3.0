@@ -125,7 +125,10 @@ const help = {
 	"help.settings.appearance.body": "Tema, idioma, zoom y desplazamiento — cómo se ve y se siente la aplicación.",
 	"help.settings.tasks.title": "Tareas y tablero",
 	"help.settings.tasks.body":
-		"Comportamiento por defecto del tablero y las tareas: dónde cae una tarjeta arrastrada en su columna, el sonido al completar una tarea, el modo concentración, el seguimiento por defecto y los consejos de funciones.",
+		"Comportamiento por defecto del tablero y las tareas: dónde cae una tarjeta, cómo se abren las tareas, los prompts de revisión y los consejos.",
+	"help.settings.notifications.title": "Notificaciones",
+	"help.settings.notifications.body":
+		"Elige cuándo los eventos de las tareas reclaman tu atención y cómo los entrega este navegador o dispositivo.",
 	"help.settings.keyboard.title": "Teclado",
 	"help.settings.keyboard.body":
 		"Todos los atajos de la aplicación en un solo lugar. Haz clic en las teclas que muestra una fila y escribe la combinación que quieras; si otro atajo ya la tiene, se te dice cuál antes de quitársela. Cada atajo admite además una segunda combinación opcional. Unos pocos quedan fijos — secuencias como `g d`, la familia ⌘1–9, el conmutador de tareas que se mantiene pulsado y Esc — y cada uno explica por qué.",
@@ -137,7 +140,7 @@ const help = {
 		"Inicia sesión en varias cuentas por agente (Claude Code, Codex), cambia cuál está activa y gestiona los perfiles de claves API.",
 	"help.settings.system.title": "Sistema",
 	"help.settings.system.body":
-		"Mecánica a nivel de aplicación: el canal de actualizaciones, mantener la máquina despierta mientras trabajan los agentes, la confirmación al salir y las notificaciones del navegador.",
+		"Mecánica de la aplicación: canal de actualizaciones, mantener el equipo despierto, confirmación al salir, proxy y herramientas de desarrollo.",
 	"help.settings.workspace.title": "Espacio de trabajo",
 	"help.settings.workspace.body":
 		"Dónde viven los worktrees de las tareas en disco, qué editores y aplicaciones externas alimentan open-in, y tus cuentas de GitHub.",
@@ -185,6 +188,9 @@ const help = {
 	"help.modal.addProject.title": "Añadir un proyecto",
 	"help.modal.addProject.body":
 		"Apunta dev3 a un repo git local, clona uno remoto primero, o crea un tablero de Operaciones — un proyecto virtual cuyas tareas ejecutan agentes en carpetas gestionadas, sin git.",
+	"help.modal.importConversations.title": "Importar conversaciones",
+	"help.modal.importConversations.body":
+		"Las conversaciones de Claude Code y Codex que se ejecutaron en la carpeta de este proyecto fuera de dev3 se convierten en tareas normales: un título, un resumen de la conversación como descripción y la etiqueta «imported». Claude titula sus propias conversaciones; una de Codex se titula con la primera petición. Lo reciente conserva un worktree; lo antiguo llega a Completado.",
 	"help.modal.spawnAgent.title": "Añadir un agente",
 	"help.modal.spawnAgent.body":
 		"Añade un segundo agente a la sesión existente de esta tarea — mismo worktree, misma terminal. Útil para pasar el relevo a otro modelo o correr un ayudante junto al agente principal.",
@@ -207,7 +213,7 @@ const help = {
 		"Capturas y renders que un agente compartió con `dev3 show-image`, las más nuevas primero. Recorre el historial, descarga una imagen (también con clic derecho), copia su ruta o revela el archivo original en disco.",
 	"help.viewer.artifact.title": "Artefacto",
 	"help.viewer.artifact.body":
-		"Un informe HTML interactivo que un agente construyó con `dev3 show-artifact`, aislado junto a la terminal. Cambia su tamaño, ponlo a pantalla completa, recorre artefactos pasados o descárgalo como HTML (o un ZIP cuando incluye imágenes).",
+		"Un informe HTML interactivo que un agente construyó con `dev3 show-artifact`, aislado y abierto como una ventana emergente sobre la tarea, igual que las imágenes. Ponlo a pantalla completa, recorre artefactos pasados o descárgalo como HTML (o un ZIP cuando incluye imágenes). Escape lo cierra.",
 
 	// ── Terminal ──
 	"help.terminal.quickShell.title": "Terminal del proyecto",
@@ -238,10 +244,10 @@ const help = {
 	"help.field.streamerMode.title": "Oculta datos privados en directo",
 	"help.field.streamerMode.body":
 		"Al activarlo, los valores que revelan identidad — correos y nombres de cuentas, organizaciones, rutas de la carpeta personal, URLs de túnel y el código QR de acceso remoto — se difuminan en toda la interfaz. El contenido del terminal NO se oculta: los paneles muestran lo que impriman los agentes. Actívalo rápido desde la paleta de comandos ⇧⌘P.",
-	"help.header.agentTraffic.title": "Tráfico de agentes: quién habla y quién debe responder",
-	"help.header.agentTraffic.body": "El glifo aparece solo mientras tus agentes se han escrito en la última hora. El número cuenta parejas activas; ábrelo para verlas, y quien recibió el último mensaje es quien aún no ha respondido.",
-	"help.traffic.log.title": "Todos los mensajes que tus agentes se escribieron",
-	"help.traffic.log.body": "Todo el historial que dev3 guardó, lo más reciente primero: un toast dura 30 segundos, esto dura 30 días. Elige una pareja a la izquierda para leer solo esa conversación, y «Solo sin confirmar» muestra los mensajes cuya entrega dev3 no pudo probar.",
+	"help.header.agentTraffic.title": "Tráfico de agentes: sigue sus conversaciones",
+	"help.header.agentTraffic.body": "Selecciona el icono morado de mensajes o pulsa ⇧⌘M para abrir la órbita en vivo. Empieza con las últimas 24 horas; el contador muestra los mensajes sin leer.",
+	"help.traffic.log.title": "Explora el tráfico de agentes en vivo",
+	"help.traffic.log.body": "Selecciona una tarea o un mensaje para consultar su estado de entrega registrado. Cambia el periodo o carga mensajes anteriores, conservados durante 30 días. La línea temporal filtra mensajes; las columnas de tareas siguen mostrando el estado actual.",
 	"help.header.memory.title": "La píldora de memoria muestra lo que QUEDA",
 	"help.header.connectionQuality.title": "Qué tan lenta es esta conexión",
 	"help.header.connectionQuality.body":

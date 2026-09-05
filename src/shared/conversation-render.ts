@@ -34,6 +34,12 @@ export interface RenderOptions {
 	toolOutputLimit?: number;
 	/** Keep only the last N turns (the preamble is never a turn worth keeping). */
 	maxTurns?: number;
+	/**
+	 * Lead with the conversation's first user prompt, verbatim, before anything
+	 * else. For a retelling read as a brief rather than as a log — an imported
+	 * task's description, where the point has to arrive before the detail.
+	 */
+	leadWithFirstRequest?: boolean;
 }
 
 const DEFAULT_TOOL_OUTPUT_LIMIT = 2048;
@@ -148,6 +154,21 @@ function renderTurn(
 	return lines;
 }
 
+/** The first thing the user asked for, verbatim. Null when the session opened
+ *  with an agent-written prompt (a compacted resume) or with no prose at all.
+ *  Codex opens almost every session with injected context in the `user` role —
+ *  skipped here, or every Codex import would be titled after its AGENTS.md. */
+export function firstUserRequest(parsed: ParsedConversation): string | null {
+	for (const turn of parsed.turns) {
+		if (turn.trigger !== "user") continue;
+		const opener = turn.events.find((event) => event.kind === "message" && event.role === "user");
+		if (opener?.meta?.compactSummary === true || opener?.meta?.injected === true) continue;
+		const text = turn.userText?.trim();
+		if (text) return text;
+	}
+	return null;
+}
+
 /**
  * Render the whole conversation as one message. This is the "one big message"
  * path: always available, for any source agent and any target.
@@ -160,7 +181,12 @@ export function renderHandoff(parsed: ParsedConversation, options: RenderOptions
 	const kept = options.maxTurns && options.maxTurns > 0 ? substantive.slice(-options.maxTurns) : substantive;
 	const dropped = substantive.length - kept.length;
 
-	const lines = [...preface(parsed, target), ...context(parsed)];
+	const lines = [...preface(parsed, target)];
+	// Before the context block on purpose: whoever reads this needs the point of
+	// the work before its working directory.
+	const firstRequest = options.leadWithFirstRequest ? firstUserRequest(parsed) : null;
+	if (firstRequest) lines.push("## The request that started this", "", firstRequest, "");
+	lines.push(...context(parsed));
 	if (dropped > 0) {
 		lines.push(`_The first ${dropped} of ${substantive.length} turns are omitted; the rest follow._`, "");
 	}
@@ -177,4 +203,84 @@ export function renderHandoff(parsed: ParsedConversation, options: RenderOptions
 	}
 
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Characters an imported conversation's description may occupy. It is stored in
+ * `tasks.json`, which the board reads whole on every load, so the cap is the one
+ * lever on that cost: 300 imported conversations at this size add ~12 MB. Lower
+ * it before inventing a second storage path.
+ */
+export const IMPORTED_DESCRIPTION_LIMIT = 40_000;
+
+/** How many trailing turns to try, widest first, when fitting the cap. */
+const TAIL_TURN_STEPS = [60, 30, 15, 8, 4, 2, 1];
+
+/**
+ * The widest tail that fits under `limit`.
+ *
+ * Head plus tail, never a silent middle cut — the turn count that was dropped is
+ * stated by the renderer itself, and a body still over the cap after one turn
+ * ends with a marker rather than stopping mid-sentence with no notice.
+ */
+function fitToLimit(parsed: ParsedConversation, limit: number, base: RenderOptions): string {
+	const render = (maxTurns: number): string => renderHandoff(parsed, { ...base, maxTurns });
+
+	for (const maxTurns of TAIL_TURN_STEPS) {
+		const text = render(maxTurns);
+		if (text.length <= limit) return text;
+	}
+
+	const text = render(1);
+	if (text.length <= limit) return text;
+	// Named from the transcript, not hardcoded: a Codex import must not be told to
+	// go look in Claude Code.
+	const agent = parsed.source === "codex" ? "Codex" : "Claude Code";
+	const marker = `\n…[${text.length - limit} more characters cut — the full conversation is still in ${agent}'s own transcript]\n`;
+	return `${text.slice(0, Math.max(0, limit - marker.length))}${marker}`;
+}
+
+/**
+ * The retelling that becomes an imported task's description: the user's original
+ * request in full, then as much of the recent work as fits under `limit`.
+ */
+export function renderImportedDescription(
+	parsed: ParsedConversation,
+	options: { limit?: number } = {},
+): string {
+	return fitToLimit(parsed, options.limit ?? IMPORTED_DESCRIPTION_LIMIT, {
+		target: "claude",
+		leadWithFirstRequest: true,
+		// A description is a brief, not an archive: an imported conversation's
+		// tool output is worth a glance, never 2 KB per call.
+		toolOutputLimit: 400,
+	});
+}
+
+/**
+ * Characters a handoff FILE may occupy.
+ *
+ * Three times the description cap, because nothing stores this one: it is written
+ * beside the task's other artifacts and read once, by the agent taking over. About
+ * 30k tokens — a long session's tail in full, still a fraction of the fresh context
+ * it lands in. The parent conversation of this feature renders to 359 KB with tool
+ * output dropped entirely, so an unbounded file is not an option.
+ */
+export const HANDOFF_FILE_LIMIT = 120_000;
+
+/**
+ * The retelling written to disk for another agent to read: the request that started
+ * the work, then as much recent detail as fits. Tool output is kept at a wider limit
+ * than a description gets — whoever picks this up has to know what the commands
+ * actually answered, not merely that they ran.
+ */
+export function renderHandoffFile(
+	parsed: ParsedConversation,
+	options: { limit?: number; target?: RenderTarget } = {},
+): string {
+	return fitToLimit(parsed, options.limit ?? HANDOFF_FILE_LIMIT, {
+		target: options.target ?? "claude",
+		leadWithFirstRequest: true,
+		toolOutputLimit: 800,
+	});
 }

@@ -1,9 +1,12 @@
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleTask } from "../commands/task";
 import type { CliContext } from "../context";
 import type { ParsedArgs } from "../args";
 import type { Task, CliResponse } from "../../shared/types";
-import { DRAFT_TASK_ACTIVATION_ERROR } from "../../shared/types";
+import { DRAFT_TASK_ACTIVATION_ERROR, TASK_REF_UNRESOLVED_PREFIX } from "../../shared/types";
 import { CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT } from "../../shared/cli-exit-codes";
 
 vi.mock("../stdin", () => ({
@@ -340,11 +343,148 @@ describe("task create", () => {
 		expect(params.projectId).toBe(CTX.projectId);
 	});
 
+	it("sends --type and names the role it created", async () => {
+		mockSend.mockResolvedValue(okResp({ ...createdTask, taskType: "pr-review" }));
+
+		await handleTask("create", args([], { project: "proj-001", title: "Review PR 42", type: "PR-Review" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.create", {
+			projectId: "proj-001",
+			title: "Review PR 42",
+			taskType: "pr-review",
+		});
+		expect(stderrOutput).toContain("Role: pr-review");
+	});
+
+	it("sends --type coordinator alongside a description", async () => {
+		mockSend.mockResolvedValue(okResp({ ...createdTask, taskType: "coordinator" }));
+
+		await handleTask(
+			"create",
+			args([], { project: "proj-001", title: "Run the board", description: "manage the agents", type: "coordinator" }),
+			SOCKET,
+			null,
+		);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.create", {
+			projectId: "proj-001",
+			title: "Run the board",
+			description: "manage the agents",
+			taskType: "coordinator",
+		});
+	});
+
+	it("omits taskType for --type standard", async () => {
+		mockSend.mockResolvedValue(okResp(createdTask));
+
+		await handleTask("create", args([], { project: "proj-001", title: "New task", type: "standard" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.create", {
+			projectId: "proj-001",
+			title: "New task",
+		});
+		expect(stderrOutput).not.toContain("Role:");
+	});
+
+	it("rejects an unknown --type before contacting the app", async () => {
+		await expect(
+			handleTask("create", args([], { project: "proj-001", title: "New task", type: "reviewer" }), SOCKET, null),
+		).rejects.toThrow("EXIT_3");
+		expect(stderrOutput).toContain("--type must be one of coordinator, pr-review or standard");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
 	it("exits with usage error when --project missing and no context", async () => {
 		await expect(
 			handleTask("create", args([], { title: "New task" }), SOCKET, null),
 		).rejects.toThrow("EXIT_3");
 		expect(stderrOutput).toContain("--project");
+	});
+
+	describe("--pr / --branch", () => {
+		it("sends --pr, implies pr-review, and says where the worktree starts", async () => {
+			mockSend.mockResolvedValue(okResp({
+				...createdTask,
+				taskType: "pr-review",
+				existingBranch: "arditti/fix/ctrl-o",
+				foreignCode: true,
+			}));
+
+			await handleTask("create", args([], { project: "proj-001", title: "Review of #1512", pr: "1512" }), SOCKET, null);
+
+			expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.create", {
+				projectId: "proj-001",
+				title: "Review of #1512",
+				taskType: "pr-review",
+				pr: "1512",
+			});
+			expect(stderrOutput).toContain("Starts on: arditti/fix/ctrl-o");
+			expect(stderrOutput).toContain("someone else's code");
+		});
+
+		it("lets an explicit --type override what --pr would imply", async () => {
+			mockSend.mockResolvedValue(okResp(createdTask));
+
+			await handleTask("create", args([], { project: "proj-001", title: "X", pr: "5", type: "standard" }), SOCKET, null);
+
+			expect(mockSend.mock.calls[0]![2]!).not.toHaveProperty("taskType");
+			expect(mockSend.mock.calls[0]![2]!.pr).toBe("5");
+		});
+
+		it("sends --branch without implying a type", async () => {
+			mockSend.mockResolvedValue(okResp({ ...createdTask, existingBranch: "origin/feat/x" }));
+
+			await handleTask("create", args([], { project: "proj-001", title: "Look", branch: "origin/feat/x" }), SOCKET, null);
+
+			expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.create", {
+				projectId: "proj-001",
+				title: "Look",
+				branch: "origin/feat/x",
+			});
+			expect(stderrOutput).toContain("Starts on: origin/feat/x");
+			expect(stderrOutput).not.toContain("someone else's code");
+		});
+
+		it("rejects --pr together with --branch before contacting the app", async () => {
+			await expect(
+				handleTask("create", args([], { project: "proj-001", title: "X", pr: "1", branch: "origin/x" }), SOCKET, null),
+			).rejects.toThrow("EXIT_3");
+			expect(stderrOutput).toContain("pass one of them");
+			expect(mockSend).not.toHaveBeenCalled();
+		});
+
+		// Nothing was created, so the caller must be able to tell this apart from
+		// "the task failed to be written" — hence its own code, not exit 1.
+		it("exits 18 with the readable reason when the ref does not resolve", async () => {
+			mockSend.mockResolvedValue({
+				id: "1",
+				ok: false,
+				error: `${TASK_REF_UNRESOLVED_PREFIX}no pull request 999999 in this project (could not resolve).`,
+			});
+
+			await expect(
+				handleTask("create", args([], { project: "proj-001", title: "Review of #999999", pr: "999999" }), SOCKET, null),
+			).rejects.toThrow("EXIT_18");
+			expect(stderrOutput).toContain("no pull request 999999 in this project");
+			expect(stderrOutput).toContain("No task was created.");
+			// The wire marker is plumbing — it must not reach the user's terminal.
+			expect(stderrOutput).not.toContain(TASK_REF_UNRESOLVED_PREFIX);
+		});
+
+		it("still exits 1 for an ordinary creation failure", async () => {
+			mockSend.mockResolvedValue({ id: "1", ok: false, error: "disk is full" });
+
+			await expect(
+				handleTask("create", args([], { project: "proj-001", title: "X" }), SOCKET, null),
+			).rejects.toThrow("EXIT_1");
+		});
+
+		it("refuses --pr on a scratch task", async () => {
+			await expect(
+				handleTask("create", args([], { project: "proj-001", scratch: "true", run: "true", pr: "5" }), SOCKET, null),
+			).rejects.toThrow("EXIT_3");
+			expect(mockSend).not.toHaveBeenCalled();
+		});
 	});
 
 	it("exits with usage error when --title missing", async () => {
@@ -574,6 +714,50 @@ describe("task update", () => {
 		expect(mockSend).not.toHaveBeenCalled();
 	});
 
+	// The description is the agent's first prompt at launch and nothing re-delivers
+	// it, so a rewrite on a live task has to say so at the keyboard.
+	it("warns that a running agent will not see a new description", async () => {
+		mockSend.mockResolvedValue(okResp({ task: FAKE_TASK, titlePreserved: false }));
+
+		await handleTask("update", args(["aaaaaaaa"], { description: "Now also fix it" }), SOCKET, null);
+
+		expect(stdoutOutput).toContain("running agent will NOT see this");
+		expect(stdoutOutput).toContain("dev3 message --task aaaaaaaa");
+	});
+
+	it("carries --project into the suggested message for a cross-project task", async () => {
+		mockSend.mockResolvedValue(okResp({ task: FAKE_TASK, titlePreserved: false }));
+
+		await handleTask(
+			"update",
+			args(["aaaaaaaa"], { description: "Now also fix it", project: "proj-002" }),
+			SOCKET,
+			null,
+		);
+
+		expect(stdoutOutput).toContain("dev3 message --task aaaaaaaa --project proj-002");
+	});
+
+	it("stays quiet when no agent is running to miss the edit", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, status: "todo", worktreePath: null },
+			titlePreserved: false,
+		}));
+
+		await handleTask("update", args(["aaaaaaaa"], { description: "Brief for later" }), SOCKET, null);
+
+		expect(stdoutOutput).toContain("Updated task");
+		expect(stdoutOutput).not.toContain("running agent");
+	});
+
+	it("stays quiet for a title-only update on a running task", async () => {
+		mockSend.mockResolvedValue(okResp({ task: FAKE_TASK, titlePreserved: false }));
+
+		await handleTask("update", args(["aaaaaaaa"], { title: "Renamed by the agent" }), SOCKET, null);
+
+		expect(stdoutOutput).not.toContain("running agent");
+	});
+
 	it("prints a notice when the server reports titlePreserved=true (issue #564)", async () => {
 		mockSend.mockResolvedValue(okResp({
 			task: { ...FAKE_TASK, customTitle: "User-set title" },
@@ -696,12 +880,20 @@ describe("task move", () => {
 		).rejects.toThrow("EXIT_3");
 	});
 
-	it("blocks cancelled status (destroys worktree)", async () => {
+	// `cancelled` is never a direct move either — it detours through the same
+	// approval dialog as `completed` (covered in its own describe below).
+	it("does not send a plain task.move for cancelled", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: false }));
+
 		await expect(
 			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
-		).rejects.toThrow("EXIT_1");
-		expect(stderrOutput).toContain("Cannot move to");
-		expect(mockSend).not.toHaveBeenCalled();
+		).rejects.toThrow("EXIT_22");
+		expect(mockSend).toHaveBeenCalledWith(
+			SOCKET,
+			"task.requestCancellation",
+			{ taskId: "aaaaaaaa" },
+			{ timeoutMs: 10 * 60 * 1000 },
+		);
 	});
 
 	it("exits on server error (e.g. invalid transition)", async () => {
@@ -830,6 +1022,56 @@ describe("task move --status completed", () => {
 		);
 
 		expect(stdoutOutput).toBe("{}");
+	});
+});
+
+// ─── task move --status cancelled (agent cancellation request) ──────────────
+// Same approval contract as `completed`, its own method and its own exit code:
+// "the work landed" and "the work is garbage" must not be one answer.
+
+describe("task move --status cancelled", () => {
+	it("sends task.requestCancellation with the long approval timeout", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: true, task: { ...FAKE_TASK, status: "cancelled" } }));
+
+		await handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null);
+
+		expect(mockSend).toHaveBeenCalledWith(
+			SOCKET,
+			"task.requestCancellation",
+			{ taskId: "aaaaaaaa" },
+			{ timeoutMs: 10 * 60 * 1000 },
+		);
+		expect(stderrOutput).toContain("requires user approval");
+		expect(stdoutOutput).toContain("User approved");
+		expect(stdoutOutput).toContain("moved to Cancelled");
+	});
+
+	it("exits with code 22 when the user declines", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: false }));
+
+		await expect(
+			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
+		).rejects.toThrow("EXIT_22");
+		expect(stderrOutput).toContain("User declined the cancellation request");
+		expect(stderrOutput).toContain("session stays alive");
+	});
+
+	it("exits with a hint when the approval wait times out", async () => {
+		mockSend.mockRejectedValue(new Error("Socket timeout (600s)"));
+
+		await expect(
+			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
+		).rejects.toThrow("EXIT_1");
+		expect(stderrOutput).toContain("Timed out waiting for the user's decision");
+	});
+
+	it("exits on server error", async () => {
+		mockSend.mockResolvedValue(errResp("Task is already cancelled"));
+
+		await expect(
+			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
+		).rejects.toThrow("EXIT_1");
+		expect(stderrOutput).toContain("Task is already cancelled");
 	});
 });
 
@@ -1519,6 +1761,35 @@ describe("task move — agent asking to start another task", () => {
 		expect(stdoutOutput).not.toContain('--task seq:77 "your message"');
 	});
 
+	describe("--handoff-file", () => {
+		it("sends the file's text so the launched agent gets it without a second message", async () => {
+			const path = join(tmpdir(), `dev3-handoff-${Date.now()}.md`);
+			writeFileSync(path, "  Report to Seq 1141 only.\n", "utf8");
+			mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other", launched: [{ variantIndex: null, replyCommand: "x" }] }));
+
+			await handleTask("move", args([], { task: OTHER, status: "in-progress", "handoff-file": path }), SOCKET, CTX);
+
+			expect(mockSend.mock.calls[0]![2]!.handoffNote).toBe("Report to Seq 1141 only.");
+			rmSync(path, { force: true });
+		});
+
+		it("fails on the launcher's own terminal when the file cannot be read", async () => {
+			await expect(
+				handleTask("move", args([], { task: OTHER, status: "in-progress", "handoff-file": "/nope/missing.md" }), SOCKET, CTX),
+			).rejects.toThrow("EXIT_3");
+			expect(stderrOutput).toContain("cannot read");
+			expect(mockSend).not.toHaveBeenCalled();
+		});
+
+		it("omits the note entirely when the flag is absent", async () => {
+			mockSend.mockResolvedValue(okResp({ approved: true, seq: 77, title: "Other", launched: [{ variantIndex: null, replyCommand: "x" }] }));
+
+			await handleTask("move", args([], { task: OTHER, status: "in-progress" }), SOCKET, CTX);
+
+			expect(mockSend.mock.calls[0]![2]!).not.toHaveProperty("handoffNote");
+		});
+	});
+
 	it("keeps the agent's OWN status move on the fast path", async () => {
 		mockSend.mockResolvedValue(okResp({ ...FAKE_TASK, status: "review-by-ai" as const }));
 
@@ -1548,7 +1819,15 @@ describe("task create --scratch --run", () => {
 		await expect(
 			handleTask("create", args(["do the thing"], { scratch: "true", run: "true", project: "proj-001" }), SOCKET, CTX),
 		).rejects.toThrow("EXIT_3");
-		expect(stderrOutput).toContain("no title or description");
+		expect(stderrOutput).toContain("no title, description or type");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
+	it("refuses --type — a scratch task has no prompt to put a role brief above", async () => {
+		await expect(
+			handleTask("create", args([], { scratch: "true", run: "true", type: "coordinator", project: "proj-001" }), SOCKET, CTX),
+		).rejects.toThrow("EXIT_3");
+		expect(stderrOutput).toContain("no title, description or type");
 		expect(mockSend).not.toHaveBeenCalled();
 	});
 

@@ -79,6 +79,30 @@ describe("saveSettings", () => {
 		expect((await loadSettings()).prOriginTaskLink).toBeUndefined();
 	});
 
+	/**
+	 * low-battery is opt-in: absent means off. Both booleans are stored — an explicit
+	 * `false` is the user saying "off", which is what makes the next start uninstall
+	 * what dev3 wrote, and it must not collapse into "never chose".
+	 */
+	it("defaults lowBatteryEnabled to off and keeps both explicit choices", async () => {
+		expect((await loadSettings()).lowBatteryEnabled).toBeUndefined();
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ lowBatteryEnabled: true }), null, 2), "utf-8");
+		expect((await loadSettings()).lowBatteryEnabled).toBe(true);
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ lowBatteryEnabled: false }), null, 2), "utf-8");
+		expect((await loadSettings()).lowBatteryEnabled).toBe(false);
+	});
+
+	// The default-on era's opt-out key. It is never consulted now (its meaning, off,
+	// is the new default anyway) but it stays on disk for an older co-installed build.
+	it("leaves a legacy lowBatteryDisabled key alone and does not read it as a choice", async () => {
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ lowBatteryDisabled: true }), null, 2), "utf-8");
+		const loaded = await loadSettings();
+		expect(loaded.lowBatteryEnabled).toBeUndefined();
+		expect(loaded.lowBatteryDisabled).toBe(true);
+	});
+
 	it("reads tipsDisabled back from disk (async + sync)", async () => {
 		// User toggled "Disable feature tips" → the flag lives in settings.json.
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ tipsDisabled: true }), null, 2), "utf-8");
@@ -173,7 +197,9 @@ describe("saveSettings", () => {
 		});
 		const full: Required<GlobalSettings> = {
 			coordinatorPrompt: "Coordinate, do not code.",
+			staticAccessCode: "correct-horse-battery-staple",
 			remoteTunnel: { provider: "custom", command: "ngrok http {port} --log stdout", urlPattern: "https://\\S+" },
+			remotePort: 41234,
 			agentLaunchAutoApproveMinutes: 2,
 			defaultAgentId: "builtin-codex",
 			defaultConfigId: "codex-default",
@@ -185,6 +211,7 @@ describe("saveSettings", () => {
 			updateChannel: "canary",
 			terminalPathOpenMode: "reveal",
 			terminalShell: "sh",
+			dimInactivePanes: false,
 			theme: "light",
 			analyticsDistinctId: "11111111-2222-3333-4444-555555555555",
 			resolvedTheme: "light",
@@ -195,6 +222,9 @@ describe("saveSettings", () => {
 			keyboardShortcuts: { "go-to-project": { primary: "Mod+KeyJ", alias: null } },
 			experimentalTerminalBidi: true,
 			experimentalAgentTraffic: true,
+			lowBatteryEnabled: true,
+			lowBatteryDisabled: true,
+			lowBatteryAnnounced: true,
 			playSoundOnTaskComplete: false,
 			externalApps: [{ id: "x", name: "X", macAppName: "X" }],
 			tipsDisabled: true,

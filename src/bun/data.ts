@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import type { Project, Task, TaskHistoryChange, TaskHistoryEntry, TaskPriority, TaskStatus, TaskType, TipState } from "../shared/types";
-import { DEFAULT_PRIORITY, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, getTaskOverview, getTaskTitle, isStatusGuardBlocked, remapColumnAgents, titleFromDescription } from "../shared/types";
+import type { Project, Task, TaskHistoryChange, TaskHistoryEntry, TaskMovement, TaskPriority, TaskStatus, TaskType, TipState } from "../shared/types";
+import { appendTaskMovement, DEFAULT_PRIORITY, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, getTaskOverview, getTaskTitle, isStatusGuardBlocked, remapColumnAgents, titleFromDescription } from "../shared/types";
 import {
 	decodeTerminalBackend,
 	isTerminalBackendIdentity,
@@ -15,6 +15,7 @@ import { detectClonePaths } from "./cow-clone";
 import { withFileLock } from "./file-lock";
 import { persistTaskBlobs, splitTaskBlobs } from "./task-blobs";
 import { readNewTaskTerminalBackendPreference } from "./terminal-backend-preference";
+import { protectedStateFile, snapshotStateFile, writeHourlySnapshot } from "./state-backup";
 import { projectSlug } from "./git";
 import { canBlockTask, isTaskBlocked } from "../shared/task-blocking";
 
@@ -29,10 +30,9 @@ const PROJECTS_BACKUP_RETENTION_DAYS = 7;
 const PROJECTS_BACKUP_FILE_PATTERN = /^projects-\d{4}-\d{2}-\d{2}\.json\.bak$/;
 const TASK_BACKUPS_DIR = "tasks-backups";
 const TASK_BACKUP_RETENTION_HOURS = 72;
-const TASK_BACKUP_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}Z\.json$/;
 // `name` is display-only: `path` is deliberately absent, so a rename never moves
 // a data dir, worktree dir or slug (AGENTS.md on-disk invariants).
-type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "reviewModePrompt" | "coordinatorPrompt" | "env">>;
+type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "reviewModePrompt" | "coordinatorPrompt" | "env" | "conversationImportOfferedAt">>;
 
 export class DataFileReadError extends Error {
 	override name = "DataFileReadError";
@@ -53,10 +53,6 @@ function tasksFile(project: Project): string {
 
 function tasksBackupDir(project: Project): string {
 	return `${DEV3_HOME}/data/${projectSlug(project.path)}/${TASK_BACKUPS_DIR}`;
-}
-
-function tasksBackupFileName(now: Date = new Date()): string {
-	return `${now.toISOString().slice(0, 13)}Z.json`;
 }
 
 export function deriveTaskBaseBranch(project: Project, existingBranch?: string | null): string {
@@ -221,6 +217,9 @@ async function rawSaveProjects(projects: Project[]): Promise<void> {
 	await backupProjectsDaily().catch((err) => {
 		log.warn("Failed to write daily projects backup (non-fatal)", { err });
 	});
+	await backupProjectsHourly().catch((err) => {
+		log.warn("Failed to write hourly projects backup (non-fatal)", { err });
+	});
 	await atomicWriteFile(PROJECTS_FILE, JSON.stringify(projects, null, 2));
 	projectsCache.delete(PROJECTS_FILE);
 	log.info(`Saved ${projects.length} project(s)`);
@@ -256,6 +255,17 @@ export async function backupProjectsDaily(now: Date = new Date()): Promise<void>
 	for (const staleFile of backupFiles.slice(0, Math.max(0, backupFiles.length - PROJECTS_BACKUP_RETENTION_DAYS))) {
 		await unlink(`${DEV3_HOME}/${staleFile}`);
 	}
+}
+
+/**
+ * Hourly safety snapshot of the project list, plus its un-evictable good copy.
+ *
+ * The scheme itself lives in `state-backup.ts`, where every other file of user
+ * state shares it; this stays as the pre-write hook on the save path, which the
+ * timer-driven files do not have.
+ */
+export async function backupProjectsHourly(now: Date = new Date()): Promise<void> {
+	await snapshotStateFile(protectedStateFile("projects"), now);
 }
 
 // ---- Projects (public API — all mutators use file lock) ----
@@ -745,7 +755,7 @@ async function rawSaveTasks(
 	const split = splitTaskBlobs(tasks);
 	if (split.changed) await persistTaskBlobs(project, split.blobs);
 
-	// Compact, not pretty-printed: indentation alone was 3.5 MB of base44's
+	// Compact, not pretty-printed: indentation alone was 3.5 MB of the largest
 	// 13.9 MB file. JSON.parse is indifferent to it, so every older app version
 	// reads the file exactly as before.
 	await atomicWriteFile(file, JSON.stringify(split.tasks));
@@ -753,42 +763,8 @@ async function rawSaveTasks(
 	log.info(`Saved ${tasks.length} task(s)`, { projectId: project.id });
 }
 
-/**
- * At most one pre-save snapshot per entry hour, decided with stat() rather than by
- * reading two whole files. The hour is captured before reading, so a boundary-spanning
- * read stays in its start hour. See decision 204.
- */
 async function writeHourlyTasksBackup(project: Project, filePath: string): Promise<void> {
-	const backupDir = tasksBackupDir(project);
-	const backupFile = `${backupDir}/${tasksBackupFileName()}`;
-
-	try {
-		await stat(backupFile);
-		return; // This hour is already snapshotted.
-	} catch (err: any) {
-		if (err.code !== "ENOENT") throw err;
-	}
-
-	let currentContent: string;
-	try {
-		currentContent = await readFile(filePath, "utf8");
-	} catch (err: any) {
-		if (err.code === "ENOENT") {
-			return;
-		}
-		throw err;
-	}
-
-	await mkdir(backupDir, { recursive: true });
-	await writeFile(backupFile, currentContent);
-
-	const backupFiles = (await readdir(backupDir))
-		.filter((entry) => TASK_BACKUP_FILE_PATTERN.test(entry))
-		.sort();
-
-	for (const staleFile of backupFiles.slice(0, Math.max(0, backupFiles.length - TASK_BACKUP_RETENTION_HOURS))) {
-		await unlink(`${backupDir}/${staleFile}`);
-	}
+	await writeHourlySnapshot(filePath, tasksBackupDir(project), TASK_BACKUP_RETENTION_HOURS);
 }
 
 // ---- Tasks (public API — all mutators use file lock) ----
@@ -873,6 +849,10 @@ export async function addTask(
 		automationId?: string | null;
 		priority?: TaskPriority;
 		relations?: Task["relations"];
+		/** Overrides the derived base branch — the imported conversation's own branch. */
+		baseBranch?: string;
+		/** See Task.importedSessionId. */
+		importedSessionId?: string;
 	},
 ): Promise<Task> {
 	const file = tasksFile(project);
@@ -903,7 +883,7 @@ export async function addTask(
 			description,
 			status,
 			priority: extras?.priority ?? DEFAULT_PRIORITY,
-			baseBranch: deriveTaskBaseBranch(project, extras?.existingBranch),
+			baseBranch: extras?.baseBranch || deriveTaskBaseBranch(project, extras?.existingBranch),
 			worktreePath: null,
 			branchName: null,
 			groupId: extras?.groupId ?? null,
@@ -929,6 +909,7 @@ export async function addTask(
 			...(extras?.draft ? { draft: true } : {}),
 			...(extras?.foreignCode ? { foreignCode: true } : {}),
 			...(extras?.taskType ? { taskType: extras.taskType } : {}),
+			...(extras?.importedSessionId ? { importedSessionId: extras.importedSessionId } : {}),
 			...(extras?.customTitle ? { customTitle: extras.customTitle } : {}),
 			...(extras?.titleEditedByUser ? { titleEditedByUser: true } : {}),
 			...(extras?.opsWorkDir ? { opsWorkDir: extras.opsWorkDir } : {}),
@@ -939,6 +920,13 @@ export async function addTask(
 			...(newBackend ? { [TERMINAL_BACKEND_FIELD]: newBackend } : {}),
 		};
 		task.history = [{ at: now, title: getTaskTitle(task), overview: getTaskOverview(task), changed: "created" }];
+		task.movements = [{
+			id: crypto.randomUUID(),
+			at: now,
+			kind: "created",
+			to: task.status,
+			toColumnId: task.customColumnId ?? null,
+		}];
 		tasks.push(task);
 		await rawSaveTasks(project, tasks);
 
@@ -1213,9 +1201,10 @@ export async function moveTaskToProject(
 /**
  * Apply `updates` to `tasks[idx]` in place. `changed` tells the caller whether the
  * array was touched at all, so a no-op never rewrites the file: on a big board
- * (base44 runs a 14 MB tasks.json) an agent hook that reports an already-recorded
- * value used to burn a full parse+serialize+write per call, ~11 times a second,
- * which pinned the event loop and froze the UI. See the 2026-08-16 freeze record.
+ * (the largest one measured runs a 14 MB tasks.json) an agent hook reporting an
+ * already-recorded value used to burn a full parse+serialize+write per call, ~11
+ * times a second, which pinned the event loop and froze the UI. See the
+ * 2026-08-16 freeze record.
  */
 function applyTaskUpdate(
 	tasks: Task[],
@@ -1273,8 +1262,32 @@ function applyTaskUpdate(
 	}
 
 	recordTitleOverviewHistory(tasks, idx, prevTitle, prevOverview, now);
+	if (statusChanged || customColumnChanged) {
+		recordTaskMovement(tasks, idx, {
+			id: crypto.randomUUID(),
+			at: now,
+			kind: statusChanged ? "status" : "column",
+			from: currentTask.status,
+			to: tasks[idx].status,
+			fromColumnId: currentTask.customColumnId ?? null,
+			toColumnId: tasks[idx].customColumnId ?? null,
+		});
+	}
 
 	return { task: tasks[idx], changed: true };
+}
+
+/**
+ * Append a movement to the task's log. Split out so both insert sites (creation
+ * and every rendered-column change) go through one capped writer.
+ */
+function recordTaskMovement(tasks: Task[], idx: number, movement: TaskMovement): void {
+	const { movements, dropped } = appendTaskMovement(tasks[idx].movements, movement);
+	tasks[idx] = {
+		...tasks[idx],
+		movements,
+		...(dropped > 0 ? { movementsDropped: (tasks[idx].movementsDropped ?? 0) + dropped } : {}),
+	};
 }
 
 /**

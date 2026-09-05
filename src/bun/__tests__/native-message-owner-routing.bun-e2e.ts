@@ -444,6 +444,8 @@ async function runSender(): Promise<void> {
 			taskId: TASK_ID,
 			projectId: PROJECT_ID,
 			text: cliToken,
+			// Mandatory on every send; the gate rejects the request before delivery.
+			subject: "owner routing e2e token",
 		});
 		check(response.ok === true, `message.send through app B's socket succeeded${response.ok ? "" : `: ${response.error}`}`);
 		check(
@@ -555,6 +557,9 @@ async function runSender(): Promise<void> {
 				// best-effort
 			}
 		}
+		// Unconditional: a half-started sentinel still left a socket FILE behind,
+		// and tmux never unlinks one. The name is pid-keyed, so nothing else owns it.
+		await tmux.killServer({ socket: sentinelSocket });
 		try {
 			rmSync(root, { recursive: true, force: true });
 		} catch {

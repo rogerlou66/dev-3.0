@@ -7,7 +7,7 @@ import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types
 export { skillInvocationPrefix } from "../shared/types";
 import { buildProviderEnv, getProviderDefinition, providerOmitsModelFlag, providerPinnedModel } from "../shared/llm-provider";
 import { createLogger } from "./logger";
-import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, ensureCodexConfig, type CodexProfileLaunchFlag } from "./codex-config";
+import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, ensureCodexConfig, ensureCodexProfileFiles, getCodexSyntaxForVersion, type CodexProfileLaunchFlag } from "./codex-config";
 import { agentBinaryPathOverride } from "./executable";
 import { DEV3_HOME } from "./paths";
 // Writer and pruner share one path constant: whatever registers an entry must
@@ -16,6 +16,7 @@ import { GEMINI_TRUSTED_FOLDERS } from "./worktree-trust";
 import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
+import { ensureAgentSystemPromptFile, systemPromptNeedsFile } from "./agent-system-prompt-file";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
 import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
 export { claudeModelFamily } from "../shared/agent-accounts";
@@ -33,6 +34,7 @@ import type { TemplateContext } from "../shared/agent-adapters/template";
 // adapter layer (src/shared must not import src/bun), but many callers/tests
 // still import them from here.
 export { shellEscape, quoteIfUnsafe } from "../shared/agent-adapters/shell";
+import { commandToken } from "../shared/agent-adapters/shell";
 export { interpolateTemplate } from "../shared/agent-adapters/template";
 export type { TemplateContext } from "../shared/agent-adapters/template";
 
@@ -195,7 +197,7 @@ function mergeAgentWithDefault(
  *  to warrant a one-time resync of already-onboarded users' stored order
  *  (mergeWithDefaults otherwise preserves stored order forever). See
  *  decisions/ for the write-up. */
-export const AGENTS_LAYOUT_REVISION = 11;
+export const AGENTS_LAYOUT_REVISION = 12;
 
 /** One-time reorder of each built-in agent's configurations to match the
  *  current DEFAULT_AGENTS declared order. Custom (non-default) configs are
@@ -453,7 +455,9 @@ export interface CommandOptions {
  * agent adapter (single source of truth for resume syntax + capability).
  */
 export function buildResumeCommand(agentCmd: string, sessionId?: string, family?: AgentFamily): string | null {
-	return getAgentAdapter(agentCmd, family).buildResumeCommand(agentCmd, sessionId);
+	// Same boundary rule as resolveAgentCommand: this string is re-parsed by a
+	// wrapper script, so the binary is spelled as a command for that dialect.
+	return getAgentAdapter(agentCmd, family).buildResumeCommand(commandToken(agentCmd), sessionId);
 }
 
 /** Returns true when the agent CLI supports session resumption. */
@@ -497,9 +501,32 @@ export function resolveAgentCommand(
 		// Codex-only: resolve the theme/profile runtime (impure) here so the pure
 		// adapter stays pure. Non-Codex agents skip it (avoids the codex --help probe).
 		codex: adapter.command === "codex" ? codexLaunchRuntime() : undefined,
+		// Windows caps a command line at 32 767 characters and the protocol is
+		// ~34 000, so there it has to reach the agent as a file. Resolved here
+		// because writing one is impure and the adapters are not.
+		systemPromptFile: options?.skipSystemPrompt ? undefined : systemPromptFileFor(adapter),
 	};
 
-	return adapter.launchArgs(baseCmd, config, ctx, adapterOptions).join(" ");
+	// The adapter returns argv with the binary first; only the boundary knows the
+	// command line is about to be re-parsed by a wrapper script, so the binary is
+	// spelled as a command here rather than in six adapters.
+	const [binary, ...args] = adapter.launchArgs(baseCmd, config, ctx, adapterOptions);
+	return [commandToken(binary ?? baseCmd), ...args].join(" ");
+}
+
+/**
+ * The file this adapter's protocol body was written to, or undefined when the
+ * platform can carry it inline (every POSIX platform) or the adapter has no
+ * flag that takes a file.
+ *
+ * Only Claude has one (`--append-system-prompt-file`). Codex delivers the body
+ * through `-c developer_instructions=…` and the rest concatenate it onto the
+ * prompt, so on Windows those launches are still over the ceiling — a separate
+ * per-agent channel, not something this function can paper over.
+ */
+function systemPromptFileFor(adapter: { command: string; skillBody?: string }): string | undefined {
+	if (!systemPromptNeedsFile() || adapter.command !== "claude" || !adapter.skillBody) return undefined;
+	return ensureAgentSystemPromptFile("claude", adapter.skillBody) ?? undefined;
 }
 
 /** Every raw arg a launch adds beyond the preset's own: the selected backend's
@@ -605,11 +632,25 @@ export const CLAUDE_DEFAULT_ENV: Record<string, string> = {
 	CLAUDE_CODE_NO_FLICKER: "1",
 };
 
+/**
+ * Claude's defaults, plus the sandbox declaration a root box needs: Claude Code
+ * exits(1) under uid 0 the moment bypass mode is merely reachable, and dev3
+ * passes --allow-dangerously-skip-permissions on every launch.
+ * See decisions/2026/08/27/claude-bypass-mode-under-root.md.
+ */
+export function claudeDefaultEnv(
+	uid = process.getuid?.(),
+	platform: string = process.platform,
+): Record<string, string> {
+	const sandbox: Record<string, string> = platform !== "win32" && uid === 0 ? { IS_SANDBOX: "1" } : {};
+	return { ...CLAUDE_DEFAULT_ENV, ...sandbox };
+}
+
 /** Build default env vars for an agent based on which CLI it is. */
 export function getDefaultEnvForAgent(agent: CodingAgent, config?: AgentConfiguration): Record<string, string> {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
 	if (isClaudeCommand(baseCmd, agent.agentFamily)) {
-		return { ...CLAUDE_DEFAULT_ENV };
+		return claudeDefaultEnv();
 	}
 	return {};
 }
@@ -986,15 +1027,19 @@ export async function ensureCodexTrust(dirPath: string): Promise<void> {
 
 		if (content != null) backupUnparsableCodexConfig(CODEX_CONFIG, content);
 
+		const codexVersion = getCodexVersionCached();
 		const updated = ensureCodexConfig(content, worktreesPath, socketsPath, [worktreesPath, resolved], {
-			codexVersion: getCodexVersionCached(),
+			codexVersion,
 		});
-		if (updated === content) {
-			return;
+		if (updated !== content) {
+			writeFileSync(CODEX_CONFIG, updated, "utf-8");
+			log.info("Registered worktree as trusted in ~/.codex/config.toml", { path: resolved });
 		}
 
-		writeFileSync(CODEX_CONFIG, updated, "utf-8");
-		log.info("Registered worktree as trusted in ~/.codex/config.toml", { path: resolved });
+		// Repairs the orphaned `[mcp_servers.*.tools]` tables Codex writes into the
+		// active profile during a session — they make the NEXT launch fail with
+		// "invalid transport" (issue #1640).
+		if (getCodexSyntaxForVersion(codexVersion).profileV2) ensureCodexProfileFiles(home);
 	} catch (err) {
 		// Non-fatal — worst case the user sees the trust dialog
 		log.warn("Failed to register Codex worktree trust", { error: String(err) });

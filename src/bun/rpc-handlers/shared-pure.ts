@@ -396,7 +396,7 @@ export function setPushMessage(fn: (name: string, payload: any) => void): void {
 	pushMessageRaw = fn;
 	pushMessage = (name, payload) => {
 		fn(name, payload);
-		if (name === "taskUpdated" || name === "projectUpdated" || name === "taskRemoved" || name === "spacesUpdated") {
+		if (name === "taskUpdated" || name === "projectUpdated" || name === "taskRemoved" || name === "spacesUpdated" || name === "agentMessageLogChanged") {
 			const params: Record<string, string> = { event: name };
 			if (payload.projectId) params.projectId = payload.projectId;
 			if (payload.project?.id) params.projectId = payload.project.id;
@@ -418,6 +418,18 @@ export function getPushMessageLocal(): ((name: string, payload: any) => void) | 
 export function isActive(status: TaskStatus): boolean {
 	return ACTIVE_STATUSES.includes(status);
 }
+
+/**
+ * Defaults every agent launch starts from — spread FIRST in each env assembly
+ * so both Project Settings / .dev3 env and per-agent-config env override them.
+ *
+ * FORCE_HYPERLINK: agents gate OSC 8 hyperlink emission on supports-hyperlinks
+ * heuristics that recognize neither tmux nor the native backend; ghostty-web
+ * renders OSC 8 clickable, so opt them in. supports-hyperlinks honors the
+ * variable above every TTY check, so piped/captured output of the launched
+ * process tree carries OSC 8 too (see the decision record).
+ */
+export const AGENT_ENV_DEFAULTS: Record<string, string> = { FORCE_HYPERLINK: "1" };
 
 export function buildAgentEnv(extraEnv: Record<string, string>, taskId: string): Record<string, string> {
 	const dev3Bin = `${DEV3_HOME}/bin`;

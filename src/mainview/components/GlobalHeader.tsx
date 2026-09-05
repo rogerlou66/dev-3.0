@@ -1,23 +1,28 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import type { CodingAgent, Project, Task, UpdateChangelog } from "../../shared/types";
-import { getTaskTitle, taskSeqLabel, ACTIVE_STATUSES, isBuiltinOpsProject, isSpaceSensitive, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
-import type { Route } from "../state";
+import type { CodingAgent, Project, Space, Task, UpdateChangelog } from "../../shared/types";
+import { getTaskTitle, taskSeqLabel, ACTIVE_STATUSES, isBuiltinOpsProject, isSpaceSensitive, orderSpaces, spacesOfProject, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
+import { routeSpaceId, type Route } from "../state";
 import { useT } from "../i18n";
 import { HELP_ATTRACTOR_DISMISS_EVENT } from "../help";
 import { parseDisplayVersion } from "../../shared/update-channel";
 import { MASK_CLASS, useProjectPrivacy } from "../sensitive-projects";
 import { useSpaces } from "../useSpaces";
 import { groupProjectsForSwitcher } from "../utils/spaceGroups";
+import { fuzzyScore } from "../utils/fuzzyMatch";
+import { projectSearchHaystack } from "../utils/projectSearchHaystack";
+import { HighlightedText } from "./PaletteShell";
+import { lastProjectForSpace } from "../utils/spaceBoardMemory";
 import { useCompact } from "../utils/useCompact";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { api, isElectrobun } from "../rpc";
-import { isRemote } from "../utils/platform";
+import { isMac, isRemote } from "../utils/platform";
 import { subscribeFullscreen, isFullscreenActive, isFullscreenSupported, toggleFullscreen } from "../fullscreen";
 import { toast, usePinnedToastSlot } from "../toast";
 import TmuxSessionManager from "./TmuxSessionManager";
 import InlineRename from "./InlineRename";
 import NativeBackendMark from "./NativeBackendMark";
+import SpaceIcon from "./SpaceIcon";
 import TaskTitleHoverCard from "./TaskTitleHoverCard";
 import TaskBreadcrumbBadge from "./TaskBreadcrumbBadge";
 import GitPullButton from "./GitPullButton";
@@ -51,13 +56,16 @@ import {
 	UpdateReadyIcon,
 	HelpModeIcon,
 } from "./HeaderIcons";
-import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
+import { APP_SHORTCUTS, shortcutKeysFor, shortcutKeysForMode } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
 import { forgetAndroidComputer, isAndroidAppShell, switchAndroidComputer } from "../android-client-bridge";
 
 // Single source of truth for the ⇧⌘/ combo shown on the header help button.
 const HELP_MODE_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "help-mode");
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "toggle-project-terminal");
+// The ⌘K palette advertised inside the project switcher — same registry entry
+// the key handler fires on, so the printed combo cannot drift from the binding.
+const GO_TO_PROJECT_SHORTCUT = APP_SHORTCUTS.find((s) => s.id === "go-to-project");
 
 interface GlobalHeaderProps {
 	route: Route;
@@ -104,6 +112,15 @@ interface BreadcrumbSegment {
 	badge?: string;
 	onClick?: () => void;
 	isProjectDropdown?: boolean;
+	/**
+	 * The space level: a plain link to that space's board, never a switcher. Only
+	 * the trail's tail carries a dropdown, and the space is never the tail here.
+	 */
+	spaceLink?: boolean;
+	/** The chip names a SPACE, not a project — it wears the space glyph. */
+	isSpaceSubject?: boolean;
+	/** Streamer mode blurs this crumb (a space name can be a client's name). */
+	masked?: boolean;
 	task?: Task;
 }
 
@@ -132,9 +149,18 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	const [showToast, setShowToast] = useState(false);
 	const pinnedToastSlot = usePinnedToastSlot();
 	const [showProjectDropdown, setShowProjectDropdown] = useState(false);
+	// Which space to zoom out to, when the current project sits in more than one.
+	const [showSpacePicker, setShowSpacePicker] = useState(false);
 	const [projectTaskCounts, setProjectTaskCounts] = useState<Record<string, number>>({});
+	// Switcher search: the list is long enough that scanning it stopped working.
+	const [projectQuery, setProjectQuery] = useState("");
+	const [switcherIndex, setSwitcherIndex] = useState(0);
+	// The highlight only appears once the keyboard is driving — an unprompted
+	// marker on row 0 competes with the accent row that says "you are here".
+	const [switcherKeyNav, setSwitcherKeyNav] = useState(false);
 	const dropdownRef = useRef<HTMLDivElement>(null);
 	const projectDropdownRef = useRef<HTMLDivElement>(null);
+	const activeSwitcherRowRef = useRef<HTMLButtonElement>(null);
 	const countsCacheTimeRef = useRef<number>(0);
 	const projectTerminalShortcut = PROJECT_TERMINAL_SHORTCUT ? shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT) : "";
 	const projectTerminalTooltip = t("projectTerminal.tooltipWithShortcut", { shortcut: projectTerminalShortcut });
@@ -195,6 +221,9 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 			}
 			if (showProjectDropdown && projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
 				setShowProjectDropdown(false);
+			}
+			if (showSpacePicker && projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
+				setShowSpacePicker(false);
 			}
 			// A menu row's flyout (memory breakdown, tmux sessions) is portaled to
 			// <body>, so it is "outside" the menu by DOM — without this exemption the
@@ -263,6 +292,15 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		setShowProjectDropdown(false);
 	}, [route]);
 
+	// Every opening starts from a clean query: a stale filter from last time reads
+	// as "half my projects are gone".
+	useEffect(() => {
+		if (!showProjectDropdown) return;
+		setProjectQuery("");
+		setSwitcherIndex(0);
+		setSwitcherKeyNav(false);
+	}, [showProjectDropdown]);
+
 	function dismissToast() {
 		setShowToast(false);
 	}
@@ -301,6 +339,46 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		[tasks],
 	);
 
+	const currentProjectId = "projectId" in route ? route.projectId : null;
+	const sensitiveProjectIds = new Set(projects.filter((p) => p.sensitive).map((p) => p.id));
+	// ---- The space level of the trail, and the way up to it ----
+	// The space the user came THROUGH rides on the route (board and task routes
+	// alike), so the trail can state the level instead of implying it.
+	const routeSpace = routeSpaceId(route);
+	const currentSpace = routeSpace ? spacesFile.spaces.find((sp) => sp.id === routeSpace && !sp.deleted) ?? null : null;
+	/** The board whose SUBJECT is the space: there the chip names the space itself. */
+	const onSpaceBoard = !!currentSpace && route.screen === "project" && !route.activeTaskId && !route.taskView;
+	/** The chip always names the trail's tail — the space above, a project here. */
+	const projectIsChipSubject = "projectId" in route && !onSpaceBoard;
+	// The unified-board control sits wherever a project is the chip's subject, and
+	// it offers the project's OWN memberships — not the route's space. Whether it
+	// asks depends on one thing only: whether there is anything to ask about. Two
+	// spaces means two possible boards, so it asks even when the user already came
+	// through one of them (from `AI` the other board is exactly what you cannot
+	// reach otherwise); one space means one destination, so it just goes. Keying it
+	// on the route instead made the menu appear and vanish for no visible reason.
+	const zoomOutSpaces = !currentProjectId || !projectIsChipSubject
+		? []
+		: orderSpaces(spacesOfProject(spacesFile.spaces, currentProjectId), spacesFile.order);
+
+	const zoomOutTo = useCallback((spaceId: string) => {
+		setShowSpacePicker(false);
+		if (!currentProjectId) return;
+		navigate({ screen: "project", projectId: currentProjectId, spaceId });
+	}, [currentProjectId, navigate]);
+
+	// The keyboard path (⇧⌘U) is the button's own behaviour, dispatched here so
+	// there is exactly one rule for "one space → go, several → ask".
+	useEffect(() => {
+		function onZoomOut() {
+			if (zoomOutSpaces.length === 0) return;
+			if (zoomOutSpaces.length === 1) zoomOutTo(zoomOutSpaces[0].id);
+			else setShowSpacePicker(true);
+		}
+		window.addEventListener("dev3:zoomOutToSpace", onZoomOut);
+		return () => window.removeEventListener("dev3:zoomOutToSpace", onZoomOut);
+	}, [zoomOutSpaces, zoomOutTo]);
+
 	const segments: BreadcrumbSegment[] = [];
 
 	// App name — always present
@@ -320,10 +398,28 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 			// Clickable when not already on the kanban board (no activeTaskId, not in task/activity view)
 			const isOnKanban = route.screen === "project" && !route.activeTaskId && !route.taskView;
 			const projectNameOnClick = !isOnKanban ? handleProjectNameClick : undefined;
+			// A space board is about the space, so the chip names it — a rename lands
+			// here and nowhere else, which is why a rename never moves the user. One
+			// level deeper the chip names the project and the space walks in front of
+			// it as a plain link: the level the user came through, stated rather than
+			// remembered, which is what makes the way back up obvious.
+			if (currentSpace && !onSpaceBoard) {
+				segments.push({
+					label: currentSpace.name,
+					spaceLink: true,
+					onClick: () => zoomOutTo(currentSpace.id),
+					masked: isSpaceSensitive(currentSpace, sensitiveProjectIds),
+				});
+			}
 			segments.push({
-				label: projectDisplayName(project, t("ops.boardName")),
+				label: onSpaceBoard ? currentSpace.name : projectDisplayName(project, t("ops.boardName")),
 				isProjectDropdown: true,
-				onClick: projectNameOnClick,
+				// A chip naming a space wears the space glyph, the same one the
+				// dropdown's group headings carry. Without it `AI` in a chip is
+				// indistinguishable from a project called AI.
+				isSpaceSubject: !!onSpaceBoard,
+				onClick: onSpaceBoard ? undefined : projectNameOnClick,
+				masked: onSpaceBoard ? isSpaceSensitive(currentSpace, sensitiveProjectIds) : false,
 			});
 		}
 	}
@@ -361,7 +457,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		segments.push({ label: t("nativePaneLab.title") });
 	}
 
-	const currentProjectId = "projectId" in route ? route.projectId : null;
 	// Virtual ("Operations") boards have no git repo — the project-level git
 	// affordances (Pull) are meaningless and must be hidden.
 	const isVirtualProject = currentProjectId
@@ -369,6 +464,17 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		: false;
 	// Built-in Operations board pinned first; ⌘0 jumps to it, ⌘1-9 to the rest.
 	const availableProjects = orderProjectsForDisplay(projects.filter((p) => !p.deleted));
+
+	// The switcher's group headings are the other way in: the space they name is
+	// itself a board, so the heading opens it instead of only labelling rows. The
+	// route anchors on a member — the one last used there, else the first listed.
+	const openSpaceBoardFromSwitcher = useCallback((space: Space) => {
+		const members = space.projectIds.filter((id) => availableProjects.some((p) => p.id === id));
+		if (members.length === 0) return;
+		const remembered = lastProjectForSpace(space.id);
+		setShowProjectDropdown(false);
+		navigate({ screen: "project", projectId: remembered && members.includes(remembered) ? remembered : members[0], spaceId: space.id });
+	}, [availableProjects, navigate]);
 	const switcherHasPinnedBuiltin = availableProjects.length > 0 && isBuiltinOpsProject(availableProjects[0]);
 	// ⌘N stays keyed to BOARD order, so the badge keeps matching the shortcut once
 	// spaces regroup the rows (same split as the ⌘K palette's shortcutIndexById).
@@ -385,19 +491,89 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	// current project's own space is hoisted first. null = no space holds a
 	// visible project, and the flat list below stays byte-identical to today's.
 	const switcherGroups = groupProjectsForSwitcher(availableProjects, spacesFile, currentProjectId);
-	const sensitiveProjectIds = new Set(projects.filter((p) => p.sensitive).map((p) => p.id));
+
+	// ---- The switcher's search ----
+	// Same matcher and same haystack as the ⌘K palette (name first, then the
+	// project's space names), so typing the same letters in either place picks the
+	// same project. Filter only — never re-rank: the rows keep their space grouping,
+	// which is the whole grammar of this menu.
+	const switcherSearching = projectQuery.trim().length > 0;
+	function switcherMatch(p: Project): { matched: boolean; indices: number[] } {
+		const name = projectDisplayName(p, t("ops.boardName"));
+		if (!switcherSearching) return { matched: true, indices: [] };
+		const haystack = isBuiltinOpsProject(p) ? name : projectSearchHaystack(name, spacesFile.spaces, p.id);
+		const hit = fuzzyScore(projectQuery, haystack);
+		// A match may land in the space-name tail; only the name is rendered here.
+		return { matched: hit.matched, indices: hit.indices.filter((i) => i < name.length) };
+	}
+	const switcherBuiltins = availableProjects.filter((p) => isBuiltinOpsProject(p) && switcherMatch(p).matched);
+	const switcherFilteredGroups = switcherGroups === null
+		? null
+		: switcherGroups
+			.map((group) => ({ ...group, projects: group.projects.filter((p) => switcherMatch(p).matched) }))
+			// A group survives an empty result only when nothing is being searched:
+			// an untouched menu keeps its shape, a filtered one shows only hits.
+			.filter((group) => !switcherSearching || group.projects.length > 0);
+	/** Visible rows in render order — what ↑/↓ walks and ⏎ commits. */
+	const switcherRows: { project: Project; keyPrefix: string }[] = switcherFilteredGroups === null
+		? availableProjects.filter((p) => switcherMatch(p).matched).map((project) => ({ project, keyPrefix: "flat" }))
+		: [
+				...switcherBuiltins.map((project) => ({ project, keyPrefix: "builtin" })),
+				...switcherFilteredGroups.flatMap((group) =>
+					group.projects.map((project) => ({ project, keyPrefix: group.space?.id ?? "home" })),
+				),
+			];
+	const switcherActive = switcherRows.length === 0 ? -1 : Math.min(switcherIndex, switcherRows.length - 1);
+	/** `<space>:<project>` → its position in `switcherRows`; a project in two spaces has two. */
+	const switcherRowIndex = new Map(switcherRows.map((row, i) => [`${row.keyPrefix}:${row.project.id}`, i]));
+
+	const openQuickSwitchPalette = useCallback(() => {
+		setShowProjectDropdown(false);
+		window.dispatchEvent(new CustomEvent("menu:open-project-switch"));
+	}, []);
+
+	// Keep the keyboard-driven row in view inside the scrolling menu.
+	useEffect(() => {
+		if (!switcherKeyNav) return;
+		activeSwitcherRowRef.current?.scrollIntoView({ block: "nearest" });
+	}, [switcherKeyNav, switcherActive]);
+
+	function handleSwitcherSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			if (switcherRows.length === 0) return;
+			setSwitcherKeyNav(true);
+			const step = e.key === "ArrowDown" ? 1 : -1;
+			setSwitcherIndex((switcherActive + step + switcherRows.length) % switcherRows.length);
+		} else if (e.key === "Enter") {
+			e.preventDefault();
+			const target = switcherRows[switcherActive];
+			if (!target) return;
+			setShowProjectDropdown(false);
+			navigate({ screen: "project", projectId: target.project.id });
+		}
+	}
 
 	// One switcher row. `keyPrefix` disambiguates a project that belongs to
-	// several spaces and therefore renders under each of them.
-	function renderSwitcherRow(p: Project, keyPrefix: string) {
-		const isCurrent = currentProjectId === p.id;
+	// several spaces and therefore renders under each of them — and it is also what
+	// decides which of those copies reads as "you are here": the one filed under the
+	// space the user actually came through. Lighting up both said the user was in
+	// two places at once. With no space on the route there is no basis to choose, so
+	// every copy is marked, which is the honest answer rather than a guess.
+	function renderSwitcherRow(p: Project, keyPrefix: string, rowIndex: number) {
+		const isCurrent = currentProjectId === p.id && (routeSpace === null || keyPrefix === routeSpace);
 		const count = projectTaskCounts[p.id];
 		const isBuiltin = isBuiltinOpsProject(p);
 		const locked = privacy.isLocked(p);
 		const shortcutLabel = switcherShortcutById[p.id];
+		const highlighted = switcherKeyNav && rowIndex === switcherActive;
+		const { indices } = switcherMatch(p);
+		const label = projectDisplayName(p, t("ops.boardName"));
 		return (
 			<button
 				key={`${keyPrefix}:${p.id}`}
+				ref={highlighted ? activeSwitcherRowRef : undefined}
+				data-testid="switcher-row"
 				aria-disabled={locked || undefined}
 				title={locked ? t("streamer.projectLocked") : undefined}
 				onClick={() => {
@@ -406,7 +582,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 				}}
 				className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
 					isCurrent ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-elevated hover:text-fg"
-				}`}
+				} ${highlighted ? "ring-1 ring-inset ring-accent/60 bg-elevated" : ""}`}
 			>
 				{isBuiltin && (
 					<span className="text-accent flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0E7}"}</span>
@@ -414,7 +590,9 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 				{locked && (
 					<span aria-hidden="true" className="text-fg-muted flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F033E}"}</span>
 				)}
-				<span className={`truncate text-sm flex-1 ${privacy.maskClass(p)}`}>{projectDisplayName(p, t("ops.boardName"))}</span>
+				<span className={`truncate text-sm flex-1 ${privacy.maskClass(p)}`}>
+					<HighlightedText text={label} indices={indices} />
+				</span>
 				{isBuiltin && (
 					<span className="flex-shrink-0 px-1 py-0.5 rounded bg-raised text-fg-3 text-nano font-medium uppercase tracking-wide">{t("ops.badgeSystem")}</span>
 				)}
@@ -576,12 +754,15 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 									{seg.onClick ? (
 										<button
 											onClick={seg.onClick}
-											className="header-anim px-2 py-[3px] min-w-0 text-accent hover:text-accent-emphasis hover:bg-elevated transition-colors truncate"
+											className={`header-anim px-2 py-[3px] min-w-0 text-accent hover:text-accent-emphasis hover:bg-elevated transition-colors truncate ${seg.masked ? MASK_CLASS : ""}`}
 										>
 											{seg.label}
 										</button>
 									) : (
-										<span className="px-2 py-[3px] min-w-0 text-fg font-semibold truncate">{seg.label}</span>
+										<span className="px-2 py-[3px] min-w-0 flex items-center gap-1.5 text-fg font-semibold">
+											{seg.isSpaceSubject && <SpaceIcon className="w-3.5 h-3.5 flex-shrink-0 text-accent/90" />}
+											<span className={`truncate ${seg.masked ? MASK_CLASS : ""}`}>{seg.label}</span>
+										</span>
 									)}
 									<span className="w-px self-stretch bg-edge flex-shrink-0" aria-hidden="true" />
 									<Tooltip content={t("header.switchProject")} detail={t("ttip.header.switchProject")}>
@@ -600,35 +781,185 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 											</span>
 										</button>
 									</Tooltip>
+									{zoomOutSpaces.length > 0 && (
+										<>
+											<span className="w-px self-stretch bg-edge flex-shrink-0" aria-hidden="true" />
+											<Tooltip content={t("spaces.zoomOut")}>
+												<button
+													onClick={() => (zoomOutSpaces.length === 1 ? zoomOutTo(zoomOutSpaces[0].id) : setShowSpacePicker((v) => !v))}
+													aria-haspopup={zoomOutSpaces.length > 1 ? "menu" : undefined}
+													aria-expanded={zoomOutSpaces.length > 1 ? showSpacePicker : undefined}
+													aria-label={t("spaces.zoomOut")}
+													data-testid="space-zoom-out"
+													className="header-anim px-1.5 py-[3px] flex items-center justify-center text-fg-3 hover:text-fg hover:bg-elevated transition-colors"
+												>
+													<SpaceIcon className="w-3.5 h-3.5 block" />
+												</button>
+											</Tooltip>
+										</>
+									)}
 								</div>
+								{/* A project may sit in several spaces — the button never guesses
+								    which one was meant, it asks. */}
+								{showSpacePicker && zoomOutSpaces.length > 1 && (
+									<div role="menu" className="absolute left-0 top-full mt-1.5 w-72 bg-overlay border border-edge rounded-xl shadow-2xl z-50 py-1">
+										<div className="px-3 py-1 text-nano font-semibold uppercase tracking-wider text-fg-3">
+											{t("spaces.zoomOutPick")}
+										</div>
+										{zoomOutSpaces.map((sp) => {
+											// The board the user is already on is marked, not hidden: it
+											// is the answer to "which one am I in", and removing it would
+											// make the menu's length change with the route.
+											const here = sp.id === routeSpace;
+											return (
+												<button
+													key={sp.id}
+													onClick={() => zoomOutTo(sp.id)}
+													aria-current={here ? "true" : undefined}
+													className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
+														here ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-elevated hover:text-fg"
+													}`}
+												>
+													<SpaceIcon className={`w-3.5 h-3.5 flex-shrink-0 ${here ? "text-accent" : "text-fg-muted"}`} />
+													<span className={`truncate ${isSpaceSensitive(sp, sensitiveProjectIds) ? MASK_CLASS : ""}`}>{sp.name}</span>
+												</button>
+											);
+										})}
+									</div>
+								)}
 								{/* `w-96`, not `w-72`: a row carries the space indent, an active-task
 								    count and a shortcut badge beside the project name. */}
 								{showProjectDropdown && (
-									<div role="menu" className="absolute left-0 top-full mt-1.5 w-96 max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:mt-0 max-md:w-auto bg-overlay border border-edge rounded-xl shadow-2xl z-50 py-1 max-h-80 overflow-y-auto">
-										{switcherGroups === null ? (
-											availableProjects.map((p) => renderSwitcherRow(p, "flat"))
+									// `pb-1`, not `py-1`: the sticky search row below is flush with the
+									// scrollport's top edge, and any top padding would leave a strip for
+									// scrolled-away rows to show through above it.
+									<div role="menu" className="absolute left-0 top-full mt-1.5 w-96 max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:mt-0 max-md:w-auto bg-overlay border border-edge rounded-xl shadow-2xl z-50 pb-1 max-h-80 overflow-y-auto">
+										{/* Search, pinned to the top of the scroller: past a dozen projects
+										    the eye stopped finding the row, and the ⌘K palette next to it is
+										    how the same job is done without opening this menu at all. */}
+										<div className="sticky top-0 z-10 mb-1 px-2 pt-2 pb-1.5 flex items-center gap-1.5 bg-overlay border-b border-edge">
+											<div className="relative flex-1 min-w-0">
+												<svg
+													className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-fg-3 pointer-events-none"
+													fill="none"
+													viewBox="0 0 24 24"
+													strokeWidth={1.5}
+													stroke="currentColor"
+													aria-hidden="true"
+												>
+													<path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+												</svg>
+												{/* biome-ignore lint/a11y/noAutofocus: the menu is opened deliberately, and typing is why it was opened */}
+												<input
+													autoFocus
+													type="text"
+													value={projectQuery}
+													onChange={(e) => {
+														setProjectQuery(e.target.value);
+														setSwitcherIndex(0);
+														setSwitcherKeyNav(false);
+													}}
+													onKeyDown={handleSwitcherSearchKeyDown}
+													placeholder={t("projectSwitch.placeholder")}
+													aria-label={t("projectSwitch.placeholder")}
+													data-testid="project-switcher-search"
+													// `rounded`, not `rounded-md`: the menu's own corner is 12px and this
+													// sits 8px inside it, so a concentric inner corner is 4px.
+													className="w-full pl-6 pr-5 py-1 text-xs bg-base border border-edge rounded text-fg placeholder:text-fg-muted focus:border-edge-active transition-colors"
+												/>
+												{projectQuery && (
+													<button
+														type="button"
+														onClick={() => {
+															setProjectQuery("");
+															setSwitcherIndex(0);
+														}}
+														aria-label={t("settings.searchClear")}
+														className="absolute right-1.5 top-1/2 -translate-y-1/2 text-fg-3 hover:text-fg text-xs leading-none transition-[color,transform] duration-150 ease-out active:scale-[0.96]"
+													>
+														×
+													</button>
+												)}
+											</div>
+											{/* No tooltip: the chip carries its own label, and a hover card
+											    repeating it verbatim is noise. `aria-label` stays for the narrow
+											    variant, where only the combo is visible.
+											    No `header-anim` either — that class only drives the `.hdr*` icon
+											    loops and this chip has no such icon. */}
+											{GO_TO_PROJECT_SHORTCUT && (
+												<button
+													type="button"
+													onClick={openQuickSwitchPalette}
+													data-testid="project-switcher-palette-hint"
+													aria-label={t("projectSwitch.title")}
+													// `transform`, not `scale`: Tailwind 3's `scale-*` compiles to the
+													// `transform` property, so naming `scale` here would leave the press
+													// snapping instead of easing.
+													className="flex items-center gap-1 flex-shrink-0 px-1.5 py-1 rounded border border-edge bg-raised/60 text-fg-3 hover:text-fg hover:bg-elevated hover:border-edge-active transition-[color,background-color,border-color,transform] duration-150 ease-out active:scale-[0.96]"
+												>
+													<span className="text-nano font-medium max-md:hidden">{t("projectSwitch.title")}</span>
+													{/* Dimmed by opacity, not by a fixed token: the combo then follows
+													    the chip's own hover colour instead of staying dull beside it. */}
+													<kbd className="text-dense font-mono opacity-70">
+														{shortcutKeysForMode(GO_TO_PROJECT_SHORTCUT, isMac(), viewedOverRemote)}
+													</kbd>
+												</button>
+											)}
+										</div>
+										{switcherRows.length === 0 && (
+											<p className="px-3 py-3 text-center text-sm text-fg-muted">{t("projectSwitch.noResults")}</p>
+										)}
+										{switcherFilteredGroups === null ? (
+											switcherRows.map((row) => renderSwitcherRow(row.project, "flat", switcherRowIndex.get(`flat:${row.project.id}`) ?? -1))
 										) : (
 											<>
 												{/* The builtin Operations board never joins a space; it stays
 												    pinned above every group, exactly as on the dashboard. */}
-												{availableProjects.filter(isBuiltinOpsProject).map((p) => renderSwitcherRow(p, "builtin"))}
-												{switcherGroups.map((group) => {
+												{switcherBuiltins.map((p) => renderSwitcherRow(p, "builtin", switcherRowIndex.get(`builtin:${p.id}`) ?? -1))}
+												{switcherFilteredGroups.map((group) => {
 													const masked = group.space ? isSpaceSensitive(group.space, sensitiveProjectIds) : false;
 													return (
 														<div key={group.space?.id ?? "home"} className="pt-2 first:pt-0">
 															{/* Label, then a hairline running to the edge — the same
-															    grammar the Keyboard settings use for their sections. */}
-															<div className="px-3 pb-1 flex items-center gap-2">
-																<span className={`text-nano font-semibold uppercase tracking-wider truncate ${group.space ? "text-accent/90" : "text-fg-3"} ${masked ? MASK_CLASS : ""}`}>
-																	{group.space ? group.space.name : t("spaces.homeGroup")}
-																</span>
-																<span className="text-nano text-fg-muted tabular-nums flex-shrink-0">{group.projects.length}</span>
-																<span aria-hidden="true" className={`h-px flex-1 ${group.space ? "bg-accent/25" : "bg-edge/60"}`} />
-															</div>
+															    grammar the Keyboard settings use for their sections. A
+															    space heading is a menu item of its own: it names a board,
+															    so clicking it opens that board. Home names no space and
+															    stays an inert label. */}
+															{group.space ? (
+																<button
+																	type="button"
+																	role="menuitem"
+																	onClick={() => openSpaceBoardFromSwitcher(group.space as Space)}
+																	title={t("spaces.openBoard")}
+																	className="group/space w-full px-3 pb-1 pt-0.5 flex items-center gap-2 text-left rounded-md hover:bg-raised-hover"
+																	data-testid={`switcher-space-${group.space.id}`}
+																>
+																	<SpaceIcon className="w-3.5 h-3.5 flex-shrink-0 text-accent/90" />
+																	<span className={`text-nano font-semibold uppercase tracking-wider truncate text-accent/90 group-hover/space:text-accent ${masked ? MASK_CLASS : ""}`}>
+																		{group.space.name}
+																	</span>
+																	<span className="text-nano text-fg-muted tabular-nums flex-shrink-0">{group.projects.length}</span>
+																	<span aria-hidden="true" className="h-px flex-1 bg-accent/25" />
+																	<span className="text-nano text-fg-muted opacity-0 transition-opacity group-hover/space:opacity-100 flex-shrink-0">
+																		{t("spaces.openBoard")}
+																	</span>
+																</button>
+															) : (
+																<div className="px-3 pb-1 flex items-center gap-2">
+																	<span className="text-nano font-semibold uppercase tracking-wider truncate text-fg-3">
+																		{t("spaces.homeGroup")}
+																	</span>
+																	<span className="text-nano text-fg-muted tabular-nums flex-shrink-0">{group.projects.length}</span>
+																	<span aria-hidden="true" className="h-px flex-1 bg-edge/60" />
+																</div>
+															)}
 															{/* The trunk: rows sit indented off a vertical rule, so a
 															    project reads as filed under its space. */}
 															<div className={`ml-3 border-l ${group.space ? "border-accent/30" : "border-edge/60"}`}>
-																{group.projects.map((p) => renderSwitcherRow(p, group.space?.id ?? "home"))}
+																{group.projects.map((p) => {
+																const prefix = group.space?.id ?? "home";
+																return renderSwitcherRow(p, prefix, switcherRowIndex.get(`${prefix}:${p.id}`) ?? -1);
+															})}
 															</div>
 														</div>
 													);
@@ -638,6 +969,19 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 									</div>
 								)}
 							</div>
+						) : seg.spaceLink ? (
+							// Icon-only below `md`: the trail must not push the project chip
+							// or back/forward off a phone. No tooltip on purpose — a hover
+							// card would print a masked client's name straight onto camera.
+							<button
+								onClick={seg.onClick}
+								data-testid="breadcrumb-space"
+								aria-label={t("spaces.crumbOpenBoard", { name: seg.label })}
+								className="header-anim flex items-center gap-1.5 min-w-0 flex-shrink max-md:min-h-[44px] max-md:px-1 text-fg-3 hover:text-fg transition-colors"
+							>
+								<SpaceIcon className="w-3.5 h-3.5 flex-shrink-0" />
+								<span className={`truncate max-md:hidden ${seg.masked ? MASK_CLASS : ""}`}>{seg.label}</span>
+							</button>
 						) : seg.onClick ? (
 							<button
 								onClick={seg.onClick}
@@ -768,7 +1112,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 								<MemoryHeadroomIndicator navigate={navigate} variant="menu" />
 								<AgentTrafficIndicator
 									projectId={currentProjectId}
-									navigate={navigate}
 									onOpenLog={() => {
 										setShowOverflowMenu(false);
 										window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT));
@@ -843,14 +1186,13 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 					</div>
 				)}
 
-				{/* Agent traffic — the ONLY control here whose bar slot is earned per
-				    occasion: the kebab row above is its home, and this pill appears
-				    immediately right of the three dots only while messages have landed
-				    since the user last looked, then disappears when they look. Never on a
-				    phone header (bible §5.9, §12.6). */}
+				{/* Agent traffic — a conditional slot immediately right of the three dots:
+				    the pill is here for as long as the project's agents have messaged each
+				    other, and absent entirely for a project where they never have. The
+				    badge on it is the unread count, which is a different question. Never on
+				    a phone header (bible §5.9, §12.6). */}
 				<AgentTrafficIndicator
 					projectId={currentProjectId}
-					navigate={navigate}
 					onOpenLog={() => window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT))}
 				/>
 
@@ -1049,7 +1391,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 					    takes the same shape as the rows below it, not the chip row above. */}
 					<AgentTrafficIndicator
 						projectId={currentProjectId}
-						navigate={navigate}
 						onOpenLog={() => {
 							setShowActionSheet(false);
 							window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT));

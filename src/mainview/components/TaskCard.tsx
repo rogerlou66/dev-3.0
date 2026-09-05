@@ -2,12 +2,11 @@ import { Children, Fragment, useState, useRef, useEffect, useLayoutEffect, type 
 import { toast } from "../toast";
 import { createPortal } from "react-dom";
 import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isCoordinatorTask, isTaskDisconnected } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isCoordinatorTask, isTaskDisconnected, projectDisplayName } from "../../shared/types";
 import { getTaskOpenMode, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { confirm } from "../confirm";
 import { useT } from "../i18n";
-import type { TranslationKey } from "../i18n";
 import { formatBytes } from "../utils/formatBytes";
 import { formatCountdown } from "../../shared/duration";
 import { useStatusColors } from "../hooks/useStatusColors";
@@ -38,8 +37,7 @@ import AgentLauncherBadge, { resolveAgentLauncherIcon } from "./AgentLauncherBad
 import { PREPARING_STAGE_LABELS } from "./TaskPreparingView";
 import Tooltip from "./Tooltip";
 import TaskShutdownOverlay from "./TaskShutdownOverlay";
-import TaskPrStatusPopover from "./TaskPrStatusPopover";
-import { summarizeMergeability, type PRMergeabilityReason } from "../../shared/pr-status";
+import TaskPrBadges from "./TaskPrBadges";
 import PipelineRing from "./PipelineRing";
 
 const SUMMARY_PREVIEW_WIDTH = 360;
@@ -104,9 +102,15 @@ interface TaskCardProps {
 	onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 	/** Jira-like board density: keep identity, title, lifecycle, and the To Do run action. */
 	compact?: boolean;
+	/**
+	 * Name the card's project on the card. Identity, not an action: plain text, no
+	 * focus, no menu row, and it spends none of the card's action slots. Set only
+	 * where more than one project shares a board (the unified space board).
+	 */
+	showProjectMark?: boolean;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false, showProjectMark = false }: TaskCardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -482,116 +486,10 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const openUnresolvedInDiff = onOpenUnresolvedComments
 		? () => onOpenUnresolvedComments(task)
 		: undefined;
-	const prBadge = prInfo ? (
-		<TaskPrStatusPopover prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
-			<button
-				type="button"
-				onClick={(e) => {
-					e.stopPropagation();
-					window.open(prInfo.url, "_blank");
-				}}
-				className="inline-flex h-5 max-w-full flex-shrink-0 items-center gap-1 rounded bg-success/10 px-1.5 py-0.5 font-mono text-dense font-semibold leading-none text-success transition-colors hover:bg-success/20"
-				aria-label={t("task.openPR", { number: String(prInfo.number) })}
-			>
-				<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0401}"}</span>
-				<span className="leading-none">{t("task.prNumber", { number: String(prInfo.number) })}</span>
-			</button>
-		</TaskPrStatusPopover>
-	) : null;
-
-	// PR status badges. Every badge opens the pull request; hovering any one of
-	// them opens the shared checks/conflict popover.
-	//
-	// Mergeability replaces the old standalone CI badge — GitHub's merge-state
-	// already folds failing/blocking checks into one verdict, and the popover
-	// keeps the per-check breakdown for detail.
-	const MERGE_BADGE_REASON: Record<PRMergeabilityReason, TranslationKey> = {
-		conflict: "task.mergeBadge.conflict",
-		blocked: "task.mergeBadge.blocked",
-		behind: "task.mergeBadge.behind",
-		draft: "task.mergeBadge.draft",
-		unstable: "task.mergeBadge.unstable",
-		hooks: "task.mergeBadge.blocked",
-	};
-	const mergeability = prInfo ? summarizeMergeability(prInfo.mergeState) : null;
-	const mergeBadge = mergeability && mergeability.state !== "unknown" ? (() => {
-		const ok = mergeability.state === "mergeable";
-		const label = ok
-			? t("task.mergeBadge.mergeable")
-			: mergeability.reason
-				? t(MERGE_BADGE_REASON[mergeability.reason])
-				: t("task.mergeBadge.notMergeable");
-		return (
-			<TaskPrStatusPopover prInfo={prInfo!} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
-				<button
-					type="button"
-					onClick={(e) => {
-						e.stopPropagation();
-						window.open(prInfo!.url, "_blank");
-					}}
-					className={`inline-flex h-5 max-w-full flex-shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-dense font-semibold leading-none transition-colors ${ok ? "text-success bg-success/10 hover:bg-success/20" : "text-danger bg-danger/10 hover:bg-danger/20"}`}
-					aria-label={t(ok ? "task.mergeBadge.mergeableAria" : "task.mergeBadge.notMergeableAria")}
-				>
-					<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{ok ? "\u{F0623}" : "\uf05e"}</span>
-					<span className="truncate leading-none">{label}</span>
-				</button>
-			</TaskPrStatusPopover>
-		);
-	})() : null;
-	const REVIEW_BADGE: Record<NonNullable<TaskPRBadgeInfo["reviewState"]>, { glyph: string | null; square?: boolean; cls: string; key: TranslationKey }> = {
-		approved: { glyph: null, square: true, cls: "text-success bg-success/10 hover:bg-success/20", key: "task.review.approved" },
-		changes_requested: { glyph: "", cls: "text-danger bg-danger/10 hover:bg-danger/20", key: "task.review.changesRequested" },
-		commented: { glyph: "", cls: "text-warning-strong bg-warning/10 hover:bg-warning/20", key: "task.review.commented" },
-	};
-	const reviewMeta = prInfo?.reviewState ? REVIEW_BADGE[prInfo.reviewState] : null;
-	const reviewBadge = reviewMeta ? (
-		<TaskPrStatusPopover prInfo={prInfo!} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
-			<button
-				type="button"
-				onClick={(e) => {
-					e.stopPropagation();
-					window.open(prInfo!.url, "_blank");
-				}}
-				className={`inline-flex flex-shrink-0 items-center rounded font-mono text-dense font-semibold leading-none transition-colors ${reviewMeta.square ? "h-5 w-5 justify-center p-0" : "h-5 gap-1 px-1.5 py-0.5"} ${reviewMeta.cls}`}
-				aria-label={t(reviewMeta.key)}
-			>
-				{reviewMeta.glyph === null ? (
-					<svg
-						className="h-3.5 w-3.5"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						strokeWidth="2"
-						strokeLinecap="round"
-						strokeLinejoin="round"
-						aria-hidden="true"
-					>
-						<circle cx="8.5" cy="7.5" r="3" />
-						<path d="M3.5 19c.4-3.2 2.1-5 5-5s4.6 1.8 5 5" />
-						<path d="m15 17 2 2 4-5" />
-					</svg>
-				) : (
-					<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{reviewMeta.glyph}</span>
-				)}
-			</button>
-		</TaskPrStatusPopover>
-	) : null;
-	const unresolvedCount = prInfo?.unresolvedCount ?? 0;
-	const commentBadge = prInfo && unresolvedCount > 0 ? (
-		<TaskPrStatusPopover prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
-			<button
-				type="button"
-				onClick={(e) => {
-					e.stopPropagation();
-					window.open(prInfo.url, "_blank");
-				}}
-				className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 font-mono text-dense font-semibold leading-none text-warning-strong transition-colors hover:bg-warning/20"
-				aria-label={t.plural("task.prUnresolvedComments", unresolvedCount)}
-			>
-				<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF086"}</span>
-				<span className="leading-none">{unresolvedCount}</span>
-			</button>
-		</TaskPrStatusPopover>
+	// PR signals — the same cluster the Active Tasks sidebar renders, extracted so
+	// the two surfaces cannot drift.
+	const prBadges = prInfo ? (
+		<TaskPrBadges prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} />
 	) : null;
 
 	function handleShowDescription(e: React.MouseEvent) {
@@ -651,12 +549,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const [configRef, configTruncated] = useIsTruncated<HTMLSpanElement>(configLabel);
 
 	// ---- SIGNALS zone: read-only facts, grouped git / run / time -------------
-	const gitSignals = [
-		prBadge ? <Fragment key="pr">{prBadge}</Fragment> : null,
-		mergeBadge ? <Fragment key="merge">{mergeBadge}</Fragment> : null,
-		reviewBadge ? <Fragment key="review">{reviewBadge}</Fragment> : null,
-		commentBadge ? <Fragment key="comments">{commentBadge}</Fragment> : null,
-	].filter(Boolean);
+	// Keyed here rather than on each badge: they are built as standalone nodes above
+	// and only become a list at this point.
+	const gitSignals = prBadges ? [<Fragment key="pr">{prBadges}</Fragment>] : [];
 	const runSignals: React.ReactNode[] = [];
 	if (isActive && ports && ports.length > 0) {
 		runSignals.push(
@@ -993,16 +888,22 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					</div>
 					<div className="flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-nano text-fg-muted">
 						<span className="flex-shrink-0 text-accent/70">#{task.seq}</span>
+						{showProjectMark && (
+							<span
+								data-testid="task-card-project-mark"
+								className="max-w-[35%] shrink-0 truncate font-sans font-semibold text-fg-3"
+								title={projectDisplayName(project, t("ops.boardName"))}
+							>
+								{projectDisplayName(project, t("ops.boardName"))}
+							</span>
+						)}
 						<NativeBackendMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-native-backend" />
 						<ForeignCodeMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-foreign-code" />
 						<span className="min-w-0 truncate">{configLabel || "—"}</span>
 						{variantDots}
 						{(gitSignals.length > 0 || runSignals.length > 0 || timeSignals.length > 0) && (
 							<div data-testid="task-card-signals" className="ml-auto flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden">
-								{prBadge}
-								{mergeBadge}
-								{reviewBadge}
-								{commentBadge}
+								{prBadges}
 								{Children.toArray(runSignals)}
 								{Children.toArray(timeSignals)}
 							</div>
@@ -1295,6 +1196,19 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					<div className={`flex min-w-0 flex-1 flex-col ${compact ? "px-2 pt-1.5" : "px-3 pt-2.5"}`}>
 					{/* CONTENT */}
 					<div>
+						{/* On a space board the card has to say which project it belongs to.
+						    It sits above the title, not in the identity row: that row is the
+						    most crowded on the card, and an eyebrow is read before the title,
+						    so a column groups itself by project while scanning. */}
+						{showProjectMark && (
+							<div
+								data-testid="task-card-project-mark"
+								className="truncate text-dense font-semibold uppercase tracking-[0.07em] text-fg-3"
+								title={projectDisplayName(project, t("ops.boardName"))}
+							>
+								{projectDisplayName(project, t("ops.boardName"))}
+							</div>
+						)}
 						<div
 							data-testid="task-card-title"
 							className={`text-sm font-medium text-fg ${compact ? "truncate whitespace-nowrap leading-snug" : "line-clamp-3 break-words leading-relaxed"} ${isTodo ? "cursor-pointer hover:text-fg-2" : ""}`}

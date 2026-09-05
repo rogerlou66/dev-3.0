@@ -33,6 +33,7 @@ import type { RendererLogLevel, SharedArtifact, SharedImage, Task } from "../../
 import { formatStatus, getTaskTitle } from "../../shared/types";
 import { createLogger } from "../logger";
 import { postNativeTaskNotification } from "../native-notifications";
+import { outboundNotify } from "../notification-transports";
 import { log, getPushMessage } from "./shared-pure";
 
 const rendererLog = createLogger("renderer");
@@ -288,6 +289,21 @@ export function queueTerminalFocusAttention(payload: TerminalFocusAttentionPaylo
 	queuedTerminalNotifications.push({ kind: "attention", payload });
 }
 
+/**
+ * Drop a task's queued badge events (`dev3 attention --clear`). Attention calls
+ * and terminal bells light the same badge, so both go — otherwise a badge
+ * cleared during Focus Mode reappears when the queue flushes.
+ */
+export function dropQueuedAttention(taskId: string): void {
+	for (let i = queuedTerminalNotifications.length - 1; i >= 0; i--) {
+		const queued = queuedTerminalNotifications[i];
+		const isBadge = queued.kind === "attention" || queued.kind === "terminalBell";
+		if (isBadge && queued.payload.taskId === taskId) {
+			queuedTerminalNotifications.splice(i, 1);
+		}
+	}
+}
+
 export function pushCliToast(payload: TerminalFocusToastPayload): void {
 	if (isProjectSilenced(payload.projectId)) return;
 	if (isNotificationSuppressed()) {
@@ -419,6 +435,20 @@ function deliverTaskNotification(
 		});
 	}
 	pushWebNotification({ task, body, projectName: projectName ?? "" });
+	// A destination that survives having no listener. Sits here, after the silence
+	// and suppression gates above, so a muted project or a foregrounded app is
+	// still respected — and before the early return, which only concerns the
+	// legacy focus-proxy below.
+	outboundNotify({
+		taskId: task.id,
+		projectId: task.projectId,
+		title,
+		body,
+		level: "info",
+		taskSeq: task.seq,
+		taskTitle: getTaskTitle(task),
+		projectName: projectName ?? "",
+	});
 	if (nativePosted) return;
 	// Only arm click-to-open when the app is NOT already in the foreground. If the
 	// user is actively looking at the app, the banner is purely informational — a

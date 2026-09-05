@@ -51,6 +51,11 @@ export interface AdapterLaunchOptions {
 	skipSystemPrompt?: boolean;
 	/** statusLine-wrapper settings file (Claude only). */
 	statuslineSettingsFile?: string;
+	/** Path the dev3 protocol was written to, when this platform cannot carry it
+	 *  on the command line (Windows caps one at 32 767 characters and the protocol
+	 *  is ~34 000). Set by the backend; adapters that have a file-taking flag use
+	 *  it instead of the inline argument. */
+	systemPromptFile?: string;
 	/** True when a third-party backend delivers the model via env → omit --model. */
 	skipModelForProvider?: boolean;
 	/** Raw (unescaped) CLI args the active third-party backend adds to the launch
@@ -97,8 +102,13 @@ export interface AgentAdapter {
 	 * before spending it on `--resume`. Pure: returns paths, never touches fs.
 	 * Omitted by agents whose store is not filename-keyed (codex/gemini key on a
 	 * cwd header inside the file), leaving their stored ids unverifiable.
+	 *
+	 * `configDirs` is every config directory this agent may have written under on
+	 * this machine — the home store plus dev3's agent accounts, enumerated by the
+	 * caller because this stays pure. Required rather than optional on purpose: a
+	 * caller that cannot supply it would silently see one account's history.
 	 */
-	transcriptStore?(worktreePath: string, home: string): { dir: string; ext: string };
+	transcriptStore?(worktreePath: string, configDirs: readonly string[]): { dirs: string[]; ext: string };
 
 	/** Agent-native lifecycle hooks to install, or null when the agent has none. */
 	hooksSpec(options?: { stopTarget?: TaskStatus; permissionMode?: PermissionMode }): HooksSpec | null;

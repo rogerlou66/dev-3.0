@@ -667,7 +667,7 @@ function TaskInfoPanel({
 			data-testid="diff-summary-badge"
 		>
 			<span className="text-fg-muted text-sm-plus leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF0CB"}</span>
-			<span>{visibleDiffFiles} {visibleDiffFiles === 1 ? "file" : "files"}</span>
+			<span>{t.plural("infoPanel.diffFileCount", visibleDiffFiles)}</span>
 			<span className="text-success">+{visibleDiffInsertions}</span>
 			<span className="text-danger">−{visibleDiffDeletions}</span>
 		</button>
@@ -1495,7 +1495,7 @@ function TaskInfoPanel({
 									onClick={() => {
 										setActionsSheetOpen(false);
 										window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
-											detail: { taskId: task.id, projectId: project.id, artifacts: task.sharedArtifacts, index: (task.sharedArtifacts?.length ?? 1) - 1 },
+											detail: { taskId: task.id, taskStatus: task.status, projectId: project.id, artifacts: task.sharedArtifacts, index: (task.sharedArtifacts?.length ?? 1) - 1 },
 										}));
 									}}
 									className={SHEET_ROW_CLASS}

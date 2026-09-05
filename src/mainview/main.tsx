@@ -6,11 +6,13 @@ import "./rpc";
 import App from "./App";
 import { I18nProvider, resolveInitialLocale } from "./i18n";
 import { MobileProvider, detectMobile } from "./hooks/useMobile";
+import { debugLog } from "./debug-log";
 import { api, isElectrobun } from "./rpc";
 import { initAutoFullscreen } from "./fullscreen";
 import { initKeyboardLock } from "./keyboard-lock";
 import { bootstrapZoom } from "./zoom";
 import { bootstrapScrollSpeed } from "./scroll-speed";
+import { bootstrapTerminalFont } from "./terminal-font";
 import { startViewportDiagnostics } from "./viewport-diagnostics";
 import { startRendererHeartbeat } from "./renderer-heartbeat";
 import { getInitialThemeState, getWindowInjectedThemeState } from "./theme-bootstrap";
@@ -97,6 +99,10 @@ initKeyboardLock();
 // Load saved terminal scroll speed into cache before terminals mount
 bootstrapScrollSpeed();
 
+// Same, for the terminal font — the first terminal must be built with it, because
+// cell metrics are measured at construction.
+bootstrapTerminalFont();
+
 // Mirror the page's own geometry into the backend log — the other half of the
 // display-change diagnostic the backend writes (see viewport-diagnostics.ts).
 startViewportDiagnostics();
@@ -111,11 +117,11 @@ startRendererHeartbeat();
 document.documentElement.lang = resolveInitialLocale();
 
 async function bootstrap() {
-	console.log("[main] bootstrap() starting...");
+	debugLog("boot", "[main] bootstrap() starting...");
 	try {
-		console.log("[main] Initializing ghostty-web...");
+		debugLog("boot", "[main] Initializing ghostty-web...");
 		await init();
-		console.log("[main] ghostty-web initialized");
+		debugLog("boot", "[main] ghostty-web initialized");
 	} catch (err) {
 		console.error("[main] ghostty-web init() FAILED:", err);
 		console.error("[main] This will prevent terminal rendering. Error:", {
@@ -140,7 +146,7 @@ async function bootstrap() {
 		document.title = "dev-3.0";
 	}
 
-	console.log("[main] Rendering React app...");
+	debugLog("boot", "[main] Rendering React app...");
 	// RootErrorBoundary wraps the providers (not just <App/>) so a crash in
 	// I18nProvider/MobileProvider themselves still renders a visible fallback
 	// instead of a blank, unmounted tree.
@@ -157,7 +163,7 @@ async function bootstrap() {
 			</RootErrorBoundary>
 		</StrictMode>,
 	);
-	console.log("[main] React app rendered");
+	debugLog("boot", "[main] React app rendered");
 }
 
 bootstrap().catch((err) => {

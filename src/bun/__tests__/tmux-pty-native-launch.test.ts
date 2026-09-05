@@ -184,6 +184,7 @@ vi.mock("../agent-hooks", () => ({ setupAgentHooks: vi.fn() }));
 vi.mock("../artifact-template", () => ({ ensureArtifactTemplateEnv: vi.fn(() => ({ DEV3_ARTIFACT_DIR: "/tmp/art" })) }));
 
 vi.mock("../rpc-handlers/shared-pure", () => ({
+	AGENT_ENV_DEFAULTS: { FORCE_HYPERLINK: "1" },
 	getPushMessage: vi.fn(() => null),
 	getScriptShellPath: vi.fn((shellPath?: string) => shellPath || "/bin/zsh"),
 	isActive: vi.fn(() => true),
@@ -230,7 +231,7 @@ const { launchTaskPty, tmuxPtyHandlers } = await import("../rpc-handlers/tmux-pt
 const TASK_ID = "aabbccdd-1111-2222-3333-444444444444";
 const WORKTREE = "/tmp/wt";
 const RUN_SCRIPT = `/tmp/dev3/${TASK_ID}/run.sh`;
-const EXPECTED_ENV = { DEV3_TASK_ID: TASK_ID, DEV3_AGENT: "claude", DEV3_ARTIFACT_DIR: "/tmp/art" };
+const EXPECTED_ENV = { FORCE_HYPERLINK: "1", DEV3_TASK_ID: TASK_ID, DEV3_AGENT: "claude", DEV3_ARTIFACT_DIR: "/tmp/art" };
 const SETUP_SCRIPT = `/tmp/dev3/${TASK_ID}-setup.sh`;
 const CMD_SCRIPT = `/tmp/dev3/${TASK_ID}-cmd.sh`;
 

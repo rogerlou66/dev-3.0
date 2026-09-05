@@ -2,11 +2,13 @@ import { existsSync, readdirSync, unlinkSync, mkdirSync } from "node:fs";
 import type { AgentMessageSource, CliRequest, CliResponse, CustomColumn, Label, Project, Task, TaskPriority, TaskStatus, TaskType, TaskNote, NoteSource, SharedArtifact, SharedImage } from "../shared/types";
 import { isValidNotificationDurationMs, NOTIFICATION_MAX_DURATION_MS, NOTIFICATION_MIN_DURATION_MS } from "../shared/duration";
 import { agentReplyCommand, seqIsShared } from "../shared/agent-message-envelope";
+import { requireMessageSubject } from "../shared/agent-message-subject";
 import { socketMetaPathFor } from "../shared/socket-meta";
 import { isCliEndpointHandle } from "../shared/cli-endpoint";
-import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, getTaskTitle, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
+import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
 import { CODEX_STATUS_HOOK_EVENTS, getCodexHookTargetStatus, type CodexStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
+import { DEFAULT_EVENT_LIMIT, DEFAULT_EVENT_WINDOW_MS, MAX_EVENT_LIMIT, formatMovementText, normalizeEventInstant, resolveEventIdPrefix, selectEvents, type BoardEvent, type BoardEventKind } from "../shared/board-events";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { markPendingDeepLinkNav } from "./deep-link-nav";
 import { SharedImageError, saveSharedImage } from "./shared-images";
@@ -18,7 +20,8 @@ import type { AgentLaunchChoice } from "../shared/types";
 import { deliverLaunchHandoff } from "./agent-launch-handoff";
 import * as data from "./data";
 import { loadSpacesFile } from "./spaces-data";
-import { createScratchTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
+import { resolveTaskStartRef } from "./task-start-ref";
+import { createScratchTask, createTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, dropQueuedAttention, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
 import { getDevServerStatus, runDevServer, stopDevServer, restartDevServer } from "./rpc-handlers/tmux-pty";
 import { getTmuxLayout } from "./pty-server";
 import { scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
@@ -104,18 +107,54 @@ function parseSeqRef(ref: string): number | null {
 	return match ? Number(match[1]) : null;
 }
 
+const VARIANT_NEEDS_SEQ =
+	'--variant narrows a variant group addressed by seq. Pass `--task seq:<N> --variant <i>`.';
+
+/** The seq resolved, but no member carries the requested `--variant <i>`. */
+class VariantNotFoundError extends Error {}
+
+/** The variant indices a seq actually answers to, for a "no such variant" error. */
+function describeLiveVariants(matches: Task[]): string {
+	const indices = matches
+		.map((m) => m.variantIndex)
+		.filter((i): i is number => i != null)
+		.sort((a, b) => a - b);
+	if (indices.length === 0) return "It is not a variant group — drop --variant.";
+	return `Live variants: ${indices.join(", ")}.`;
+}
+
 /**
  * Resolve a task reference — full id, ≥8-char id prefix, or `seq:<N>` — against
  * one project's task list. Throws on ambiguity (a variant group shares one seq;
  * a short prefix can match several ids), returns null when nothing matches.
+ *
+ * `variantIndex` is `dev3 message --variant <i>` and nothing else passes it: it
+ * narrows the same-seq matches to the one member carrying that index. It is a
+ * plain filter even when the seq is already unambiguous, so a group's survivor
+ * keeps answering to the address it handed out while its siblings were alive —
+ * `variantIndex` is permanent, the collision that minted it is not.
  */
-function findTaskByRef(tasks: Task[], ref: string): Task | null {
+function findTaskByRef(tasks: Task[], ref: string, variantIndex?: number): Task | null {
 	const seq = parseSeqRef(ref);
-	if (seq === null) return findByIdPrefix(tasks, ref, "task");
+	if (seq === null) {
+		if (variantIndex !== undefined) throw new Error(VARIANT_NEEDS_SEQ);
+		return findByIdPrefix(tasks, ref, "task");
+	}
 	const matches = tasks.filter((t) => t.seq === seq);
+	if (variantIndex !== undefined && matches.length > 0) {
+		const picked = matches.filter((t) => t.variantIndex === variantIndex);
+		if (picked.length === 0) {
+			throw new VariantNotFoundError(`Task ref "${ref}" has no variant ${variantIndex}. ${describeLiveVariants(matches)}`);
+		}
+		if (picked.length > 1) {
+			const ids = picked.map((m) => m.id.slice(0, 8)).join(", ");
+			throw new Error(`Task ref "${ref}" matches ${picked.length} tasks with variant ${variantIndex} (${ids}). Address one of them by id.`);
+		}
+		return picked[0];
+	}
 	if (matches.length > 1) {
 		const ids = matches.map((m) => m.id.slice(0, 8)).join(", ");
-		throw new Error(`Task ref "${ref}" matches ${matches.length} variant tasks (${ids}). Address one of them by id.`);
+		throw new Error(`Task ref "${ref}" matches ${matches.length} variant tasks (${ids}). Address one of them by id, or with \`dev3 message\` by \`--variant <i>\`.`);
 	}
 	return matches[0] ?? null;
 }
@@ -172,10 +211,14 @@ async function requirePaneTask(params: Record<string, unknown>): Promise<{ proje
 	return found;
 }
 
-async function resolveTaskAcrossProjects(taskId: string): Promise<{ project: Project; task: Task } | null> {
+async function resolveTaskAcrossProjects(taskId: string, variantIndex?: number): Promise<{ project: Project; task: Task } | null> {
 	// Scan virtual ("Operations") boards too, so `dev3` commands run from inside
 	// an operation worktree (no explicit --project) can resolve their task.
 	const projects = [...await data.loadProjects(), ...await data.loadVirtualProjects()];
+	// Raised here rather than inside the loop: the id-prefix path below swallows
+	// everything but "Ambiguous", so a `--variant` misuse would come back as a
+	// bare "task not found".
+	if (variantIndex !== undefined && parseSeqRef(taskId) === null) throw new Error(VARIANT_NEEDS_SEQ);
 
 	// Seq refs must collect matches across ALL projects instead of returning the
 	// first hit: every board counts 1..N, so cross-project collisions are routine
@@ -184,16 +227,25 @@ async function resolveTaskAcrossProjects(taskId: string): Promise<{ project: Pro
 	// collisions unrealistic, and the CLI already guards them (decision 102).
 	if (parseSeqRef(taskId) !== null) {
 		const matches: Array<{ project: Project; task: Task }> = [];
+		// A board carrying the seq but not that variant is a near miss, not a
+		// verdict: another board may hold the real group (seq collisions across
+		// projects are routine). Kept, and raised only if nothing matched anywhere.
+		let variantMiss: VariantNotFoundError | null = null;
 		for (const project of projects) {
 			try {
 				const tasks = await data.loadTasks(project);
-				const task = findTaskByRef(tasks, taskId);
+				const task = findTaskByRef(tasks, taskId, variantIndex);
 				if (task) matches.push({ project, task });
 			} catch (err) {
+				if (err instanceof VariantNotFoundError) {
+					variantMiss ??= err;
+					continue;
+				}
 				// Re-throw ambiguity errors, skip broken task files
 				if (err instanceof Error && err.message.startsWith("Task ref")) throw err;
 			}
 		}
+		if (matches.length === 0 && variantMiss) throw variantMiss;
 		if (matches.length > 1) {
 			const shown = matches.map((m) => `${m.task.id.slice(0, 8)} (${m.project.name})`).join(", ");
 			throw new Error(`Task ref "${taskId}" matches ${matches.length} tasks across projects (${shown}). Pass --project to disambiguate.`);
@@ -214,21 +266,51 @@ async function resolveTaskAcrossProjects(taskId: string): Promise<{ project: Pro
 	return null;
 }
 
-async function resolveTaskFromParams(params: Record<string, unknown>): Promise<{ project: Project; task: Task }> {
+/**
+ * A socket param carrying a flat string map, or undefined when the caller sent
+ * nothing. `devServer.start`'s `env` uses it; the handler sanitizes what comes
+ * out, so this only has to reject shapes that are not a map at all.
+ */
+function readEnvParam(params: Record<string, unknown>): Record<string, string> | undefined {
+	const raw = params.env;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+}
+
+/**
+ * `opts.variantIndex` is `dev3 message --variant <i>` and only that: no other
+ * command accepts the flag, so every other caller resolves exactly as before.
+ */
+async function resolveTaskFromParams(
+	params: Record<string, unknown>,
+	opts?: { variantIndex?: number },
+): Promise<{ project: Project; task: Task }> {
 	const taskId = params.taskId as string;
 	if (!taskId) throw new Error("taskId is required");
+	const variantIndex = opts?.variantIndex;
 
 	if (params.projectId) {
 		const project = await data.getProject(params.projectId as string);
 		const tasks = await data.loadTasks(project);
-		const task = findTaskByRef(tasks, taskId);
+		const task = findTaskByRef(tasks, taskId, variantIndex);
 		if (!task) throw taskNotFoundError(taskId, project);
 		return { project, task };
 	}
 
-	const found = await resolveTaskAcrossProjects(taskId);
+	const found = await resolveTaskAcrossProjects(taskId, variantIndex);
 	if (!found) throw taskNotFoundError(taskId);
 	return found;
+}
+
+/** `dev3 message --variant <i>` off the wire; rejected here as well as in the CLI. */
+function messageVariantIndex(params: Record<string, unknown>): number | undefined {
+	const raw = params.variantIndex;
+	if (raw === undefined || raw === null) return undefined;
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value < 0) {
+		throw new Error(`Invalid --variant "${String(raw)}": expected a non-negative integer index.`);
+	}
+	return value;
 }
 
 /**
@@ -260,6 +342,16 @@ async function resolveAgentMessageSource(
 		title: getTaskTitle(found.task),
 		projectId: found.task.projectId,
 	};
+}
+
+/**
+ * The launcher's standing handoff text, as the CLI read it out of `--handoff-file`.
+ * Only reaches a child when the request actually turns into a launch — a plain
+ * board move carries it and ignores it.
+ */
+function launcherHandoffNote(params: Record<string, unknown>): string | null {
+	const raw = typeof params.handoffNote === "string" ? params.handoffNote.trim() : "";
+	return raw ? raw : null;
 }
 
 /** {@link seqIsShared} against a project's live task list; pessimistic if it cannot be read. */
@@ -320,6 +412,8 @@ async function requestAgentLaunchApproval(opts: {
 	task: Task;
 	targetStatus: TaskStatus;
 	requester: AgentMessageSource;
+	/** The launcher's standing text, already read from its `--handoff-file`. */
+	launcherNote?: string | null;
 }): Promise<LaunchApprovalOutcome> {
 	const { project, task, targetStatus, requester } = opts;
 	const push = getPushMessage();
@@ -379,7 +473,12 @@ async function requestAgentLaunchApproval(opts: {
 	// variant gets its own note — each one is a separate agent that has to know
 	// who started it.
 	for (const child of launched) {
-		void deliverLaunchHandoff({ projectId: project.id, childTaskId: child.id, source: requester });
+		void deliverLaunchHandoff({
+			projectId: project.id,
+			childTaskId: child.id,
+			source: requester,
+			launcherNote: opts.launcherNote ?? null,
+		});
 	}
 
 	// Read the board AFTER the launch: launching with variants mints the siblings
@@ -424,6 +523,16 @@ async function loadBoardTasks(project: Project): Promise<Task[] | null> {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Loaded on demand, not at module load. The handler module reaches the renderer
+ * bridge through `rpc-handlers/shared`, which pulls Electrobun in — and the suites
+ * that import this file mock only the handler BARREL, so a static import here
+ * kills them at collect time with an error from inside Electrobun.
+ */
+async function conversationImport() {
+	return (await import("./rpc-handlers/conversation-import-handlers")).conversationImportHandlers;
 }
 
 type Handler = (params: Record<string, unknown>) => Promise<unknown>;
@@ -489,7 +598,7 @@ async function codexPaneSessionAlreadyRecorded(
  * The steady state is exactly that no-op — codex fires this hook continuously for
  * the whole life of a session — so it is answered from the cached read BEFORE
  * taking the file lock. Going through the lock for it made every hook re-parse the
- * board strictly (14 MB on base44); see the 2026-08-16 freeze record.
+ * board strictly (14 MB on the largest measured board); see the 2026-08-16 freeze record.
  */
 async function captureCodexPaneSession(
 	project: Project,
@@ -550,6 +659,8 @@ const handlers: Record<string, Handler> = {
 			} else if (event === "projectUpdated" && projectId) {
 				const project = await data.getProject(projectId);
 				localPush("projectUpdated", { project });
+			} else if (event === "agentMessageLogChanged" && projectId) {
+				localPush("agentMessageLogChanged", { projectId });
 			} else if (event === "spacesUpdated") {
 				// Re-read locally: the identity-checked cache sees the peer's write.
 				const file = await loadSpacesFile();
@@ -675,6 +786,8 @@ const handlers: Record<string, Handler> = {
 		const description = (params.description as string | undefined)?.trim() || "";
 		if (!projectId) throw new Error("projectId is required");
 		if (!title) throw new Error("title is required");
+		const prRef = typeof params.pr === "string" ? params.pr : undefined;
+		const branchRef = typeof params.branch === "string" ? params.branch : undefined;
 
 		let priority = undefined;
 		if (params.priority !== undefined) {
@@ -682,14 +795,39 @@ const handlers: Record<string, Handler> = {
 			if (!priority) throw new Error(`Invalid priority "${params.priority}". Use P0, P1, P2, P3, or P4.`);
 		}
 
+		let taskType: TaskType | undefined;
+		if (params.taskType !== undefined && params.taskType !== null && params.taskType !== "standard") {
+			taskType = normalizeTaskType(String(params.taskType)) ?? undefined;
+			if (!taskType) throw new Error(`Invalid task type "${params.taskType}". Use ${TASK_TYPES.join(", ")} or standard.`);
+		}
+
 		const project = await data.getProject(projectId);
+		// What the task is ABOUT, resolved before it exists — creation derives
+		// foreignCode from this ref, and a ref set afterwards would leave the trust
+		// decision already made on the base branch (see task-start-ref.ts).
+		const existingBranch = await resolveTaskStartRef({ project, pr: prRef, branch: branchRef });
 		// Use description as the task body if provided, otherwise fall back to title.
-		// Only pass the extras arg when a priority was given (keeps the common 3-arg call).
-		const task = priority
-			? await data.addTask(project, description || title, "todo", { priority })
-			: await data.addTask(project, description || title, "todo");
-		// If a separate title was given alongside a description, store it as customTitle
-		if (description && title) {
+		// A type puts its role brief above that text at creation, through the same
+		// function `task update --type` uses, so a card never claims a role its
+		// agent was not given.
+		const ownText = description || title;
+		const body = taskType
+			? withPresetPrompt(ownText, presetPromptForTaskType(taskType, project, await loadSettings()))
+			: ownText;
+		// The GUI's own creation handler — never a parallel path. It owns
+		// foreignCode, and the CLI reached feature parity by calling it rather than
+		// by copying it.
+		const task = await createTask({
+			projectId: project.id,
+			description: body,
+			...(existingBranch ? { existingBranch } : {}),
+			...(priority ? { priority } : {}),
+			...(taskType ? { taskType } : {}),
+		});
+		// If a separate title was given alongside a description, store it as customTitle.
+		// A role brief counts as a body too: without this the card would be named
+		// after the first 80 characters of the preamble, so every one would read alike.
+		if ((description || taskType) && title) {
 			const updated = await data.updateTask(project, task.id, { customTitle: title });
 			getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
 			return updated;
@@ -724,6 +862,7 @@ const handlers: Record<string, Handler> = {
 			task,
 			targetStatus: "in-progress",
 			requester,
+			launcherNote: launcherHandoffNote(params),
 		});
 		// A declined scratch task has no reason to exist — it was created only to
 		// have something for the dialog to launch. Leaving it would litter To Do
@@ -1025,6 +1164,129 @@ const handlers: Record<string, Handler> = {
 		return updated;
 	},
 
+	/**
+	 * `dev3 events` — every note recorded anywhere on the board, in one feed.
+	 *
+	 * Completed and cancelled tasks are deliberately included: that is the whole
+	 * point. A live task can still message a coordinator, a finished one cannot,
+	 * and its notes are all that survived its worktree.
+	 *
+	 * Selection happens here rather than in the CLI because the "older than the
+	 * window" count needs the full corpus, and shipping every note body over the
+	 * socket to count them would be the expensive way to learn one number.
+	 */
+	"events.list": async (params) => {
+		const rawLimit = Number(params.limit ?? DEFAULT_EVENT_LIMIT);
+		const limit = Number.isFinite(rawLimit)
+			? Math.min(MAX_EVENT_LIMIT, Math.max(1, Math.floor(rawLimit)))
+			: DEFAULT_EVENT_LIMIT;
+
+		const projects = params.projectId
+			? [await data.getProject(params.projectId as string)]
+			: [...await data.loadProjects(), ...await data.loadVirtualProjects()];
+
+		const kind = (params.kind as BoardEventKind | undefined) ?? null;
+		const wantNotes = kind === null || kind === "note";
+		const wantMoves = kind === null || kind === "move";
+
+		const events: BoardEvent[] = [];
+		// Filled while scanning; resolved into a count once the cursor is known,
+		// because "was it inside what you asked for" needs that cursor.
+		const evictionProbes: Array<{ dropped: number; oldestRetained: string | null }> = [];
+		for (const project of projects) {
+			let tasks: Task[];
+			try {
+				tasks = await data.loadTasks(project);
+			} catch (err) {
+				log.warn("events.list: skipping unreadable project", { projectId: project.id, error: String(err) });
+				continue;
+			}
+			const columnName = new Map((project.customColumns ?? []).map((col) => [col.id, col.name]));
+			// The board's own vocabulary, renames included — a reader recognises
+			// "Agent is Working", not the `in-progress` slug underneath it.
+			const statusLabel = (status: TaskStatus) =>
+				project.customStatusLabels?.[status] ?? STATUS_LABELS[status] ?? formatStatus(status);
+			for (const task of tasks) {
+				if (wantMoves) {
+					if (task.movementsDropped) {
+						const oldest = normalizeEventInstant(task.movements?.[0]?.at);
+						evictionProbes.push({ dropped: task.movementsDropped, oldestRetained: oldest });
+					}
+					for (const move of task.movements ?? []) {
+						const at = normalizeEventInstant(move.at);
+						if (!at) continue;
+						const movement = {
+							kind: move.kind,
+							...(move.from ? { from: move.from } : {}),
+							to: move.to,
+							fromColumn: move.fromColumnId ? columnName.get(move.fromColumnId) ?? null : null,
+							toColumn: move.toColumnId ? columnName.get(move.toColumnId) ?? null : null,
+						};
+						events.push({
+							kind: "move",
+							at,
+							id: move.id,
+							projectId: project.id,
+							projectName: project.name ?? "",
+							taskId: task.id,
+							seq: task.seq ?? null,
+							taskTitle: getTaskTitle(task),
+							taskStatus: task.status,
+							movement,
+							text: formatMovementText(movement, statusLabel),
+						});
+					}
+				}
+				if (!wantNotes) continue;
+				for (const note of task.notes ?? []) {
+					const at = normalizeEventInstant(note.createdAt) ?? normalizeEventInstant(task.createdAt);
+					if (!at) continue;
+					events.push({
+						kind: "note",
+						at,
+						id: note.id,
+						projectId: project.id,
+						projectName: project.name ?? "",
+						taskId: task.id,
+						seq: task.seq ?? null,
+						taskTitle: getTaskTitle(task),
+						taskStatus: task.status,
+						source: note.source,
+						text: note.content,
+					});
+				}
+			}
+		}
+
+		// An id prefix is resolved against the same scope that is about to be read,
+		// so "not found" always means "not in what you asked for".
+		const cursorId = params.cursorId as string | undefined;
+		const cursor = cursorId
+			? resolveEventIdPrefix(events, cursorId)
+			: (params.cursor as string | null | undefined) ?? null;
+
+		const now = Date.now();
+		// A task's evicted moves are all older than its oldest surviving one, so
+		// they only matter when even that survivor is newer than where the caller
+		// is reading from — then the gap is inside the answer.
+		const floor = cursor
+			?? new Date(now - ((params.windowMs as number | undefined) ?? DEFAULT_EVENT_WINDOW_MS)).toISOString();
+		const movementsEvicted = evictionProbes
+			.filter((p) => p.oldestRetained !== null && p.oldestRetained > floor)
+			.reduce((sum, p) => sum + p.dropped, 0);
+
+		return {
+			...selectEvents(events, {
+				cursor,
+				limit,
+				now,
+				windowMs: params.windowMs as number | undefined,
+			}),
+			from: cursor ? cursor.replace(/Z$/, "") : null,
+			movementsEvicted,
+		};
+	},
+
 	"vent.add": async (params) => {
 		// Background, fire-and-forget: an agent reporting friction with the dev3
 		// platform itself. Always available, no opt-in, no UI — just write the
@@ -1036,6 +1298,22 @@ const handlers: Record<string, Handler> = {
 
 		const vent = addVent(name, content);
 		return { fileName: vent.fileName };
+	},
+
+	"conversations.scanImport": async (params) => {
+		const projectId = params.projectId as string;
+		if (!projectId) throw new Error("projectId is required");
+		return (await conversationImport()).scanImportableConversations({ projectId });
+	},
+
+	"conversations.import": async (params) => {
+		const projectId = params.projectId as string;
+		if (!projectId) throw new Error("projectId is required");
+		const sessionIds = params.sessionIds;
+		if (!Array.isArray(sessionIds) || sessionIds.some((id) => typeof id !== "string")) {
+			throw new Error("sessionIds must be an array of session ids");
+		}
+		return (await conversationImport()).importConversations({ projectId, sessionIds: sessionIds as string[] });
 	},
 
 	"label.list": async (params) => {
@@ -1416,7 +1694,13 @@ const handlers: Record<string, Handler> = {
 		const requester = await resolveAgentMessageSource(params, task.id);
 		const isActivation = !ACTIVE_STATUSES.includes(task.status) && ACTIVE_STATUSES.includes(builtinStatus);
 		if (requester && isActivation && !isStatusGuardBlocked(task.status, { ifStatus, ifStatusNot })) {
-			return requestAgentLaunchApproval({ project, task, targetStatus: builtinStatus, requester });
+			return requestAgentLaunchApproval({
+				project,
+				task,
+				targetStatus: builtinStatus,
+				requester,
+				launcherNote: launcherHandoffNote(params),
+			});
 		}
 
 		return moveTask({
@@ -1443,17 +1727,18 @@ const handlers: Record<string, Handler> = {
 			throw new Error("No app window is connected — cannot ask the user for approval");
 		}
 
-		const { requestId, decision, isNew } = createAgentRequest("complete", task.id, project.id);
+		// Kept ON the request, not just pushed: the push is a one-shot event, so a
+		// renderer that reloads before answering could never be handed the dialog
+		// again (a retry joins instead of re-pushing). It asks for this on connect.
+		const dialog = {
+			taskTitle: getTaskTitle(task),
+			// Full read-only context (project, seq, priority, labels, overview)
+			// so the user recognizes which task the prompt destroys.
+			subject: buildTaskDialogSubject(task, project),
+		};
+		const { requestId, decision, isNew } = createAgentRequest("complete", task.id, project.id, { dialog });
 		if (isNew) {
-			push("agentCompletionRequested", {
-				requestId,
-				taskId: task.id,
-				projectId: project.id,
-				taskTitle: getTaskTitle(task),
-				// Full read-only context (project, seq, priority, labels, overview)
-				// so the user recognizes which task the prompt destroys.
-				subject: buildTaskDialogSubject(task, project),
-			});
+			push("agentCompletionRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
 		}
 
 		const { approved } = await decision;
@@ -1461,6 +1746,39 @@ const handlers: Record<string, Handler> = {
 			return { approved: false };
 		}
 		const updated = await moveTask({ taskId: task.id, projectId: project.id, newStatus: "completed" });
+		return { approved: true, task: updated };
+	},
+
+	// Agent-initiated request to CANCEL a task — an agent cleaning up a task it
+	// should not have created. Same approval model as `task.requestCompletion`,
+	// deliberately a separate kind and a separate push: cancelling throws the
+	// work away, and the dialog asking for it must not look like the other one.
+	// Never auto-approved (no `autoApproveAfterMs`) — nobody loses a worktree to
+	// a dialog they never saw.
+	"task.requestCancellation": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params);
+		if (task.status === "completed" || task.status === "cancelled") {
+			throw new Error(`Task is already ${task.status}`);
+		}
+		const push = getPushMessage();
+		if (!push) {
+			throw new Error("No app window is connected — cannot ask the user for approval");
+		}
+
+		const dialog = {
+			taskTitle: getTaskTitle(task),
+			subject: buildTaskDialogSubject(task, project),
+		};
+		const { requestId, decision, isNew } = createAgentRequest("cancel", task.id, project.id, { dialog });
+		if (isNew) {
+			push("agentCancellationRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
+		}
+
+		const { approved } = await decision;
+		if (!approved) {
+			return { approved: false };
+		}
+		const updated = await moveTask({ taskId: task.id, projectId: project.id, newStatus: "cancelled" });
 		return { approved: true, task: updated };
 	},
 
@@ -1531,11 +1849,21 @@ const handlers: Record<string, Handler> = {
 		return { delivered: true, mode: "toast", taskId };
 	},
 
-	// UI control: light the red attention badge on a task card with a reason.
+	// UI control: light the red attention badge on a task card with a reason,
+	// or (--clear) take it back down together with its accumulated reasons.
 	"ui.attention": async (params) => {
 		const reason = ((params.reason as string) ?? "").trim();
 		const { project, task } = await resolveTaskFromParams(params);
 		if ((await loadSettings()).focusMode) setFocusMode(true);
+		if (params.clear === true) {
+			// Never queued and never silenced: a stale badge has to go down even
+			// while Focus Mode or a silenced project holds new badges back.
+			dropQueuedAttention(task.id);
+			const clearPush = getPushMessage();
+			if (!clearPush) return { delivered: false, taskId: task.id };
+			clearPush("cliAttention", { taskId: task.id, reason: "", clear: true });
+			return { delivered: true, taskId: task.id, projectId: project.id };
+		}
 		if (isNotificationSuppressed()) {
 			pushCliAttention({ taskId: task.id, projectId: task.projectId, reason });
 			return { delivered: true, queued: true, taskId: task.id, projectId: project.id };
@@ -1550,10 +1878,14 @@ const handlers: Record<string, Handler> = {
 	// agent immediately. Throws only when nothing was sent; an unconfirmed send
 	// travels back as its own status so the CLI reports it as neither.
 	"message.send": async (params) => {
-		const { project, task } = await resolveTaskFromParams(params);
+		const { project, task } = await resolveTaskFromParams(params, { variantIndex: messageVariantIndex(params) });
 		const text = ((params.text as string) ?? "").toString();
+		// The app's half of the subject gate. The CLI checks it first and reports it
+		// better, so reaching this means an older `dev3` binary that never learned
+		// the flag — it gets the same explanation instead of writing a mute row.
+		const subject = requireMessageSubject(params.subject, text);
 		const source = await resolveAgentMessageSource(params, task.id);
-		const delivery = await sendMessageImmediately(task, text, null, source);
+		const delivery = await sendMessageImmediately(task, text, null, source, { subject });
 		return {
 			delivered: true,
 			status: delivery.status,
@@ -1586,11 +1918,13 @@ const handlers: Record<string, Handler> = {
 	// `dev3 message --in <dur> | --at <hh:mm> "text"`: queue a scheduled message on
 	// the task's live agent (validation + cap live in the scheduler core).
 	"message.schedule": async (params) => {
-		const { project, task } = await resolveTaskFromParams(params);
+		const { project, task } = await resolveTaskFromParams(params, { variantIndex: messageVariantIndex(params) });
 		const text = ((params.text as string) ?? "").toString();
 		const at = (params.at as string) ?? "";
+		// Same gate as the immediate send: a delay changes nothing about the subject.
+		const subject = requireMessageSubject(params.subject, text);
 		const source = await resolveAgentMessageSource(params, task.id);
-		const updated = await scheduleMessageCore(project, task, { text, at, source });
+		const updated = await scheduleMessageCore(project, task, { text, at, source, subject });
 		return { taskId: task.id, projectId: project.id, at, pending: (updated.scheduledMessages ?? []).length };
 	},
 
@@ -1742,7 +2076,7 @@ const handlers: Record<string, Handler> = {
 
 	"devServer.start": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		return runDevServer({ taskId: task.id, projectId: project.id });
+		return runDevServer({ taskId: task.id, projectId: project.id, env: readEnvParam(params) });
 	},
 
 	"devServer.stop": async (params) => {
@@ -1752,7 +2086,7 @@ const handlers: Record<string, Handler> = {
 
 	"devServer.restart": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		return restartDevServer({ taskId: task.id, projectId: project.id });
+		return restartDevServer({ taskId: task.id, projectId: project.id, env: readEnvParam(params) });
 	},
 
 	"devServer.status": async (params) => {
@@ -1807,7 +2141,7 @@ const handlers: Record<string, Handler> = {
 	// platform shim, so we import them LAZILY here: a static import would drag
 	// electrobun into every unit test that merely imports this socket server.
 	"remote.accessUrl": async () => {
-		const { getAccessUrl, getServerPort, getStaticCode } = await import("./remote-access-server");
+		const { getAccessUrl, getServerPort, getStaticCode, getSignInLink } = await import("./remote-access-server");
 		const { getTunnelUrl } = await import("./cloudflare-tunnel");
 		if (getServerPort() === 0) {
 			throw new Error("Remote access server is not running in this instance (start it with `dev3 remote`).");
@@ -1817,6 +2151,7 @@ const handlers: Record<string, Handler> = {
 			tunnelUrl: getTunnelUrl(),
 			port: getServerPort(),
 			staticCode: getStaticCode(),
+			signInLink: await getSignInLink(),
 		};
 	},
 

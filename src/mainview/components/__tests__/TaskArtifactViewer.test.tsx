@@ -6,7 +6,7 @@ import TaskArtifactViewer from "../TaskArtifactViewer";
 import { useEscapeKey } from "../../hooks/useEscapeKey";
 
 vi.mock("../../rpc", () => ({
-	api: { request: { readArtifactContent: vi.fn(), readArtifactDownload: vi.fn(), createArtifactDownload: vi.fn(), openArtifactInBrowser: vi.fn() } },
+	api: { request: { readArtifactContent: vi.fn(), readArtifactDownload: vi.fn(), createArtifactDownload: vi.fn(), openArtifactInBrowser: vi.fn(), sendArtifactMessageToAgent: vi.fn() } },
 }));
 const androidBridge = vi.hoisted(() => ({
 	isAndroidAppHost: vi.fn(() => false),
@@ -19,8 +19,12 @@ vi.mock("../../android-client-bridge", () => androidBridge);
 // Pin the platform so the ⌘F assertions don't depend on the host running them.
 const platform = vi.hoisted(() => ({ remote: false }));
 vi.mock("../../utils/platform", () => ({ isMac: () => true, isRemote: () => platform.remote }));
+
+// No toast host is mounted in these tests — assert on the service instead.
+vi.mock("../../toast", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 import { api } from "../../rpc";
 const mockedApi = vi.mocked(api, true);
+import { toast } from "../../toast";
 
 function artifact(id: string, withBundle = false): SharedArtifact {
 	return {
@@ -82,7 +86,7 @@ function versioned(): SharedArtifact {
 
 describe("TaskArtifactViewer versions", () => {
 	it("lands on the newest version and switches to an older one", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		const picker = screen.getByTestId("artifact-version-picker");
 		expect(picker).toHaveTextContent("v9");
 		await waitFor(() => expect(mockedApi.request.readArtifactContent).toHaveBeenCalledWith({
@@ -104,7 +108,7 @@ describe("TaskArtifactViewer versions", () => {
 	});
 
 	it("closes the version list on a click anywhere outside it", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[versioned()]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await userEvent.click(screen.getByTestId("artifact-version-picker"));
 		expect(screen.getByTestId("artifact-version-list")).toBeInTheDocument();
 
@@ -115,12 +119,12 @@ describe("TaskArtifactViewer versions", () => {
 	});
 
 	it("hides the picker for an artifact published once", () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		expect(screen.queryByTestId("artifact-version-picker")).not.toBeInTheDocument();
 	});
 
 	it("moving to another artifact lands on ITS newest version", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[versioned(), artifact("plain")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[versioned(), artifact("plain")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await userEvent.click(screen.getByTestId("artifact-version-picker"));
 		await userEvent.click(screen.getAllByTestId("artifact-version-option")[2]);
 		expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v7");
@@ -134,7 +138,7 @@ describe("TaskArtifactViewer versions", () => {
 
 describe("TaskArtifactViewer", () => {
 	it("loads the latest artifact into a sandboxed iframe", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b", true)]} initialIndex={1} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b", true)]} initialIndex={1} onClose={vi.fn()} /></I18nProvider>);
 		expect(screen.getByText("Artifact b")).toBeInTheDocument();
 		const frame = await screen.findByTitle("Artifact b");
 		expect(frame).toHaveAttribute("sandbox", "allow-scripts");
@@ -143,11 +147,11 @@ describe("TaskArtifactViewer", () => {
 
 	it("opens the latest artifact when the list updates while the viewer is open", async () => {
 		const { rerender } = render(
-			<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b")]} initialIndex={1} onClose={vi.fn()} /></I18nProvider>,
+			<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b")]} initialIndex={1} onClose={vi.fn()} /></I18nProvider>,
 		);
 
 		rerender(
-			<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b"), artifact("c")]} initialIndex={2} onClose={vi.fn()} /></I18nProvider>,
+			<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b"), artifact("c")]} initialIndex={2} onClose={vi.fn()} /></I18nProvider>,
 		);
 
 		expect(screen.getByText("Artifact c")).toBeInTheDocument();
@@ -156,9 +160,26 @@ describe("TaskArtifactViewer", () => {
 		expect(frame).toBeInTheDocument();
 	});
 
+	it("follows a republish that reorders a list of the same length", async () => {
+		const { rerender } = render(
+			<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b"), artifact("c")]} initialIndex={2} onClose={vi.fn()} /></I18nProvider>,
+		);
+		await userEvent.click(screen.getByLabelText("Previous artifact"));
+		expect(screen.getByText("Artifact b")).toBeInTheDocument();
+
+		// Re-publishing "a" moves its row to the end; the length never changes, so the
+		// viewer has to key on the list itself to land on what was just published.
+		rerender(
+			<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("b"), artifact("c"), artifact("a")]} initialIndex={2} onClose={vi.fn()} /></I18nProvider>,
+		);
+
+		expect(screen.getByText("Artifact a")).toBeInTheDocument();
+		expect(screen.getByText("3 / 3")).toBeInTheDocument();
+	});
+
 	it("toggles fullscreen and closes", async () => {
 		const onClose = vi.fn();
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
 		await userEvent.click(screen.getByTestId("artifact-viewer-fullscreen"));
 		expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-fullscreen", "true");
 		await userEvent.click(screen.getByTestId("artifact-viewer-close"));
@@ -169,7 +190,7 @@ describe("TaskArtifactViewer", () => {
 		const previousTheme = document.documentElement.dataset.theme;
 		document.documentElement.dataset.theme = hostTheme;
 		try {
-			render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+			render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 			const frame = await screen.findByTitle("Artifact a") as HTMLIFrameElement;
 			const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
 			const theme = screen.getByTestId("artifact-viewer-theme");
@@ -190,14 +211,24 @@ describe("TaskArtifactViewer", () => {
 		}
 	});
 
-	it("does not consume terminal shortcuts until focus enters the viewer", async () => {
+	// The lightbox is modal, so it owns Escape wherever focus sits — including on
+	// the terminal behind the scrim, which the user cannot reach anyway.
+	it("owns Escape while open, whatever holds focus", async () => {
 		const onClose = vi.fn();
-		render(<I18nProvider><button type="button">Terminal</button><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+		render(<I18nProvider><button type="button">Terminal</button><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+		await waitFor(() => expect(screen.getByTestId("artifact-viewer")).toBeInTheDocument());
 		screen.getByRole("button", { name: "Terminal" }).focus();
 		fireEvent.keyDown(window, { key: "Escape" });
+		expect(onClose).toHaveBeenCalledOnce();
+	});
+
+	it("closes when the scrim behind the card is clicked, but not the card itself", async () => {
+		const onClose = vi.fn();
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+		const card = await screen.findByTestId("artifact-viewer");
+		await userEvent.click(card);
 		expect(onClose).not.toHaveBeenCalled();
-		screen.getByTestId("artifact-viewer-close").focus();
-		fireEvent.keyDown(window, { key: "Escape" });
+		await userEvent.click(card.parentElement as HTMLElement);
 		expect(onClose).toHaveBeenCalledOnce();
 	});
 
@@ -214,7 +245,7 @@ describe("TaskArtifactViewer", () => {
 			savedName = this.download;
 		});
 
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		const frame = await screen.findByTitle("Artifact a") as HTMLIFrameElement;
 		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain(dataUrl));
 
@@ -236,7 +267,7 @@ describe("TaskArtifactViewer", () => {
 	});
 
 	async function openFind(artifactList = [artifact("a")]) {
-		render(<I18nProvider><button type="button">Terminal</button><TaskArtifactViewer artifacts={artifactList} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><button type="button">Terminal</button><TaskArtifactViewer taskId="t1" artifacts={artifactList} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		const frame = await screen.findByTitle(`Artifact ${artifactList[0].id}`) as HTMLIFrameElement;
 		const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
 		return { frame, postMessage };
@@ -249,14 +280,10 @@ describe("TaskArtifactViewer", () => {
 		window.dispatchEvent(event);
 	}
 
-	it("opens find on ⌘F only once focus is inside the viewer, and searches the sandboxed document", async () => {
+	it("opens find on ⌘F while the lightbox is open, and searches the sandboxed document", async () => {
 		const { frame, postMessage } = await openFind();
 
 		screen.getByRole("button", { name: "Terminal" }).focus();
-		fireEvent.keyDown(window, { code: "KeyF", metaKey: true });
-		expect(screen.queryByTestId("artifact-search-bar")).not.toBeInTheDocument();
-
-		screen.getByTestId("artifact-viewer-close").focus();
 		fireEvent.keyDown(window, { code: "KeyF", metaKey: true });
 		expect(screen.getByTestId("artifact-search-bar")).toBeInTheDocument();
 
@@ -276,7 +303,7 @@ describe("TaskArtifactViewer", () => {
 	// Regression: the magnifier shipped as an EMPTY button once — the Nerd Font glyph
 	// was lost in editing, so the control rendered as a blank box.
 	it("renders an actual magnifier glyph on the header toggle and in the bar", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await screen.findByTitle("Artifact a");
 		const toggle = screen.getByTestId("artifact-viewer-search");
 		expect(toggle).toHaveTextContent("\uf002");
@@ -300,7 +327,7 @@ describe("TaskArtifactViewer", () => {
 
 	it("keeps Escape and the arrow keys off artifact history while find is open", async () => {
 		const onClose = vi.fn();
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
 		await screen.findByTitle("Artifact a");
 		screen.getByTestId("artifact-viewer-close").focus();
 		fireEvent.keyDown(window, { code: "KeyF", metaKey: true });
@@ -329,7 +356,7 @@ describe("TaskArtifactViewer", () => {
 		window.addEventListener("keydown", appLevel);
 		try {
 			const onClose = vi.fn();
-			render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a"), artifact("b")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+			render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a"), artifact("b")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
 			await screen.findByTitle("Artifact a");
 			const close = screen.getByTestId("artifact-viewer-close");
 			close.focus();
@@ -347,7 +374,7 @@ describe("TaskArtifactViewer", () => {
 	});
 
 	it("hands the stored artifact file to the OS browser on desktop", async () => {
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await screen.findByTitle("Artifact a");
 		await userEvent.click(screen.getByTestId("artifact-viewer-open-browser"));
 		expect(mockedApi.request.openArtifactInBrowser).toHaveBeenCalledWith({ artifact: artifact("a") });
@@ -358,7 +385,7 @@ describe("TaskArtifactViewer", () => {
 		vi.mocked(mockedApi.request.openArtifactInBrowser).mockClear();
 		const openSpy = vi.fn().mockReturnValue({});
 		window.open = openSpy;
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await screen.findByTitle("Artifact a");
 		await userEvent.click(screen.getByTestId("artifact-viewer-open-browser"));
 		expect(mockedApi.request.openArtifactInBrowser).not.toHaveBeenCalled();
@@ -369,7 +396,7 @@ describe("TaskArtifactViewer", () => {
 	it("requests ZIP download when the artifact has assets", async () => {
 		const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
 		const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("b", true)]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("b", true)]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		await userEvent.click(screen.getByRole("button", { name: /download zip/i }));
 		await waitFor(() => expect(mockedApi.request.readArtifactDownload).toHaveBeenCalled());
 		expect(createObjectURL).toHaveBeenCalled();
@@ -381,7 +408,7 @@ describe("TaskArtifactViewer", () => {
 	it("uses Android device handoffs for artifact download and browser open", async () => {
 		platform.remote = true;
 		androidBridge.isAndroidAppHost.mockReturnValue(true);
-		render(<I18nProvider><TaskArtifactViewer artifacts={[artifact("b", true)]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+		render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("b", true)]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
 		const frame = await screen.findByTitle("Artifact b") as HTMLIFrameElement;
 		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain("<!doctype html>"));
 
@@ -396,11 +423,31 @@ describe("TaskArtifactViewer", () => {
 		await userEvent.click(screen.getByTestId("artifact-viewer-open-browser"));
 		await waitFor(() => expect(androidBridge.openAndroidHtml).toHaveBeenCalledWith("b.html", expect.stringContaining("<!doctype html>")));
 	});
-	describe("standalone overlay", () => {
-		it("opens as an overlay with no fullscreen toggle to dock back with", async () => {
-			render(<I18nProvider><TaskArtifactViewer standalone artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
-			await waitFor(() => expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-fullscreen", "true"));
-			expect(screen.queryByTestId("artifact-viewer-fullscreen")).toBeNull();
+	describe("lightbox", () => {
+		// The popup replaced a docked, drag-resizable panel; there is no dock to go
+		// back to, so it always opens windowed with the fullscreen toggle available.
+		// decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md
+		it("opens windowed over a scrim, with a fullscreen toggle", async () => {
+			render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={vi.fn()} /></I18nProvider>);
+			const card = await screen.findByTestId("artifact-viewer");
+			expect(card).toHaveAttribute("data-fullscreen", "false");
+			expect(card).toHaveAttribute("aria-modal", "true");
+			expect(card.parentElement).toHaveClass("fixed", "inset-0");
+			expect(screen.getByTestId("artifact-viewer-fullscreen")).toBeInTheDocument();
+			expect(document.documentElement).toHaveAttribute("data-artifact-viewer", "open");
+		});
+
+		it("unwinds fullscreen before closing on Escape", async () => {
+			const onClose = vi.fn();
+			render(<I18nProvider><TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={onClose} /></I18nProvider>);
+			await screen.findByTestId("artifact-viewer");
+			await userEvent.click(screen.getByTestId("artifact-viewer-fullscreen"));
+			expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-fullscreen", "true");
+			fireEvent.keyDown(window, { key: "Escape" });
+			expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-fullscreen", "false");
+			expect(onClose).not.toHaveBeenCalled();
+			fireEvent.keyDown(window, { key: "Escape" });
+			expect(onClose).toHaveBeenCalledOnce();
 		});
 
 		it("wins Escape against the modal that opened it", async () => {
@@ -409,7 +456,7 @@ describe("TaskArtifactViewer", () => {
 			function ModalWithViewer() {
 				// Registers its capture-phase Escape FIRST, like the archived task modal.
 				useEscapeKey(onCloseModal);
-				return <TaskArtifactViewer standalone artifacts={[artifact("a")]} initialIndex={0} onClose={onCloseViewer} />;
+				return <TaskArtifactViewer taskId="t1" artifacts={[artifact("a")]} initialIndex={0} onClose={onCloseViewer} />;
 			}
 			render(<I18nProvider><ModalWithViewer /></I18nProvider>);
 			await waitFor(() => expect(screen.getByTestId("artifact-viewer")).toBeInTheDocument());
@@ -417,5 +464,191 @@ describe("TaskArtifactViewer", () => {
 			expect(onCloseViewer).toHaveBeenCalled();
 			expect(onCloseModal).not.toHaveBeenCalled();
 		});
+	});
+});
+
+describe("TaskArtifactViewer agent messages", () => {
+	async function openViewer(props: Partial<{ artifacts: SharedArtifact[]; taskStatus: "in-progress" | "completed" }> = {}) {
+		render(
+			<I18nProvider>
+				<TaskArtifactViewer
+					taskId="task-7"
+					taskStatus={props.taskStatus ?? "in-progress"}
+					artifacts={props.artifacts ?? [versioned()]}
+					initialIndex={0}
+					onClose={vi.fn()}
+				/>
+			</I18nProvider>,
+		);
+		const frame = await screen.findByTitle("Artifact v") as HTMLIFrameElement;
+		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain("data-dev3-artifact-bridge"));
+		return { frame, postMessage: vi.spyOn(frame.contentWindow!, "postMessage") };
+	}
+
+	function send(frame: HTMLIFrameElement, text = "Option B") {
+		const event = new MessageEvent("message", { data: { type: "dev3-artifact-send", id: 4, text } });
+		Object.defineProperty(event, "source", { value: frame.contentWindow });
+		window.dispatchEvent(event);
+	}
+
+	beforeEach(() => {
+		vi.mocked(toast.success).mockReset();
+		vi.mocked(toast.error).mockReset();
+		vi.mocked(mockedApi.request.sendArtifactMessageToAgent).mockReset();
+		vi.mocked(mockedApi.request.sendArtifactMessageToAgent).mockResolvedValue({ spilledPath: null });
+	});
+
+	it("delivers a send request to the owning task, names the artifact, and confirms it", async () => {
+		const { frame, postMessage } = await openViewer();
+		send(frame);
+
+		await waitFor(() => expect(mockedApi.request.sendArtifactMessageToAgent).toHaveBeenCalledWith({
+			taskId: "task-7",
+			text: "Option B",
+			artifactTitle: "Artifact v",
+			version: 9,
+			versionCount: 9,
+		}));
+		await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: "dev3-artifact-send-result", id: 4, ok: true }, "*"));
+		await waitFor(() => expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Sent to the agent", { taskId: "task-7" }));
+	});
+
+	it("reports a delivery failure into the frame and to the user", async () => {
+		vi.mocked(mockedApi.request.sendArtifactMessageToAgent).mockRejectedValueOnce(new Error("no live agent session"));
+		const { frame, postMessage } = await openViewer();
+		send(frame);
+
+		await waitFor(() => expect(postMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "dev3-artifact-send-result", id: 4, ok: false, reason: "failed" }),
+			"*",
+		));
+		await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalledWith("Couldn't send that to the agent", { taskId: "task-7" }));
+	});
+
+	it("bakes the capability in on the newest version and out on an older one", async () => {
+		const { frame } = await openViewer();
+		expect(frame.getAttribute("srcdoc")).toContain('"canSend":true');
+
+		await userEvent.click(screen.getByTestId("artifact-version-picker"));
+		await userEvent.click(screen.getAllByTestId("artifact-version-option")[2]);
+		await waitFor(() => expect(
+			(screen.getByTitle("Artifact v") as HTMLIFrameElement).getAttribute("srcdoc"),
+		).toContain('"canSend":false'));
+	});
+
+	it("bakes the capability out for a task that already finished", async () => {
+		const { frame } = await openViewer({ taskStatus: "completed" });
+		expect(frame.getAttribute("srcdoc")).toContain('"canSend":false');
+	});
+});
+
+// Republishing swaps the whole document, which used to take the user's half-typed
+// answer with it and leave no trace that anything was lost.
+describe("TaskArtifactViewer unsent input", () => {
+	const DRAFT = [{ key: "answer", value: "a long answer I do not want to retype" }];
+
+	function republished(): SharedArtifact {
+		const before = versioned();
+		return {
+			...before,
+			version: 10,
+			name: "tenth.html",
+			storedPath: "/wt/shared-artifacts/tenth/tenth.html",
+			createdAt: 4_000,
+			previousVersions: [
+				...(before.previousVersions ?? []),
+				{ version: 9, name: "newest.html", storedPath: "/wt/shared-artifacts/newest/newest.html", originalPath: "/tmp/newest.html", bytes: 9, createdAt: 3_000, assets: [] },
+			],
+		};
+	}
+
+	function view(artifacts: SharedArtifact[]) {
+		return (
+			<I18nProvider>
+				<TaskArtifactViewer taskId="task-9" taskStatus="in-progress" artifacts={artifacts} initialIndex={0} onClose={vi.fn()} />
+			</I18nProvider>
+		);
+	}
+
+	async function frameOf(): Promise<HTMLIFrameElement> {
+		const frame = await screen.findByTitle("Artifact v") as HTMLIFrameElement;
+		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain("data-dev3-artifact-bridge"));
+		return frame;
+	}
+
+	function relay(frame: HTMLIFrameElement, data: Record<string, unknown>) {
+		const event = new MessageEvent("message", { data });
+		Object.defineProperty(event, "source", { value: frame.contentWindow });
+		window.dispatchEvent(event);
+	}
+
+	it("keeps the answer, offers the version it belongs to, and sends from there", async () => {
+		const { rerender } = render(view([versioned()]));
+		const frame = await frameOf();
+		relay(frame, { type: "dev3-artifact-draft", fields: DRAFT });
+
+		// The agent answers by republishing — the document under the user is replaced.
+		rerender(view([republished()]));
+		await waitFor(() => expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v10"));
+
+		const notice = await screen.findByTestId("artifact-draft-notice");
+		expect(notice).toHaveTextContent("unsent answer on version 9");
+
+		await userEvent.click(screen.getByTestId("artifact-draft-restore"));
+		await waitFor(() => expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v9"));
+
+		// Back on version 9 the values go in, and the form is not a dead end: the
+		// question on screen is the one being answered, so sending stays allowed.
+		const back = await frameOf();
+		const postMessage = vi.spyOn(back.contentWindow!, "postMessage");
+		fireEvent.load(back);
+		expect(postMessage).toHaveBeenCalledWith({ type: "dev3-artifact-draft-restore", draft: { fields: DRAFT, custom: undefined } }, "*");
+		expect(back.getAttribute("srcdoc")).toContain('"canSend":true');
+	});
+
+	it("tells the frame the capability moved instead of rebuilding the document", async () => {
+		render(view([versioned()]));
+		// Park on an older version, where sending is refused and the document says so.
+		// Options run newest first: 9, 8, 7.
+		await userEvent.click(screen.getByTestId("artifact-version-picker"));
+		await userEvent.click(screen.getAllByTestId("artifact-version-option")[2]);
+		const frame = await frameOf();
+		await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain('"canSend":false'));
+		const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+
+		// Typing here earns the capability back — and must not cost the document.
+		relay(frame, { type: "dev3-artifact-draft", fields: DRAFT });
+
+		await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: "dev3-artifact-can-send", canSend: true }, "*"));
+		expect(frame.getAttribute("srcdoc")).toContain('"canSend":false');
+	});
+
+	it("drops the offer when the form goes back to its defaults", async () => {
+		const { rerender } = render(view([versioned()]));
+		const frame = await frameOf();
+		relay(frame, { type: "dev3-artifact-draft", fields: DRAFT });
+		relay(frame, { type: "dev3-artifact-draft", fields: [] });
+
+		rerender(view([republished()]));
+		await waitFor(() => expect(screen.getByTestId("artifact-version-picker")).toHaveTextContent("v10"));
+		expect(screen.queryByTestId("artifact-draft-notice")).toBeNull();
+	});
+
+	it("hides the notice on request without throwing the answer away", async () => {
+		const { rerender } = render(view([versioned()]));
+		relay(await frameOf(), { type: "dev3-artifact-draft", fields: DRAFT });
+		rerender(view([republished()]));
+
+		await userEvent.click(await screen.findByTestId("artifact-draft-dismiss"));
+		expect(screen.queryByTestId("artifact-draft-notice")).toBeNull();
+
+		// The draft is still there — reaching version 9 by hand restores it.
+		// Options run newest first: 10, 9, 8, 7.
+		await userEvent.click(screen.getByTestId("artifact-version-picker"));
+		await userEvent.click(screen.getAllByTestId("artifact-version-option")[1]);
+		const back = await frameOf();
+		const postMessage = vi.spyOn(back.contentWindow!, "postMessage");
+		fireEvent.load(back);
+		expect(postMessage).toHaveBeenCalledWith({ type: "dev3-artifact-draft-restore", draft: { fields: DRAFT, custom: undefined } }, "*");
 	});
 });

@@ -7,6 +7,7 @@ import { PRIORITY_NAME_KEYS } from "./priorityStyles";
 import { groupTasksIntoTiers } from "./sidebarTiers";
 import { toast } from "../toast";
 import { useStatusColors } from "../hooks/useStatusColors";
+import { useTaskPrBadges } from "../hooks/useTaskPrBadges";
 import { useTerminalPreview } from "../hooks/useTerminalPreview";
 import { api } from "../rpc";
 import type { AppAction, Route } from "../state";
@@ -23,7 +24,8 @@ import Tooltip from "./Tooltip";
 import { PanelLeftIcon } from "./TaskIcons";
 import ActiveTaskRow from "./ActiveTaskRow";
 import { useSpaces } from "../useSpaces";
-import { spaceSiblingProjectIds } from "../utils/spaceScope";
+import SpaceIcon from "./SpaceIcon";
+import { spaceScopeProjectIds } from "../utils/spaceScope";
 
 type SidebarScope = "project" | "global" | "space";
 const LS_SIDEBAR_SCOPE = "dev3-sidebar-scope";
@@ -55,6 +57,12 @@ interface ActiveTasksSidebarProps {
 	/** Absent on the dashboard mount: no current project, so the scope locks to
 	 *  global ("across all spaces") and the scope switcher is not rendered. */
 	project?: Project;
+	/**
+	 * The space the user came through, when there is one. A project can sit in
+	 * several spaces, so `space` scope cannot be derived from the project alone —
+	 * without this it pools every space the project belongs to.
+	 */
+	spaceId?: string;
 	tasks?: Task[];
 	allProjects?: Project[];
 	activeTaskId?: string;
@@ -106,6 +114,26 @@ function ScopeGlyph({ outline, filled, active, struck }: { outline: string; fill
 	);
 }
 
+/**
+ * The space scope wears the app's space glyph rather than a ring, so the control
+ * says which pool it selects. It is an SVG, so it cannot cross-fade two font
+ * glyphs like {@link ScopeGlyph} — weight carries the on state instead, and the
+ * disabled strike is a drawn rule (`line-through` does nothing to an `<svg>`).
+ */
+function SpaceScopeGlyph({ active, struck }: { active: boolean; struck?: boolean }) {
+	return (
+		<span aria-hidden className="relative inline-flex items-center justify-center">
+			<SpaceIcon className={`w-3.5 h-3.5 transition-[stroke-width] duration-300 ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${active ? "[stroke-width:2.2]" : ""}`} />
+			{struck && (
+				<span
+					data-testid="sidebar-scope-space-struck"
+					className="pointer-events-none absolute left-0 right-0 top-1/2 h-px -translate-y-1/2 rotate-[-20deg] bg-current"
+				/>
+			)}
+		</span>
+	);
+}
+
 /** Shared chrome for the three scope toggles — press feedback included. */
 const SCOPE_BUTTON_CLASS =
 	"inline-flex items-center justify-center h-5 w-5 rounded-md leading-none transition-[color,background-color,scale] duration-150 ease-out active:scale-[0.96]";
@@ -119,6 +147,7 @@ const SCOPE_STATE_CLASS = (active: boolean) =>
 
 function ActiveTasksSidebar({
 	project,
+	spaceId,
 	tasks = [],
 	allProjects,
 	activeTaskId,
@@ -149,10 +178,12 @@ function ActiveTasksSidebar({
 	const { spaces, loading: spacesLoading } = useSpaces();
 
 	// null = the current project is in no space → the button disables and a
-	// stored "space" scope falls back to project below.
+	// stored "space" scope falls back to project below. With a space on the route
+	// the pool is that one space; without one (arrived from the dashboard, ⌘K, a
+	// deep link) it stays the union of the project's spaces.
 	const siblingIds = useMemo(
-		() => (project ? spaceSiblingProjectIds(spaces, project.id) : null),
-		[spaces, project],
+		() => (project ? spaceScopeProjectIds(spaces, project.id, spaceId ?? null) : null),
+		[spaces, project, spaceId],
 	);
 
 	const setScope = useCallback((next: SidebarScope) => {
@@ -259,10 +290,17 @@ function ActiveTasksSidebar({
 		return map;
 	}, [allProjects, project]);
 
+	// PR badges from what each task already carries, kept fresh by the
+	// `taskPrStatus` push. No `discoverProjectIds`: this surface spans EVERY
+	// project in global scope, so the board's branch->PR lookup would fan out to
+	// one `gh` call per project per minute instead of one. See
+	// decisions/2026/08/30/sidebar-pr-badge-without-discovery-poll.md.
+	const knowsProject = useCallback((projectId: string) => projectById.has(projectId), [projectById]);
+	const taskPrMap = useTaskPrBadges({ tasks: activeTasks, knowsProject });
+
 	// Facet resolver + funnel pool for the token-DSL filter. Labels/statuses are
 	// resolved per the task's OWN project (the pool may be cross-project in
-	// global scope). The sidebar tracks no live PR map — the matcher falls back to
-	// the task's own sticky prNumber/prUrl, so PR search still works here.
+	// global scope).
 	const resolver: FacetResolver = useMemo(() => ({
 		agents,
 		labelsFor: (task) => {
@@ -281,7 +319,8 @@ function ActiveTasksSidebar({
 		// Space names come from the task's OWN project, so a cross-project pool
 		// can be filtered by space; a single-project pool yields one value.
 		spaceNamesFor: (task) => spacesOfProject(spaces, task.projectId).map((s) => s.name),
-	}), [agents, projectById, taskPorts, spaces, t]);
+		prNumberFor: (task) => taskPrMap.get(task.id)?.number ?? null,
+	}), [agents, projectById, taskPorts, taskPrMap, spaces, t]);
 
 	const priorityCandidates = useMemo<FilterFunnelOption[]>(
 		() => ALL_PRIORITIES.map((p) => ({ facet: "priority" as const, value: p, label: `${p} — ${t(PRIORITY_NAME_KEYS[p])}` })),
@@ -531,8 +570,7 @@ function ActiveTasksSidebar({
 								}`}
 								data-testid="sidebar-scope-space"
 							>
-								{/* Nerd Font: nf-cod-circle_large_outline (U+EABC) \u2192 nf-cod-circle_large_filled (U+EBB5) */}
-								<ScopeGlyph outline={"\uEABC"} filled={"\uEBB5"} active={effectiveScope === "space"} struck={siblingIds === null} />
+								<SpaceScopeGlyph active={effectiveScope === "space"} struck={siblingIds === null} />
 							</button>
 						</Tooltip>
 						)}
@@ -707,6 +745,7 @@ function ActiveTasksSidebar({
 											groupMembers={groupMembers}
 											projectBadgeName={showProjectBadge ? taskProject?.name ?? t("sidebar.unknownProject") : undefined}
 											ports={taskPorts.get(task.id)}
+											prInfo={taskPrMap.get(task.id)}
 											statusColors={statusColors}
 											color={taskColor(task)}
 											now={now}

@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
 	getLocalInterfaces: vi.fn(),
 	resolveAccessHost: vi.fn(),
 	getServerPort: vi.fn(),
+	getRemoteAccessStatus: vi.fn(),
+	retryRemoteAccessServer: vi.fn(),
+	getStaticCode: vi.fn<() => string | null>(),
+	getSignInLink: vi.fn<() => Promise<string | null>>(),
 	resolveRemoteTunnelProvider: vi.fn(),
 }));
 
@@ -31,6 +35,10 @@ vi.mock("../../remote-access-server", () => ({
 	getLocalInterfaces: mocks.getLocalInterfaces,
 	resolveAccessHost: mocks.resolveAccessHost,
 	getServerPort: mocks.getServerPort,
+	getRemoteAccessStatus: mocks.getRemoteAccessStatus,
+	retryRemoteAccessServer: mocks.retryRemoteAccessServer,
+	getStaticCode: mocks.getStaticCode,
+	getSignInLink: mocks.getSignInLink,
 }));
 
 import { remoteAccessHandlers, TUNNEL_DNS_SETTLE_DELAY_MS } from "../remote-access";
@@ -42,12 +50,15 @@ describe("remote access handler", () => {
 		mocks.isTunnelBinaryAvailable.mockReturnValue(true);
 		mocks.getTunnelState.mockReturnValue("idle");
 		mocks.getServerPort.mockReturnValue(12478);
+		mocks.getRemoteAccessStatus.mockReturnValue({ running: true, port: 12478, failure: null });
 		mocks.startTunnel.mockResolvedValue("https://public.trycloudflare.com");
 		mocks.generateQrDataUrl.mockResolvedValue("data:image/png;base64,test");
 		mocks.getAccessUrl.mockResolvedValue("https://public.trycloudflare.com/?token=test");
 		mocks.getLocalInterfaces.mockReturnValue([]);
 		mocks.resolveAccessHost.mockReturnValue("127.0.0.1");
 		mocks.resolveRemoteTunnelProvider.mockReturnValue({ kind: "cloudflare", command: null, urlRegex: null });
+		mocks.getStaticCode.mockReturnValue(null);
+		mocks.getSignInLink.mockResolvedValue(null);
 	});
 
 	afterEach(() => {
@@ -93,5 +104,39 @@ describe("remote access handler", () => {
 
 		expect(result.tunnelProvider).toBe("custom");
 		expect(result.tunnelBinaryInstalled).toBe(true);
+	});
+
+	// The modal must be able to say "a permanent code is set" without ever seeing
+	// the code — reporting the value would put it in the renderer and in screenshots.
+	it("reports whether a static access code is set, never the code itself", async () => {
+		mocks.getStaticCode.mockReturnValue("sesame-open-up");
+		const withCode = await remoteAccessHandlers.getRemoteAccessQR({ tunnel: false });
+		expect(withCode.staticCodeActive).toBe(true);
+		// The code itself travels only inside signInLink, which is copied on an
+		// explicit click and never rendered — nothing else in the payload holds it.
+		expect(JSON.stringify({ ...withCode, signInLink: null })).not.toContain("sesame-open-up");
+
+		mocks.getStaticCode.mockReturnValue(null);
+		const without = await remoteAccessHandlers.getRemoteAccessQR({ tunnel: false });
+		expect(without.staticCodeActive).toBe(false);
+		expect(without.signInLink).toBeNull();
+	});
+
+	// Nothing is listening means the port is 0, so a QR minted anyway would encode
+	// http://host:0/ — scannable-looking and dead. The modal gets the status instead.
+	it("mints no QR and no URL while the server never bound its port", async () => {
+		mocks.getRemoteAccessStatus.mockReturnValue({
+			running: false,
+			port: 0,
+			failure: { port: 45999, reason: "port-in-use", message: "Is port 45999 in use?" },
+		});
+
+		const result = await remoteAccessHandlers.getRemoteAccessQR({});
+
+		expect(result.qrDataUrl).toBe("");
+		expect(result.accessUrl).toBe("");
+		expect(result.signInLink).toBeNull();
+		expect(result.serverStatus.failure?.port).toBe(45999);
+		expect(mocks.generateQrDataUrl).not.toHaveBeenCalled();
 	});
 });

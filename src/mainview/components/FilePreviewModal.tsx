@@ -9,6 +9,7 @@ import { writeClipboardText } from "../utils/clipboard-write";
 import { isAndroidAppHost } from "../android-client-bridge";
 import type { FilePreviewResult } from "../../shared/types";
 import { MarkdownDocument } from "./pr-review/markdown";
+import { isRenderableDocPath, toRenderableMarkdown } from "./pr-review/markdown-files";
 
 interface FilePreviewModalProps {
 	path: string;
@@ -71,7 +72,7 @@ export default function FilePreviewModal({ path, line, taskId, onClose }: FilePr
 		}
 	}, [preview]);
 
-	const isMarkdown = /\.(md|markdown)$/i.test(path);
+	const isRenderable = isRenderableDocPath(path);
 	const textContent = preview?.kind === "text" ? preview.content : null;
 	const slash = path.lastIndexOf("/");
 	const fileName = slash >= 0 ? path.slice(slash + 1) : path;
@@ -112,9 +113,9 @@ export default function FilePreviewModal({ path, line, taskId, onClose }: FilePr
 			case "text":
 				return (
 					<div className="min-h-0 flex-1 overflow-auto p-4">
-						{isMarkdown && !showRaw ? (
+						{isRenderable && !showRaw ? (
 							<MarkdownDocument
-								body={preview.content}
+								body={toRenderableMarkdown(preview.content, path)}
 								className="max-w-[70ch] mx-auto"
 								imageBaseDir={dirName || null}
 							/>
@@ -210,7 +211,7 @@ export default function FilePreviewModal({ path, line, taskId, onClose }: FilePr
 							</p>
 						)}
 					</div>
-					{isMarkdown && textContent !== null && (
+					{isRenderable && textContent !== null && (
 						<div className="shrink-0 flex rounded-lg border border-edge overflow-hidden text-xs">
 							{([false, true] as const).map((raw) => (
 								<button

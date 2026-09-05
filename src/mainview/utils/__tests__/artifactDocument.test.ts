@@ -107,9 +107,43 @@ describe("composeArtifactDocument", () => {
 		expect(output).toContain("CSS.highlights");
 	});
 
+	it("publishes the resolved asset map so report code can build a src at runtime", () => {
+		const output = composeArtifactDocument('<html><head></head><body></body></html>', [
+			{ name: "shots/run.png", mime: "image/png", dataUrl: "data:image/png;base64,UlVO" },
+		]);
+
+		expect(output).toContain("window.__dev3ArtifactAssets=");
+		expect(output).toContain('"shots/run.png":"data:image/png;base64,UlVO"');
+		// A src the HTML scan never sees still resolves, so reports published before
+		// dev3Artifact.asset() existed keep rendering.
+		expect(output).toContain("MutationObserver");
+		expect(output).toContain("img,source");
+	});
+
+	it("escapes a closing script tag smuggled through an asset name", () => {
+		const output = composeArtifactDocument("<html><head></head><body></body></html>", [
+			{ name: "</script><script>alert(1)</script>.png", mime: "image/png", dataUrl: "data:image/png;base64,QQ==" },
+		]);
+
+		expect(output).not.toContain("</script><script>alert(1)");
+		expect(output).toContain("\\u003c/script>");
+	});
+
 	it("injects the find bridge into bare-fragment artifacts too", () => {
 		const output = composeArtifactDocument("<p>no html wrapper</p>", []);
 		expect(output).toContain("data-dev3-artifact-find");
 		expect(output).toContain("no html wrapper");
+	});
+
+	// The bridge's own behaviour is covered in artifactBridge.test.ts — here we only
+	// assert it reaches the document with the capability the viewer asked for.
+	it("injects the agent bridge carrying the requested capability flag", () => {
+		const enabled = composeArtifactDocument("<p>report</p>", [], undefined, true);
+		expect(enabled).toContain("data-dev3-artifact-bridge");
+		expect(enabled).toContain('"canSend":true');
+
+		expect(composeArtifactDocument("<p>report</p>", [], undefined, false)).toContain('"canSend":false');
+		// Callers that pass no flag get the inert bridge, never a live one.
+		expect(composeArtifactDocument("<p>report</p>", [])).toContain('"canSend":false');
 	});
 });

@@ -510,10 +510,135 @@ describe("GlobalHeader — project switcher dropdown", () => {
 			expect(badgeOf("Project Delta")).toBe("⌘3");
 		});
 
+		// A heading names a board of its own, so it has to lead somewhere. Before
+		// this it was an inert label and the space board had exactly one entrance.
+		it("opens the space board when its heading is clicked", async () => {
+			withSpaces();
+			const navigate = vi.fn();
+			const user = userEvent.setup();
+			renderHeader({ screen: "project", projectId: "p1" }, [project1, project2, project4], navigate);
+			await user.click(getChevronButton());
+			const menu = await screen.findByRole("menu");
+			await within(menu).findByText("Dev Space");
+
+			await user.click(screen.getByTestId("switcher-space-sp_dev"));
+
+			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1", spaceId: "sp_dev" });
+		});
+
+		it("anchors on a member that still exists, not on the current project", async () => {
+			withSpaces();
+			const navigate = vi.fn();
+			const user = userEvent.setup();
+			renderHeader({ screen: "project", projectId: "p1" }, [project1, project2, project4], navigate);
+			await user.click(getChevronButton());
+			const menu = await screen.findByRole("menu");
+			await within(menu).findByText("Other Space");
+
+			// p1 is the current project but is not in sp_other; p2 is its only member.
+			await user.click(screen.getByTestId("switcher-space-sp_other"));
+
+			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p2", spaceId: "sp_other" });
+		});
+
+		it("leaves the Home heading inert — it names no space", async () => {
+			withSpaces();
+			const menu = await openSwitcher();
+			await within(menu).findByText("Home");
+			expect(within(menu).getByText("Home").closest("button")).toBeNull();
+		});
+
 		it("stays flat when no space holds a visible project", async () => {
 			const menu = await openSwitcher();
 			expect(within(menu).queryByText("Home")).not.toBeInTheDocument();
-			expect(within(menu).getAllByRole("button")).toHaveLength(3);
+			// The search row's ⌘K button is not a project row — count the rows only.
+			expect(within(menu).getAllByTestId("switcher-row")).toHaveLength(3);
+		});
+	});
+
+	describe("project switcher search", () => {
+		const project4: Project = { ...project2, id: "p4", name: "Project Delta" };
+
+		function withSpaces() {
+			mockedApi.request.getSpaces.mockResolvedValue({
+				version: 1,
+				spaces: [
+					{ id: "sp_dev", name: "Dev Space", parentId: null, projectIds: ["p1", "p2"], createdAt: 1 },
+				],
+				order: ["sp_dev"],
+			});
+		}
+
+		async function openSwitcher() {
+			const user = userEvent.setup();
+			const navigate = vi.fn();
+			renderHeader({ screen: "project", projectId: "p1" }, [project1, project2, project4], navigate);
+			await user.click(getChevronButton());
+			const menu = await screen.findByRole("menu");
+			return { user, menu, navigate };
+		}
+
+		/** Row labels, read off textContent — a matched row splits its name per char. */
+		function rowNames(menu: HTMLElement) {
+			return within(menu)
+				.getAllByTestId("switcher-row")
+				.map((row) => row.querySelector("span.flex-1")?.textContent ?? "");
+		}
+
+		it("filters the rows down to the typed match", async () => {
+			const { user, menu } = await openSwitcher();
+			await user.type(screen.getByTestId("project-switcher-search"), "delta");
+			expect(rowNames(menu)).toEqual(["Project Delta"]);
+		});
+
+		it("surfaces a space's members when the space name is typed", async () => {
+			withSpaces();
+			const { user, menu } = await openSwitcher();
+			await within(menu).findByText("Dev Space");
+			await user.type(screen.getByTestId("project-switcher-search"), "dev space");
+			// Alpha and Beta are the members; Delta belongs to no space.
+			expect(rowNames(menu)).toEqual(["Project Alpha", "Project Beta"]);
+		});
+
+		it("drops a space group that has no match left", async () => {
+			withSpaces();
+			const { user, menu } = await openSwitcher();
+			await within(menu).findByText("Dev Space");
+			await user.type(screen.getByTestId("project-switcher-search"), "delta");
+			expect(within(menu).queryByText("Dev Space")).not.toBeInTheDocument();
+		});
+
+		it("says so when nothing matches", async () => {
+			const { user, menu } = await openSwitcher();
+			await user.type(screen.getByTestId("project-switcher-search"), "zzzz");
+			expect(within(menu).queryAllByTestId("switcher-row")).toHaveLength(0);
+			expect(within(menu).getByText("No matching projects")).toBeInTheDocument();
+		});
+
+		it("opens the highlighted match on Enter", async () => {
+			const { user, navigate } = await openSwitcher();
+			const input = screen.getByTestId("project-switcher-search");
+			await user.type(input, "beta");
+			await user.type(input, "{Enter}");
+			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p2" });
+		});
+
+		it("walks the rows with the arrow keys", async () => {
+			const { user, navigate } = await openSwitcher();
+			const input = screen.getByTestId("project-switcher-search");
+			await user.type(input, "{ArrowDown}{Enter}");
+			// Row 0 is Alpha; one step down lands on Beta.
+			expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p2" });
+		});
+
+		it("hands off to the ⌘K palette and closes the menu", async () => {
+			const onPalette = vi.fn();
+			window.addEventListener("menu:open-project-switch", onPalette);
+			const { user } = await openSwitcher();
+			await user.click(screen.getByTestId("project-switcher-palette-hint"));
+			window.removeEventListener("menu:open-project-switch", onPalette);
+			expect(onPalette).toHaveBeenCalled();
+			expect(screen.queryByRole("menu")).not.toBeInTheDocument();
 		});
 	});
 
@@ -1480,5 +1605,164 @@ describe("GlobalHeader — native terminal backend mark", () => {
 			makeBreadcrumbTask(),
 		]);
 		expect(screen.queryByTestId("breadcrumb-native-backend")).toBeNull();
+	});
+});
+
+// ---- The space is a level of the trail, not a memory ----
+//
+// A project can sit in several spaces, so which one the user came through is not
+// derivable from the project. The trail states it: `dev-3.0 / AI / Nanochat`,
+// with the space a plain link and the tail always the switcher chip.
+describe("GlobalHeader — the space segment", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockedApi.request.getTasks.mockResolvedValue([]);
+	});
+
+	function withSpaces(sensitive = false) {
+		mockedApi.request.getSpaces.mockResolvedValue({
+			version: 1,
+			spaces: [
+				{ id: "sp_ai", name: "AI Space", parentId: null, projectIds: ["p1", "p2"], createdAt: 1, sensitive },
+				{ id: "sp_other", name: "Other Space", parentId: null, projectIds: ["p1"], createdAt: 2 },
+			],
+			order: ["sp_ai", "sp_other"],
+		});
+	}
+
+	const splitInSpace: Route = { screen: "project", projectId: "p1", spaceId: "sp_ai", activeTaskId: "t1" };
+
+	it("names the space and the project, in that order, with a task open", async () => {
+		withSpaces();
+		renderHeader(splitInSpace, [project1, project2], vi.fn(), [makeBreadcrumbTask()]);
+		const crumb = await screen.findByTestId("breadcrumb-space");
+		expect(crumb).toHaveTextContent("AI Space");
+		expect(screen.getByText("Project Alpha")).toBeInTheDocument();
+		expect(screen.getByText("My Task Title")).toBeInTheDocument();
+		// dev-3.0 / AI Space / Project Alpha / #42 — the space sits before the chip.
+		expect(crumb.compareDocumentPosition(screen.getByText("Project Alpha")) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
+	});
+
+	it("carries the space into a full-page task too", async () => {
+		withSpaces();
+		renderHeader(
+			{ screen: "task", projectId: "p1", spaceId: "sp_ai", taskId: "t1" },
+			[project1],
+			vi.fn(),
+			[makeBreadcrumbTask()],
+		);
+		expect(await screen.findByTestId("breadcrumb-space")).toHaveTextContent("AI Space");
+	});
+
+	it("is a plain link to that space's board — never a second switcher", async () => {
+		withSpaces();
+		const navigate = vi.fn();
+		renderHeader(splitInSpace, [project1, project2], navigate, [makeBreadcrumbTask()]);
+		const user = userEvent.setup();
+		await user.click(await screen.findByTestId("breadcrumb-space"));
+		// Up a level: the space's own board, the task dropped.
+		expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1", spaceId: "sp_ai" });
+		// One dropdown in the trail, and it belongs to the tail.
+		expect(screen.getAllByLabelText("Switch project")).toHaveLength(1);
+	});
+
+	// On the space board the space IS the tail, so it is the chip — putting a link
+	// there too would read as `AI / AI`.
+	it("does not duplicate the space on the space board itself", async () => {
+		withSpaces();
+		renderHeader({ screen: "project", projectId: "p1", spaceId: "sp_ai" }, [project1, project2]);
+		await screen.findByText("AI Space");
+		expect(screen.queryByTestId("breadcrumb-space")).toBeNull();
+	});
+
+	it("stays absent when the route names no space", async () => {
+		withSpaces();
+		renderHeader({ screen: "project", projectId: "p1", activeTaskId: "t1" }, [project1], vi.fn(), [
+			makeBreadcrumbTask(),
+		]);
+		await screen.findByText("Project Alpha");
+		expect(screen.queryByTestId("breadcrumb-space")).toBeNull();
+	});
+
+	// A space name can be a client's name, so it blurs with everything else the
+	// camera must not see.
+	it("blurs a sensitive space's name", async () => {
+		withSpaces(true);
+		renderHeader(splitInSpace, [project1, project2], vi.fn(), [makeBreadcrumbTask()]);
+		const crumb = await screen.findByTestId("breadcrumb-space");
+		expect(crumb.querySelector(".streamer-private")).not.toBeNull();
+	});
+
+	// The unified-board button asks on exactly one condition: is there anything to
+	// ask about. Keying it on the route instead made the menu appear and vanish for
+	// no visible reason, which is what the user reported.
+	it("asks which space whenever the project has two, even from inside one of them", async () => {
+		withSpaces();
+		renderHeader(splitInSpace, [project1, project2], vi.fn(), [makeBreadcrumbTask()]);
+		const user = userEvent.setup();
+		await user.click(await screen.findByTestId("space-zoom-out"));
+		const menu = await screen.findByRole("menu");
+		expect(within(menu).getByText("Which space?")).toBeInTheDocument();
+		// The board you are already on is marked, not hidden — the menu's length
+		// must not depend on where you stand.
+		const rows = within(menu).getAllByRole("button");
+		const current = rows.find((b) => b.textContent?.includes("AI Space"));
+		expect(current).toHaveAttribute("aria-current", "true");
+		expect(rows.find((b) => b.textContent?.includes("Other Space"))).not.toHaveAttribute("aria-current");
+	});
+
+	it("still asks when the route names no space", async () => {
+		withSpaces();
+		renderHeader({ screen: "project", projectId: "p1" }, [project1, project2]);
+		const user = userEvent.setup();
+		await user.click(await screen.findByTestId("space-zoom-out"));
+		expect(await screen.findByText("Which space?")).toBeInTheDocument();
+	});
+
+	// p2 belongs to sp_ai alone: one destination, so there is nothing to ask.
+	it("goes straight there when the project has exactly one space", async () => {
+		withSpaces();
+		const navigate = vi.fn();
+		renderHeader({ screen: "project", projectId: "p2" }, [project1, project2], navigate);
+		const user = userEvent.setup();
+		await user.click(await screen.findByTestId("space-zoom-out"));
+		expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p2", spaceId: "sp_ai" });
+		expect(screen.queryByText("Which space?")).toBeNull();
+	});
+
+	// A project in two spaces rendered under both, and both copies lit up — the
+	// user was told they were in two places at once.
+	it("marks the current project only under the space on the route", async () => {
+		withSpaces();
+		renderHeader({ screen: "project", projectId: "p1", spaceId: "sp_ai" }, [project1, project2]);
+		const user = userEvent.setup();
+		await user.click(getChevronButton());
+		const menu = await screen.findByRole("menu");
+		const rows = within(menu).getAllByRole("button").filter((b) => b.textContent?.includes("Project Alpha"));
+		// Once under AI Space, once under Other Space, plus the Home group never
+		// holds it — exactly one of them reads as current.
+		expect(rows.length).toBeGreaterThan(1);
+		expect(rows.filter((b) => b.className.includes("text-accent"))).toHaveLength(1);
+	});
+
+	it("marks every copy when the route names no space, having no basis to choose", async () => {
+		withSpaces();
+		renderHeader({ screen: "project", projectId: "p1" }, [project1, project2]);
+		const user = userEvent.setup();
+		await user.click(getChevronButton());
+		const menu = await screen.findByRole("menu");
+		const rows = within(menu).getAllByRole("button").filter((b) => b.textContent?.includes("Project Alpha"));
+		expect(rows.filter((b) => b.className.includes("text-accent")).length).toBe(rows.length);
+	});
+
+	// `AI` in a chip is otherwise indistinguishable from a project called AI.
+	it("wears the space glyph when the chip names a space", async () => {
+		withSpaces();
+		const { container } = renderHeader({ screen: "project", projectId: "p1", spaceId: "sp_ai" }, [project1, project2]);
+		const chip = await screen.findByText("AI Space");
+		expect(chip.parentElement?.querySelector("svg")).not.toBeNull();
+		// The project chip carries no such glyph.
+		expect(container).toBeTruthy();
 	});
 });

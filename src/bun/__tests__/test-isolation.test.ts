@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { tmpdir } from "node:os";
-import { INHERITED_TASK_CONTEXT_ENV, deriveTestRunRoot, testWorktreeId } from "../../../test-isolation";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { createServer } from "node:net";
+import { testScopedPath, testSocketPath } from "../../../test-scoped-path";
+import {
+	DEV3_ENV_PREFIX,
+	MAX_UNIX_SOCKET_PATH_BYTES,
+	PANE_INJECTED_ENV_SAMPLE,
+	PRESERVED_TEST_ENV_PREFIX,
+	assertDev3HomeIsSandboxed,
+	cleanupTestIsolation,
+	configureTestIsolation,
+	deriveTestRunRoot,
+	deriveTestSocketRoot,
+	testWorktreeId,
+} from "../../../test-isolation";
 import { resolveDev3Home } from "../../shared/dev3-home";
 
 describe("test process isolation", () => {
@@ -35,29 +50,95 @@ describe("test process isolation", () => {
 		expect(process.env.XDG_RUNTIME_DIR).toContain(root);
 	});
 
-	it("scrubs the task context of the agent that started this run", () => {
-		// These suites usually run INSIDE a dev3 task pane. Leaving DEV3_TASK_SEQ or
-		// DEV3_PANE_ID set would let a module quietly pick up the agent's own task
-		// and produce a different verdict locally than in CI.
-		for (const key of INHERITED_TASK_CONTEXT_ENV) expect(process.env[key]).toBeUndefined();
+	it("keeps the socket root short enough to bind, however deep the temp dir is", () => {
+		// The whole point: bounded by CONSTRUCTION, not by how short this machine's
+		// $TMPDIR happens to be. macOS already spends ~48 bytes on /var/folders/…,
+		// and a fixture under the run root came to 119 bytes — 15 over the limit.
+		const absurdTempRoot = `/var/folders/${"n".repeat(180)}/T`;
+		const socketRoot = deriveTestSocketRoot("/repo/worktrees/alpha", "bun", 99999, absurdTempRoot);
+		const longestFixture = join(socketRoot, `${"a".repeat(8)}-endpoint.sock`);
+
+		expect(Buffer.byteLength(longestFixture)).toBeLessThanOrEqual(MAX_UNIX_SOCKET_PATH_BYTES);
+		expect(socketRoot.startsWith(absurdTempRoot)).toBe(false);
 	});
 
-	it("scrubs the native session config of the pane this run started in", () => {
-		// An agent pane on the native backend exports its own host's
-		// DEV3_NATIVE_SESSION_* — which a launcher test would otherwise read as if
-		// the launcher had set it.
-		expect(Object.keys(process.env).filter((key) => key.startsWith("DEV3_NATIVE_SESSION_"))).toEqual([]);
+	it("gives the live run a socket root that is created and under the limit", () => {
+		const socketRoot = process.env.DEV3_TEST_SOCKET_ROOT;
+		expect(socketRoot).toBeTruthy();
+		expect(existsSync(socketRoot as string)).toBe(true);
+		expect(Buffer.byteLength(testSocketPath("o.sock"))).toBeLessThanOrEqual(MAX_UNIX_SOCKET_PATH_BYTES);
 	});
 
-	it("names every task-context var dev3 injects into a pane", () => {
-		// A new injected var must be added to the scrub list in the same change.
-		expect([...INHERITED_TASK_CONTEXT_ENV]).toEqual([
-			"DEV3_TASK_ID",
-			"DEV3_TASK_SEQ",
-			"DEV3_TASK_TITLE",
-			"DEV3_PANE_ID",
-			"DEV3_WORKTREE_PATH",
-			"DEV3_BRANCH_NAME",
-		]);
+	it("really binds a socket at the path the helper hands out", async () => {
+		// The guard above is arithmetic; this is the kernel's own verdict.
+		const path = testSocketPath("bind.sock");
+		const server = createServer();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(path, () => resolve());
+			});
+			expect(existsSync(path)).toBe(true);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
+	it("refuses to hand a socket path out of the deep run root", () => {
+		expect(() => testScopedPath("s.sock")).toThrow(/testSocketPath/);
+	});
+
+	it("leaves this run carrying no pane-injected DEV3_ var at all", () => {
+		// These suites usually run INSIDE a dev3 task pane, which exports its data
+		// home, its checkout, its worktree, its ports and its task. Anything that
+		// survived here would let a module quietly test the agent's OWN environment.
+		const root = process.env.DEV3_TEST_ROOT as string;
+		// Anything left outside the harness's own DEV3_TEST_ namespace has to be a
+		// path this run owns — DEV3_LOG_DIR is set by the isolation itself.
+		const escaped = Object.keys(process.env)
+			.filter((key) => key.startsWith(DEV3_ENV_PREFIX) && !key.startsWith(PRESERVED_TEST_ENV_PREFIX))
+			.filter((key) => !process.env[key]?.startsWith(root));
+		expect(escaped).toEqual([]);
+	});
+
+	it("scrubs a DEV3_ var nobody listed, including one invented after this test", () => {
+		// The point of default-deny: the scrub is a prefix rule, so a var dev3 gains
+		// later is dropped with nobody editing test-isolation.ts. A named list is
+		// what let DEV3_HOME through while dutifully scrubbing six lesser vars.
+		const injected = [...PANE_INJECTED_ENV_SAMPLE, "DEV3_SOMETHING_INVENTED_LATER"];
+		withRestoredEnv(() => {
+			for (const key of injected) process.env[key] = "/Users/real/leaked";
+			process.env.DEV3_TEST_CONCURRENT = "1";
+
+			const root = configureTestIsolation("guard", "/repo/worktrees/guard-scrub");
+			try {
+				for (const key of injected) expect(process.env[key]).toBeUndefined();
+				// The harness's own namespace must survive: the Vitest config reads
+				// DEV3_TEST_CONCURRENT for its worker budget right after this returns.
+				expect(process.env.DEV3_TEST_CONCURRENT).toBe("1");
+				expect(process.env.DEV3_TEST_ROOT).toBe(root);
+			} finally {
+				cleanupTestIsolation(root);
+			}
+		});
+	});
+
+	it("refuses to start when the data root still escapes to the real home", () => {
+		// The outcome check rather than the mechanism: if a later change lets some
+		// override through, the run dies here instead of writing to the live board.
+		expect(() => assertDev3HomeIsSandboxed("/tmp/dev3-tests/elsewhere")).toThrow(
+			/outside the run root/,
+		);
 	});
 });
+
+/** Run `body` with the process environment restored afterwards, whatever it did. */
+function withRestoredEnv(body: () => void): void {
+	const saved = { ...process.env };
+	try {
+		body();
+	} finally {
+		for (const key of Object.keys(process.env)) delete process.env[key];
+		Object.assign(process.env, saved);
+	}
+}

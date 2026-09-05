@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -59,11 +59,14 @@ vi.mock("../cloudflare-tunnel", () => ({
 	getTunnelState: vi.fn().mockReturnValue("idle"),
 }));
 
+// Mutable so the port tests can drive the `remotePort` setting.
+const mockSettings: { theme: string; resolvedTheme: string; remotePort?: number } = {
+	theme: "light",
+	resolvedTheme: "light",
+};
+
 vi.mock("../settings", () => ({
-	loadSettingsSync: vi.fn(() => ({
-		theme: "light",
-		resolvedTheme: "light",
-	})),
+	loadSettingsSync: vi.fn(() => mockSettings),
 }));
 
 vi.mock("../theme-state", () => ({
@@ -265,6 +268,7 @@ describe("resolveListenPort", () => {
 		} else {
 			process.env.DEV3_REMOTE_PORT = originalEnv;
 		}
+		delete mockSettings.remotePort;
 	});
 
 	it("returns 0 when env var is unset", () => {
@@ -304,6 +308,27 @@ describe("resolveListenPort", () => {
 
 	it("falls back to 0 for negative port", () => {
 		process.env.DEV3_REMOTE_PORT = "-1";
+		expect(resolveListenPort()).toBe(0);
+	});
+
+	// The desktop app never sees DEV3_REMOTE_PORT — every DEV3_* key is stripped
+	// out of the imported shell environment — so the setting is its only way to
+	// pin the port a tunnel ingress or reverse proxy is aimed at.
+	it("uses the remotePort setting when the env is unset", () => {
+		delete process.env.DEV3_REMOTE_PORT;
+		mockSettings.remotePort = 41234;
+		expect(resolveListenPort()).toBe(41234);
+	});
+
+	it("lets the env win over the setting — it names this launch", () => {
+		process.env.DEV3_REMOTE_PORT = "3000";
+		mockSettings.remotePort = 41234;
+		expect(resolveListenPort()).toBe(3000);
+	});
+
+	it("honours the env random-port sentinel over a pinned setting", () => {
+		process.env.DEV3_REMOTE_PORT = "0";
+		mockSettings.remotePort = 41234;
 		expect(resolveListenPort()).toBe(0);
 	});
 });
@@ -363,13 +388,6 @@ describe("resolveAccessHost", () => {
 });
 
 describe("getAccessUrl host override", () => {
-	// dev3-managed shells export DEV3_REMOTE_STATIC_CODE (the dev app's own
-	// web-access code), and getAccessUrl prefers it over the mocked QR token.
-	// Unset it so these tests stay hermetic when run inside a dev3 worktree.
-	beforeEach(() => {
-		vi.stubEnv("DEV3_REMOTE_STATIC_CODE", undefined);
-	});
-
 	afterEach(() => {
 		vi.unstubAllEnvs();
 	});
@@ -388,6 +406,24 @@ describe("getAccessUrl host override", () => {
 	it("generateQrDataUrl threads the host through to the QR image", async () => {
 		const qr = await generateQrDataUrl("127.0.0.1");
 		expect(qr).toBe("data:image/png;base64,test");
+	});
+
+	// The static code is a PERMANENT credential. In a URL it would land in browser
+	// history, the address bar and every proxy log on the way; it is typed on the
+	// sign-in screen instead, so the URL keeps carrying the one-time QR token.
+	it("never puts the static access code in the URL", async () => {
+		vi.stubEnv("DEV3_REMOTE_STATIC_CODE", "sesame");
+		const url = await getAccessUrl("127.0.0.1");
+		expect(url).not.toContain("sesame");
+		expect(url).toContain("?token=test-token");
+	});
+
+	it("never puts the static access code in the QR image either", async () => {
+		vi.stubEnv("DEV3_REMOTE_STATIC_CODE", "sesame");
+		await generateQrDataUrl("127.0.0.1");
+		const { default: QRCode } = await import("qrcode");
+		const calls = vi.mocked(QRCode.toDataURL).mock.calls;
+		expect(String(calls[calls.length - 1]?.[0])).not.toContain("sesame");
 	});
 });
 

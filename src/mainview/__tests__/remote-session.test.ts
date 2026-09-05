@@ -78,6 +78,7 @@ type FetchOutcome = { ok: boolean; status: number } | "network-error";
 
 function createHarness(opts: {
 	qrToken?: string | null;
+	accessCode?: string | null;
 	authMode?: "cookie" | "none";
 	exchange?: FetchOutcome;
 	refresh?: FetchOutcome | FetchOutcome[];
@@ -91,12 +92,15 @@ function createHarness(opts: {
 	const onSocketClosed = vi.fn();
 
 	const refreshOutcomes = Array.isArray(opts.refresh) ? [...opts.refresh] : null;
+	// Mutable so a test can fail the boot exchange and then answer the sign-in
+	// screen's submission differently, which is the whole point of the code path.
+	let exchangeOutcome: FetchOutcome | undefined = opts.exchange;
 
 	async function fetchFn(url: string): Promise<{ ok: boolean; status: number }> {
 		fetchCalls.push({ url, at: Date.now() });
 		let outcome: FetchOutcome | undefined;
 		if (url.includes("exchange")) {
-			outcome = opts.exchange ?? { ok: true, status: 200 };
+			outcome = exchangeOutcome ?? { ok: true, status: 200 };
 		} else {
 			outcome = refreshOutcomes ? (refreshOutcomes.length > 1 ? refreshOutcomes.shift() : refreshOutcomes[0]) : (opts.refresh as FetchOutcome | undefined) ?? { ok: true, status: 200 };
 		}
@@ -106,6 +110,7 @@ function createHarness(opts: {
 
 	const session = createRemoteSession({
 		qrToken: opts.qrToken ?? null,
+		accessCode: opts.accessCode ?? null,
 		authMode: opts.authMode ?? "cookie",
 		fetchFn,
 		createSocket: () => {
@@ -123,7 +128,10 @@ function createHarness(opts: {
 		},
 	});
 
-	return { session, timers, sockets, states, fetchCalls, onExpired, onSocketOpen, onSocketClosed };
+	return {
+		session, timers, sockets, states, fetchCalls, onExpired, onSocketOpen, onSocketClosed,
+		setExchange: (outcome: FetchOutcome) => { exchangeOutcome = outcome; },
+	};
 }
 
 const refreshCalls = (h: ReturnType<typeof createHarness>) => h.fetchCalls.filter((c) => c.url.includes("refresh"));
@@ -360,5 +368,134 @@ describe("kick", () => {
 		h.session.kick();
 		await h.timers.flush();
 		expect(h.sockets).toHaveLength(0);
+	});
+});
+
+// ── The sign-in screen: the owner's permanent access code ────────────
+//
+// `expired` is terminal for every automatic path. Typing the access code is the
+// ONLY way out of it, so these tests pin that it actually revives the session.
+
+describe("submitAccessCode", () => {
+	async function expiredHarness() {
+		const h = createHarness({ qrToken: null, refresh: { ok: false, status: 401 } });
+		h.session.start();
+		await h.timers.flush();
+		expect(h.session.getState()).toBe("expired");
+		expect(h.sockets).toHaveLength(0);
+		return h;
+	}
+
+	it("a correct code leaves expired and connects", async () => {
+		const h = await expiredHarness();
+		h.setExchange({ ok: true, status: 200 });
+
+		await expect(h.session.submitAccessCode("sesame")).resolves.toBe("ok");
+		await h.timers.flush();
+
+		expect(h.session.getState()).not.toBe("expired");
+		expect(h.sockets).toHaveLength(1);
+		expect(exchangeCalls(h)).toHaveLength(1);
+	});
+
+	it("a wrong code is rejected and NOT terminal — the user may type it again", async () => {
+		const h = await expiredHarness();
+		h.setExchange({ ok: false, status: 401 });
+
+		await expect(h.session.submitAccessCode("nope")).resolves.toBe("rejected");
+		expect(h.session.getState()).toBe("expired");
+		expect(h.sockets).toHaveLength(0);
+
+		h.setExchange({ ok: true, status: 200 });
+		await expect(h.session.submitAccessCode("sesame")).resolves.toBe("ok");
+		await h.timers.flush();
+		expect(h.sockets).toHaveLength(1);
+	});
+
+	it("an unreachable host reads as network, not as a bad code", async () => {
+		const h = await expiredHarness();
+		h.setExchange("network-error");
+		await expect(h.session.submitAccessCode("sesame")).resolves.toBe("network");
+		expect(h.sockets).toHaveLength(0);
+	});
+
+	it("a destroyed session never revives", async () => {
+		const h = await expiredHarness();
+		h.setExchange({ ok: true, status: 200 });
+		h.session.destroy();
+		await expect(h.session.submitAccessCode("sesame")).resolves.toBe("network");
+		expect(h.sockets).toHaveLength(0);
+	});
+});
+
+// ── The bookmarked sign-in link (#code=…) ────────────────────────────
+//
+// The point of the link is "click the bookmark, you are in" — so the tests
+// below pin the ORDER: a live cookie is never spent to use the code, and a bad
+// code in an old bookmark still lands on the sign-in screen rather than looping.
+
+describe("access code from a bookmarked link", () => {
+	it("signs in with no typing when there is no cookie", async () => {
+		const h = createHarness({ accessCode: "sesame", refresh: { ok: false, status: 401 } });
+		h.session.start();
+		await h.timers.flush();
+
+		expect(h.onExpired).not.toHaveBeenCalled();
+		expect(h.sockets).toHaveLength(1);
+		expect(exchangeCalls(h)).toHaveLength(1);
+	});
+
+	// Order matters: the refresh probe runs first, so a returning visitor never
+	// burns an exchange, and the code is a fallback rather than the normal path.
+	it("prefers a live cookie and never touches the code", async () => {
+		const h = createHarness({ accessCode: "sesame", refresh: { ok: true, status: 200 } });
+		h.session.start();
+		await h.timers.flush();
+
+		expect(exchangeCalls(h)).toHaveLength(0);
+		expect(h.sockets).toHaveLength(1);
+	});
+
+	it("a stale code in an old bookmark ends on the sign-in screen, not in a loop", async () => {
+		const h = createHarness({
+			accessCode: "rotated-away",
+			exchange: { ok: false, status: 401 },
+			refresh: { ok: false, status: 401 },
+		});
+		h.session.start();
+		await h.timers.flush();
+
+		expect(h.onExpired).toHaveBeenCalledOnce();
+		expect(h.onExpired.mock.calls[0][0]).toMatchObject({ reason: "link-code-rejected" });
+		expect(exchangeCalls(h)).toHaveLength(1);
+		expect(h.sockets).toHaveLength(0);
+	});
+
+	// A dead network is not a wrong code. Expiring here would show "that code was
+	// not accepted" to someone whose wifi merely dropped.
+	it("keeps retrying instead of expiring when the exchange cannot reach the host", async () => {
+		const h = createHarness({
+			accessCode: "sesame",
+			exchange: "network-error",
+			refresh: { ok: false, status: 401 },
+		});
+		h.session.start();
+		await h.timers.flush();
+
+		expect(h.onExpired).not.toHaveBeenCalled();
+		expect(h.timers.pendingCount()).toBeGreaterThan(0);
+	});
+
+	it("a QR token in the same URL still wins — it is one-time and must be spent fresh", async () => {
+		const h = createHarness({
+			qrToken: "qr",
+			accessCode: "sesame",
+			exchange: { ok: true, status: 200 },
+		});
+		h.session.start();
+		await h.timers.flush();
+
+		expect(exchangeCalls(h)).toHaveLength(1);
+		expect(h.sockets).toHaveLength(1);
 	});
 });

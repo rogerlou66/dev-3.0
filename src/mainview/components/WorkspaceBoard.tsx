@@ -537,7 +537,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 									<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F01DB}"}</span>
 								</span>
 								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="max-w-64 truncate text-left text-xs font-semibold text-fg-3 hover:text-accent">{project.name}</button>
-								<span className="text-dense text-fg-muted">{t("workspaceBoard.noActiveSummary", { count: String(completedTasks.length) })}</span>
+								<span className="text-dense text-fg-muted">{t.plural("workspaceBoard.noActiveSummary", completedTasks.length)}</span>
 								<button type="button" onClick={() => onOpenCreateTask(project.id)} className="ml-auto rounded px-2 py-1 text-dense font-medium text-fg-3 hover:bg-accent/10 hover:text-accent">{t("kanban.newTask")}</button>
 								{completedTasks.length > 0 && <button type="button" onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="rounded px-2 py-1 font-mono text-dense font-semibold text-success hover:bg-success/10">✓ {completedTasks.length}</button>}
 							</div>
@@ -562,7 +562,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 									</span>
 									<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-fg hover:text-accent">{project.name}</button>
 								</div>
-								<div className="mt-0.5 font-mono text-nano text-fg-muted">{t("workspaceBoard.taskCount", { count: String(projectTasks.length) })}</div>
+								<div className="mt-0.5 font-mono text-nano text-fg-muted">{t.plural("workspaceBoard.taskCount", projectTasks.length)}</div>
 							</div>
 						{desktopColumns.map((column) => {
 							const cellTasks = tasksForCell(project, column);

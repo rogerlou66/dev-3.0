@@ -6,6 +6,7 @@ import { handleTasks } from "./commands/tasks";
 import { handleTask } from "./commands/task";
 import { handleCurrent } from "./commands/current";
 import { handleNote } from "./commands/note";
+import { handleEvents } from "./commands/events";
 import { handleVents } from "./commands/vents";
 import { handleOverview } from "./commands/overview";
 import { handleLabel } from "./commands/label";
@@ -16,7 +17,7 @@ import { handleConfig } from "./commands/config";
 import { handleDevServer } from "./commands/dev-server";
 import { handleRemote } from "./commands/remote";
 import { handleGui } from "./commands/gui";
-import { handleConversations } from "./commands/conversations";
+import { handleConversations, handleImportCurrentSession, resolveImportTarget } from "./commands/conversations";
 import { handleNotify, handleAttention, handleUi } from "./commands/ui-control";
 import { handleMessage } from "./commands/message";
 import { handlePeek } from "./commands/peek";
@@ -50,7 +51,8 @@ Commands:
   dev3 task move [--task <id>] --status <status>  Change task status
   dev3 task terminal-backend [--task <id>] [--to tmux|native]  Inspect/switch this task's terminal backend
   dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off] [--type coordinator|pr-review|standard]  Update task fields
-  dev3 task create --title "..." [--description "..." | --description -]  Create a new task (To Do)
+  dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard]  Create a new task (To Do)
+                                         (--pr <n> starts the worktree on that pull request's branch and implies --type pr-review)
   dev3 note add "..." [--content "..."] [--task <id>] [--source user]  Add note to a task
   dev3 note list [--task <id>]          List notes
   dev3 note show <id> [--task <task>]   Show one note's full body (8-char prefix works)
@@ -64,7 +66,7 @@ Commands:
   dev3 label delete <id>                Delete label
   dev3 label set <id> [<id>...] [--task <task>]  Assign labels to a task
   dev3 label set --clear [--task <id>]  Remove all labels from a task
-  dev3 tasks list [--status <s>] [--label <id>] [--limit <n>] [--offset <n>]  List tasks (newest first, default 50)
+  dev3 tasks list [--status <s>] [--label <id>] [--priority P0,P1] [--sort priority|seq] [--limit <n>] [--offset <n>]  List tasks (highest priority first, default 50)
   dev3 automations list                 List project automations (scheduled agent runs)
   dev3 automations show <id>            Automation details + run history
   dev3 automations create --name "..." [--prompt "..." | --prompt -] --rrule "FREQ=DAILY;BYHOUR=9" [--template shipped-report]
@@ -75,15 +77,18 @@ Commands:
   dev3 conversations search "<query>" [--limit N] [--all-statuses] [--json]  Search past task conversations (completed/cancelled)
   dev3 conversations dump [--latest] [--stdout]  Parse this task's agent transcripts into JSON
   dev3 conversations handoff [--for claude|codex]  Retell this conversation as one message for another agent
-  dev3 dev-server start [task-id]       Start a task dev server
+  dev3 import [--json]                  Put the Claude Code conversation you are running inside onto the board as a task
+                                         (takes nothing: the working directory picks the project, CLAUDE_CODE_SESSION_ID picks the conversation)
+  dev3 dev-server start [task-id] [--env KEY=VALUE ...]  Start a task dev server (--env is repeatable, passed to the devScript)
   dev3 dev-server stop [task-id]        Stop a task dev server
   dev3 dev-server restart [task-id]     Restart a task dev server
   dev3 dev-server status [task-id]      Show task dev server status
   dev3 notify "msg" [--level info|success|error] [--desktop]  Show an in-app toast (or OS notification); clicking opens the task
   dev3 attention "reason" [--task <id>] Light the red attention badge on the task card (reason shows on hover)
-  dev3 message "text" [--in <dur> | --at <hh:mm>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later)
+  dev3 attention --clear [--task <id>]  Lower the attention badge and drop its accumulated reasons
+  dev3 message --subject "<about 6 words>" "text" [--in <dur> | --at <hh:mm>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later); --subject is required and stored with the message
   dev3 show-image <path> [--caption "..."] [<path> ...]  Show images (screenshots/renders) in an in-app viewer bound to the task; each --caption annotates the preceding image
-  dev3 show-artifact <file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; local CSS, JS, and images are exported as ZIP
+  dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, and image under it
   dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
   dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
   dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane
@@ -239,9 +244,44 @@ async function main(): Promise<void> {
 		// runs before publishing an artifact and needs no app or socket.
 		return await handleInlineHtml(rawArgs.slice(1));
 	}
+	if (command === "import") {
+		// It takes nothing: the session id comes from the environment and the
+		// project from the working directory, so an argument here is a mistake
+		// worth naming (`dev3 conversations import --sessions <id>` is next door).
+		if (subcommand) {
+			exitUsage(`\`dev3 import\` takes no arguments (got "${subcommand}"). It imports the conversation it is run from.`);
+		}
+		// Both of those are answered from local files, so they are answered FIRST:
+		// "no project owns this directory" is the commonest outcome, and hiding it
+		// behind "dev3 is not running" sends the reader off to restart the app.
+		const target = resolveImportTarget();
+		// Creating the task is a write, so from here it needs the socket like
+		// every other write.
+		if (!socketPath) socketPath = await resolveSocketPathWithRetry();
+		if (!socketPath) {
+			exitAppNotRunning({
+				stage: "discovery",
+				tolerate: tolerateAppOffline,
+				...debugAppNotRunning("discovery"),
+			});
+		}
+		return await handleImportCurrentSession(args, socketPath ?? null, target);
+	}
 	if (command === "conversations") {
-		// Read-only search over local transcript files — no app/socket needed.
-		return await handleConversations(subcommand, args, context);
+		// search/dump/handoff are read-only over local transcript files and answer
+		// with no app at all. `import` creates tasks, so it takes the socket like
+		// every other write — except in `--dry-run`, which is the same local scan.
+		if (subcommand === "import" && args.flags["dry-run"] !== "true") {
+			if (!socketPath) socketPath = await resolveSocketPathWithRetry();
+			if (!socketPath) {
+				exitAppNotRunning({
+					stage: "discovery",
+					tolerate: tolerateAppOffline,
+					...debugAppNotRunning("discovery"),
+				});
+			}
+		}
+		return await handleConversations(subcommand, args, context, socketPath ?? null);
 	}
 	if (command === "remote") {
 		// `dev3 remote` IS the app in headless mode — it must not require a
@@ -278,6 +318,10 @@ async function main(): Promise<void> {
 	try {
 		switch (command) {
 			case "projects":
+			// Alias: the plural is the real command, but `dev3 project list` is the
+			// natural mistype and used to answer "Unknown command" with no hint —
+			// the same forwarding `task list` already does for `tasks list`.
+			case "project":
 				return await handleProjects(subcommand, args, socketPath);
 			case "tasks":
 				return await handleTasks(subcommand, args, socketPath, context);
@@ -285,6 +329,10 @@ async function main(): Promise<void> {
 				return await handleTask(subcommand, args, socketPath, context);
 			case "note":
 				return await handleNote(subcommand, args, socketPath, context);
+			case "events":
+				// `events` takes no subcommand — re-parse from the raw args so a
+				// stray positional is reported instead of silently swallowed.
+				return await handleEvents(resolveFileArgs(parseArgs(rawArgs.slice(1))), socketPath, context);
 			case "vents":
 				// `vents` takes no subcommand — its first positional is the vent
 				// name, so re-parse from the raw args without the subcommand split.

@@ -740,7 +740,7 @@ const ALL_TIPS: Tip[] = [
 		icon: "\u{F0BB0}", // nf-md-bell_off
 		score: 4,
 		contexts: ["board", "terminal"],
-		settingsSection: "tasks",
+		settingsSection: "notifications",
 	},
 	{
 		id: "pr-ci-review-badges",
@@ -773,7 +773,7 @@ const ALL_TIPS: Tip[] = [
 		icon: "\uF0F3", // nf-fa-bell
 		score: 4,
 		contexts: ["settings", "board"],
-		settingsSection: "system",
+		settingsSection: "notifications",
 	},
 	{
 		id: "remote-detach-lifecycle",
@@ -982,6 +982,17 @@ const ALL_TIPS: Tip[] = [
 		icon: "\u{F01D9}", // nf-md-swap_horizontal
 		score: 3,
 		contexts: ["board", "terminal"],
+	},
+	// Distinct from spawn-extra-agent: that one is "more hands on the same work",
+	// this one is "the same work, a different agent". Invisible until the dialog is
+	// already open, and nothing else in the product hints that a switch is possible.
+	{
+		id: "continue-in-another-agent",
+		titleKey: "tip.continueInAnotherAgent.title",
+		bodyKey: "tip.continueInAnotherAgent.body",
+		icon: "\u{F0450}", // nf-md-account_switch
+		score: 4,
+		contexts: ["terminal"],
 	},
 ];
 

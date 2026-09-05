@@ -1,10 +1,10 @@
-import type { AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
+import type { AgentCancellationRequest, AgentCompletionRequest, AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
 import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, reviewTaskTitle, titleFromDescription } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
-import { resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
+import { listPendingAgentRequests, resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
 import { loadSettingsSync, recordFavoriteUsages } from "../settings";
 import { emitTaskSound } from "../lifecycle/executor";
 import { getPushMessage, isActive, log } from "./shared";
@@ -153,7 +153,12 @@ async function getWorkspaceBoardTasks(): Promise<{ projectId: string; tasks: Tas
 	return results;
 }
 
-async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType }): Promise<Task> {
+/**
+ * The one place a task is born. The CLI (`dev3 task create`) routes through it
+ * too — a second creation path is how `foreignCode` came to be set in the GUI
+ * and nowhere else.
+ */
+export async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType }): Promise<Task> {
 	log.info("→ createTask", {
 		projectId: params.projectId,
 		requestedStatus: params.status ?? "todo",
@@ -925,10 +930,44 @@ async function setTaskManualCompletion(params: { taskId: string; projectId: stri
 	return updated;
 }
 
+/**
+ * Completion dialogs still waiting for an answer, for a renderer that just
+ * connected. `agentCompletionRequested` is a one-shot push, so a window that
+ * reloads before answering would otherwise leave the request unanswerable: the
+ * blocked agent's retry joins the same entry instead of triggering a new push.
+ */
+async function listPendingCompletionRequests(): Promise<AgentCompletionRequest[]> {
+	return listPendingAgentRequests("complete").map((r) => ({
+		requestId: r.requestId,
+		taskId: r.taskId,
+		projectId: r.projectId,
+		taskTitle: r.dialog.taskTitle,
+		subject: r.dialog.subject,
+	}));
+}
+
 async function respondToAgentCompletionRequest(params: { requestId: string; approved: boolean }): Promise<void> {
 	const known = resolveAgentRequest(params.requestId, { approved: params.approved });
 	if (!known) {
 		log.debug("respondToAgentCompletionRequest: request expired or unknown", { requestId: params.requestId });
+	}
+}
+
+/** Cancellation dialogs still waiting for an answer — replayed like the completion ones. */
+async function listPendingCancellationRequests(): Promise<AgentCancellationRequest[]> {
+	return listPendingAgentRequests("cancel").map((r) => ({
+		requestId: r.requestId,
+		taskId: r.taskId,
+		projectId: r.projectId,
+		taskTitle: r.dialog.taskTitle,
+		subject: r.dialog.subject,
+	}));
+}
+
+async function respondToAgentCancellationRequest(params: { requestId: string; approved: boolean }): Promise<void> {
+	const known = resolveAgentRequest(params.requestId, { approved: params.approved });
+	if (!known) {
+		log.debug("respondToAgentCancellationRequest: request expired or unknown", { requestId: params.requestId });
 	}
 }
 
@@ -1202,7 +1241,10 @@ export const taskLifecycleHandlers = {
 	scheduleTaskLaunch,
 	cancelScheduledLaunch,
 	startScheduledLaunchNow,
+	listPendingCompletionRequests,
 	respondToAgentCompletionRequest,
+	listPendingCancellationRequests,
+	respondToAgentCancellationRequest,
 	respondToAgentLaunchRequest,
 	updateAgentLaunchChoice,
 	getTaskTerminalBackend,

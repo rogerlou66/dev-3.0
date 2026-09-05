@@ -43,7 +43,6 @@ vi.mock("../../rpc", () => ({
 		},
 	},
 }));
-vi.mock("../../analytics", () => ({ trackEvent: vi.fn(), agentNameFromId: vi.fn(() => "unknown") }));
 vi.mock("../../toast", () => ({
 	toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() },
 	// No ToastHost here, so the header's update prompt has no slot to portal into.

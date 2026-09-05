@@ -24,7 +24,7 @@ vi.mock("../../rpc", () => ({
 				binaryPath: "/opt/homebrew/bin/gh",
 				accounts: [
 					{ login: "h0x91b", host: "github.com", active: true },
-					{ login: "h0x91b-wix", host: "github.com", active: false },
+					{ login: "h0x91b-work", host: "github.com", active: false },
 				],
 			}),
 			updateProjectSettings: vi.fn().mockResolvedValue({ id: "proj-1", name: "Test Project", path: "/tmp/test", defaultBaseBranch: "main", setupScript: "", devScript: "", cleanupScript: "", createdAt: "" }),
@@ -33,6 +33,7 @@ vi.mock("../../rpc", () => ({
 			getProjects: vi.fn().mockResolvedValue([]),
 			getAgents: vi.fn().mockResolvedValue([]),
 			getGlobalSettings: vi.fn().mockResolvedValue({}),
+			getSpaces: vi.fn().mockResolvedValue({ version: 1, spaces: [], order: [] }),
 		},
 	},
 }));
@@ -214,7 +215,7 @@ describe("ProjectSettings", () => {
 			await renderProjectSettings();
 			await goToProjectTab();
 
-			await user.selectOptions(screen.getByRole("combobox", { name: "GitHub Account" }), "github.com\th0x91b-wix");
+			await user.selectOptions(screen.getByRole("combobox", { name: "GitHub Account" }), "github.com\th0x91b-work");
 			await user.click(screen.getByText("Save"));
 
 			await vi.waitFor(() => {
@@ -222,7 +223,7 @@ describe("ProjectSettings", () => {
 					expect.objectContaining({
 						projectId: "proj-1",
 						githubAuthHost: "github.com",
-						githubAuthLogin: "h0x91b-wix",
+						githubAuthLogin: "h0x91b-work",
 					}),
 				);
 			});

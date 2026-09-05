@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type Dispatch } from "react";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { extractRepoName } from "../../shared/types";
+import type { Project } from "../../shared/types";
 import type { AppAction } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
@@ -8,16 +9,21 @@ import HelpSpot from "./HelpSpot";
 import { openFolderPicker, openFolderPickerMulti } from "../folder-picker";
 import { toast } from "../toast";
 import { useFocusTrap } from "../utils/useFocusTrap";
-import ProjectSpacesField from "./ProjectSpacesField";
+import ProjectSpacesField, { applyDeferredSpaces, type DeferredSpaces } from "./ProjectSpacesField";
 
 interface AddProjectModalProps {
 	dispatch: Dispatch<AppAction>;
 	onClose: () => void;
 	/** Pre-selected space memberships when the flow started from a space. */
 	initialSpaceIds?: string[];
+	/**
+	 * The git projects this dialog just added, reported once it is done. dev3
+	 * offers to import the agent conversations that already ran in them.
+	 */
+	onGitProjectsAdded?: (projects: Project[]) => void;
 }
 
-function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModalProps) {
+function AddProjectModal({ dispatch, onClose, initialSpaceIds, onGitProjectsAdded }: AddProjectModalProps) {
 	const t = useT();
 	const trapRef = useFocusTrap<HTMLDivElement>();
 	const [kind, setKind] = useState<"git" | "operations">("git");
@@ -32,16 +38,18 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 	const [initializing, setInitializing] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [cloneOutput, setCloneOutput] = useState<string[]>([]);
-	const [pendingSpaceIds, setPendingSpaceIds] = useState<string[]>(initialSpaceIds ?? []);
+	const [pendingSpaces, setPendingSpaces] = useState<DeferredSpaces>({
+		spaceIds: initialSpaceIds ?? [],
+		newNames: [],
+	});
 	const cloneProgressIdRef = useRef<string | null>(null);
 	const urlInputRef = useRef<HTMLInputElement>(null);
 
 	// Membership is applied after the project exists; failures only toast —
 	// the project itself was created fine.
 	async function applyPendingSpaces(projectId: string) {
-		if (pendingSpaceIds.length === 0) return;
 		try {
-			await api.request.setProjectSpaces({ projectId, spaceIds: pendingSpaceIds });
+			await applyDeferredSpaces(projectId, pendingSpaces);
 		} catch (err) {
 			toast.error(t("spaces.failedUpdate", { error: String(err) }), { source: "dashboard" });
 		}
@@ -87,6 +95,7 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 			if (!folders || folders.length === 0) return;
 
 			const errors: string[] = [];
+			const added: Project[] = [];
 			let anySucceeded = false;
 			for (const folder of folders) {
 				// The backend names the project — see the addProject RPC comment.
@@ -95,6 +104,7 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 					const result = await api.request.addProject({ path: folder });
 					if (result.ok) {
 						dispatch({ type: "addProject", project: result.project });
+						added.push(result.project);
 						void applyPendingSpaces(result.project.id);
 						anySucceeded = true;
 					} else {
@@ -107,8 +117,10 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 
 			if (errors.length === 0) {
 				onClose();
+				if (added.length > 0) onGitProjectsAdded?.(added);
 			} else if (anySucceeded) {
 				onClose();
+				if (added.length > 0) onGitProjectsAdded?.(added);
 				for (const err of errors) toast.error(err, { source: "dashboard" });
 			} else {
 				setError(errors.join("\n"));
@@ -141,6 +153,7 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 				dispatch({ type: "addProject", project: result.project });
 				void applyPendingSpaces(result.project.id);
 				onClose();
+				onGitProjectsAdded?.([result.project]);
 			} else {
 				setError(result.error);
 			}
@@ -190,6 +203,7 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 				dispatch({ type: "addProject", project: result.project });
 				void applyPendingSpaces(result.project.id);
 				onClose();
+				onGitProjectsAdded?.([result.project]);
 			} else {
 				setError(result.error);
 			}
@@ -437,7 +451,7 @@ function AddProjectModal({ dispatch, onClose, initialSpaceIds }: AddProjectModal
 				{/* Optional space memberships, applied after the project is created */}
 				<div className="flex items-center gap-3">
 					<span className="text-fg-2 text-sm font-medium flex-shrink-0">{t("spaces.fieldLabel")}</span>
-					<ProjectSpacesField mode="deferred" value={pendingSpaceIds} onChange={setPendingSpaceIds} />
+					<ProjectSpacesField mode="deferred" value={pendingSpaces} onChange={setPendingSpaces} />
 				</div>
 				</>
 				)}

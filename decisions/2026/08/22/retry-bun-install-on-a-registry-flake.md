@@ -1,5 +1,11 @@
 # Retry `bun install` on a registry flake, loudly, instead of failing CI
 
+> Partly superseded on 2026-09-04 by
+> `decisions/2026/09/04/route-every-ci-install-through-the-retry-action.md`: the last risk below,
+> "Only `build.yml` is covered", is no longer true — every workflow now installs through the action,
+> and the test guards the whole workflow directory rather than `build.yml`. The retry script,
+> its bounds and its rationale are unchanged.
+
 ## Context
 
 `bun install` intermittently dies on one package with `error: Fail extracting tarball for "mermaid"`
@@ -69,6 +75,6 @@ sneaking back into `build.yml`.
   dependencies installed. Explicitly rejected.
 - **Pinning or downgrading `mermaid`, or vendoring its tarball** — the failure is not version
   specific, and touching `bun.lock` on a developer machine rewrites resolution URLs to the private
-  Wix Artifactory mirror, which breaks CI outright.
+  Artifactory mirror, which breaks CI outright.
 - **Lowering bun's network concurrency** — slows every install to maybe reduce a failure whose cause
   is a bad response body, not a race.

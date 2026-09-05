@@ -98,6 +98,7 @@ vi.mock("../git", () => ({
 	getTaskDiff: vi.fn(),
 	getUncommittedChanges: vi.fn(),
 	getUnpushedCount: vi.fn(),
+	getUnpreservedCount: vi.fn(),
 	getBehindOriginCount: vi.fn().mockResolvedValue(0),
 	getBranchDiffStats: vi.fn(),
 	canRebaseCleanly: vi.fn(),
@@ -154,6 +155,7 @@ vi.mock("../pty-server", () => ({
 	getSessionSocket: vi.fn(() => "dev3"),
 	getSessionTmuxName: vi.fn((key: string) => `dev3-${key.slice(0, 8)}`),
 	getSessionType: vi.fn(() => null),
+	isProjectSessionKey: vi.fn(() => false),
 	capturePane: vi.fn(),
 	applyTmuxTheme: vi.fn(),
 }));
@@ -350,6 +352,7 @@ vi.mock("bun:ffi", () => ({
 }));
 
 import * as data from "../data";
+import { clearResourceMonitorBoost, isResourceMonitorBoosted } from "../resource-monitor";
 import * as git from "../git";
 import * as github from "../github";
 import * as pty from "../pty-server";
@@ -409,6 +412,9 @@ const {
 	setTerminalFocus,
 	setFocusMode,
 	isNotificationSuppressed,
+	pushCliAttention,
+	pushTerminalBell,
+	dropQueuedAttention,
 	emitTaskSound,
 	runCleanupScript,
 	portableReadKey,
@@ -2042,6 +2048,25 @@ describe("handlers.saveGlobalSettings", () => {
 		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
 
 		await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+
+		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
+	});
+
+	// Pane dimming lives in the tmux config, so switching it has to reach the live
+	// server the same way a shell change does — otherwise the toggle only takes
+	// effect after an app restart.
+	it.skipIf(process.platform === "win32")("re-sources tmux when pane dimming is switched off", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+
+		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: false } as GlobalSettings);
+
+		expect(pty.applyTmuxTheme).toHaveBeenCalled();
+	});
+
+	it.skipIf(process.platform === "win32")("leaves tmux alone when pane dimming stays at its default", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+
+		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: true } as GlobalSettings);
 
 		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
 	});
@@ -5415,7 +5440,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
-		expect(result).toEqual({ ahead: 0, behind: 0, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 });
+		expect(result).toEqual({ ahead: 0, behind: 0, baseUnreachable: false, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 });
 	});
 
 	// A project added from a local folder has no `origin`. Comparing against
@@ -5428,9 +5453,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 		vi.mocked(git.hasOriginRemote).mockResolvedValueOnce(false);
 		vi.mocked(git.detectDefaultCompareRef).mockResolvedValueOnce("main");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 1, insertions: 5, deletions: 0, fileStats: [] });
 		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 
@@ -5449,9 +5474,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 		vi.mocked(git.hasOriginRemote).mockResolvedValueOnce(true);
 		vi.mocked(git.detectDefaultCompareRef).mockResolvedValueOnce("origin/main");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(1);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(1);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 1, insertions: 1, deletions: 0, fileStats: [] });
 		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 
@@ -5468,9 +5493,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 3, behind: 2 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 3, behind: 2, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 10, deletions: 5 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(1);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(1);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 4, insertions: 50, deletions: 20, fileStats: [{path:"a.ts",insertions:50,deletions:20},{path:"b.ts",insertions:0,deletions:0},{path:"c.ts",insertions:0,deletions:0},{path:"d.ts",insertions:0,deletions:0}] });
 		vi.mocked(git.canRebaseCleanly).mockResolvedValue(true);
 
@@ -5495,9 +5520,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
@@ -5512,9 +5537,9 @@ describe("handlers.getBranchStatus", () => {
 		function mockAheadZero(behind: number) {
 			vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 			vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind });
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind, baseUnreachable: false });
 			vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-			vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+			vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
 			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 			vi.mocked(git.canRebaseCleanly).mockResolvedValue(true);
 		}
@@ -5579,7 +5604,7 @@ describe("handlers.getBranchStatus", () => {
 			vi.mocked(data.getProject).mockResolvedValue(project);
 			vi.mocked(data.getTask).mockResolvedValue(task);
 			mockAheadZero(0);
-			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0 });
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0, baseUnreachable: false });
 			vi.mocked(git.isContentMergedInto).mockResolvedValue(true);
 
 			const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
@@ -5596,9 +5621,9 @@ describe("handlers.getBranchStatus", () => {
 	describe("getBranchStatus with a stored PR from another branch", () => {
 		function mockClean() {
 			vi.mocked(git.getCurrentBranch).mockResolvedValue("fix/mine");
-			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 3 });
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 3, baseUnreachable: false });
 			vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-			vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+			vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
 			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 			vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", exitCode: 0 } as any);
 		}
@@ -5671,9 +5696,9 @@ describe("handlers.getBranchStatus", () => {
 			vi.mocked(data.getTask).mockResolvedValue(task);
 			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }) as any);
 			vi.mocked(git.getCurrentBranch).mockResolvedValue("feature/source-v2");
-			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0 });
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0, baseUnreachable: false });
 			vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-			vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+			vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 			vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 			vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", exitCode: 0 } as any);
@@ -5743,9 +5768,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("fix/ctrl-o");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 5, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 5, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 3, insertions: 30, deletions: 10, fileStats: [] });
 		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", code: 0 });
 
@@ -5763,9 +5788,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.updateTask).mockResolvedValue({ ...task, branchName: "dev3/fix-login" });
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/fix-login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 
 		const push = vi.fn();
@@ -5775,8 +5800,8 @@ describe("handlers.getBranchStatus", () => {
 
 		// Should have synced the stored branchName
 		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", { branchName: "dev3/fix-login" });
-		// Should pass live branch name to getUnpushedCount
-		expect(git.getUnpushedCount).toHaveBeenCalledWith("/tmp/wt", "dev3/fix-login");
+		// Should pass live branch name to getUnpreservedCount
+		expect(git.getUnpreservedCount).toHaveBeenCalledWith("/tmp/wt", "dev3/fix-login");
 		// Must notify the renderer so the header/cards re-render with the new
 		// branch instead of showing the stale name until a reload.
 		expect(push).toHaveBeenCalledWith("taskUpdated", {
@@ -5792,9 +5817,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-aaaa");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 
 		const push = vi.fn();
@@ -5813,9 +5838,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 42, url: "", title: null, author: null }, isGitHub: true });
 
@@ -5833,9 +5858,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.updateTask).mockResolvedValue(persisted);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 42, url: prUrl, title: null, author: null }, isGitHub: true });
 		const push = vi.fn();
@@ -5857,9 +5882,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: null, isGitHub: true });
 
@@ -5879,9 +5904,9 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 		vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", code: 0 });
 
@@ -5900,14 +5925,58 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("feat/login");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false });
 		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
-		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
 		vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 		vi.mocked(github.findOpenPullRequest).mockResolvedValue({ pr: { number: 10, url: "", title: null, author: null }, isGitHub: true });
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 		expect(result.prNumber).toBe(10);
+	});
+});
+
+// The completion dialog's data source: the number it renders "will be lost" from.
+describe("handlers.getUnsavedWork", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	function setup() {
+		const project = makeProject();
+		const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+		vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 3, behind: 0, baseUnreachable: false });
+	}
+
+	it("asks what is preserved anywhere, not what is on origin/<branch>", async () => {
+		setup();
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
+
+		const result = await handlers.getUnsavedWork({ taskId: "task-1", projectId: "proj-1" });
+
+		expect(git.getUnpreservedCount).toHaveBeenCalledWith("/tmp/wt", "dev3/t");
+		expect(git.getUnpushedCount).not.toHaveBeenCalled();
+		// 0 with commits ahead is the cross-branch push (issue #1545): the dialog
+		// must stay silent, because nothing would be lost.
+		expect(result).toEqual({ insertions: 0, deletions: 0, unpushed: 0, ahead: 3, baseUnreachable: false });
+	});
+
+	it("keeps the never-pushed sentinel when nothing is preserved", async () => {
+		setup();
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
+
+		const result = await handlers.getUnsavedWork({ taskId: "task-1", projectId: "proj-1" });
+		expect(result).toEqual({ insertions: 0, deletions: 0, unpushed: -1, ahead: 3, baseUnreachable: false });
+	});
+
+	it("passes a partial count through", async () => {
+		setup();
+		vi.mocked(git.getUnpreservedCount).mockResolvedValue(2);
+
+		const result = await handlers.getUnsavedWork({ taskId: "task-1", projectId: "proj-1" });
+		expect(result).toEqual({ insertions: 0, deletions: 0, unpushed: 2, ahead: 3, baseUnreachable: false });
 	});
 });
 
@@ -7503,7 +7572,7 @@ describe("handlers.mergeTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 } as any);
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false } as any);
 		vi.mocked(git.refExists).mockResolvedValue(true);
 		vi.mocked(git.hasOriginRemote).mockResolvedValue(true);
 		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
@@ -7613,7 +7682,7 @@ describe("handlers.mergeTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 } as any);
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false } as any);
 		vi.mocked(git.refExists).mockResolvedValue(true);
 		vi.mocked(git.hasOriginRemote).mockResolvedValue(false);
 		mockSpawn.mockReturnValue({ stdout: new Response("%42\n"), stderr: new Response(""), exited: Promise.resolve(0) });
@@ -7648,7 +7717,7 @@ describe("handlers.mergeTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 2 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 2, baseUnreachable: false });
 
 		await expect(
 			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" }),
@@ -7661,7 +7730,7 @@ describe("handlers.mergeTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 2 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 2, baseUnreachable: false });
 
 		await expect(
 			handlers.mergeTask({ taskId: "task-1", projectId: "proj-1" }),
@@ -7687,7 +7756,7 @@ describe("handlers.mergeTask", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0 } as any);
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 1, behind: 0, baseUnreachable: false } as any);
 		// The branch choice moved out of the script into TypeScript (Seq 1547), so
 		// the local base branch existing is now a mocked git read, not an `elif`.
 		vi.mocked(git.refExists).mockResolvedValue(true);
@@ -7756,12 +7825,20 @@ describe("handlers.rebaseTaskViaAgent", () => {
 	}
 
 	/**
-	 * The literal text one guarded send put into the pane. The adapter sends text as
-	 * `-H <hex bytes>`, so decoding is how a test reads what the agent will see.
+	 * The literal text one guarded send put into the pane. Text rides a tmux paste buffer,
+	 * so reading it back means resolving each `paste-buffer -b <name>` against the
+	 * `set-buffer` that loaded it.
 	 */
 	function typedText(args: string[] | undefined): string {
-		const hex = /send-keys -t %\d+ -H ([0-9a-f ]+)/.exec(args?.join(" ") ?? "")?.[1];
-		return hex ? Buffer.from(hex.replaceAll(" ", ""), "hex").toString("utf8") : "";
+		const loaded = new Map(
+			mockSpawn.mock.calls
+				.map((c) => c[0] as string[])
+				.filter((argv) => argv[3] === "set-buffer")
+				.map((argv) => [argv[5] as string, argv[7] as string] as const),
+		);
+		return [...(args?.join(" ") ?? "").matchAll(/paste-buffer -d -p -r -b (\S+)/g)]
+			.map((match) => loaded.get(match[1] as string) ?? "")
+			.join("");
 	}
 
 	/**
@@ -7855,12 +7932,20 @@ describe("handlers.commitTaskViaAgent", () => {
 	}
 
 	/**
-	 * The literal text one guarded send put into the pane. The adapter sends text as
-	 * `-H <hex bytes>`, so decoding is how a test reads what the agent will see.
+	 * The literal text one guarded send put into the pane. Text rides a tmux paste buffer,
+	 * so reading it back means resolving each `paste-buffer -b <name>` against the
+	 * `set-buffer` that loaded it.
 	 */
 	function typedText(args: string[] | undefined): string {
-		const hex = /send-keys -t %\d+ -H ([0-9a-f ]+)/.exec(args?.join(" ") ?? "")?.[1];
-		return hex ? Buffer.from(hex.replaceAll(" ", ""), "hex").toString("utf8") : "";
+		const loaded = new Map(
+			mockSpawn.mock.calls
+				.map((c) => c[0] as string[])
+				.filter((argv) => argv[3] === "set-buffer")
+				.map((argv) => [argv[5] as string, argv[7] as string] as const),
+		);
+		return [...(args?.join(" ") ?? "").matchAll(/paste-buffer -d -p -r -b (\S+)/g)]
+			.map((match) => loaded.get(match[1] as string) ?? "")
+			.join("");
 	}
 
 	/**
@@ -8655,6 +8740,22 @@ describe("handlers.listTmuxSessions", () => {
 });
 
 // ================================================================
+// handlers.setResourceMonitorBoost
+// ================================================================
+
+describe("handlers.setResourceMonitorBoost", () => {
+	afterEach(() => clearResourceMonitorBoost());
+
+	it("turns the fast resource tick on and off", async () => {
+		await handlers.setResourceMonitorBoost({ active: true });
+		expect(isResourceMonitorBoosted()).toBe(true);
+
+		await handlers.setResourceMonitorBoost({ active: false });
+		expect(isResourceMonitorBoosted()).toBe(false);
+	});
+});
+
+// ================================================================
 // tmuxAction
 // ================================================================
 
@@ -8885,6 +8986,95 @@ describe("tmuxPaneCount", () => {
 });
 
 // ================================================================
+// handlers.tmuxPanesInMode
+// ================================================================
+
+describe("handlers.tmuxPanesInMode", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	// clearAllMocks keeps implementations, so a per-test override of the session
+	// naming would leak into every later suite. Put the defaults back.
+	afterEach(() => {
+		vi.mocked(pty.getSessionTmuxName).mockImplementation((key: string) => `dev3-${key.slice(0, 8)}`);
+		vi.mocked(pty.isProjectSessionKey).mockReturnValue(false);
+	});
+
+	function routeListPanes(out: string, exit = 0, opts?: { devSession?: string; ownMissing?: boolean }) {
+		mockSpawn.mockImplementation((args: string[]) => {
+			const sub = args[3];
+			const target = args[args.indexOf("-t") + 1] ?? "";
+			const isDevSession = target.startsWith("dev3-dev-");
+			if (sub === "has-session") {
+				const exists = isDevSession ? opts?.devSession !== undefined : !opts?.ownMissing;
+				return {
+					stderr: new Response("").body,
+					stdout: new Response("").body,
+					exited: Promise.resolve(exists ? 0 : 1),
+				};
+			}
+			const body = sub !== "list-panes" ? "" : (isDevSession ? (opts?.devSession ?? "") : out);
+			return {
+				stderr: new Response("").body,
+				stdout: new Response(body).body,
+				exited: Promise.resolve(sub === "list-panes" ? exit : 0),
+			};
+		});
+	}
+
+	it("reports true when any pane of the task session is in copy-mode", async () => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		routeListPanes("%0\t0\n%1\t1\n");
+		await expect(handlers.tmuxPanesInMode({ taskId: "abcd1234-full-id" })).resolves.toEqual({ inMode: true });
+		expect(mockSpawn).toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}"],
+			expect.any(Object),
+		);
+	});
+
+	it("reports false when every pane is live, and touches nothing", async () => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		routeListPanes("%0\t0\n");
+		await expect(handlers.tmuxPanesInMode({ taskId: "abcd1234-full-id" })).resolves.toEqual({ inMode: false });
+		expect(mockSpawn).not.toHaveBeenCalledWith(expect.arrayContaining(["send-keys"]), expect.any(Object));
+	});
+
+	it("also sees a dev-server pane in copy-mode — that is the window users scroll", async () => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		routeListPanes("%0\t0\n", 0, { devSession: "%99\t1\n" });
+		await expect(handlers.tmuxPanesInMode({ taskId: "abcd1234-full-id" })).resolves.toEqual({ inMode: true });
+		expect(mockSpawn).toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-dev-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}"],
+			expect.any(Object),
+		);
+	});
+
+	// The quick shell's key is `project-<id>`, whose session is `dev3-pt-<id>`.
+	// Resolving it as a task name reported "no session" for every quick shell,
+	// which made the scroll-to-latest button vanish one poll tick after appearing.
+	it("resolves a quick-shell key to its own dev3-pt session and probes no dev-server", async () => {
+		vi.mocked(pty.getSessionTmuxName).mockReturnValue("dev3-pt-abcd1234");
+		vi.mocked(pty.isProjectSessionKey).mockReturnValue(true);
+		routeListPanes("%7\t1\n");
+
+		await expect(handlers.tmuxPanesInMode({ taskId: "project-abcd1234-full" })).resolves.toEqual({ inMode: true });
+		expect(mockSpawn).toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-pt-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}"],
+			expect.any(Object),
+		);
+		expect(mockSpawn).not.toHaveBeenCalledWith(
+			expect.arrayContaining(["dev3-dev-abcd1234"]),
+			expect.any(Object),
+		);
+	});
+
+	it("reports false for a task without a tmux session (native backend) — no pane is listed", async () => {
+		routeListPanes("", 0, { ownMissing: true });
+		await expect(handlers.tmuxPanesInMode({ taskId: "abcd1234-full-id" })).resolves.toEqual({ inMode: false });
+		expect(mockSpawn).not.toHaveBeenCalledWith(expect.arrayContaining(["list-panes"]), expect.any(Object));
+	});
+});
+
+// ================================================================
 // handlers.exitCopyModeAllPanes
 // ================================================================
 
@@ -8894,7 +9084,8 @@ describe("handlers.exitCopyModeAllPanes", () => {
 	// Spawn router: matches by tmux subcommand so individual tests can declare
 	// what each tmux command should return without ordering fragility.
 	function setupSpawnRouter(routes: {
-		hasSession?: number; // exit code for has-session (dev-server check)
+		hasSession?: number; // exit code for the dev-server session probe
+		ownMissing?: boolean; // the terminal's own session does not exist
 		listTaskPanes?: { exit: number; out: string };
 		listDevPanes?: { exit: number; out: string };
 	}) {
@@ -8903,10 +9094,14 @@ describe("handlers.exitCopyModeAllPanes", () => {
 			const sessionArg = args[args.indexOf("-t") + 1] ?? "";
 
 			if (sub === "has-session") {
+				// Both sessions are probed the same way now, so answer per target.
+				const exit = sessionArg.startsWith("dev3-dev-")
+					? (routes.hasSession ?? 1)
+					: (routes.ownMissing ? 1 : 0);
 				return {
 					stderr: new Response("").body,
 					stdout: new Response("").body,
-					exited: Promise.resolve(routes.hasSession ?? 1),
+					exited: Promise.resolve(exit),
 				};
 			}
 			if (sub === "list-panes") {
@@ -8977,8 +9172,7 @@ describe("handlers.exitCopyModeAllPanes", () => {
 	});
 
 	it("no-op when neither task nor dev-server session exists", async () => {
-		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(false);
-		setupSpawnRouter({ hasSession: 1 });
+		setupSpawnRouter({ hasSession: 1, ownMissing: true });
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
@@ -9466,23 +9660,23 @@ describe("handlers.spawnBugHuntersInTask", () => {
 
 	interface GuardedSend {
 		pane: string;
-		/** The literal text this send puts into the pane, decoded from its `-H` hex. */
+		/** The literal text this send puts into the pane, read back from its paste buffer. */
 		text: string;
 		/** The key names this send presses. */
 		keys: string[];
 		exitCode: number;
 	}
 
-	function parseGuardedCommands(commandList: string): { text: string; keys: string[] } {
+	/** Text rides a paste buffer, so `buffers` is what turns a buffer name back into it. */
+	function parseGuardedCommands(commandList: string, buffers: Map<string, string>): { text: string; keys: string[] } {
 		let text = "";
 		const keys: string[] = [];
 		for (const command of commandList.split(" ; ")) {
-			const hex = command.split(" -H ")[1];
-			if (hex !== undefined) {
-				text += Buffer.from(hex.split(" ").join(""), "hex").toString("utf8");
+			const parts = command.split(" ");
+			if (parts[0] === "paste-buffer") {
+				text += buffers.get(parts[parts.indexOf("-b") + 1] ?? "") ?? "";
 				continue;
 			}
-			const parts = command.split(" ");
 			if (parts[0] === "send-keys") keys.push(...parts.slice(3));
 		}
 		return { text, keys };
@@ -9508,12 +9702,17 @@ describe("handlers.spawnBugHuntersInTask", () => {
 		const opened: string[] = [];
 		const killed: string[] = [];
 		const sends: GuardedSend[] = [];
+		const buffers = new Map<string, string>();
 		const reply = (stdout: string, exitCode = 0) => ({
 			stderr: enc.encode(""),
 			stdout: enc.encode(stdout),
 			exited: Promise.resolve(exitCode),
 		});
 		mockSpawn.mockImplementation((args: string[]) => {
+			if (args[3] === "set-buffer") {
+				buffers.set(args[5] as string, args[7] as string);
+				return reply("");
+			}
 			if (args.includes("split-window")) {
 				const pane = paneIds[i++] ?? `%99`;
 				opened.push(pane);
@@ -9531,7 +9730,7 @@ describe("handlers.spawnBugHuntersInTask", () => {
 			if (guardIndex >= 0) {
 				const pane = args[guardIndex + 2];
 				const exitCode = (opts.sendFails ?? []).includes(pane) ? 1 : 0;
-				sends.push({ pane, ...parseGuardedCommands(args[guardIndex + 5] ?? ""), exitCode });
+				sends.push({ pane, ...parseGuardedCommands(args[guardIndex + 5] ?? "", buffers), exitCode });
 				if (exitCode !== 0) return reply("", exitCode);
 				// No marker on stdout is how tmux reports "the guard was false".
 				return reply((opts.guardRefuses ?? []).includes(pane) ? "" : "dev3-pane-input-sent\n");
@@ -10481,6 +10680,60 @@ describe("launchTaskPty", () => {
 		} finally {
 			writeSpy.mockRestore();
 		}
+	});
+
+	// This write replaces pane[0] wholesale, so it is the one place an origin
+	// store can silently disappear — after which resume resolves the id against
+	// an empty worktree store and starts a brand new conversation instead.
+	describe("sessionOriginCwd across the sessionState rewrite", () => {
+		const ORIGIN = "/Users/dev/code/my-app";
+		const withOrigin = () => makeTask({
+			sessionState: {
+				panes: [{
+					agentCmd: "claude",
+					sessionId: "from-elsewhere",
+					agentId: "builtin-claude",
+					configId: "claude-default",
+					sessionOriginCwd: ORIGIN,
+				}],
+			},
+		});
+		const persistedPane = () => {
+			const call = vi.mocked(data.updateTask).mock.calls.find(([, , updates]) => (updates as any)?.sessionState);
+			return (call?.[2] as any)?.sessionState?.panes?.[0];
+		};
+
+		it("carries the origin store forward when the same id is resumed", async () => {
+			const task = withOrigin();
+			mockTaskWrites(task);
+
+			await launchTaskPty(makeProject(), task, "/tmp/wt", "builtin-claude", "claude-default", false, true, {
+				sessionId: "from-elsewhere",
+			});
+
+			expect(persistedPane()).toMatchObject({ sessionId: "from-elsewhere", sessionOriginCwd: ORIGIN });
+		});
+
+		it("drops the origin store when the resolver substituted a different id", async () => {
+			const task = withOrigin();
+			mockTaskWrites(task);
+
+			await launchTaskPty(makeProject(), task, "/tmp/wt", "builtin-claude", "claude-default", false, true, {
+				sessionId: "healed-local",
+			});
+
+			expect(persistedPane()).toMatchObject({ sessionId: "healed-local" });
+			expect(persistedPane()?.sessionOriginCwd).toBeUndefined();
+		});
+
+		it("leaves a fresh launch without an origin store", async () => {
+			const task = withOrigin();
+			mockTaskWrites(task);
+
+			await launchTaskPty(makeProject(), task, "/tmp/wt", "builtin-claude", "claude-default");
+
+			expect(persistedPane()?.sessionOriginCwd).toBeUndefined();
+		});
 	});
 
 	it("throws without creating a PTY session when command resolution fails", async () => {
@@ -11988,7 +12241,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
 		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(false);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 4 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 4, baseUnreachable: false });
 		vi.mocked(github.isPullRequestMerged).mockResolvedValue(true);
 		setPushMessage(push);
 
@@ -12015,7 +12268,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
 		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(false);
-		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 4 });
+		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 4, baseUnreachable: false });
 		vi.mocked(github.isPullRequestMerged).mockResolvedValue(true);
 		setPushMessage(push);
 
@@ -13202,6 +13455,28 @@ describe("notifyWatchedTaskStatusChange", () => {
 	});
 });
 
+describe("dropQueuedAttention (dev3 attention --clear)", () => {
+	afterEach(() => {
+		setTerminalFocus(false);
+		setPushMessage(() => {});
+	});
+
+	it("drops a task's queued badges so the flush cannot resurrect them", () => {
+		const push = vi.fn();
+		setPushMessage(push);
+		setTerminalFocus(true);
+		pushCliAttention({ taskId: "task-cleared", projectId: "proj-1", reason: "blocked" });
+		pushTerminalBell("task-cleared");
+		pushCliAttention({ taskId: "task-other", projectId: "proj-1", reason: "still waiting" });
+
+		dropQueuedAttention("task-cleared");
+		setTerminalFocus(false);
+
+		expect(push).toHaveBeenCalledTimes(1);
+		expect(push).toHaveBeenCalledWith("cliAttention", expect.objectContaining({ taskId: "task-other" }));
+	});
+});
+
 describe("web notification push (remote/browser mode mirror)", () => {
 	beforeEach(() => {
 		vi.mocked(Utils.showNotification).mockClear();
@@ -13646,12 +13921,20 @@ describe("handlers.createPullRequest", () => {
 	}
 
 	/**
-	 * The literal text one guarded send put into the pane. The adapter sends text as
-	 * `-H <hex bytes>`, so decoding is how a test reads what the agent will see.
+	 * The literal text one guarded send put into the pane. Text rides a tmux paste buffer,
+	 * so reading it back means resolving each `paste-buffer -b <name>` against the
+	 * `set-buffer` that loaded it.
 	 */
 	function typedText(args: string[] | undefined): string {
-		const hex = /send-keys -t %\d+ -H ([0-9a-f ]+)/.exec(args?.join(" ") ?? "")?.[1];
-		return hex ? Buffer.from(hex.replaceAll(" ", ""), "hex").toString("utf8") : "";
+		const loaded = new Map(
+			mockSpawn.mock.calls
+				.map((c) => c[0] as string[])
+				.filter((argv) => argv[3] === "set-buffer")
+				.map((argv) => [argv[5] as string, argv[7] as string] as const),
+		);
+		return [...(args?.join(" ") ?? "").matchAll(/paste-buffer -d -p -r -b (\S+)/g)]
+			.map((match) => loaded.get(match[1] as string) ?? "")
+			.join("");
 	}
 
 	/**
@@ -13863,7 +14146,7 @@ describe("handlers.createPullRequest", () => {
 
 		const sends = guardedSends();
 		expect(sends).toHaveLength(2);
-		expect(sends[0]?.join(" ")).toContain("send-keys -t %5 -H");
+		expect(sends[0]?.join(" ")).toMatch(/paste-buffer -d -p -r -b \S+ -t %5/);
 		expect(sends[1]?.join(" ")).toContain("send-keys -t %5 Enter");
 	});
 
@@ -13887,7 +14170,7 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		expect(guardedSends()[0]?.join(" ")).toContain("send-keys -t %5 -H");
+		expect(guardedSends()[0]?.join(" ")).toMatch(/paste-buffer -d -p -r -b \S+ -t %5/);
 	});
 
 	it("routes to the live agent pane when the Codex main pane id is not persisted", async () => {
@@ -13908,7 +14191,7 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		expect(guardedSends()[0]?.join(" ")).toContain("send-keys -t %7 -H");
+		expect(guardedSends()[0]?.join(" ")).toMatch(/paste-buffer -d -p -r -b \S+ -t %7/);
 	});
 
 	it("routes a legacy Codex main pane before a focused shell split", async () => {
@@ -13926,7 +14209,7 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		expect(guardedSends()[0]?.join(" ")).toContain("send-keys -t %5 -H");
+		expect(guardedSends()[0]?.join(" ")).toMatch(/paste-buffer -d -p -r -b \S+ -t %5/);
 	});
 
 	// A registered agent pane that no longer exists must not hijack the routing —
@@ -13944,7 +14227,7 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		expect(guardedSends()[0]?.join(" ")).toContain("send-keys -t %3 -H");
+		expect(guardedSends()[0]?.join(" ")).toMatch(/paste-buffer -d -p -r -b \S+ -t %3/);
 	});
 
 	it("throws when the task has no worktree", async () => {

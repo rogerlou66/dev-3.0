@@ -120,6 +120,11 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		analyticsDistinctId: typeof d.analyticsDistinctId === "string" && d.analyticsDistinctId
 			? d.analyticsDistinctId
 			: undefined,
+		// Trimmed on the way in: a code that differs from what the owner typed only
+		// by trailing whitespace is a sign-in that fails for no visible reason.
+		staticAccessCode: typeof d.staticAccessCode === "string" && d.staticAccessCode.trim()
+			? d.staticAccessCode.trim()
+			: undefined,
 		cloneBaseDirectory: d.cloneBaseDirectory ?? undefined,
 		customBinaryPaths: d.customBinaryPaths ?? undefined,
 		agentBinaryPaths: d.agentBinaryPaths ?? undefined,
@@ -155,6 +160,8 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			d.terminalShell === "zsh" || d.terminalShell === "bash" || d.terminalShell === "sh"
 				? d.terminalShell
 				: undefined,
+		// Default-on toggle — only an explicit false is a stored opt-out.
+		dimInactivePanes: d.dimInactivePanes === false ? false : undefined,
 		focusMode: d.focusMode === true ? true : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		agentRateLimitTracking: d.agentRateLimitTracking === false ? false : undefined,
@@ -176,8 +183,21 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		agentsLayoutRevision: typeof d.agentsLayoutRevision === "number" ? d.agentsLayoutRevision : undefined,
 		// Default-off experimental toggle — only an explicit true is a stored opt-in.
 		pxpipeProxyEnabled: d.pxpipeProxyEnabled === true ? true : undefined,
+		// Default-off feature — no key at all means off, so nothing is installed and
+		// no output style is touched until the user opts in. Both booleans are kept:
+		// an explicit false is the user saying "off", not the absence of a choice.
+		lowBatteryEnabled: typeof d.lowBatteryEnabled === "boolean" ? d.lowBatteryEnabled : undefined,
+		// Legacy keys, never read by this version — passed through so an older
+		// co-installed build keeps its own opt-out and announce flag.
+		lowBatteryDisabled: d.lowBatteryDisabled === true ? true : undefined,
+		lowBatteryAnnounced: d.lowBatteryAnnounced === true ? true : undefined,
 		// Bring-your-own-tunnel config; kept only when it names a runnable custom command.
 		remoteTunnel: sanitizeRemoteTunnel(d.remoteTunnel),
+		// Pinned remote-access port; anything outside the TCP range means "auto".
+		remotePort:
+			typeof d.remotePort === "number" && Number.isInteger(d.remotePort) && d.remotePort >= 1 && d.remotePort <= 65535
+				? d.remotePort
+				: undefined,
 		// Default-off beta toggle — only an explicit true is a stored opt-in.
 		experimentalTerminalBidi: d.experimentalTerminalBidi === true ? true : undefined,
 		// Default-off beta toggle — only an explicit true is a stored opt-in.

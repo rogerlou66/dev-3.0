@@ -163,6 +163,9 @@ export const APP_SHORTCUTS: ShortcutSpec[] = [
 		remappable: false, fixedReasonKey: "keymap.fixed.chordSequence",
 		display: { mac: "G then D/P/T/S/1–9", other: "G then D/P/T/S/1–9" },
 	},
+	// Zoom out from a project's board to its space's unified board. One key for the
+	// whole feature: ⌘1..9 stay exactly what they are today (a project each).
+	{ id: "zoom-out-to-space", primary: [mod("KeyU", "Shift")], descKey: "keymap.shortcut.zoomOutToSpace", category: "navigation" },
 	{ id: "focus-search", primary: [{ code: "Slash", mods: [] }], descKey: "keymap.shortcut.focusSearch", category: "navigation" },
 	{
 		id: "escape", primary: [], descKey: "keymap.shortcut.escape", category: "navigation",
@@ -233,6 +236,25 @@ export const APP_SHORTCUTS: ShortcutSpec[] = [
 			{ code: "KeyW", mods: ["Ctrl", "Shift"], platform: "other", desktopOnly: true },
 		],
 		remoteDisplay: { mac: "⌃B x", other: "Ctrl+B x" },
+	},
+	// Zoom and swap already exist behind the tmux prefix (⌃B z, ⌃B { / }) and are
+	// listed on the overlay's Terminal tab. These are the backend-neutral,
+	// prefix-free route: they also work on the native backend, which has no tmux
+	// prefix at all, and they are rebindable like the rest of the pane family.
+	{
+		id: "pane-zoom", category: "terminal", conflictGroup: "terminal", descKey: "tmux.zoomDesc",
+		primary: [{ code: "Enter", mods: ["Mod", "Shift"], platform: "mac" }, { code: "Enter", mods: ["Ctrl", "Shift"], platform: "other" }],
+	},
+	// ⌘⇧, and ⌘⇧. read as `<` and `>` — move this pane left / right. Deliberately
+	// NOT ⌘⇧[ / ⌘⇧], which the app already spends on variant cycling; a terminal
+	// holds focus most of the time here, so silently shadowing it would hurt.
+	{
+		id: "pane-swap-prev", category: "terminal", conflictGroup: "terminal", descKey: "panes.swapPrev",
+		primary: [{ code: "Comma", mods: ["Mod", "Shift"], platform: "mac" }, { code: "Comma", mods: ["Ctrl", "Shift"], platform: "other" }],
+	},
+	{
+		id: "pane-swap-next", category: "terminal", conflictGroup: "terminal", descKey: "panes.swapNext",
+		primary: [{ code: "Period", mods: ["Mod", "Shift"], platform: "mac" }, { code: "Period", mods: ["Ctrl", "Shift"], platform: "other" }],
 	},
 	{
 		id: "tmux-new-window", category: "terminal", conflictGroup: "terminal", descKey: "cheatSheet.newWindow",

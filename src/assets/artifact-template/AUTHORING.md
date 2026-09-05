@@ -2,158 +2,71 @@
 
 The layout is fixed; do not list or explore the directory before starting:
 
-- `AUTHORING.md` — read this reference once.
-- `index.html` — report copy, sections, fields, and table headings; edit this.
-- `report.js` — report data, charts, filters, and interactions; edit this.
-- `app.css` — stable responsive visual system and print layout; keep unchanged.
-- `app.js` — stable theme, chart, control, and toast bridge; keep unchanged.
-- `dev3-icon.png` — bundled brand asset; keep and publish it.
-
-Copy this pristine directory into the task worktree before editing:
+- `AUTHORING.md` — this card. Enough for an ordinary report; read it once.
+- `REFERENCE.md` — charts, controls, menus, dense tables, print, talking back to the agent. Read a section only when the report needs it.
+- `index.html` — the report: copy, sections, fields, table headings. **Edit this.**
+- `report.js` — report data, chart options, filters, interactions. **Edit this**; a static report may leave it an empty function.
+- `app.css`, `app.js` — the stable visual system and shell. Keep unchanged.
+- `dev3-icon.png` — brand asset; keep and publish it.
 
 ```bash
-cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report
+cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report      # never edit the pristine source
+# … edit index.html and report.js …
+dev3 show-artifact ./dev3-artifact-report --title "Report title"   # the directory: every css/js/image in it rides along
 ```
 
-## Edit surface
+For most reports, edit only `index.html` and `report.js`. Do not read or edit `app.css` or `app.js` unless the artifact format itself must change — that keeps formatting out of your context. Delete irrelevant HTML sections and their matching `report.js` blocks freely; the shell has no dependency on demo data or panels. Re-running `show-artifact` with the same `--title` publishes a new **version** of the same artifact; never invent `report-v2.html`. Files outside the directory go after `--assets`.
 
-For most reports, edit only `index.html` and `report.js`.
+## What the shell already gives you
 
-- `index.html` owns visible copy, sections, form fields, and table headings.
-- `report.js` owns all report-specific data and behavior: chart options, table rows, filters, and interactions.
-- `app.css` owns the responsive dev3 visual system and print layout.
-- `app.js` owns only the reusable theme, chart, and toast shell.
+Write the class — never a `<style>` block, never a hex color, never a px font size.
 
-Do not read or edit `app.css` or `app.js` unless the artifact format itself must change. This keeps formatting out of the authoring context and makes normal artifact work a targeted change. Delete irrelevant HTML sections and their matching `report.js` blocks freely; the reusable shell has no dependency on demo data or panels.
+| You want | Write |
+|---|---|
+| A panel | `<section class="card section">` with `<h2 class="section-title">` in a `.section-head`; a table panel is `.card.table-card` |
+| Panels side by side | `.dashboard-grid` + `span-3` … `span-9` on each child; KPI cards go in `.grid.kpis` (`.card.kpi` → `.kpi-top`, `.kpi-value`, `.trend`) |
+| A paragraph | `<p class="prose">` — holds a readable line length inside a wide panel |
+| A table that sorts | `<table data-sortable>` and `<th data-sort tabindex="0">` — the shell sorts the rows; `data-sort="3"` on a cell overrides its text. Leave `data-sortable` off when `report.js` renders and sorts the rows itself |
+| A dense ledger | `.evidence-table` inside `.evidence-table-scroll`; cell classes `.good` `.bad` `.sig` `.dim` `.wrap`, `tr.total` |
+| A status chip | `.pill` + `success` / `warning` / `accent` / `tone`; a progress cell is `.bar-cell` → `.mini-track` → `.mini-fill` |
+| A hue | `tone-1` … `tone-6` or `tone-gold` on a card, KPI, pill — everything inside follows |
+| A chart | `<div class="chart-host" id="…" role="img">` + `dev3Artifact.chart()` in `report.js` |
+| A select, slider, switch | native markup + `data-ui-select` / `data-ui-slider`; `.check`, `.switch`, `.option-group` skin the rest |
+| A menu that opens | `.popover-anchor` → `data-popover-trigger` + `.popover` — never `position: absolute` + `z-index` |
 
-## Panels, spacing, and padding
+## Color: three families, never mixed
 
-`main.app` spaces its direct children for you, so stacked panels never touch. Add sections as top-level siblings of `.app` and do not hand-add vertical margins between them. Nest a group of panels inside `<div class="stack">` when they belong together; use `.grid`, `.dashboard-grid`, or `.evidence-book` for column layouts.
+- `--dev3-success` / `--dev3-warning` / `--dev3-danger` assert a verdict. Green means "good" to every reader, so never use it to tell two bars apart.
+- `--dev3-gold` is emphasis without a verdict; `--dev3-accent` is the interactive color (links, selection, the primary button).
+- `--dev3-viz-1` … `--dev3-viz-6` are categorical hues at one lightness — chart series, cohorts. `tone-N` maps to them.
+- Every `--dev3-*` color token is a **raw RGB triplet**, so a bare `var()` is an invalid value and the declaration silently drops. If you must write CSS, wrap it: `background: rgb(var(--dev3-surface-raised));`, alpha with a slash: `rgb(var(--dev3-accent) / .18)`; from JavaScript use `dev3Artifact.color("--dev3-accent", .3)`.
 
-`.card` already carries its own padding, so a bare `<section class="card">` looks right with plain content inside it. `.section` and `.kpi` set a roomier padding, and `.table-card` intentionally drops it so a table can run edge to edge. Never re-pad a card from report markup.
+## Charts in two lines
 
-`.dashboard-grid` is a 12-column grid. A panel inside it takes the whole row unless you give it a width, so a card you drop in never collapses into a sliver. To put panels side by side add `span-3` … `span-9` (`<article class="card section span-6">`); the widths apply above 900px and every panel goes full width below that and in print.
-
-The container grows with the viewport up to 1840px, so dense tables and dashboards use a wide monitor instead of leaving it empty. Because the panels are wide, put running prose in `<p class="prose">` (or any `.prose` block) to hold a readable line length; short `.muted` and `.section-copy` lines are capped for you. `.kpis` fits as many cards per row as the width allows, so a report may ship three or six KPI cards without a layout override.
-
-## Text size
-
-The topbar carries an `A− / 100% / A+` group beside the theme button. It steps the whole report between 80% and 150% in ten-point stops, the percentage doubles as the reset button, and the choice is remembered per browser (silently skipped in the sandboxed viewer, whose opaque origin has no storage). Keep the control in `.actions`.
-
-Everything in `app.css` is sized in `rem`, or in `em` for a glyph that belongs to its own label, so one root scale carries text, chart heights, checkboxes, switches, sliders, and the Choices dropdowns with it. Print follows the same scale — an enlarged report prints enlarged.
-
-Two rules for report code:
-
-- Never write a px font size in `index.html` or `report.js`. Use the shell's classes, or `rem` if a one-off is unavoidable.
-- Chart options are exempt: the shell rescales every `fontSize` number in an option tree before ECharts sees it, so `fontSize: 12` in `report.js` stays correct at every scale. Use `dev3Artifact.scaleFont(px)` for a px number ECharts does not read from `fontSize` (an `itemHeight`, a `grid.left` sized for labels), and `dev3Artifact.fontScale()` for the raw multiplier.
-
-## Preview and share
-
-Pass every local dependency explicitly after `--assets`:
-
-```bash
-dev3 show-artifact ./dev3-artifact-report/index.html \
-  --assets \
-  ./dev3-artifact-report/app.css \
-  ./dev3-artifact-report/report.js \
-  ./dev3-artifact-report/app.js \
-  ./dev3-artifact-report/dev3-icon.png \
-  --title "Report title"
+```js
+const trend = dev3Artifact.chart(document.getElementById("velocityChart"), () => ({ /* ECharts option */ }));
+trend.update();     // re-reads the factory and morphs data in place — change what the factory closes over first
+trend.remount();    // re-reads the factory and redraws from scratch
 ```
 
-Keep assets beside or below `index.html` and reference them with relative paths. dev3 rewrites local CSS, classic JavaScript, raster references, and CSS `@import` chains for its sandboxed viewer, then includes the original paths in the downloadable ZIP. Pass every imported stylesheet explicitly in `--assets`. The extracted ZIP also opens directly through `file://`. Avoid ES modules and `fetch()` for local files because browsers restrict them for opaque and file origins.
+Pass the **element**, never its id. `update()` and `remount()` take **no arguments**. A `chart()` call that throws kills the whole of `report.js`, so a blank report with one console error is one bad call. The shell colors series from the viz ramp, rescales `fontSize` with the text-size control, re-renders on theme change, and shows a notice when the CDN is unreachable. More: `REFERENCE.md` § Charts.
 
-## Network access and external libraries
+## Contract
 
-Artifacts render in a sandboxed opaque-origin iframe with network access open. CDN libraries, fonts, `fetch()`, and WebSockets may reach the user's services or the dev3 dev server, but the target must accept a `null` origin (CORS). Prefer familiar, narrowly scoped libraries from cdnjs when they remove report-specific code, and pin the exact version in the URL. Do not add `integrity` hashes: CDN byte changes must not brick an otherwise compatible artifact. Keep report content and data local; analytics and trackers are not allowed.
+Keep `data-dev3-artifact-template="v1"` on `<html>`, the dev3 icon and a `DEV3 ARTIFACT · <CATEGORY>` eyebrow, the theme and `A− / 100% / A+` controls in `.actions`, `Built with dev3 Artifacts` in the footer. Never define or shadow `window.dev3` — the viewer owns it. A path your JavaScript builds at runtime goes through `dev3Artifact.asset()`.
 
-The starter already pins ECharts 6.1.0, Choices.js 11.2.3, and noUiSlider 15.8.1 in their URLs. Do not replace their tags or reproduce their behavior in report code. All three degrade safely when offline: charts show a notice, while selects and ranges remain native controls.
+## When the report needs more — `REFERENCE.md`
 
-## Charts (Apache ECharts from cdnjs)
-
-`index.html` loads Apache ECharts 6.1.0 through a versioned cdnjs tag. Keep that tag intact when the report has charts. Offline, chart hosts show a notice while the rest of the report remains usable.
-
-The stable bridge lives in `app.js` and exposes `window.dev3Artifact.chart()`, `.color()`, `.enhance()`, `.fontScale()`, `.popover()`, `.scaleFont()`, `.setControl()`, and `.toast()`. Keep chart options, values, labels, filters, and interactions in `report.js`; use the exposed helpers there without editing the shell. The chart helper applies dev3 tokens, uses the SVG renderer for crisp print/PDF output, adds aria descriptions, re-renders on theme changes, and resizes with its container.
-
-The shell declares the card surface as each chart's `backgroundColor`, because ECharts derives value-label contrast from it — without that, every label renders dark grey inside a white halo, which is illegible on the dark theme. Keep report code out of that decision: do not set `backgroundColor` or hand-color value labels unless the chart sits on a surface other than `--dev3-surface-raised`.
-
-Use `.remount()` when switching a chart view so ECharts redraws its geometry from left to right; use `.update()` when live data should morph in place. The shell keeps ECharts' native timing and disables motion when the user prefers reduced motion.
-
-## Navigation and form controls
-
-Local fragment links are real navigation. Put them in `.section-nav`, give every target an `id` plus `.section-anchor`, and let the shell handle scrolling, focus, `aria-current`, and scrollspy:
-
-```html
-<nav class="section-nav"><a href="#results">Results</a></nav>
-<section class="section-anchor" id="results"><h2>Results</h2></section>
-```
-
-Keep form markup native and opt into the polished CDN controls with one attribute. The original elements remain the form values and the offline fallback; the shell handles keyboard support, labels, output updates, and reset synchronization:
-
-```html
-<select id="cohort" data-ui-select><option>Control</option><option>Agent</option></select>
-<label for="threshold">Threshold <output for="threshold">80%</output></label>
-<input id="threshold" type="range" min="50" max="100" value="80" data-ui-slider data-unit="%" data-pips="3">
-```
-
-Use native checkbox, radio, and switch markup from `index.html`; `app.css` supplies the shared skin without report JavaScript.
-When report code changes an enhanced select or range, call `dev3Artifact.setControl(element, value)` so the native value, visual control, events, and output stay synchronized.
-
-## Menus, dropdowns, and anything that opens over the report
-
-**Never hand-roll `position: absolute` + `z-index` for a panel that opens.** It is the most common broken artifact: the card, the horizontal scroller, or the sticky table header around it clips the panel, and no z-index can win because the clip happens before stacking. Use the shell's popover — it puts the panel in the browser top layer, where no ancestor can clip it or paint over it:
-
-```html
-<div class="popover-anchor">
-  <button type="button" data-popover-trigger="branchMenu">refactor/…header-controls <span class="popover-caret" aria-hidden="true">▾</span></button>
-  <div class="popover" id="branchMenu">
-    <div class="popover-title">Branch</div>
-    <button type="button" data-action="copy-path">Copy worktree path</button>
-    <button type="button" data-action="checkout">Copy checkout command</button>
-    <hr>
-    <a href="https://example.com/pr/1412">Open pull request</a>
-  </div>
-</div>
-```
-
-The shell owns opening, `aria-expanded`, `aria-haspopup`, placement against the trigger, flipping above it when the viewport is short, clamping inside the viewport, repositioning on scroll and resize, arrow-key movement, Escape, outside-click dismissal, focus return, and hiding in print. Report code only listens for clicks on its own items. A menu closes on the item that was clicked; add `data-popover-keep-open` to an item that must not close it (a filter panel rather than a menu).
-
-For a panel built after load, register it with `dev3Artifact.popover(panel, triggerElement)` and drive it through the returned `open()`, `close()`, `toggle()`, and `isOpen`. Enhanced selects need nothing: the shell already lifts the Choices list into the top layer, so a filter inside `.table-card` or `.evidence-group` keeps every option reachable.
-
-Style overlays only through `.popover`, `.popover-title`, and plain `button`/`a`/`hr` children. Do not set `position`, `top`, `left`, `inset`, or `z-index` on a popover — the shell writes those. When something genuinely needs its own stacking order, use the `--dev3-z-nav`, `--dev3-z-overlay`, and `--dev3-z-toast` tokens instead of a new number.
-
-## Tables
-
-Every table gets its reading aids from the shell: alternating row tint, a full-row hover highlight, a vertical rule between cells, tabular figures, and a header that stays visible while the rows scroll. Do not re-implement any of it in report code, and do not add per-row background styles.
-
-Mark a sortable heading with `data-sort` plus `tabindex="0"`; the shell maintains `aria-sort` and renders the ascending/descending caret, so report code only has to sort the data. A heading without `data-sort` renders as a plain label with no pointer cursor.
-
-## Dense evidence tables
-
-Keep decision summaries and charts first, then preserve exhaustive source rows in a visible evidence ledger. Large mechanically produced datasets may live in an additional classic JavaScript asset such as `evidence-data.js`; list it in `--assets`, load it before `report.js`, and keep only rendering logic in `report.js`.
-
-Wrap wide tables in `.evidence-table-scroll` and add `.evidence-table` to the table. The shell keeps every column reachable with horizontal scrolling on narrow screens and lays all columns out for print. The first column is pinned while the numbers scroll past it, so put the row's identity there — a day, a cohort, a file — and never a value that only makes sense next to its neighbours. Reuse the semantic source markers `.good`, `.bad`, `.sig`, `.flat`, `.dim`, `.sep`, `.regime`, and `.total`; the shell maps them to dev3 tokens, quiet typographic significance emphasis, column separators, rollout boundaries, and total rows.
-
-## Print and PDF
-
-Choose Auto, Light, or Dark in the report, then print with Cmd/Ctrl+P. The stylesheet preserves the selected theme and chart colors, removes interactive controls, repeats table headers, and avoids splitting cards and rows.
-
-- Keep `print-color-adjust: exact` on `html, body`.
-- Keep charts on the SVG renderer.
-- Add `print-hidden` to controls that do not belong in static output.
-- Add `print-only` to concise context shown only in PDF.
-- Closed `details` sections expand for printing and return to their prior state afterwards.
-- For dense charts, set `--dev3-print-chart-height` on `<html>` to keep every label visible.
-- Check print preview in both Light and Dark after changing layout.
-
-## Contracts to preserve
-
-- Keep `data-dev3-artifact-template="v1"` on `<html>`.
-- Keep the dev3 icon and a `DEV3 ARTIFACT · <CATEGORY>` eyebrow.
-- Keep `Built with dev3 Artifacts` in the footer.
-- Keep the Auto → Light → Dark theme control and the `A− / 100% / A+` text-size control.
-- Keep local navigation functional: a click must scroll, focus the section heading, and expose `aria-current`.
-- Use only the bundled `--dev3-*` semantic tokens for color, and the `--dev3-z-*` tokens for stacking.
-- Route every panel that opens over the report through `.popover` / `dev3Artifact.popover()`; never hand-roll an absolutely positioned menu.
-- Keep the page responsive and keyboard-accessible.
-- Keep report content/data local; external libraries and live integrations are allowed.
+| Read the section | When |
+|---|---|
+| Panels, spacing, and padding | placing panels by hand, print widths |
+| Color tokens · Tones | writing any CSS at all |
+| Text size | a one-off size, or a px number ECharts reads from something other than `fontSize` |
+| Publishing and assets | images under `shots/`, a path built in JavaScript, files outside the report directory |
+| Network and libraries | pulling another CDN library, `fetch()` to a dev server |
+| Charts | more than one chart, live data, chart types |
+| Navigation and form controls | selects, sliders, switches, radio groups, `setControl()` |
+| Menus and popovers | a dropdown, an export menu, anything that opens over the report |
+| Tables · Dense evidence tables | stacking rules on narrow screens, large generated ledgers |
+| Print and PDF | the report will be printed or saved as PDF |
+| Asking the user something | a form whose answer goes straight back to the agent |

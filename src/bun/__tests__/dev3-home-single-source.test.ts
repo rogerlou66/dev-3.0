@@ -31,6 +31,8 @@ const ALLOWED: Record<string, string> = {
 	"codex-config.ts": "same as agents.ts — writes real paths into the user's own ~/.codex/config.toml",
 	"agent-skills.ts": "skill TEXT shown to agents, plus the real sockets path in ~/.claude/settings.json",
 	"conversation-search.ts": "reads historical transcripts, which exist only under the real home",
+	"agent-store-roots.ts": "agent accounts are a machine fact like agents.ts: a redirected instance still launches agents against the REAL ~/.dev3.0/agent-accounts, and their transcripts are there",
+	"conversation-import.ts": "rejects conversations that ran in dev3 worktrees — deliberately BOTH the real root and this instance's resolveDev3Home()",
 };
 
 function composesDev3HomeItself(source: string): boolean {
@@ -89,7 +91,7 @@ describe("the dev3 data root has one source", () => {
 	it("the CLI resolves the same root, because it is a separate process", () => {
 		// Without this the isolation is half: a scoped app instance plus a dev3 CLI
 		// still pointed at the user's real board.
-		for (const file of ["context.ts", "spaces.ts", "commands/install-hooks.ts"]) {
+		for (const file of ["context.ts", "spaces.ts", "commands/install-hooks.ts", "commands/conversations.ts"]) {
 			const source = readFileSync(join(APP_ROOT, "..", "cli", file), "utf-8");
 			expect(source, `src/cli/${file} must use resolveDev3Home`).toContain("resolveDev3Home");
 		}

@@ -3,7 +3,9 @@ import type { AppRPCSchema } from "../shared/types";
 import { adjustZoom, applyZoom, ZOOM_STEP, DEFAULT_ZOOM } from "./zoom";
 import { createWatchdogState, decidePingOutcome, shouldAllowReload } from "./rpc-watchdog";
 import { recordDiagnostic, RPC_STATUS_EVENT, type RpcConnectionState } from "./diagnostics";
-import { createRemoteSession, type RemoteSessionState, type SocketLike } from "./remote-session";
+import { createRemoteSession, type AccessCodeOutcome, type RemoteSessionState, type SocketLike } from "./remote-session";
+import { readCodeFromFragment, stripCodeFromFragment } from "../shared/remote-sign-in-link";
+import { debugLog } from "./debug-log";
 
 // ── Transport connection state ──────────────────────────────────────
 // Surfaced to the bootstrap screen so a stuck "Loading…" can tell the user
@@ -14,6 +16,21 @@ let rpcConnectionState: RpcConnectionState = "connected";
 // Set by whichever transport initializes — lets `reconnectRpc()` do a soft
 // recovery (re-open socket) before the user has to hard-reload the page.
 let reconnectImpl: (() => void) | null = null;
+
+// Wired by the browser transport only: the sign-in screen's access-code form.
+// The desktop bridge has no auth, so it stays null and the form never renders.
+let submitAccessCodeImpl: ((code: string) => Promise<AccessCodeOutcome>) | null = null;
+
+/**
+ * Trade the owner's permanent access code for a session cookie and reconnect.
+ * Returns "unsupported" on the desktop bridge, where there is nothing to sign
+ * into. A "rejected" answer is not terminal — the code is multi-use, so the
+ * user simply types it again.
+ */
+export async function submitRemoteAccessCode(code: string): Promise<AccessCodeOutcome | "unsupported"> {
+	if (!submitAccessCodeImpl) return "unsupported";
+	return submitAccessCodeImpl(code);
+}
 
 /**
  * One timed round trip of the cheapest request there is, through the transport
@@ -83,12 +100,14 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	manualCompletionChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:manualCompletionChanged", { detail: payload })),
 	mergePromptResolved: (payload) => window.dispatchEvent(new CustomEvent("rpc:mergePromptResolved", { detail: payload })),
 	agentCompletionRequested: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentCompletionRequested", { detail: payload })),
+	agentCancellationRequested: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentCancellationRequested", { detail: payload })),
 	agentLaunchRequested: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentLaunchRequested", { detail: payload })),
 	agentRequestResolved: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentRequestResolved", { detail: payload })),
 	updateAvailable: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateAvailable", { detail: payload })),
 	portsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:portsUpdated", { detail: payload })),
 	devServerUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:devServerUpdated", { detail: payload })),
 	exposedPortsChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:exposedPortsChanged", { detail: payload })),
+	remoteAccessStatusChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:remoteAccessStatusChanged", { detail: payload })),
 	resourceUsageUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:resourceUsageUpdated", { detail: payload })),
 	systemMemoryUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:systemMemoryUpdated", { detail: payload })),
 	agentRateLimitsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentRateLimitsUpdated", { detail: payload })),
@@ -101,6 +120,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	openTaskFromNotification: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", { detail: payload })),
 	openDeepLink: (payload) => window.dispatchEvent(new CustomEvent("rpc:openDeepLink", { detail: payload })),
 	cliToast: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliToast", { detail: payload })),
+	agentMessageLogChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentMessageLogChanged", { detail: payload })),
 	agentMessage: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentMessage", { detail: payload })),
 	cliAttention: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliAttention", { detail: payload })),
 	cliShowImage: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliShowImage", { detail: payload })),
@@ -153,13 +173,19 @@ interface ApiShape {
 	request: RequestProxy;
 }
 
-const RPC_TIMEOUT_MS = 120_000;
+// 6 minutes. Governs every renderer→host request on both transports. It is a
+// last-resort "give up" backstop, not the liveness detector — the bridge
+// watchdog (4s ping) and the browser socket-close handler catch a dead
+// connection in seconds. The one thing that legitimately runs long is a fresh
+// clone (cloneAndAddProject): a large repo on a slow network routinely blew
+// past the old 2-minute cap, so the whole cap is tripled.
+const RPC_TIMEOUT_MS = 360_000;
 
 // Wrap api.request to enrich timeout errors with the method name.
 // Electrobun rejects with a generic "RPC request timed out." — no indication
 // of which method failed.  This proxy catches that and re-throws with context
 // so the diagnostics boundary and console show something
-// actionable like: 'RPC "getBranchStatus" timed out (120 000 ms)'.
+// actionable like: 'RPC "getBranchStatus" timed out (360 000 ms)'.
 function enrichRequest(rawRequest: RequestProxy): RequestProxy {
 	return new Proxy(rawRequest, {
 		get(target: RequestProxy, prop: string | symbol, receiver: unknown) {
@@ -185,7 +211,7 @@ function enrichRequest(rawRequest: RequestProxy): RequestProxy {
 // function is never called.
 // Liveness-probe timing for the bridge watchdog. The ping races a short timeout
 // (independent of RPC_TIMEOUT_MS) so a jammed socket is detected in seconds, not
-// the 2-minute request timeout.
+// the full request timeout.
 const PING_TIMEOUT_MS = 4_000;
 const PING_INTERVAL_MS = 30_000;
 const RELOAD_MIN_GAP_MS = 30_000;
@@ -365,16 +391,27 @@ function initBrowserApi(): ApiShape {
 		window.dispatchEvent(new CustomEvent("rpc:authFailed", { detail }));
 	}
 
-	// Extract QR token from URL and clean it from the address bar. Only the
-	// token is a credential — keep other params (e.g. ?streamer=on, read later
-	// by initStreamerMode) instead of wiping the whole query.
+	// Lift both credentials off the URL and clean the address bar in one pass:
+	// the one-time QR token from the query, the permanent access code from the
+	// fragment of a bookmarked sign-in link. Everything else survives (e.g.
+	// ?streamer=on, read later by initStreamerMode) — only credentials go.
+	//
+	// Stripping the fragment matters more than stripping the query: the code is
+	// permanent, so leaving it in the address bar would put it in every
+	// screenshot of this tab and in whatever the user copies out of it next.
 	const urlParams = new URLSearchParams(window.location.search);
 	const qrToken = urlParams.get("token") || "";
-	console.log("[browser-rpc] init", { isViteDevServer, hasQrToken: !!qrToken, protocol: wsProtocol });
-	if (qrToken) {
+	const linkCode = readCodeFromFragment(window.location.hash);
+	debugLog("rpc", "[browser-rpc] init", { isViteDevServer, hasQrToken: !!qrToken, hasLinkCode: !!linkCode, protocol: wsProtocol });
+	if (qrToken || linkCode) {
 		urlParams.delete("token");
-		const rest = urlParams.toString();
-		window.history.replaceState({}, "", rest ? `${window.location.pathname}?${rest}` : window.location.pathname);
+		const query = urlParams.toString();
+		const fragment = stripCodeFromFragment(window.location.hash);
+		window.history.replaceState(
+			{},
+			"",
+			`${window.location.pathname}${query ? `?${query}` : ""}${fragment ? `#${fragment}` : ""}`,
+		);
 	}
 
 	function buildWsUrl(path: string, extraParams?: string): string {
@@ -448,6 +485,7 @@ function initBrowserApi(): ApiShape {
 
 	const session = createRemoteSession({
 		qrToken: qrToken || null,
+		accessCode: linkCode,
 		authMode: isViteDevServer ? "none" : "cookie",
 		// The HttpOnly session cookie rides same-origin requests; be explicit so
 		// a future fetch-default change can't silently drop auth.
@@ -456,7 +494,7 @@ function initBrowserApi(): ApiShape {
 		callbacks: {
 			onStateChange: (state) => setRpcState(mapSessionState(state)),
 			onSocketOpen: (socket) => {
-				console.log("[browser-rpc] WS OPEN");
+				debugLog("rpc", "[browser-rpc] WS OPEN");
 				activeSocket = socket;
 				flushQueuedRequests(socket);
 			},
@@ -485,6 +523,8 @@ function initBrowserApi(): ApiShape {
 			},
 		},
 	});
+
+	submitAccessCodeImpl = (code) => session.submitAccessCode(code);
 
 	// Soft reconnect for the bootstrap "Retry": replace the (possibly dead)
 	// socket without a full page reload.
