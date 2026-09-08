@@ -145,6 +145,36 @@ describe("global-settings utils", () => {
 		});
 	});
 
+	it.each([
+		["bypassPermissions", " --allow-all"],
+		["default", ""],
+		["plan", " --plan"],
+	] as const)("previews Copilot %s as an interactive launch", (permissionMode, permissionArgs) => {
+		const config: AgentConfiguration = { id: "c", name: "Copilot", permissionMode };
+		expect(buildCommandPreview("copilot", config)).toEqual({
+			command: `copilot${permissionArgs} --interactive '{{TASK_DESCRIPTION}}'`,
+			envLine: null,
+		});
+	});
+
+	it("previews Copilot wrappers with model, effort, additional args and escaped instructions", () => {
+		const config: AgentConfiguration = {
+			id: "c", name: "Copilot", baseCommandOverride: "company-copilot",
+			model: "custom[model]", effort: "high", permissionMode: "plan",
+			additionalArgs: ["--no-color"], appendPrompt: "Don't change files",
+			envVars: { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/instructions" },
+		};
+		expect(buildCommandPreview("copilot", config, undefined, undefined, "copilot")).toEqual({
+			command: "company-copilot --model 'custom[model]' --effort high --plan --no-color --interactive '{{TASK_DESCRIPTION}}\\n\\nDon'\\''t change files'",
+			envLine: "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/instructions",
+		});
+	});
+
+	it("does not advertise an unsupported Copilot budget flag", () => {
+		expect(buildCommandPreview("copilot", { id: "c", name: "Copilot", maxBudgetUsd: 5 }).command)
+			.not.toContain("--max-budget-usd");
+	});
+
 	it("omits --model for Claude when provider is bedrock", () => {
 		const config: AgentConfiguration = {
 			id: "c",

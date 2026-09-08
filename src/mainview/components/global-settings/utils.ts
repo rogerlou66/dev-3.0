@@ -132,6 +132,7 @@ export function buildCommandPreview(
 	const isCursor = cmdName === "agent";
 	const isCodex = cmdName === "codex";
 	const isClaude = cmdName === "claude";
+	const isCopilot = cmdName === "copilot";
 
 	// Mirror the launcher: only a backend registered for THIS agent applies
 	// (same guard as agentProvider in agents.ts).
@@ -163,8 +164,15 @@ export function buildCommandPreview(
 		parts.push(quoteIfUnsafeForPreview(arg));
 	}
 
+	if (isCopilot && config.effort) {
+		parts.push("--effort", quoteIfUnsafeForPreview(config.effort));
+	}
+
 	if (!isCodex && config.permissionMode && config.permissionMode !== "default") {
-		if (isCursor) {
+		if (isCopilot) {
+			if (config.permissionMode === "plan") parts.push("--plan");
+			else if (config.permissionMode === "bypassPermissions") parts.push("--allow-all");
+		} else if (isCursor) {
 			if (config.permissionMode === "plan") {
 				parts.push("--mode", "plan");
 			} else if (config.permissionMode === "bypassPermissions") {
@@ -185,11 +193,11 @@ export function buildCommandPreview(
 		if (!hasBypassFlag) parts.push("--allow-dangerously-skip-permissions");
 	}
 
-	if (config.effort && !isCursor && !isCodex) {
+	if (config.effort && !isCursor && !isCodex && !isCopilot) {
 		parts.push("--effort", config.effort);
 	}
 
-	if (config.maxBudgetUsd != null && config.maxBudgetUsd > 0 && !isCursor && !isCodex) {
+	if (config.maxBudgetUsd != null && config.maxBudgetUsd > 0 && !isCursor && !isCodex && !isCopilot) {
 		parts.push("--max-budget-usd", String(config.maxBudgetUsd));
 	}
 
@@ -210,7 +218,8 @@ export function buildCommandPreview(
 	if (isCursor) {
 		prompt += "\\n\\n…dev3 prompt…";
 	}
-	parts.push(`'${prompt}'`);
+	if (isCopilot) parts.push("--interactive", quoteIfUnsafeForPreview(prompt));
+	else parts.push(`'${prompt}'`);
 
 	// Mirror the launcher's env: provider env (Bedrock flag + pinned model)
 	// first, then config envVars (which win on conflict, as at launch time).
