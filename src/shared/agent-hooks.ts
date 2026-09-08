@@ -515,7 +515,7 @@ export function writeCodexHooks(worktreePath: string): void {
 export const COPILOT_STATUS_HOOK_EVENTS = ["userPromptSubmitted", "agentStop"] as const;
 export type CopilotStatusHookEvent = typeof COPILOT_STATUS_HOOK_EVENTS[number];
 
-export function buildCopilotHooks(cliPath?: string): Record<string, unknown> {
+export function buildCopilotHooks(cliPath?: string, dev3Home?: string): Record<string, unknown> {
 	const resolved = cliPath ?? resolveDev3CliPath();
 	const executable = resolved.startsWith("~/") ? join(homedir(), resolved.slice(2)) : resolved;
 	return {
@@ -524,6 +524,7 @@ export function buildCopilotHooks(cliPath?: string): Record<string, unknown> {
 			type: "command",
 			exec: executable,
 			args: ["hook", "copilot", "--event", event],
+			...(dev3Home ? { env: { DEV3_HOME: dev3Home } } : {}),
 			timeoutSec: 5,
 		}]])),
 	};
@@ -556,7 +557,7 @@ export function guardClaudeHooksFromCopilot(settings: Record<string, unknown>): 
 }
 
 /** Preserve user entries and fail without overwriting malformed configuration. */
-export function writeCopilotHooks(worktreePath: string): boolean {
+export function writeCopilotHooks(worktreePath: string, options?: { cliPath: string; dev3Home: string }): boolean {
 	const hooksPath = join(worktreePath, ".github", "hooks", "dev3.json");
 	const previous = readPreservedSettings(hooksPath);
 	if (previous.version !== undefined && previous.version !== 1) {
@@ -565,7 +566,7 @@ export function writeCopilotHooks(worktreePath: string): boolean {
 	if (previous.hooks !== undefined && (!previous.hooks || typeof previous.hooks !== "object" || Array.isArray(previous.hooks))) {
 		throw new Error(`Cannot install Copilot hooks: invalid hooks in ${hooksPath}`);
 	}
-	const generated = buildCopilotHooks();
+	const generated = buildCopilotHooks(options?.cliPath, options?.dev3Home);
 	const merged = { ...asRecord(previous.hooks) };
 	for (const [event, entries] of Object.entries(asRecord(generated.hooks))) {
 		const existing = merged[event];

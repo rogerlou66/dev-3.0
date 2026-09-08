@@ -48,6 +48,20 @@ describe("Copilot hook installation", () => {
 		expect(() => writeCopilotHooks(root)).toThrow();
 		expect(readFileSync(path, "utf8")).toBe("{broken");
 	});
+
+	it("replaces stale shared hooks with the current bundle and pins the app data root", () => {
+		const root = temp();
+		writeCopilotHooks(root);
+		const options = { cliPath: "/Apps/dev3 dev.app/Contents/Resources/app/cli/dev3", dev3Home: "/tmp/dev3 qa" };
+		expect(writeCopilotHooks(root, options)).toBe(true);
+		const result = JSON.parse(readFileSync(join(root, ".github", "hooks", "dev3.json"), "utf8"));
+		for (const event of ["agentStop", "userPromptSubmitted"]) {
+			expect(result.hooks[event]).toHaveLength(1);
+			expect(result.hooks[event][0].exec).toBe(options.cliPath);
+			expect(result.hooks[event][0].env).toEqual({ DEV3_HOME: options.dev3Home });
+		}
+		expect(writeCopilotHooks(root, options)).toBe(false);
+	});
 });
 
 describe("Claude cross-tool hook guard", () => {

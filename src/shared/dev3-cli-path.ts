@@ -13,7 +13,7 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, win32 } from "node:path";
+import { dirname, posix, win32 } from "node:path";
 
 /** Frozen POSIX invocation — do not change (see the on-disk invariants in AGENTS.md). */
 export const POSIX_DEV3_CLI = "~/.dev3.0/bin/dev3";
@@ -72,6 +72,26 @@ export function resolveDev3CliPath(lookup: Dev3CliLookup = {}): string {
 	// Nothing to anchor on (no exec dir, no home): let the OS resolve it on PATH.
 	if (candidates.length === 0) return WINDOWS_DEV3_CLI_BASENAME;
 	return candidates.find(exists) ?? candidates[candidates.length - 1];
+}
+
+/** Copilot's new hook subcommand must use the launcher's CLI, including in dev builds. */
+export function resolveCopilotHookCliPath(
+	lookup: Dev3CliLookup & { execPath?: string; sourceCliPath?: string } = {},
+): string {
+	const platform = lookup.platform ?? process.platform;
+	const paths = platform === "win32" ? win32 : posix;
+	const name = platform === "win32" ? WINDOWS_DEV3_CLI_BASENAME : "dev3";
+	const exists = lookup.exists ?? existsSync;
+	let executable = lookup.execPath ?? process.execPath;
+	try { executable = realpathSync(executable); } catch { /* The lookup may describe another platform. */ }
+	const execDir = lookup.execDir ?? paths.dirname(executable);
+	const candidates = [
+		...(paths.basename(executable) === name ? [executable] : []),
+		paths.join(execDir, "cli", name),
+		paths.resolve(execDir, "..", "Resources", "app", "cli", name),
+		...(lookup.sourceCliPath ? [lookup.sourceCliPath] : []),
+	];
+	return candidates.find(exists) ?? resolveDev3CliPath({ ...lookup, platform });
 }
 
 /**

@@ -13,6 +13,9 @@ import { createLogger } from "./logger";
 import { getAgentAdapter } from "../shared/agent-adapters/registry";
 import { writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
 import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass } from "./codex-config";
+import { join } from "node:path";
+import { resolveCopilotHookCliPath } from "../shared/dev3-cli-path";
+import { DEV3_HOME } from "./paths";
 
 export {
 	buildClaudeHooks,
@@ -76,7 +79,10 @@ export function setupAgentHooks(
 		return Promise.resolve(null);
 	}
 	if (spec.kind === "copilot") {
-		writeCopilotHooks(worktreePath);
+		const cliPath = resolveCopilotHookCliPath({
+			sourceCliPath: join(import.meta.dir, "..", "cli", process.platform === "win32" ? "dev3.exe" : "dev3"),
+		});
+		writeCopilotHooks(worktreePath, { cliPath, dev3Home: DEV3_HOME });
 		log.info("Copilot lifecycle hooks installed", { worktreePath });
 		return Promise.resolve(null);
 	}
