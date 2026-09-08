@@ -1,3 +1,4 @@
+import { applyCopilotLaunchEnv } from "../copilot-config";
 import { existsSync, realpathSync } from "node:fs";
 import type { AgentFamily, ColumnAgentConfig, DevServerStatus, PaneSessionEntry, PermissionMode, PortInfo, Project, PtyThroughputStats, Task, TmuxLayout, TmuxSessionInfo } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
@@ -779,6 +780,7 @@ export async function launchTaskPty(
 		...buildAgentEnv(extraEnv, task.id),
 		...artifactTemplateEnv,
 	};
+	if (getAgentAdapter(resolvedBaseCmd, resolvedAgentFamily).command === "copilot") applyCopilotLaunchEnv(env);
 	const userShell = getUserShell();
 	const dialect = launchDialect();
 
@@ -1043,6 +1045,7 @@ export async function launchColumnAgent(
 		...buildAgentEnv(extraEnv, task.id),
 		...ensureArtifactTemplateEnv(project, task, worktreePath),
 	};
+	if (getAgentAdapter(resolvedBaseCmd, resolvedAgentFamily).command === "copilot") applyCopilotLaunchEnv(env, true);
 	const scriptPath = dev3TaskTempPath(task.id, generatedScriptName("col-agent"));
 	await writeLaunchScript(scriptPath, buildCmdScript(tmuxCmd, env, {
 		paneTitle: options.paneTitle,
@@ -1771,6 +1774,7 @@ async function resumeTask(params: { taskId: string }): Promise<string> {
 						stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
 						family: resumeAgentFamily,
 					});
+					if (getAgentAdapter(resumeBaseCmd, resumeAgentFamily).command === "copilot") applyCopilotLaunchEnv(extraEnv);
 					const scriptPath = dev3TaskTempPath(params.taskId, `resume-pane-${i}.sh`);
 					await writeLaunchScript(scriptPath, buildCmdScript(resumeCmd, extraEnv, { keepShell: true }));
 					const wrappedCmd = `bash "${scriptPath}"`;
@@ -2788,6 +2792,7 @@ async function spawnAgentInTask(params: {
 		...ensureArtifactTemplateEnv(project, task, task.worktreePath),
 	};
 
+	if (getAgentAdapter(resolvedBaseCmd, resolvedAgentFamily).command === "copilot") applyCopilotLaunchEnv(env);
 	const existingPorts = portPool.getPortAssignments(task.id);
 	if (existingPorts.length > 0) {
 		Object.assign(env, portPool.buildPortEnv(existingPorts));
@@ -3008,6 +3013,7 @@ async function spawnSingleBugHunterPane(opts: {
 		...buildAgentEnv(extraEnv, opts.task.id),
 		...ensureArtifactTemplateEnv(opts.project, opts.task, opts.worktreePath),
 	};
+	if (getAgentAdapter(resolvedBaseCmd, resolvedAgentFamily).command === "copilot") applyCopilotLaunchEnv(env);
 	const existingPorts = portPool.getPortAssignments(opts.task.id);
 	if (existingPorts.length > 0) {
 		Object.assign(env, portPool.buildPortEnv(existingPorts));

@@ -64,6 +64,7 @@ const settings = {
 	"settings.family.claude": "Claude Code",
 	"settings.family.codex": "Codex",
 	"settings.family.gemini": "Gemini CLI",
+	"settings.family.copilot": "GitHub Copilot CLI",
 	"settings.family.agent": "Cursor Agent",
 	"settings.family.opencode": "OpenCode",
 	"settings.familyNone": "CLI desconocido",

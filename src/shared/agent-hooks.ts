@@ -4,14 +4,26 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type { PermissionMode, TaskStatus } from "./types";
 import { CLI_EXIT_CODE_APP_NOT_RUNNING } from "./cli-exit-codes";
-import { type HookCliDialect, hookCliDialect } from "./dev3-cli-path";
+import { type HookCliDialect, hookCliDialect, resolveDev3CliPath } from "./dev3-cli-path";
 
 /** Dialect of the machine generating the hooks (the frozen POSIX string on macOS/Linux). */
 const DEFAULT_DIALECT = hookCliDialect();
 
 export const DEV3_CLI = DEFAULT_DIALECT.cli;
+export const CLAUDE_HOOK_FLAG = "--claude-hook";
+export const COPILOT_SESSION_ENV = "DEV3_COPILOT_SESSION";
+
+export function shouldSkipClaudeHook(args: readonly string[], env: NodeJS.ProcessEnv): boolean {
+	return args.includes(CLAUDE_HOOK_FLAG) && env[COPILOT_SESSION_ENV] === "1";
+}
+
+function markClaudeHook(command: string): string {
+	if (command.includes(CLAUDE_HOOK_FLAG)) return command;
+	return command.replace(/(?= \|\||$)/, ` ${CLAUDE_HOOK_FLAG}`);
+}
 export const CODEX_STOP_HOOK_FLAG = "--codex-stop-hook";
 /** Makes the CLI exit 0 instead of `CLI_EXIT_CODE_APP_NOT_RUNNING`, still warning on stderr. */
 export const TOLERATE_APP_OFFLINE_FLAG = "--tolerate-app-offline";
@@ -216,7 +228,7 @@ export function buildClaudeHooks(
 	// an existing tool call without emitting a new user prompt event.
 	const workingCmd = move("in-progress", "--if-status-not review-by-ai");
 
-	return {
+	const hooks: HookMap = {
 		UserPromptSubmit: [
 			{ hooks: [{ type: "command", command: workingCmd }] },
 		],
@@ -238,6 +250,12 @@ export function buildClaudeHooks(
 			{ hooks: [{ type: "command", command: `${dialect.cli} ${CLAUDE_STOP_FAILURE_HOOK_SUBCOMMAND}`, timeout: 5 }] },
 		],
 	};
+	for (const groups of Object.values(hooks)) {
+		for (const group of groups) {
+			for (const hook of group.hooks) hook.command = markClaudeHook(hook.command);
+		}
+	}
+	return hooks;
 }
 
 /**
@@ -492,4 +510,83 @@ export function writeCodexHooks(worktreePath: string): void {
 	const updated = mergeCodexHooks(settings);
 	if (JSON.stringify(updated) === JSON.stringify(settings)) return;
 	writeFileSync(hooksPath, JSON.stringify(updated, null, 2) + "\n", "utf-8");
+}
+
+export const COPILOT_STATUS_HOOK_EVENTS = ["userPromptSubmitted", "agentStop"] as const;
+export type CopilotStatusHookEvent = typeof COPILOT_STATUS_HOOK_EVENTS[number];
+
+export function buildCopilotHooks(cliPath?: string): Record<string, unknown> {
+	const resolved = cliPath ?? resolveDev3CliPath();
+	const executable = resolved.startsWith("~/") ? join(homedir(), resolved.slice(2)) : resolved;
+	return {
+		version: 1,
+		hooks: Object.fromEntries(COPILOT_STATUS_HOOK_EVENTS.map((event) => [event, [{
+			type: "command",
+			exec: executable,
+			args: ["hook", "copilot", "--event", event],
+			timeoutSec: 5,
+		}]])),
+	};
+}
+
+function readPreservedSettings(path: string): Record<string, unknown> {
+	if (!existsSync(path)) return {};
+	const parsed: unknown = JSON.parse(readFileSync(path, "utf-8").replace(/^\uFEFF/, ""));
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`Cannot install Copilot hooks: expected an object in ${path}`);
+	}
+	return parsed as Record<string, unknown>;
+}
+
+/** Tag only dev3 commands: Copilot reads Claude settings too, including legacy hooks. */
+export function guardClaudeHooksFromCopilot(settings: Record<string, unknown>): Record<string, unknown> {
+	const tag = (entry: unknown): unknown => {
+		const record = asRecord(entry);
+		if (Array.isArray(record.hooks)) return { ...record, hooks: record.hooks.map(tag) };
+		if (!mentionsDev3Cli(record.command as string | undefined)
+			|| !/\b(?:task move --status|hook claude-stop-failure)\b/.test(record.command as string)) return entry;
+		return { ...record, command: markClaudeHook(record.command as string) };
+	};
+	if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) return settings;
+	return {
+		...settings,
+		hooks: Object.fromEntries(Object.entries(asRecord(settings.hooks)).map(([event, entries]) =>
+			[event, Array.isArray(entries) ? entries.map(tag) : entries])),
+	};
+}
+
+/** Preserve user entries and fail without overwriting malformed configuration. */
+export function writeCopilotHooks(worktreePath: string): boolean {
+	const hooksPath = join(worktreePath, ".github", "hooks", "dev3.json");
+	const previous = readPreservedSettings(hooksPath);
+	if (previous.version !== undefined && previous.version !== 1) {
+		throw new Error(`Cannot install Copilot hooks: unsupported version in ${hooksPath}`);
+	}
+	if (previous.hooks !== undefined && (!previous.hooks || typeof previous.hooks !== "object" || Array.isArray(previous.hooks))) {
+		throw new Error(`Cannot install Copilot hooks: invalid hooks in ${hooksPath}`);
+	}
+	const generated = buildCopilotHooks();
+	const merged = { ...asRecord(previous.hooks) };
+	for (const [event, entries] of Object.entries(asRecord(generated.hooks))) {
+		const existing = merged[event];
+		if (existing !== undefined && !Array.isArray(existing)) {
+			throw new Error(`Cannot install Copilot hooks: invalid ${event} in ${hooksPath}`);
+		}
+		const preserved = ((existing as unknown[] | undefined) ?? []).filter((entry) => {
+			const hook = asRecord(entry);
+			return !(mentionsDev3Cli(hook.exec as string | undefined)
+				&& Array.isArray(hook.args) && hook.args[0] === "hook" && hook.args[1] === "copilot");
+		});
+		merged[event] = [...preserved, ...entries as unknown[]];
+	}
+	const claudePaths = ["settings.json", "settings.local.json"].map((name) => join(worktreePath, ".claude", name));
+	const claudeSettings = claudePaths.map((path) => readPreservedSettings(path));
+	let changed = false;
+	for (const [index, path] of claudePaths.entries()) {
+		if (existsSync(path)) {
+			changed = writeIfChanged(path, guardClaudeHooksFromCopilot(claudeSettings[index]), claudeSettings[index]) || changed;
+		}
+	}
+	mkdirSync(join(worktreePath, ".github", "hooks"), { recursive: true });
+	return writeIfChanged(hooksPath, { ...previous, version: 1, hooks: merged }, previous) || changed;
 }

@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Project, Task } from "../../shared/types";
 
 // ---- Mocks ----
+vi.mock("../copilot-config", () => ({ applyCopilotLaunchEnv: vi.fn() }));
+
 
 vi.mock("../logger", () => ({
 	createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -223,6 +225,9 @@ import * as sharedPure from "../rpc-handlers/shared-pure";
 import * as settingsConfig from "../rpc-handlers/settings-config";
 import * as auxPanes from "../task-aux-panes";
 import { tmux } from "../tmux";
+import { applyCopilotLaunchEnv } from "../copilot-config";
+import { getAgentAdapter } from "../../shared/agent-adapters/registry";
+import { resolveProjectEnv } from "../repo-config";
 
 const { launchTaskPty, tmuxPtyHandlers } = await import("../rpc-handlers/tmux-pty");
 
@@ -571,5 +576,20 @@ describe("setup-script wrapper — one flavour per backend", () => {
 		expect(vi.mocked(sharedPure.buildSetupStartupWrapper)).toHaveBeenCalledWith(
 			expect.objectContaining({ nativeBackend: false, launchMode: "blocking" }),
 		);
+	});
+});
+
+
+describe("Copilot instruction environment", () => {
+	it.each(["native", "tmux"] as const)("retains project instruction sources before injection on %s", async terminalBackend => {
+		const adapter = vi.mocked(getAgentAdapter);
+		adapter.mockReturnValue({ command: "copilot", trustKinds: [] } as unknown as ReturnType<typeof getAgentAdapter>);
+		vi.mocked(resolveProjectEnv).mockResolvedValueOnce({ COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/project/instructions" });
+		try {
+			await launchTaskPty(makeProject(), makeTask({ terminalBackend }), WORKTREE);
+			expect(applyCopilotLaunchEnv).toHaveBeenCalledWith(expect.objectContaining({ COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/project/instructions" }));
+		} finally {
+			adapter.mockReturnValue({ trustKinds: [] } as unknown as ReturnType<typeof getAgentAdapter>);
+		}
 	});
 });

@@ -209,7 +209,7 @@ describe("buildClaudeHooks", () => {
 
 		for (const event of ["PreToolUse", "PostToolUse", "UserPromptSubmit"] as const) {
 			const cmd = hooks[event][0].hooks[0].command;
-			expect(cmd).toContain("--status in-progress --if-status-not review-by-ai || [ $? -eq 2 ]");
+			expect(cmd).toContain("--status in-progress --if-status-not review-by-ai --claude-hook || [ $? -eq 2 ]");
 		}
 	});
 
@@ -853,19 +853,19 @@ describe("POSIX hook output (byte-identical contract)", () => {
 
 	it("renders the exact Claude command strings", () => {
 		const hooks = buildClaudeHooks({ stopTarget: "review-by-ai", dialect: posix });
-		const working = `${DEV3_CLI} task move --status in-progress --if-status-not review-by-ai || [ $? -eq 2 ]`;
+		const working = `${DEV3_CLI} task move --status in-progress --if-status-not review-by-ai --claude-hook || [ $? -eq 2 ]`;
 
 		expect(hooks.UserPromptSubmit[0].hooks[0].command).toBe(working);
 		expect(hooks.PreToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PostToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PermissionRequest[0].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status user-questions || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status user-questions --claude-hook || [ $? -eq 2 ]`,
 		);
 		expect(hooks.Stop[0].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status review-by-ai --if-status in-progress || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status review-by-ai --if-status in-progress --claude-hook || [ $? -eq 2 ]`,
 		);
 		expect(hooks.Stop[1].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status review-by-user --if-status review-by-ai || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status review-by-user --if-status review-by-ai --claude-hook || [ $? -eq 2 ]`,
 		);
 	});
 
@@ -894,19 +894,19 @@ describe("Windows hook output", () => {
 		const hooks = buildClaudeHooks({ stopTarget: "review-by-ai", dialect: WIN_SPACES });
 		const cli = WIN_SPACES.cli;
 		expect(cli).toBe('"C:/Users/John Doe/.dev3.0/bin/dev3.exe"');
-		const working = `${cli} task move --status in-progress --if-status-not review-by-ai --tolerate-app-offline`;
+		const working = `${cli} task move --status in-progress --if-status-not review-by-ai --tolerate-app-offline --claude-hook`;
 
 		expect(hooks.UserPromptSubmit[0].hooks[0].command).toBe(working);
 		expect(hooks.PreToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PostToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PermissionRequest[0].hooks[0].command).toBe(
-			`${cli} task move --status user-questions --tolerate-app-offline`,
+			`${cli} task move --status user-questions --tolerate-app-offline --claude-hook`,
 		);
 		expect(hooks.Stop[0].hooks[0].command).toBe(
-			`${cli} task move --status review-by-ai --if-status in-progress --tolerate-app-offline`,
+			`${cli} task move --status review-by-ai --if-status in-progress --tolerate-app-offline --claude-hook`,
 		);
 		expect(hooks.Stop[1].hooks[0].command).toBe(
-			`${cli} task move --status review-by-user --if-status review-by-ai --tolerate-app-offline`,
+			`${cli} task move --status review-by-user --if-status review-by-ai --tolerate-app-offline --claude-hook`,
 		);
 	});
 

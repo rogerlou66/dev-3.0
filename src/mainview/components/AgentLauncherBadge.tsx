@@ -1,11 +1,12 @@
 import type { ComponentType } from "react";
-import { Antigravity, Claude, Codex, Cursor, Gemini, OpenCode } from "@lobehub/icons/es/icons";
+import { Antigravity, Claude, Codex, Cursor, Gemini, GithubCopilot, OpenCode } from "@lobehub/icons/es/icons";
 import type { CodingAgent } from "../../shared/types";
 
 type AgentLauncherIconComponent = ComponentType<any>;
 
 export function resolveAgentLauncherIcon(agent: CodingAgent): AgentLauncherIconComponent | null {
 	const agentName = agent.name.toLowerCase();
+	if (agent.id === "builtin-copilot" || agent.agentFamily === "copilot" || agent.baseCommand === "copilot") return GithubCopilot;
 
 	if (agent.id === "builtin-claude" || agent.baseCommand === "claude" || agentName.includes("claude")) {
 		return Claude.Color;

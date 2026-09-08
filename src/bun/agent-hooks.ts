@@ -11,7 +11,7 @@
 import type { AgentFamily, PermissionMode, TaskStatus } from "../shared/types";
 import { createLogger } from "./logger";
 import { getAgentAdapter } from "../shared/agent-adapters/registry";
-import { writeClaudeHooks, writeCodexHooks } from "../shared/agent-hooks";
+import { writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
 import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass } from "./codex-config";
 
 export {
@@ -73,6 +73,11 @@ export function setupAgentHooks(
 			worktreePath,
 			permissionMode: spec.permissionMode,
 		});
+		return Promise.resolve(null);
+	}
+	if (spec.kind === "copilot") {
+		writeCopilotHooks(worktreePath);
+		log.info("Copilot lifecycle hooks installed", { worktreePath });
 		return Promise.resolve(null);
 	}
 

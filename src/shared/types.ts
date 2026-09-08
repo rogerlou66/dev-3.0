@@ -681,7 +681,7 @@ export interface CodingAgent {
  * resume, transcripts, trust, lifecycle hooks, skill prefix — so a differently
  * named binary runs through exactly the same code as the CLI it wraps.
  */
-export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "none";
+export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "copilot" | "none";
 
 /**
  * Prefix used to invoke an installed skill from an agent prompt. Codex reserves
@@ -929,6 +929,20 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			},
 		],
 		defaultConfigId: "codex-default",
+	},
+	{
+		id: "builtin-copilot",
+		name: "GitHub Copilot",
+		baseCommand: "copilot",
+		isDefault: true,
+		installCommand: "npm install -g @github/copilot",
+		installUrl: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
+		configurations: [
+			{ id: "copilot-bypass", name: "Bypass", permissionMode: "bypassPermissions", version: 1 },
+			{ id: "copilot-default", name: "Default", permissionMode: "default", version: 1 },
+			{ id: "copilot-plan", name: "Plan", permissionMode: "plan", version: 1 },
+		],
+		defaultConfigId: "copilot-bypass",
 	},
 	{
 		id: "builtin-gemini",

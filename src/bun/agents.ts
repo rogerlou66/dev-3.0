@@ -650,8 +650,9 @@ export function claudeDefaultEnv(
 export function getDefaultEnvForAgent(agent: CodingAgent, config?: AgentConfiguration): Record<string, string> {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
 	if (isClaudeCommand(baseCmd, agent.agentFamily)) {
-		return claudeDefaultEnv();
+		return { ...claudeDefaultEnv(), DEV3_COPILOT_SESSION: "0" };
 	}
+	if (agentKey(baseCmd, agent.agentFamily) === "copilot") return { DEV3_COPILOT_SESSION: "1" };
 	return {};
 }
 

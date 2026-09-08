@@ -1446,7 +1446,7 @@ describe("claudeDefaultEnv — Claude's bypass guard under uid 0", () => {
 	});
 
 	it("reaches a Claude launch's env, and only a Claude one", () => {
-		expect(getDefaultEnvForAgent(makeAgent())).toEqual(claudeDefaultEnv());
+		expect(getDefaultEnvForAgent(makeAgent())).toEqual({ ...claudeDefaultEnv(), DEV3_COPILOT_SESSION: "0" });
 		expect(getDefaultEnvForAgent(makeAgent({ baseCommand: "codex" }))).toEqual({});
 	});
 });

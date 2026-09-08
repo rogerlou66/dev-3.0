@@ -9,6 +9,7 @@ import {
 	agentKey,
 	claudeAdapter,
 	codexAdapter,
+	copilotAdapter,
 	geminiAdapter,
 	antigravityAdapter,
 	cursorAdapter,
@@ -81,7 +82,7 @@ describe("registry", () => {
 // drag every skill body (~32 KB) along — so hook-families.ts restates the two
 // facts as plain data. These are the tests that keep the copy honest.
 describe("hook families (the renderer's copy of the registry)", () => {
-	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, antigravityAdapter, cursorAdapter, opencodeAdapter];
+	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, antigravityAdapter, cursorAdapter, opencodeAdapter, copilotAdapter];
 
 	it("lists exactly the commands that have a first-class adapter", () => {
 		expect([...KNOWN_AGENT_COMMANDS].sort()).toEqual(ADAPTERS.map((a) => a.command).sort());

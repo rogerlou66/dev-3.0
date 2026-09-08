@@ -10,6 +10,7 @@
  * same adapter.
  */
 import { claudeAdapter } from "./claude";
+import { copilotAdapter } from "./copilot";
 import { codexAdapter } from "./codex";
 import { cursorAdapter } from "./cursor";
 import { antigravityAdapter } from "./antigravity";
@@ -25,6 +26,7 @@ export { agentKey } from "./families";
 const REGISTRY: Record<string, AgentAdapter> = {
 	[claudeAdapter.command]: claudeAdapter,
 	[codexAdapter.command]: codexAdapter,
+	[copilotAdapter.command]: copilotAdapter,
 	[geminiAdapter.command]: geminiAdapter,
 	[antigravityAdapter.command]: antigravityAdapter,
 	[cursorAdapter.command]: cursorAdapter,

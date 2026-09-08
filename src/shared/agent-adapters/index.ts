@@ -26,3 +26,5 @@ export { antigravityAdapter } from "./antigravity";
 export { cursorAdapter } from "./cursor";
 export { opencodeAdapter } from "./opencode";
 export { genericAdapter } from "./generic";
+
+export { copilotAdapter } from "./copilot";

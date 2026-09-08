@@ -1114,7 +1114,7 @@ describe("getDefaultEnvForAgent", () => {
 			defaultConfigId: "c1",
 		};
 		const env = getDefaultEnvForAgent(agent);
-		expect(env).toEqual(CLAUDE_DEFAULT_ENV);
+		expect(env).toEqual({ ...CLAUDE_DEFAULT_ENV, DEV3_COPILOT_SESSION: "0" });
 		expect(env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS).toBe("1");
 		expect(env.CLAUDE_CODE_NO_FLICKER).toBe("1");
 	});
@@ -1127,7 +1127,7 @@ describe("getDefaultEnvForAgent", () => {
 			configurations: [{ id: "c1", name: "Default" }],
 			defaultConfigId: "c1",
 		};
-		expect(getDefaultEnvForAgent(agent)).toEqual(CLAUDE_DEFAULT_ENV);
+		expect(getDefaultEnvForAgent(agent)).toEqual({ ...CLAUDE_DEFAULT_ENV, DEV3_COPILOT_SESSION: "0" });
 	});
 
 	it("returns empty env for non-claude agents", () => {
@@ -1154,7 +1154,7 @@ describe("getDefaultEnvForAgent", () => {
 			name: "Default",
 			baseCommandOverride: "claude",
 		};
-		expect(getDefaultEnvForAgent(agent, config)).toEqual(CLAUDE_DEFAULT_ENV);
+		expect(getDefaultEnvForAgent(agent, config)).toEqual({ ...CLAUDE_DEFAULT_ENV, DEV3_COPILOT_SESSION: "0" });
 	});
 
 	it("returns empty env when config overrides away from claude", () => {

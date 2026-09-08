@@ -30,10 +30,11 @@ import { handleArtifactTemplate } from "./commands/artifact-template";
 import { handleInlineHtml } from "./commands/inline-html";
 import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
+import { handleCopilotHook } from "./commands/copilot-hook";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
 import { handleUpdate } from "./commands/update";
-import { TOLERATE_APP_OFFLINE_FLAG } from "../shared/agent-hooks";
+import { CLAUDE_HOOK_FLAG, shouldSkipClaudeHook, TOLERATE_APP_OFFLINE_FLAG } from "../shared/agent-hooks";
 import { BUILD_TIME, BUILD_COMMIT, BUILD_VERSION } from "../shared/build-info.generated";
 import { CLI_EXIT_CODE_INSTANCE_NOT_FOUND, CLI_EXIT_CODE_SUCCESS } from "../shared/cli-exit-codes";
 import { INSTANCE_FLAG, INSTANCE_SELECTOR_SYNTAX, parseInstanceSelector } from "../shared/cli-instance";
@@ -146,9 +147,11 @@ function resolveRequestedInstance(value: string): string {
 }
 
 async function main(): Promise<void> {
+	const inputArgs = process.argv.slice(2);
+	if (shouldSkipClaudeHook(inputArgs, process.env)) return;
 	// `--instance` targets the whole invocation, not one command, so it leaves
 	// argv before help routing and per-command flag validation ever see it.
-	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(process.argv.slice(2));
+	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(inputArgs.filter((arg) => arg !== CLAUDE_HOOK_FLAG));
 
 	// Every short print-and-exit command may have its stdout closed early by a
 	// downstream consumer (`dev3 … | head`, `| grep -m1`, quitting a pager).
@@ -215,6 +218,9 @@ async function main(): Promise<void> {
 			socketPath || context?.socketPath || null,
 			context,
 		);
+	}
+	if (command === "hook" && subcommand === "copilot") {
+		return await handleCopilotHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
 	}
 	if (command === "hook" && subcommand === "claude-stop-failure") {
 		// Internal: Claude Code fires StopFailure instead of Stop when an API error
