@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { posix } from "node:path";
 
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const DOCS = ["AGENTS.md", ...readdirSync(`${ROOT}/docs/agents`).map((f) => `docs/agents/${f}`)];
@@ -37,6 +38,7 @@ const ALLOWED = new Map([
 	["projects.json", "runtime state under ~/.dev3.0, not a repo file"],
 	["tasks.json", "runtime state under ~/.dev3.0, not a repo file"],
 	["settings.local.json", "per-machine agent settings under .claude, not committed"],
+	[".github/hooks/dev3.json", "generated Copilot lifecycle hooks in task worktrees, not committed"],
 ]);
 
 /** `decisions/YYYY/MM/DD/slug.md`, `translations/{locale}/`, `src/mainview/**` and friends. */
@@ -46,7 +48,12 @@ function references(doc: string): string[] {
 	const text = readFileSync(`${ROOT}/${doc}`, "utf8").replace(FENCED_BLOCK, "");
 	const tokens = [
 		...[...text.matchAll(BACKTICKED)].map((m) => m[1]),
-		...[...text.matchAll(MARKDOWN_LINK)].map((m) => m[1].replace(/#.*$/, "")),
+		...[...text.matchAll(MARKDOWN_LINK)].map((m) => {
+			const target = m[1].replace(/#.*$/, "");
+			return target.startsWith("./") || target.startsWith("../")
+				? posix.normalize(posix.join(posix.dirname(doc), target))
+				: target;
+		}),
 	];
 	return [
 		...new Set(
