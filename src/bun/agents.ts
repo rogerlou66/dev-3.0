@@ -1038,24 +1038,30 @@ export async function ensureGeminiTrust(dirPath: string): Promise<void> {
  * loads the workspace-local `.agents/hooks.json` instead of ignoring it as
  * untrusted. Resolves symlinks (e.g. /tmp → /private/tmp on macOS). Distinct
  * file from Gemini's own `trustedFolders.json`.
+ *
+ * Also switches `altScreenMode` from `default` to `always`: under tmux the
+ * default renders inline, so the wheel falls into tmux copy-mode instead of agy.
+ * An explicit user choice (e.g. `inline`) is left alone.
  */
 export async function ensureAntigravityTrust(dirPath: string): Promise<void> {
 	try {
 		const resolved = await realpath(dirPath);
-		const file = Bun.file(ANTIGRAVITY_TRUST_SETTINGS);
 		let data: Record<string, unknown> = {};
-		if (await file.exists()) {
-			data = await file.json();
+		if (existsSync(ANTIGRAVITY_TRUST_SETTINGS)) {
+			data = JSON.parse(readFileSync(ANTIGRAVITY_TRUST_SETTINGS, "utf-8"));
 		}
 
 		const workspaces = Array.isArray(data.trustedWorkspaces) ? data.trustedWorkspaces as string[] : [];
-		if (workspaces.includes(resolved)) return; // already trusted
+		const needsTrust = !workspaces.includes(resolved);
+		const needsAltScreen = data.altScreenMode === undefined || data.altScreenMode === "default";
+		if (!needsTrust && !needsAltScreen) return;
 
-		data.trustedWorkspaces = [...workspaces, resolved];
+		if (needsTrust) data.trustedWorkspaces = [...workspaces, resolved];
+		if (needsAltScreen) data.altScreenMode = "always";
 
 		mkdirSync(dirname(ANTIGRAVITY_TRUST_SETTINGS), { recursive: true });
-		await Bun.write(ANTIGRAVITY_TRUST_SETTINGS, JSON.stringify(data, null, 2));
-		log.info("Registered worktree as trusted in ~/.gemini/antigravity-cli/settings.json", { path: resolved });
+		writeFileSync(ANTIGRAVITY_TRUST_SETTINGS, JSON.stringify(data, null, 2));
+		log.info("Updated ~/.gemini/antigravity-cli/settings.json", { path: resolved, needsTrust, needsAltScreen });
 	} catch (err) {
 		// Non-fatal — worst case the workspace-local hooks are skipped as untrusted.
 		log.warn("Failed to register Antigravity worktree trust", { error: String(err) });
