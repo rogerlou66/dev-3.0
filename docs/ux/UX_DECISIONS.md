@@ -635,9 +635,7 @@ Segmented back/forward at the far left makes the bare chevrons recognizable with
 
 ## 2026-06-03 — Hide-sidebar affordance inside the Active Tasks sidebar header
 
-- **Rule:** Controls that govern a panel (chrome) sit at the panel-chrome convention's far-right edge; the sidebar header follows the toolbar budget (≤4 visible), not the §5.1 bar model.
-- **Why:** The split could only be collapsed from the top-right; the sidebar needed its own affordance, mirroring the inspector's zoom toggle.
-- **Status:** Observed. Evidence: `ActiveTasksSidebar.tsx`.
+Panel controls belong at the far-right edge of their own header (≤4 visible). The sidebar needed a collapse control because the existing top-right control was remote from the panel; mirror the inspector zoom toggle. Implemented in `ActiveTasksSidebar.tsx`.
 
 ## 2026-06-03 — Compact (≤1600px) layout for header + task toolbar
 
