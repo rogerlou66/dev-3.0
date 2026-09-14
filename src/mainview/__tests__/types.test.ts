@@ -326,8 +326,9 @@ describe("DEFAULT_AGENTS", () => {
 		const antigravity = DEFAULT_AGENTS.find((a) => a.id === "builtin-antigravity");
 		expect(antigravity).toBeDefined();
 		expect(antigravity!.baseCommand).toBe("agy");
-		expect(antigravity!.defaultConfigId).toBe("antigravity-default");
+		expect(antigravity!.defaultConfigId).toBe("antigravity-bypass");
 		expect(antigravity!.configurations).toEqual([
+			{ id: "antigravity-bypass", name: "Bypass", permissionMode: "bypassPermissions", version: 1 },
 			{ id: "antigravity-default", name: "Default", version: 1 },
 			{ id: "antigravity-plan", name: "Plan", permissionMode: "plan", version: 1 },
 			{ id: "antigravity-accept-edits", name: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
