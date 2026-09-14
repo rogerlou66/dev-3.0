@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
+import { useAppState, canGoBack, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
@@ -9,10 +9,11 @@ import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, CodingAgent, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
+import { useAgents } from "./hooks/useAgents";
 import { isRemote } from "./utils/platform";
 import { isTypingContext } from "./utils/typing-context";
 import { installHorizontalWheelBridge } from "./utils/horizontal-wheel";
@@ -45,9 +46,9 @@ import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
 import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
 import { useSpaces } from "./useSpaces";
-import AgentTrafficLog from "./components/agent-traffic/AgentTrafficLog";
+import AgentTrafficScreen from "./components/agent-traffic/AgentTrafficScreen";
 import { noteTrafficArrival } from "./agent-traffic";
-import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "./agent-traffic-events";
+import { OPEN_AGENT_TRAFFIC_LOG_EVENT, openAgentTrafficLog } from "./agent-traffic-events";
 import { getAgentTrafficEnabled, syncAgentTrafficFromGlobalSettings } from "./agent-traffic-flag";
 import { useAgentTrafficEnabled } from "./hooks/useAgentTrafficEnabled";
 import StuckPreparationPopover from "./components/StuckPreparationPopover";
@@ -105,6 +106,8 @@ const QR_BOX_SIZE = "w-[min(14rem,26vh)] h-[min(14rem,26vh)]";
 
 /** QR token rotation period; the token's own TTL (`QR_TOKEN_TTL_S`) adds 5s headroom. */
 const QR_REFRESH_SECONDS = 60;
+
+const QUIT_AUTO_CONFIRM_SECONDS = 10;
 
 type RemoteAccessQRData = {
 	qrDataUrl: string;
@@ -274,7 +277,6 @@ function App() {
 	const rpcState = useRpcStatus();
 	// In-UI diagnostics viewer (opened from the floating indicator / menu).
 	const [showDiagnostics, setShowDiagnostics] = useState(false);
-	const [trafficLogOpen, setTrafficLogOpen] = useState(false);
 
 	// Listen for menu actions routed from the bun side. Any menu item that the
 	// renderer is responsible for arrives here as `rpc:menuAction` with
@@ -350,6 +352,12 @@ function App() {
 	// Quit dialog
 	const [showQuitDialog, setShowQuitDialog] = useState(false);
 	const [dontShowAgain, setDontShowAgain] = useState(false);
+	const [quitSecondsLeft, setQuitSecondsLeft] = useState(QUIT_AUTO_CONFIRM_SECONDS);
+	const [quitTimerStopped, setQuitTimerStopped] = useState(false);
+	// Read by the auto-confirm timer, which is armed once per dialog and would
+	// otherwise close over the checkbox value from the moment it opened.
+	const dontShowAgainRef = useRef(dontShowAgain);
+	dontShowAgainRef.current = dontShowAgain;
 
 	// Pending agent-initiated launch requests; only the head is on screen.
 	const [launchRequests, setLaunchRequests] = useState<AgentLaunchRequest[]>([]);
@@ -360,6 +368,7 @@ function App() {
 	useEffect(() => {
 		function onShowQuitDialog() {
 			setDontShowAgain(false);
+			setQuitTimerStopped(false);
 			setShowQuitDialog(true);
 		}
 		window.addEventListener("rpc:showQuitDialog", onShowQuitDialog);
@@ -376,6 +385,7 @@ function App() {
 			.then((pending) => {
 				if (pending) {
 					setDontShowAgain(false);
+					setQuitTimerStopped(false);
 					setShowQuitDialog(true);
 				}
 			})
@@ -468,7 +478,10 @@ function App() {
 	// Lightbox for artifacts an agent surfaced via `dev3 show-artifact`. Hosted
 	// here — never inside a task pane — so every surface that can open one (task
 	// workspace, archived task modal, a toast) gets the identical popup.
-	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number } | null>(null);
+	// `paneless`: opened from a surface that has no workspace pane behind it (the
+	// task detail modal). Such a viewer is a popup for its whole life — it neither
+	// docks nor hides with the route, because there is no task screen it belongs to.
+	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number; paneless?: boolean } | null>(null);
 	const markSharedItemsRead = useCallback((
 		projectId: string,
 		taskId: string,
@@ -515,14 +528,33 @@ function App() {
 			document.querySelector<HTMLButtonElement>("[data-testid='shared-artifacts-badge']")?.focus();
 		});
 	}, []);
-	const [agents, setAgents] = useState<CodingAgent[]>([]);
-	const [agentSettingsLoaded, setAgentSettingsLoaded] = useState(false);
+	// Live for the app's lifetime: the launch dialog this state feeds outlives
+	// every visit to Settings and every provider connect, so a fetch-once
+	// snapshot hid presets seeded or renamed after the first New Task modal.
+	const agents = useAgents();
 	const [globalSettings, setGlobalSettings] = useState<GlobalSettingsType>({
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-auto",
 		taskSortOrder: "oldest-first",
 		updateChannel: "stable",
 	});
+	// Which task's workspace pane may dock the artifact panel. Docking is the
+	// default; the popup is the explicit opt-in. Every surface with no pane of its
+	// own — the archived task modal, immersive fullscreen, a toast for a task that
+	// is not on screen — falls back to the popup because nothing publishes a slot
+	// there, and so does a narrow viewport, which the pane itself refuses.
+	const artifactDockTaskId = artifactViewer && !artifactViewer.paneless && globalSettings.openArtifactsInPopup !== true
+		? artifactViewer.taskId
+		: null;
+	// A docked panel belongs to its task's screen. Leaving that screen used to clear
+	// the dock slot and re-host the same viewer as a centred popup over whatever
+	// board came next; instead it waits offscreen — still mounted, so the document,
+	// the version pick and an unsent draft come back with it — until the route
+	// returns to the task or the user closes it.
+	const artifactOffscreen = artifactViewer !== null
+		&& !artifactViewer.paneless
+		&& globalSettings.openArtifactsInPopup !== true
+		&& effectiveTaskId !== artifactViewer.taskId;
 	// Auth failure for browser remote access (expired/invalid session).
 	// Seeded from the transport: with a dead session the expired verdict lands
 	// BEFORE React mounts (the boot probe on localhost beats the app bootstrap),
@@ -1410,13 +1442,15 @@ function App() {
 				e.stopPropagation();
 				setShortcutsModal((s) => (s.open ? { ...s, open: false } : { open: true, tab: "app" }));
 			} else if (matchesShortcut(e, "agent-traffic-log") && getAgentTrafficEnabled()) {
-				// The traffic log is an overlay over any screen, so the shortcut toggles
-				// it from wherever the user is — including a focused terminal. Read
+				// Reachable from wherever the user is, including a focused terminal. Read
 				// through the module getter so the beta flag needs no effect re-bind.
+				// Pressed again ON the screen it steps back, so the one key both opens and
+				// leaves — what the overlay's toggle did, expressed as navigation.
 				e.preventDefault();
 				e.stopPropagation();
 				if (showQuitDialog) return;
-				setTrafficLogOpen((open) => !open);
+				if (state.route.screen === "agent-traffic") dispatch({ type: "goBack" });
+				else navigate({ screen: "agent-traffic", scopeProjectId: projectIdForRoute(state.route) ?? undefined });
 			} else if (matchesShortcut(e, "help-mode")) {
 				// Help mode ("Explain this screen"): every data-help-id zone gets an (i)
 				// badge with a HelpCard. Sibling of the shortcuts reference overlay.
@@ -1584,8 +1618,36 @@ function App() {
 	}, [dispatch]);
 
 	function handleConfirmQuit() {
-		api.request.quitApp({ dontShowAgain }).catch(() => {});
+		api.request.quitApp({ dontShowAgain: dontShowAgainRef.current }).catch(() => {});
 	}
+
+	// The dialog only tells the user sessions survive, so leaving it unanswered
+	// should not park the quit forever. Ticking off a deadline (not a per-tick
+	// budget) keeps the number honest while the window is backgrounded.
+	//
+	// The first key or click proves somebody is at the machine, and from then on
+	// the quit is theirs to confirm: only an abandoned dialog fires by itself.
+	useEffect(() => {
+		if (!showQuitDialog || quitTimerStopped) return;
+		const deadline = Date.now() + QUIT_AUTO_CONFIRM_SECONDS * 1000;
+		setQuitSecondsLeft(QUIT_AUTO_CONFIRM_SECONDS);
+		const id = setInterval(() => {
+			const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+			setQuitSecondsLeft(left);
+			if (left === 0) {
+				clearInterval(id);
+				api.request.quitApp({ dontShowAgain: dontShowAgainRef.current }).catch(() => {});
+			}
+		}, 250);
+		const stop = () => setQuitTimerStopped(true);
+		window.addEventListener("keydown", stop);
+		window.addEventListener("pointerdown", stop);
+		return () => {
+			clearInterval(id);
+			window.removeEventListener("keydown", stop);
+			window.removeEventListener("pointerdown", stop);
+		};
+	}, [showQuitDialog, quitTimerStopped]);
 
 	// Check gh availability after requirements pass (non-blocking)
 	useEffect(() => {
@@ -1773,8 +1835,9 @@ function App() {
 
 	// One agent wrote into another task's agent (`dev3 message` from a worktree).
 	// Its own violet variant and a two-identity source line — the only toast whose
-	// event has a sender AND a receiver. The click goes to the RECEIVER: that is
-	// where the text landed and where the reply gets typed.
+	// event has a sender AND a receiver. With the traffic beta on, the click opens
+	// the traffic screen, where both identities and the full text live; with it off
+	// it falls back to the RECEIVER, where the text landed and the reply gets typed.
 	useEffect(() => {
 		function onAgentMessage(e: Event) {
 			const { taskId, projectId, fromProjectId, toSeq, toTitle, fromSeq, fromTitle, preview } = (e as CustomEvent)
@@ -1789,6 +1852,10 @@ function App() {
 				preview: string;
 			};
 			if (!taskId || !preview) return;
+			// This window is already showing the traffic screen, where the message
+			// lands in full — a toast previewing it would cover its own destination.
+			// Per window, via this renderer's own route: another window keeps its toast.
+			if (getAgentTrafficEnabled() && routeRef.current.screen === "agent-traffic") return;
 			// Either side sensitive on camera drops the whole toast: it names both.
 			if (isProjectSilencedForDisplay(projectId) || isProjectSilencedForDisplay(fromProjectId)) return;
 			const from = [`#${fromSeq}`, fromTitle].filter(Boolean).join(" ");
@@ -1796,7 +1863,18 @@ function App() {
 			toast.agent(t("toast.agentMessage", { preview }), {
 				context: `${from} → ${to}`,
 				taskId,
-				onClick: () => openTaskFromNotification(taskId, projectId),
+				// Read the flag at CLICK time, not here: a toast can outlive a toggle.
+				onClick: () => {
+					if (!getAgentTrafficEnabled()) {
+						openTaskFromNotification(taskId, projectId);
+						return;
+					}
+					// Already there — the shortcut toggles, but a toast has nothing to
+					// toggle back to, and navigating again would stack a second identical
+					// history entry and make Back a dead key.
+					if (routeRef.current.screen === "agent-traffic") return;
+					openAgentTrafficLog();
+				},
 			});
 		}
 		window.addEventListener("rpc:agentMessage", onAgentMessage);
@@ -1813,16 +1891,24 @@ function App() {
 		return () => window.removeEventListener("rpc:agentMessageLogChanged", onLogChanged);
 	}, []);
 
-	// Everything that opens the traffic log goes through one event: the header
-	// readout, the native View menu and the command palette all fire it.
+	// Everything that opens agent traffic goes through one event: the header
+	// readout, the native View menu and the command palette all fire it, and it
+	// lands as an ordinary navigation — so Back returns to wherever they were.
+	// The project in view rides along as the screen's initial scope.
 	useEffect(() => {
 		function onOpen() {
 			if (!getAgentTrafficEnabled()) return;
-			setTrafficLogOpen(true);
+			navigate({ screen: "agent-traffic", scopeProjectId: projectIdForRoute(state.route) ?? undefined });
 		}
 		window.addEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
 		return () => window.removeEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
-	}, []);
+	}, [navigate, state.route]);
+
+	// Switching the beta off while the screen is open must not leave the user on a
+	// destination nothing can reach any more (the overlay closed itself instead).
+	useEffect(() => {
+		if (state.route.screen === "agent-traffic" && !agentTrafficOn) navigate({ screen: "dashboard" });
+	}, [state.route.screen, agentTrafficOn, navigate]);
 
 	// Cmd/Ctrl+Click on a file path in any terminal (preview mode).
 	useEffect(() => {
@@ -1840,6 +1926,8 @@ function App() {
 	imageViewerRef.current = imageViewer;
 	const artifactViewerRef = useRef(artifactViewer);
 	artifactViewerRef.current = artifactViewer;
+	const artifactOffscreenRef = useRef(artifactOffscreen);
+	artifactOffscreenRef.current = artifactOffscreen;
 
 	// CLI-shared images (`dev3 show-image`). Always raise the attention badge; auto-open
 	// the lightbox ONLY when the user is already looking at this task (never steal focus).
@@ -1915,19 +2003,31 @@ function App() {
 			addBellUnlessFocused(taskId, t.plural("showArtifact.attention", newCount ?? 1));
 			const viewingThisTask = effectiveTaskId === taskId;
 			const foreground = typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
-			const alreadyOpenForTask = artifactViewerRef.current?.taskId === taskId;
+			// A viewer waiting offscreen is not "already open" — republishing into it
+			// would update a panel nobody can see and swallow the toast that is the
+			// only signal left.
+			const alreadyOpenForTask = artifactViewerRef.current?.taskId === taskId && !artifactOffscreenRef.current;
 			if (alreadyOpenForTask || (viewingThisTask && foreground)) {
 				markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-				setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1 });
+				// A republish keeps the presentation the open viewer already had; a
+				// fresh one lands on the task the user is looking at, so it can dock.
+				setArtifactViewer((prev) => ({
+					taskId,
+					artifacts,
+					index: artifacts.length - 1,
+					paneless: prev?.taskId === taskId ? prev.paneless : false,
+				}));
 				return;
 			}
 			const context = taskToastContext(taskSeq, projectName, taskTitle);
 			toast.info(t.plural("showArtifact.toast", newCount ?? 1), {
 				context,
 				onClick: () => {
+					// The click navigates to the task first, so the viewer opens docked
+					// in its pane rather than as a popup over the board it came from.
 					openTaskFromNotification(taskId, projectId);
 					markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-					setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1 });
+					setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1, paneless: false });
 				},
 			});
 		}
@@ -1937,20 +2037,25 @@ function App() {
 
 	useEffect(() => {
 		function onOpenArtifactViewer(e: Event) {
-			const { taskId, taskStatus, projectId, artifacts, index } = (e as CustomEvent).detail as {
+			const { taskId, taskStatus, projectId, artifacts, index, paneless } = (e as CustomEvent).detail as {
 				taskId: string;
 				taskStatus?: TaskStatus;
 				projectId: string;
 				artifacts: SharedArtifact[];
 				index?: number;
+				paneless?: boolean;
 			};
 			if (!taskId || !projectId || !artifacts?.length) return;
 			markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-			setArtifactViewer({ taskId, taskStatus, artifacts, index: index ?? artifacts.length - 1 });
+			// Opened for a task that is not on screen? Then no pane will ever offer a
+			// slot for it, so it lives as a popup — only a viewer that started docked
+			// may later hide itself when the route walks away from its task.
+			const noPane = paneless === true || effectiveTaskId !== taskId;
+			setArtifactViewer({ taskId, taskStatus, artifacts, index: index ?? artifacts.length - 1, paneless: noPane });
 		}
 		window.addEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
 		return () => window.removeEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
-	}, [markSharedItemsRead]);
+	}, [effectiveTaskId, markSharedItemsRead]);
 
 	// Browser Web Notifications (remote mode). The desktop WKWebView already shows
 	// the native banner, so it ignores this push; only browsers act on it, falling
@@ -2565,24 +2670,6 @@ function App() {
 		return () => window.removeEventListener("rpc:openCreateTaskModal", onOpenCreateTaskModal);
 	}, [openCreateTaskModal]);
 
-	// Load agents before the subsequent launch dialog opens. Skill autocomplete
-	// accepts both agent syntaxes because that dialog chooses the final agent.
-	const agentSettingsLoadingRef = useRef(false);
-	useEffect(() => {
-		if (!createTaskProjectId || agentSettingsLoaded || agentSettingsLoadingRef.current) return;
-		agentSettingsLoadingRef.current = true;
-		Promise.all([api.request.getAgents(), api.request.getGlobalSettings()])
-			.then(([nextAgents, nextSettings]) => {
-				setAgents(nextAgents);
-				setGlobalSettings(nextSettings);
-				setAgentSettingsLoaded(true);
-			})
-			.catch(() => {})
-			.finally(() => {
-				agentSettingsLoadingRef.current = false;
-			});
-	}, [agentSettingsLoaded, createTaskProjectId]);
-
 	useEffect(() => {
 		function onOpenAddProjectModal() {
 			openAddProject();
@@ -2753,7 +2840,14 @@ function App() {
 				return;
 			}
 			const { route } = state;
-			if (route.screen === "settings") {
+			if (route.screen === "agent-traffic") {
+				// The overlay dismissed on Escape and this screen inherits the reflex:
+				// step back to where the user opened it from, or home if it was a
+				// restored session with nothing behind it.
+				e.preventDefault();
+				if (canGoBack(state)) dispatch({ type: "goBack" });
+				else navigate({ screen: "dashboard" });
+			} else if (route.screen === "settings") {
 				e.preventDefault();
 				navigate({ screen: "dashboard" });
 			} else if (route.screen === "project-settings") {
@@ -2763,8 +2857,13 @@ function App() {
 				e.preventDefault();
 				navigate({ screen: "project", projectId: route.projectId });
 			} else if (route.screen === "project" && (route.activeTaskId || route.taskView)) {
-				e.preventDefault();
-				navigate({ screen: "project", projectId: route.projectId });
+				// Inside a task view Escape belongs to the agent, not to navigation:
+				// it is how you interrupt the running agent. The old "step back to
+				// the board" branch fired whenever focus was not inside the first
+				// [data-terminal] node — a second native pane, a just-clicked header
+				// button — and threw the user out mid-interrupt. No preventDefault:
+				// the keystroke stays unconsumed so the terminal keeps receiving it.
+				return;
 			} else if (route.screen === "project") {
 				e.preventDefault();
 				navigate({ screen: "dashboard" });
@@ -2844,6 +2943,7 @@ function App() {
 			case "settings": return t("settings.screenTitle");
 			case "changelog": return t("changelog.screenTitle");
 			case "stats": return t("stats.title");
+			case "agent-traffic": return t("traffic.label");
 			default: return "";
 		}
 	})();
@@ -2923,6 +3023,7 @@ function App() {
 				<WorkspaceTaskOverlay
 					projectId={workspaceTaskTarget.projectId}
 					taskId={workspaceTaskTarget.taskId}
+					dockArtifact={artifactDockTaskId === workspaceTaskTarget.taskId}
 					tasks={workspaceTaskTarget.tasks}
 					projects={state.projects}
 					dispatch={workspaceDispatch}
@@ -3119,7 +3220,12 @@ function App() {
 							/>
 							<span className="text-fg-2 text-sm">{t("quit.dontShowAgain")}</span>
 						</label>
-						<div className="flex justify-end gap-2 pt-1">
+						<div className="flex items-center justify-end gap-2 pt-1">
+							{!quitTimerStopped && (
+								<span className="mr-auto text-fg-muted text-xs tabular-nums" aria-live="off">
+									{t("quit.autoQuitIn", { seconds: String(quitSecondsLeft) })}
+								</span>
+							)}
 							<button
 								onClick={() => setShowQuitDialog(false)}
 								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
@@ -3511,6 +3617,7 @@ function App() {
 					taskStatus={artifactViewer.taskStatus}
 					artifacts={artifactViewer.artifacts}
 					initialIndex={artifactViewer.index}
+					offscreen={artifactOffscreen}
 					onClose={closeArtifactViewer}
 				/>
 			)}
@@ -3557,20 +3664,6 @@ function App() {
 			    must remain clickable so their handler can exit fullscreen first. */}
 			<PushEnrollmentInvite t={t} />
 			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} />
-			{/* Agent traffic log — an overlay over any screen (the nav budget is spent),
-			    opened from the header readout, ⇧⌘M, the View menu and the palette. */}
-			{/* The flag also closes an open log, so switching the beta off mid-session
-			    does not leave an overlay nothing can reach any more. */}
-			{trafficLogOpen && agentTrafficOn && (
-				<AgentTrafficLog
-					projectId={projectIdForRoute(route)}
-					onClose={() => setTrafficLogOpen(false)}
-					onOpenTask={(taskId, projectId) => {
-						setTrafficLogOpen(false);
-						openTaskFromNotification(taskId, projectId);
-					}}
-				/>
-			)}
 		</div>
 	);
 
@@ -3589,6 +3682,7 @@ function App() {
 				dispatch={workspaceTaskTarget ? workspaceDispatch : dispatch}
 				navigationGuardRef={navigationGuardRef}
 					presentation="immersive"
+					dockArtifact={artifactDockTaskId === taskId}
 				isTerminalFullscreen
 				onToggleTerminalFullscreen={toggleTerminalImmersive}
 				skipCopyModeReset={skipTerminalCopyReset}
@@ -3632,6 +3726,7 @@ function App() {
 						activeTaskId={route.activeTaskId}
 						taskView={route.taskView}
 						navigationGuardRef={navigationGuardRef}
+						dockArtifact={artifactDockTaskId !== null && artifactDockTaskId === route.activeTaskId}
 						isTerminalFullscreen={terminalImmersiveVisible}
 						onToggleTerminalFullscreen={toggleTerminalImmersive}
 						skipCopyModeReset={skipTerminalCopyReset}
@@ -3661,6 +3756,7 @@ function App() {
 						navigate={navigate}
 						dispatch={dispatch}
 						navigationGuardRef={navigationGuardRef}
+						dockArtifact={artifactDockTaskId !== null && artifactDockTaskId === route.taskId}
 						isTerminalFullscreen={terminalImmersiveVisible}
 						onToggleTerminalFullscreen={toggleTerminalImmersive}
 						skipCopyModeReset={skipTerminalCopyReset}
@@ -3698,6 +3794,16 @@ function App() {
 						canGoBack={state.historyIndex > 0}
 					/>
 				);
+			case "agent-traffic":
+				// The flag effect above navigates away when the beta goes off; rendering
+				// nothing here keeps that single frame from showing a screen the user
+				// just switched off.
+				return agentTrafficOn ? (
+					<AgentTrafficScreen
+						projectId={route.scopeProjectId ?? null}
+						onOpenTask={openTaskFromNotification}
+					/>
+				) : null;
 			case "gauge-demo":
 				return <GaugeDemo navigate={navigate} />;
 			case "viewport-lab":

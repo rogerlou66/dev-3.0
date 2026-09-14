@@ -5,7 +5,7 @@ import { agentReplyCommand, seqIsShared } from "../shared/agent-message-envelope
 import { requireMessageSubject } from "../shared/agent-message-subject";
 import { socketMetaPathFor } from "../shared/socket-meta";
 import { isCliEndpointHandle } from "../shared/cli-endpoint";
-import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
+import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, repoConfigEnabled, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
 import { CODEX_STATUS_HOOK_EVENTS, getCodexHookTargetStatus, type CodexStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
 import { DEFAULT_EVENT_LIMIT, DEFAULT_EVENT_WINDOW_MS, MAX_EVENT_LIMIT, formatMovementText, normalizeEventInstant, resolveEventIdPrefix, selectEvents, type BoardEvent, type BoardEventKind } from "../shared/board-events";
@@ -21,12 +21,15 @@ import { deliverLaunchHandoff } from "./agent-launch-handoff";
 import * as data from "./data";
 import { loadSpacesFile } from "./spaces-data";
 import { resolveTaskStartRef } from "./task-start-ref";
-import { createScratchTask, createTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, dropQueuedAttention, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
+import { createScratchTask, createTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, activeNotificationSuppression, isProjectSilenced, dropQueuedAttention, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
+import { appendNotificationLog } from "./notification-log";
+import type { NotificationLogInput, NotificationLogMode, NotificationLogOutcome } from "../shared/notification-log";
 import { getDevServerStatus, runDevServer, stopDevServer, restartDevServer } from "./rpc-handlers/tmux-pty";
 import { getTmuxLayout } from "./pty-server";
 import { scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
 import { NATIVE_PROMPT_DELIVERY_METHOD, deliverNativePromptAsOwner } from "./agent-prompt-native";
 import { deliverAgentPrompt } from "./agent-prompt-delivery";
+import { recordTerminalPromptSubmission } from "./agent-terminal-prompt-log";
 import type { AgentPromptDeliveryStatus } from "../shared/agent-prompt-delivery";
 import { NATIVE_PANE_INPUT_METHOD, runNativePaneInputAsOwner } from "./pane-input-native";
 import type { PaneInputProgram } from "../shared/pane-input";
@@ -342,6 +345,83 @@ async function resolveAgentMessageSource(
 		title: getTaskTitle(found.task),
 		projectId: found.task.projectId,
 	};
+}
+
+/** Everything a notification row knows before the app tries to deliver it. */
+type NotificationLogBase = Omit<NotificationLogInput, "at" | "mode" | "outcome" | "suppressedBy">;
+
+/**
+ * Collect the facts a notification row is made of. The caller's worktree
+ * (`sourceTaskId`) is resolved separately from the notification's target,
+ * because `dev3 notify --task <other>` addresses someone else's card; when the
+ * caller was not in a worktree the source stays null rather than borrowing the
+ * target's identity.
+ */
+async function buildNotificationLogBase(
+	params: Record<string, unknown>,
+	notification: {
+		message: string;
+		level: "info" | "success" | "error";
+		durationMs: unknown;
+		task: Task | null;
+		projectId: string | null;
+		projectName: string | null;
+	},
+): Promise<NotificationLogBase> {
+	const { message, level, durationMs, task, projectId, projectName } = notification;
+	const base: NotificationLogBase = {
+		level,
+		message,
+		taskId: task?.id ?? null,
+		taskSeq: task?.seq ?? null,
+		projectId,
+		sourceTaskId: null,
+		sourceSeq: null,
+	};
+	if (typeof durationMs === "number") base.durationMs = durationMs;
+	if (task) base.taskTitle = getTaskTitle(task);
+	if (projectName) base.projectName = projectName;
+	const sessionId = typeof params.sourceSessionId === "string" ? params.sourceSessionId.trim() : "";
+	if (sessionId) base.sourceSessionId = sessionId;
+
+	const sourceTaskId = typeof params.sourceTaskId === "string" ? params.sourceTaskId.trim() : "";
+	if (!sourceTaskId) return base;
+	try {
+		const found = await resolveTaskAcrossProjects(sourceTaskId);
+		if (found) {
+			base.sourceTaskId = found.task.id;
+			base.sourceSeq = found.task.seq;
+			base.sourceTitle = getTaskTitle(found.task);
+			base.sourceProjectId = found.task.projectId;
+		}
+	} catch {
+		// An ambiguous or stale sender ref is not knowledge — the source stays null.
+	}
+	return base;
+}
+
+/**
+ * Write one notification row, unless this delivery is the CLI's fan-out copy.
+ *
+ * `dev3 notify` sends the same toast to every live dev3 instance so it reaches
+ * whichever app the user is looking at. That is one notification, not N, so only
+ * the instance the CLI addressed first records it.
+ */
+function recordNotification(
+	params: Record<string, unknown>,
+	base: NotificationLogBase,
+	mode: NotificationLogMode,
+	outcome: NotificationLogOutcome,
+): void {
+	if (params.fanout === true) return;
+	const suppressedBy = outcome === "queued" ? activeNotificationSuppression() : [];
+	appendNotificationLog({
+		...base,
+		at: new Date().toISOString(),
+		mode,
+		outcome,
+		...(suppressedBy.length ? { suppressedBy } : {}),
+	});
 }
 
 /**
@@ -1595,7 +1675,42 @@ const handlers: Record<string, Handler> = {
 			await captureCodexPaneSession(project, task.id, paneId, sessionId);
 		}
 
+		// Codex carries the submitted text on the same payload, so recording rides
+		// on the status hook rather than costing the pane a second dev3 process.
+		if (event === "UserPromptSubmit" && typeof params.prompt === "string") {
+			recordTerminalPromptSubmission({
+				project,
+				task: updated,
+				harness: "codex",
+				prompt: params.prompt,
+				sessionId,
+				submissionId: typeof params.turnId === "string" ? params.turnId : null,
+			});
+		}
+
 		return updated;
+	},
+
+	/**
+	 * A harness reported that a prompt was submitted in a task's pane. Whether
+	 * that was the human is decided in `recordTerminalPromptSubmission`, which
+	 * throws out everything dev3 itself typed before writing anything.
+	 *
+	 * Returns the verdict rather than a bare ok, so a suppressed submission is
+	 * distinguishable from a recorded one in the hook's own logs and tests.
+	 */
+	"task.promptSubmitted": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params);
+		const harness = params.harness === "codex" ? "codex" : "claude";
+		const outcome = recordTerminalPromptSubmission({
+			project,
+			task,
+			harness,
+			prompt: typeof params.prompt === "string" ? params.prompt : "",
+			sessionId: typeof params.sessionId === "string" ? params.sessionId : null,
+			submissionId: typeof params.submissionId === "string" ? params.submissionId : null,
+		});
+		return { outcome };
 	},
 
 	// Claude Code's StopFailure hook: an API error ended the turn, so the agent is
@@ -1783,6 +1898,10 @@ const handlers: Record<string, Handler> = {
 	},
 
 	// UI control: surface an in-app toast (or native OS notification) from the CLI.
+	//
+	// Every accepted request is also appended to the notification log. The write
+	// is deliberately last and never throws: a toast the user already saw must
+	// not turn into a CLI error because a disk write failed.
 	"ui.notify": async (params) => {
 		const message = ((params.message as string) ?? "").trim();
 		if (!message) throw new Error("message is required");
@@ -1818,6 +1937,9 @@ const handlers: Record<string, Handler> = {
 			projectName = resolved.project.name;
 		}
 
+		// Resolved before delivery so the row can be written whatever happens next.
+		const logBase = await buildNotificationLogBase(params, { message, level, durationMs, task, projectId, projectName });
+
 		if (desktop) {
 			if (!task || !projectId) {
 				throw new Error("desktop notification requires a task — run inside a worktree or pass --task <id>");
@@ -1827,7 +1949,13 @@ const handlers: Record<string, Handler> = {
 				body: message,
 				projectName: projectName ?? undefined,
 			});
-			return { delivered: true, mode: "desktop", taskId: task.id, queued: isNotificationSuppressed() };
+			const queued = isNotificationSuppressed();
+			// A silenced project drops the notification without a trace on screen —
+			// see `deliverTaskNotification`. Recording it would put that trace back.
+			if (!isProjectSilenced(task.projectId)) {
+				recordNotification(params, logBase, "desktop", queued ? "queued" : "delivered");
+			}
+			return { delivered: true, mode: "desktop", taskId: task.id, queued };
 		}
 
 		const payload = {
@@ -1840,12 +1968,21 @@ const handlers: Record<string, Handler> = {
 		};
 		if (isNotificationSuppressed()) {
 			pushCliToast(payload);
+			// Same rule as the desktop path: `pushCliToast` drops a silenced
+			// project's toast outright instead of queuing it.
+			if (!isProjectSilenced(projectId)) {
+				recordNotification(params, logBase, "toast", "queued");
+			}
 			return { delivered: true, mode: "toast", taskId, queued: true };
 		}
 
 		const push = getPushMessage();
-		if (!push) return { delivered: false, mode: "toast" };
+		if (!push) {
+			recordNotification(params, logBase, "toast", "no-window");
+			return { delivered: false, mode: "toast" };
+		}
 		push("cliToast", payload);
+		recordNotification(params, logBase, "toast", "delivered");
 		return { delivered: true, mode: "toast", taskId };
 	},
 
@@ -2094,12 +2231,26 @@ const handlers: Record<string, Handler> = {
 		return getDevServerStatus({ taskId: task.id, projectId: project.id });
 	},
 
+	// How long an approval can take, asked BEFORE the blocking request that waits
+	// for it. The CLI's own socket timeout is a fixed 10 minutes, so a delay longer
+	// than that used to kill the waiting agent before the timer it was waiting on
+	// could ever fire. Cheap and non-blocking on purpose — it is on the hot path of
+	// every launch request.
+	"approval.policy": async () => {
+		return { autoApproveMs: agentLaunchAutoApproveMs(await loadSettings()) };
+	},
+
 	"config.export": async (params) => {
 		const projectId = params.projectId as string;
 		if (!projectId) throw new Error("projectId is required");
 		const worktreePath = params.worktreePath as string | undefined;
 		const project = await data.getProject(projectId);
 		const configPath = worktreePath || project.path;
+		// migrateProjectConfig is a no-op while repo config is off, so exporting
+		// would report a path it never wrote. Say why instead.
+		if (!repoConfigEnabled(project)) {
+			throw new Error("Repository dev3 configuration is disabled for this project — enable \"Use repository dev3 configuration\" in Project Settings first.");
+		}
 		await repoConfig.migrateProjectConfig(project, configPath);
 		return { path: `${configPath}/.dev3/config.json` };
 	},
@@ -2128,6 +2279,9 @@ const handlers: Record<string, Handler> = {
 			),
 			sources: provenance,
 			hasRepoConfig: hasRepoFile,
+			// The file may exist and still be irrelevant — say so rather than
+			// letting "exists" imply its values are in the table above.
+			repoConfigIgnored: !repoConfigEnabled(project),
 		};
 	},
 

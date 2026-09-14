@@ -6,7 +6,7 @@ import { matchesTaskQuery, type TaskQueryContext } from "../utils/taskSearch";
 import { groupTasksIntoTiers } from "../components/sidebarTiers";
 
 const task: Task = { id: "hold", seq: 1, projectId: "p1", title: "Waiting review", description: "", status: "review-by-user", baseBranch: "main", branchName: "topic", worktreePath: "/tmp/work", groupId: null, variantIndex: null, agentId: null, configId: null, createdAt: "2026-09-02T00:00:00Z", updatedAt: "2026-09-02T00:00:00Z" };
-const context: TaskQueryContext = { agentName: null, labelNames: [], priorityValue: "p3", isAttention: true, hasPort: false, statusValues: ["review-by-user"], spaceNames: null };
+const context: TaskQueryContext = { agentName: null, labelNames: [], priorityValue: "p3", isAttention: true, isHidden: false, hasPort: false, statusValues: ["review-by-user"], spaceNames: null };
 
 describe("blocked projection", () => {
 	it("does not introduce a persisted lifecycle status", () => expect(ALL_STATUSES).not.toContain("blocked"));

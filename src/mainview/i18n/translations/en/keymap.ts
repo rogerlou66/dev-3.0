@@ -33,7 +33,7 @@ const keymap = {
 	"keymap.shortcut.goTo": "Go to… (D dashboard · P project · T tasks · S settings · digit = project N; P/T + digit = project N board/tasks)",
 	"keymap.shortcut.zoomOutToSpace": "Zoom out to the space board",
 	"keymap.shortcut.focusSearch": "Focus search",
-	"keymap.shortcut.escape": "Close dialog / step back",
+	"keymap.shortcut.escape": "Close dialog / step back (not inside a task — the agent gets it)",
 	"keymap.shortcut.newTask": "New task",
 	"keymap.shortcut.addProject": "Add project",
 	"keymap.shortcut.newWindow": "New window",
@@ -45,7 +45,8 @@ const keymap = {
 	"keymap.shortcut.openIn": "Open current project/worktree in an app (picker)",
 	"keymap.shortcut.keyboardShortcuts": "Show this keyboard shortcuts panel",
 	"keymap.shortcut.helpMode": "Explain this screen (help mode)",
-	"keymap.shortcut.agentTrafficLog": "Agent traffic log",
+	"keymap.shortcut.agentTrafficLog": "Agent traffic",
+	"keymap.shortcut.trafficReplayPlayPause": "Play or pause the traffic replay",
 	"keymap.shortcut.terminalFullscreen": "Toggle terminal immersive fullscreen (task terminal only)",
 	"keymap.shortcut.artifactSearch": "Find in the focused HTML artifact",
 	"keymap.shortcut.toggleProjectTerminal": "Toggle project terminal",
@@ -59,6 +60,7 @@ const keymap = {
 	"keymap.fixed.holdModifier": "Cycling needs a modifier you hold down, which a plain combo can't express.",
 	"keymap.fixed.chordSequence": "A sequence of keys pressed one after another, not a combo.",
 	"keymap.fixed.reserved": "Reserved — it is how you get out of every dialog and mode.",
+	"keymap.fixed.activatesFocused": "Space activates whatever control has focus, so nothing else can claim it.",
 	"keymap.fixed.shellOwned": "Owned by the app shell, not by the page.",
 
 	// Shortcut editor (Settings → Keyboard → App shortcuts)

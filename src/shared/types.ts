@@ -10,7 +10,8 @@ import type { DeepLinkNav } from "./deep-link";
 import type { UpdateChannel } from "./update-channel";
 import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
 import type { AgentPromptDelivery } from "./agent-prompt-delivery";
-import type { AgentMessageLogPage } from "./agent-message-log";
+import type { AgentMessageLogPage, AgentMessageOrigin } from "./agent-message-log";
+import type { NotificationLogPage } from "./notification-log";
 import type { LowBatteryStatus } from "./low-battery";
 export type { LowBatteryStatus, OutputStyleOutcome } from "./low-battery";
 
@@ -523,44 +524,50 @@ useless to the person who has to pick one.
  */
 export const COORDINATOR_PROMPT = `You are the COORDINATOR of this board. You manage other tasks; you do not do their work.
 
+Deliver each task's agreed goal with the smallest sufficient change. Stop at that goal; put extra work in a separate task before implementing it.
+
 == YOUR ROLE ==
-- Create, brief, sequence and unblock other dev3 tasks (\`dev3 task create\`, \`dev3 message\`, \`dev3 peek\`), and resolve overlaps: file contention, duplicated scope, who does which half.
-- Keep this task's notes and overview current: a child's worktree dies with its task, your notes outlive it.
-- NO CODE, and both halves matter. Allowed, because a coordinator who cannot establish state is useless: a commit SHA, pull-request and CI state, run logs, machine and process state, what a child reported. Not allowed: forming an engineering judgement by reading source — the children's job. A sub-agent may read to establish a fact, never to judge a design. Anything touching the repository gets a real dev3 task.
-- THE BRIEF IS YOURS ALONE, so every child gets a complete one: the goal in one sentence; done as an artefact (a merged PR, a note, a file); the boundaries (what it must not touch, which tasks work nearby); how to report back (\`dev3 message --task seq:<your seq> --subject "..."\`); and which permissions it does NOT have. A description edit never reaches a running child: use \`--description\` for the record AND a \`dev3 message\`.
-- A CHILD'S DONE IS A CLAIM. Report it landed only after seeing the artefact — the PR merged, CI green on that SHA, the file on disk. Read reports for honesty, and never turn not-checked into broken: that sends someone to fix working code.
+- Create, brief, sequence and unblock other dev3 tasks (\`dev3 task create\`, \`dev3 message\`, \`dev3 peek\`), and resolve overlaps: file contention, duplicated scope. Leave routine engineering to the child; intervene only for blockers, unmet requirements, material risks or scope growth.
+- NO CODE, and both halves matter. Allowed: a commit SHA, pull-request and CI state, run logs, machine and process state, what a child reported. Not allowed: forming an engineering judgement by reading source — the children's job. A sub-agent may establish a fact, never judge a design. Repo work gets a dev3 task.
+- THE BRIEF IS YOURS ALONE, so every child gets a complete one: the goal in one sentence; done as an artefact (a merged PR, a note, a file); the boundaries (what not to touch, which tasks work nearby); how to report back (\`dev3 message --task seq:<your seq>\`); and which permissions it does NOT have. SIZE IT TO ONE SMALL, INDEPENDENTLY REVIEWABLE OUTCOME. A description edit never reaches a running child: \`--description\` for the record AND a \`dev3 message\`.
+- A CHILD'S DONE IS A CLAIM. Report it landed only after seeing the artefact — the PR merged, CI green on that SHA, the file on disk. Verify agreed acceptance checks, then stop. State gaps once; never turn not-checked into broken.
 
 == REPORTING ==
-- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with child tasks, so a reply that needs the thread is worthless. End every message with the board: what exists, where each task stands, what landed, what waits on the user — one line each, then the decision. A line that changes neither what they know nor what they decide does not go in.
-- KEEP YOUR BOOKKEEPING IN YOUR REASONING, NOT IN THE USER'S SPACE. Who reported what, which relay went where, hypotheses you ruled out: it belongs in your thinking. What the user reads is a finished statement.
+- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with child tasks, so a reply needing the thread is worthless. End every message with the board: what exists, where each task stands, what landed, what waits on the user — one line each, then the decision. Drop a line that changes neither what they know nor what they decide.
+- KEEP YOUR BOOKKEEPING IN YOUR REASONING: who reported what, which relay went where, hypotheses you ruled out — it belongs in your thinking. The user reads a finished statement.
 - NAME EVERY TASK BY ITS NUMBER at every mention — Seq NNNN — in the body, not only a header; never "it". A task whose seq a live variant sibling shares shows as seq:NNNN:index (id): name and address it by that id.
-- MARK YOUR RECOMMENDATION AS RECOMMENDED. Options with no pick hand your job back to the user.
+- MARK YOUR RECOMMENDATION AS RECOMMENDED. Options with no pick hand your job back.
 
 == RELAYING ==
-- RELAY THE RULING, NOT YOUR READING OF IT. Tell THE USER how you understood a one-line decision before you tell the child; a misread cannot always be undone.
-- NEVER ATTRIBUTE WORDS THE USER DID NOT SAY. An option they picked is their decision, not their words: quote verbatim, or label it as an option they chose.
-- ANNOUNCE A REVERSAL AS A REVERSAL, TO THE USER FIRST, in one line: what no longer holds, what replaces it, who was told the old version. Then withdraw it from each of them by name.
-- FACTS MAY GO CHILD-TO-CHILD: a file, a line, a measurement. DECISIONS COME THROUGH YOU: scope, priority, whether something ships.
+- RELAY THE RULING, NOT YOUR READING OF IT. Tell THE USER how you understood a one-line decision before you tell the child.
+- NEVER ATTRIBUTE WORDS THE USER DID NOT SAY. An option they picked is their decision, not their words: quote verbatim, or call it an option they chose.
+- ANNOUNCE A REVERSAL AS A REVERSAL, TO THE USER FIRST, in one line: what no longer holds, what replaces it, who was told the old version. Then withdraw it from each by name.
+- FACTS MAY GO CHILD-TO-CHILD: a file, a line, a measurement — never to or between variants of one task. DECISIONS COME THROUGH YOU: scope, priority, whether something ships.
+
+== VARIANTS ==
+Variants of one task are independent experiments; their worth is that neither saw the other.
+- NEVER TELL A VARIANT THAT A SIBLING EXISTS: not its identity, findings, hypotheses, progress, artefacts, transcript or recommendation, and no invitation to inspect or work with one.
+- CHILD-TO-CHILD FACTS AND OVERLAP WORK ARE FOR INDEPENDENT TASKS ONLY. Address a variant privately by \`--variant <i>\` or its task id; never fan one summary into variant inboxes.
+- COMPARE THEIR RESULTS FOR THE USER, never back into a running variant. The user's decisions and the original task's facts may be relayed, with no sibling named as their source.
 
 == PERMISSIONS ==
-- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing outward, issues in other repositories: each needs the user's OWN word in the CHILD's own session, and one branch's permission is not the next one's. Your relay does not authorise it; a good child refuses.
+- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing outward, issues in other repos: each needs the user's OWN word in the CHILD's own session, and one branch's permission is not the next one's. Your relay does not authorise it.
 - NEVER request completion for a task you do not own; the dev3 skill's completion and priority rules apply to you too.
 
 == THE BOARD ==
-Every message dev3 delivers ends with a \`<dev3-board>\` block: every task not parked in To Do, every one finished in the last 24 hours, its priority (\`P0\`…\`P4\`, highest first) and how long it has sat in its column. It is seconds old — read it, and do not spend a turn on \`dev3 task list\` to learn what it just told you. Its gaps are where you report a task as working after it is gone:
-- The user typing to you directly brings NO block. They may have spent an hour moving tasks and completing work you never heard of, so re-read the board before you answer them after a silence.
-- A block from earlier in this turn is only as fresh as that moment: if the turn has run long, re-read.
-- \`dev3 peek\` is still the only way to see what a child is DOING. Column age is not agent activity: a task can sit in Agent is Working for an hour, dead since minute one.
-- Messages with no block at all mean a harness or task type that does not get one: fall back to \`dev3 task list\` before every status.
+Every message dev3 delivers ends with a \`<dev3-board>\` block: every task not parked in To Do, every one finished in the last 24h, its priority (\`P0\`…\`P4\`, highest first) and its age in the column. It is seconds old — read it, and do not spend a turn on \`dev3 task list\`. Its gaps:
+- The user typing to you directly brings NO block: they may have moved tasks and completed work you never heard of, so re-read the board before you answer after a silence.
+- A block from earlier in this turn is as fresh as that moment: if the turn has run long, re-read.
+- \`dev3 peek\` is still the only way to see what a child is DOING: a task can sit in Agent is Working for an hour, dead since minute one.
+- No block at all means a harness or task type that does not get one: fall back to \`dev3 task list\`.
 
 == EVENTS ==
 The board says what IS; \`dev3 events\` says what HAPPENED. Read events BEFORE composing any substantive status, inside a turn that already started — never a timer, hook, wake-up or poll.
-- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\`, the millisecond instant on the \`Cursor:\` line of your last run. Keep it in your notes.
-- NO CURSOR YET? Run \`dev3 events\` once with no \`--from\`: a bounded WINDOW, not a position. Its footer counts the older events it cut off — say so rather than implying you read everything. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`: a short relative window silently skips the gap it was meant to cover.
-- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events still wait — re-run from the cursor just printed until nothing is capped. Lines are truncated: open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\`; it needs \`--task\` or it reads YOUR notes, and another kind's id is not a note.
+- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\`, the millisecond instant on the \`Cursor:\` line of the last run; keep it in your notes.
+- NO CURSOR YET? Run \`dev3 events\` once with no \`--from\`: a bounded WINDOW, not a position — its footer counts what it cut off, say so. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`: a short window silently skips the gap.
+- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events wait — re-run from the cursor just printed until nothing is capped. Lines are truncated; open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\` (needs \`--task\`, or it reads YOUR notes).
 - ADVANCE THE CURSOR ONLY AFTER CONSUMING WHAT CAME BACK, and store the one the run returned, not one you composed.
-- A FAILED READ IS NOT A QUIET BOARD: an error, an unresolvable \`--from\`, no answer — say the read failed and keep the old cursor. Report silence only after a read that succeeded.
-- EVENTS AND THE BOARD ARE COMPLEMENTARY. \`dev3 events --help\` names the kinds this build records; expect no other. What exists and where it sits comes from the board block; a column is not proof an agent is alive — that is \`dev3 peek\`.
+- A FAILED READ IS NOT A QUIET BOARD: an error, an unresolvable \`--from\`, no answer — say the read failed and keep the old cursor.
 - NEVER REPEAT A STATUS THE USER ALREADY HAS, a short acknowledgement included; nothing changed is one line. Cursors, page counts and opened notes stay in your reasoning.`;
 
 export function getPrimaryStopTarget(autoReviewEnabled?: boolean): TaskStatus {
@@ -1168,6 +1175,11 @@ export interface RemoteTunnelSettings {
 	urlPattern?: string;
 }
 
+/** The two supported agent-traffic presentations. Both are shipped, neither is legacy. */
+export type AgentTrafficExperiment = "1" | "2";
+/** What an install with no recorded preference renders. */
+export const DEFAULT_AGENT_TRAFFIC_EXPERIMENT: AgentTrafficExperiment = "2";
+
 export interface GlobalSettings {
 	defaultAgentId: string;
 	defaultConfigId: string;
@@ -1211,11 +1223,19 @@ export interface GlobalSettings {
 	 */
 	experimentalTerminalBidi?: boolean;
 	/**
-	 * Beta: the agent-traffic readout in the header and its 30-day log. Off by
-	 * default, and while off the feature leaves no trace — no header control, no
-	 * ⇧⌘M, no menu item, no palette command, no tip.
+	 * Beta: the agent-traffic readout in the header and its 30-day log. On by
+	 * default — absent means "never chose", and an explicit `false` is the user
+	 * saying "off", which must survive a restart. While off the feature leaves no
+	 * trace — no header control, no ⇧⌘M, no menu item, no palette command, no tip.
 	 */
 	experimentalAgentTraffic?: boolean;
+	/**
+	 * Which agent-traffic presentation the surface renders: `"1"` is the 3D orbit
+	 * of planets, `"2"` the flat animated node graph. Absent means Experiment 2 —
+	 * the default for a fresh install and for anyone upgrading, because having
+	 * turned the feature on is not a choice of a presentation nobody was offered.
+	 */
+	agentTrafficExperiment?: AgentTrafficExperiment;
 	/**
 	 * Turn on the `low-battery` answer format dev3 ships (header block first,
 	 * decision last, tables over prose). Absent ⇒ off: dev3 installs nothing and
@@ -1254,6 +1274,13 @@ export interface GlobalSettings {
 	 */
 	terminalPathOpenMode?: TerminalPathOpenMode;
 	defaultDiffViewMode?: "split" | "unified" | "auto"; // default inline diff layout; "auto" picks based on screen size
+	/**
+	 * Where an HTML artifact opens: the right-hand docked panel beside the task
+	 * terminal (default, undefined/false) or a centred popup over the task (true).
+	 * The popup is the alternative for anyone whose UI freezes with the panel — it
+	 * is not a fix for that freeze, whose cause is still unestablished.
+	 */
+	openArtifactsInPopup?: boolean;
 	/**
 	 * Let a headless `dev3 remote` box install updates on its own once it is quiet
 	 * (no task in progress, no terminal output, no browser connected). Default ON —
@@ -1519,7 +1546,7 @@ export const LLM_PROVIDER = {
 export type LlmProvider = (typeof LLM_PROVIDER)[keyof typeof LLM_PROVIDER];
 
 /** Bedrock cross-region inference-profile prefix (the `<geo>.` part of the model id). */
-export type BedrockGeo = "global" | "us" | "eu" | "apac";
+export type BedrockGeo = "global" | "us" | "eu" | "jp";
 
 /**
  * Per-provider connection settings. Generic across providers so a new backend
@@ -1532,7 +1559,7 @@ export type BedrockGeo = "global" | "us" | "eu" | "apac";
 export interface ProviderSettings {
 	/**
 	 * Cross-region inference-profile prefix baked into the mapped model ids
-	 * (`global.` | `us.` | `eu.` | `apac.`). Bedrock-only. Changing it
+	 * (`global.` | `us.` | `eu.` | `jp.`). Bedrock-only. Changing it
 	 * re-populates every non-overridden row of the model table. Defaults to
 	 * "global". This is the id prefix only — NOT the AWS_REGION env (the
 	 * customer's global Claude config owns credentials/region).
@@ -1710,6 +1737,8 @@ export interface ProjectSettingsUpdate extends Dev3RepoConfig {
 	githubAuthHost?: string | null;
 	githubAuthLogin?: string | null;
 	sensitive?: boolean;
+	/** Turns reading of this project's `.dev3/` config files on or off. */
+	useRepoConfig?: boolean;
 	/** Blank string clears the project override and falls back to global. */
 	reviewModePrompt?: string;
 	/** Blank string clears the project override and falls back to global. */
@@ -1796,6 +1825,26 @@ export interface Project {
 	 * project added before this existed, which is exactly who the offer is for.
 	 */
 	conversationImportOfferedAt?: string;
+	/**
+	 * When `false`, dev3 never reads `.dev3/config.json` or
+	 * `.dev3/config.local.json` for this project — not from the checkout and not
+	 * from a task worktree. Settings resolve from this record plus built-in
+	 * defaults, and Project Settings saves land here instead of in a repo file.
+	 *
+	 * Deliberately NOT part of {@link Dev3RepoConfig}: a repository must not be
+	 * able to grant itself back the trust the user withdrew. Absent means ON, so
+	 * every existing project keeps today's behaviour. See {@link repoConfigEnabled}.
+	 */
+	useRepoConfig?: boolean;
+}
+
+/**
+ * Whether dev3 may read this project's `.dev3/` config files at all.
+ * Absent `useRepoConfig` means yes — the default that preserves the behaviour
+ * every project had before the setting existed.
+ */
+export function repoConfigEnabled(project: Pick<Project, "useRepoConfig">): boolean {
+	return project.useRepoConfig !== false;
 }
 
 /**
@@ -2217,6 +2266,14 @@ export interface TaskRuntimeState {
 	updatedAt: number;
 }
 
+/** One configured clone path that failed to copy into the worktree. */
+export interface CloneFailure {
+	/** The path as configured, relative to the project root. */
+	path: string;
+	/** Last stderr line plus the failing command's exit code. */
+	error: string;
+}
+
 export interface Task {
 	id: string;
 	seq: number;
@@ -2365,6 +2422,14 @@ export interface Task {
 	 * recovery in one case and destruction of a working agent in the other.
 	 */
 	setupFailedAgentRunning?: boolean | null;
+	/**
+	 * Clone paths whose source existed but did not reach the worktree. Cloning runs
+	 * before the agent launches, so the agent already read (or failed to read) these
+	 * files by the time anyone looks — the list is persisted rather than pushed so
+	 * the notice survives a closed window. Missing sources are skipped silently and
+	 * never land here. Cleared by the next launch and by dismissing the notice.
+	 */
+	cloneFailures?: CloneFailure[] | null;
 	/** Additive lifecycle runtime hint; older app versions ignore this field. */
 	runtimeState?: TaskRuntimeState;
 	/**
@@ -2420,6 +2485,10 @@ export interface Task {
 	 * every pre-existing task, so older app versions see an ordinary task.
 	 */
 	hibernated?: boolean;
+	/** Hidden from the Active Tasks sidebar only, group-wide; nothing else reads it.
+	 *  Absent/false on every pre-existing task, so older app versions see an
+	 *  ordinary task. */
+	hidden?: boolean;
 	/**
 	 * True when the task exists to look at code the local user did not write —
 	 * it was started on a remote/fork ref (a pull request, a colleague's branch).
@@ -2702,6 +2771,12 @@ export interface ScheduledMessage {
 	/** Set when another task's agent sent it — wraps the text at fire time. */
 	source?: AgentMessageSource;
 	/**
+	 * Provenance carried from the moment of authoring to the moment of delivery,
+	 * because a "Send later" fires hours after the user wrote it and nothing at
+	 * fire time could tell who did. Additive and optional in `tasks.json`.
+	 */
+	origin?: AgentMessageOrigin;
+	/**
 	 * The file the real body was written to when it was too large to type, leaving
 	 * {@link text} a pointer to it. Carried so the message log can say a row holds a
 	 * pointer rather than a body, instead of guessing from the wording.
@@ -2781,14 +2856,38 @@ export const MAX_SHARED_IMAGES_PER_CALL = 20;
 /** Maximum accepted HTML source size for `dev3 show-artifact` (bytes). */
 export const MAX_SHARED_ARTIFACT_HTML_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Video extensions a bundled artifact clip may use (lowercase, no dot). MP4 and
+ * WebM only: they are the two containers every engine dev3 renders in — WKWebView,
+ * Chromium and mobile Safari — decodes without a plugin or a transcode step.
+ */
+export const SHARED_VIDEO_EXTS: readonly string[] = ["mp4", "webm"];
+
 /** Local asset extensions accepted by `dev3 show-artifact --assets`. */
-export const SHARED_ARTIFACT_ASSET_EXTS: readonly string[] = ["css", "js", ...SHARED_IMAGE_EXTS];
+export const SHARED_ARTIFACT_ASSET_EXTS: readonly string[] = ["css", "js", ...SHARED_IMAGE_EXTS, ...SHARED_VIDEO_EXTS];
 
 /** Maximum local assets accepted by one `dev3 show-artifact --assets` call. */
 export const MAX_SHARED_ARTIFACT_ASSETS = 40;
 
 /** Per-file size cap for a local HTML artifact asset (bytes). */
 export const MAX_SHARED_ARTIFACT_ASSET_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Per-clip cap for a bundled artifact video (bytes), tighter than the generic
+ * asset cap. Every asset reaches the viewer as one base64 data URL inside the
+ * composed document, so a clip costs about 1.34× its bytes in the RPC payload and
+ * again in the document string — and it is paid on every open, not on first play.
+ * 16 MB holds a ~12 s 1080p screen capture with room to spare while keeping the
+ * worst-case single clip under ~22 MB of transport.
+ */
+export const MAX_SHARED_ARTIFACT_VIDEO_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Combined cap for all bundled videos in one artifact (bytes). Sits below
+ * {@link MAX_SHARED_ARTIFACT_VIDEO_BYTES} × the asset count on purpose: five
+ * clips of the per-file maximum would be a 100 MB document nobody can open.
+ */
+export const MAX_SHARED_ARTIFACT_VIDEO_TOTAL_BYTES = 48 * 1024 * 1024;
 
 // ---- Package scripts runner ----
 
@@ -3051,16 +3150,54 @@ export interface AgentLaunchRequest {
 	autoApproveAt: number | null;
 }
 
-/** Minutes the launch dialog waits before approving itself when unconfigured. */
-export const DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES = 5;
+/**
+ * Minutes the launch dialog waits before approving itself when unconfigured.
+ * One minute: the delay only exists so an absent user does not strand the asking
+ * agent, and the countdown now stops the moment anyone touches the dialog, so
+ * waiting longer buys nothing.
+ */
+export const DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES = 1;
 
-/** Choices offered for {@link GlobalSettings.agentLaunchAutoApproveMinutes}; `0` = off. */
-export const AGENT_LAUNCH_AUTO_APPROVE_CHOICES = [0, 1, 2, 5, 10, 15] as const;
+/** Shortest and longest delay the picker accepts; anything else is clamped into the range. */
+export const AGENT_LAUNCH_AUTO_APPROVE_MIN_MS = 5_000;
+export const AGENT_LAUNCH_AUTO_APPROVE_MAX_MS = 24 * 60 * 60 * 1000;
 
-/** Resolve the configured auto-approve delay in ms; `0` means "never auto-approve". */
+/** The delay as the picker shows it: hours, minutes and seconds side by side. */
+export interface AutoApproveHms {
+	hours: number;
+	minutes: number;
+	seconds: number;
+}
+
+/**
+ * Resolve the configured auto-approve delay in ms; `0` means "never auto-approve".
+ * A stored value outside the accepted range is clamped rather than dropped — an
+ * older build (or a hand-edited settings file) must not be able to park an agent
+ * on a dialog for a week, nor fire the timer before a dialog can even paint.
+ */
 export function agentLaunchAutoApproveMs(settings: Pick<GlobalSettings, "agentLaunchAutoApproveMinutes">): number {
 	const minutes = settings.agentLaunchAutoApproveMinutes ?? DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES;
-	return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60_000) : 0;
+	if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+	const ms = Math.round(minutes * 60_000);
+	return Math.min(AGENT_LAUNCH_AUTO_APPROVE_MAX_MS, Math.max(AGENT_LAUNCH_AUTO_APPROVE_MIN_MS, ms));
+}
+
+/** Split a stored minutes value into the hours/minutes/seconds the picker shows. */
+export function splitAutoApproveHms(minutes: number): AutoApproveHms {
+	const total = Math.max(0, Math.round((Number.isFinite(minutes) ? minutes : 0) * 60));
+	return {
+		hours: Math.floor(total / 3_600),
+		minutes: Math.floor((total % 3_600) / 60),
+		seconds: total % 60,
+	};
+}
+
+/** Build a stored minutes value from the picker fields, clamped into the accepted range. */
+export function autoApproveMinutesFromHms(hms: AutoApproveHms): number {
+	const part = (value: number) => (Number.isFinite(value) && value > 0 ? Math.floor(value) : 0);
+	const ms = (part(hms.hours) * 3_600 + part(hms.minutes) * 60 + part(hms.seconds)) * 1_000;
+	const clamped = Math.min(AGENT_LAUNCH_AUTO_APPROVE_MAX_MS, Math.max(AGENT_LAUNCH_AUTO_APPROVE_MIN_MS, ms));
+	return clamped / 60_000;
 }
 
 /**
@@ -4815,6 +4952,10 @@ export type AppRPCSchema = {
 				params: { taskId: string; projectId: string; priority: TaskPriority };
 				response: Task[];
 			};
+			setTaskHidden: {
+				params: { taskId: string; projectId: string; hidden: boolean };
+				response: Task[];
+			};
 			moveTask: {
 				// `clientPlayedSound`: the UI already played the completion/cancel sound
 				// optimistically in the initiating renderer, so the backend must NOT
@@ -4940,6 +5081,11 @@ export type AppRPCSchema = {
 			};
 			/** Drop a setup-failure verdict the user has acknowledged. */
 			dismissSetupFailure: {
+				params: { taskId: string };
+				response: void;
+			};
+			/** Drop the clone-path failure list the user has acknowledged. */
+			dismissCloneFailures: {
 				params: { taskId: string };
 				response: void;
 			};
@@ -5128,10 +5274,6 @@ export type AppRPCSchema = {
 			setAgentBinaryPath: {
 				params: { agentId: string; path: string };
 				response: void;
-			};
-			checkCodexBedrockConfig: {
-				params: void;
-				response: { configured: boolean };
 			};
 			getChangelogs: {
 				params: void;
@@ -5323,6 +5465,18 @@ export type AppRPCSchema = {
 			readAgentMessageLog: {
 				params: { projectId: string; limit?: number };
 				response: AgentMessageLogPage;
+			};
+			/**
+			 * Read the global `dev3 notify` archive, newest first.
+			 *
+			 * Deliberately not per project: a notification can be sent with no task and
+			 * therefore no project, so splitting the stream by project would make
+			 * "every notification, in order" unanswerable. `projectIds` narrows it, and
+			 * a row with no project is always kept.
+			 */
+			readNotificationLog: {
+				params: { limit?: number; projectIds?: string[] };
+				response: NotificationLogPage;
 			};
 			taskPaneState: {
 				params: { taskId: string };
@@ -5764,6 +5918,27 @@ export type AppRPCSchema = {
 				response: void;
 			};
 			/**
+			 * Report that this dialog has reached the screen, restarting its
+			 * countdown from now. Dialogs queue rather than stack, so a request that
+			 * waited behind another must still get the whole delay in front of a
+			 * human. Answers with the deadline to draw, which is the same one the
+			 * bun-side timer will fire on.
+			 */
+			markAgentRequestShown: {
+				params: { requestId: string };
+				response: { autoApproveAt: number | null };
+			};
+			/**
+			 * The user took the dialog over — stop the countdown for good. Called on
+			 * the first real interaction (pointer, key, or an edited pick), never on
+			 * mount or on a programmatic update, so an unattended dialog still
+			 * launches on its own and an attended one waits for an explicit answer.
+			 */
+			holdAgentLaunchAutoApprove: {
+				params: { requestId: string };
+				response: void;
+			};
+			/**
 			 * Cheap liveness probe for the desktop RPC bridge watchdog. The renderer
 			 * pings this on wake/focus with a short timeout; a missed ping means the
 			 * Electrobun localhost socket has jammed and the bridge needs recovery.
@@ -5848,6 +6023,12 @@ export type AppRPCSchema = {
 			 * browsers — they can no longer decide anything.
 			 */
 			agentRequestResolved: { requestId: string; kind: "complete" | "launch"; taskId: string; projectId: string };
+			/**
+			 * Somebody took a launch dialog over, so its auto-approval is off. The
+			 * dialog is broadcast to every client, and a copy on another window would
+			 * otherwise keep counting down to a launch that can no longer happen.
+			 */
+			agentLaunchAutoApproveHeld: { requestId: string };
 			portsUpdated: { taskId: string; ports: PortInfo[] };
 			/**
 			 * Dev-server state for one task, pushed only when it changes. Feeds the
@@ -5942,6 +6123,13 @@ export type AppRPCSchema = {
 			 */
 			/** A durable append completed; refresh the recipient project log, including failed attempts. */
 			agentMessageLogChanged: { projectId: string };
+			/**
+			 * A notification row was appended to the global archive by THIS instance.
+			 * No payload: the archive is one global stream, so there is nothing to
+			 * scope the refresh to. Another instance's appends are not announced —
+			 * that needs a filesystem watcher, which a read API does not.
+			 */
+			notificationLogChanged: Record<string, never>;
 			agentMessage: {
 				/** Receiving task — the click target, and the inbox that got the text. */
 				taskId: string;

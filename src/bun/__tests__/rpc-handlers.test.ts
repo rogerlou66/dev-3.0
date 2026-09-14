@@ -56,6 +56,7 @@ vi.mock("../data", () => ({
 	loadTasks: vi.fn(),
 	updateTask: vi.fn(),
 	setTaskPriority: vi.fn(),
+	setTaskHidden: vi.fn(),
 	deriveTaskBaseBranch: vi.fn((project: any, branch?: string | null) => branch || project.defaultBaseBranch),
 	addTask: vi.fn(),
 	addProject: vi.fn(),
@@ -213,6 +214,7 @@ vi.mock("../agents", () => ({
 	ensureClaudeTrust: vi.fn(),
 	ensureCodexTrust: vi.fn(),
 	ensureGeminiTrust: vi.fn(),
+	getCodexVersionCached: vi.fn(() => null),
 	isClaudeCommand: vi.fn(() => false),
 	skillInvocationPrefix: vi.fn((command: string) => (command === "codex" ? "$" : "/")),
 	supportsPreAssignedSessionId: vi.fn(() => false),
@@ -282,7 +284,7 @@ vi.mock("../artifact-template", () => ({
 }));
 
 vi.mock("../cow-clone", () => ({
-	clonePaths: vi.fn(),
+	clonePaths: vi.fn(async () => []),
 }));
 
 vi.mock("../logger", () => ({
@@ -1555,6 +1557,30 @@ describe("handlers.setTaskPriority", () => {
 	});
 });
 
+describe("handlers.setTaskHidden", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it("writes visibility and pushes every changed variant", async () => {
+		const project = makeProject();
+		const changed = [
+			makeTask({ id: "task-1", hidden: true }),
+			makeTask({ id: "task-2", hidden: true }),
+		];
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.setTaskHidden).mockResolvedValue(changed);
+		const push = vi.fn();
+		setPushMessage(push);
+
+		const result = await handlers.setTaskHidden({ taskId: "task-1", projectId: "proj-1", hidden: true });
+
+		expect(data.setTaskHidden).toHaveBeenCalledWith(project, "task-1", true);
+		expect(push).toHaveBeenCalledTimes(2);
+		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: "proj-1", task: changed[0] });
+		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: "proj-1", task: changed[1] });
+		expect(result).toEqual(changed);
+	});
+});
+
 // ================================================================
 // handlers.addProject
 // ================================================================
@@ -1999,6 +2025,20 @@ describe("handlers.saveGlobalSettings", () => {
 		await handlers.saveGlobalSettings(settings);
 		expect(saveSettings).toHaveBeenCalledWith(settings);
 		expect(push).toHaveBeenCalledWith("globalSettingsUpdated", settings);
+	});
+
+	// Starring a preset in Settings has to reach the launch dialog, which keeps
+	// its own copy of the settings: without the push the favorite was saved and
+	// invisible everywhere but the screen it was starred on.
+	it("broadcasts the settings after a favorite is toggled", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+		await handlers.toggleFavoriteAgent({ agentId: "builtin-claude", configId: "cfg-1" });
+		expect(push).toHaveBeenCalledWith(
+			"globalSettingsUpdated",
+			expect.objectContaining({
+				favorites: [expect.objectContaining({ agentId: "builtin-claude", configId: "cfg-1" })],
+			}),
+		);
 	});
 
 	// The renderer sends a whole snapshot taken when it loaded, and the legacy id
@@ -5542,6 +5582,7 @@ describe("handlers.getBranchStatus", () => {
 			vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
 			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 			vi.mocked(git.canRebaseCleanly).mockResolvedValue(true);
+			vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 		}
 
 		it("reports merged when the task's own PR is merged (squash-merged, then rebased)", async () => {
@@ -5556,8 +5597,9 @@ describe("handlers.getBranchStatus", () => {
 
 			expect(result.mergedByContent).toBe(true);
 			expect(github.isPullRequestMerged).toHaveBeenCalledWith(project, "/tmp/wt", 1077, "dev3/t");
-			// Content strategies are pointless here — nothing of the branch is left.
-			expect(git.isContentMergedInto).not.toHaveBeenCalled();
+			// The local check runs first and finds nothing — squash + rebase leaves no
+			// local trace at all — so only the merged PR carries this verdict.
+			expect(git.isContentMergedInto).toHaveBeenCalled();
 		});
 
 		it("reports NOT merged for a brand-new branch sitting on the base tip", async () => {
@@ -5598,6 +5640,20 @@ describe("handlers.getBranchStatus", () => {
 			expect(result.mergedByContent).toBe(false);
 		});
 
+		it("reports merged with no PR at all when the local check proves the work landed", async () => {
+			const project = makeProject();
+			const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.getTask).mockResolvedValue(task);
+			mockAheadZero(0);
+			vi.mocked(git.isContentMergedInto).mockResolvedValue(true);
+
+			const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
+
+			expect(result.mergedByContent).toBe(true);
+			expect(github.isPullRequestMerged).not.toHaveBeenCalled();
+		});
+
 		it("still uses the content strategies when the branch has commits of its own", async () => {
 			const project = makeProject();
 			const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t", prNumber: 42, prUrl: "https://gh/pr/42" });
@@ -5626,6 +5682,7 @@ describe("handlers.getBranchStatus", () => {
 			vi.mocked(git.getUnpreservedCount).mockResolvedValue(-1);
 			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
 			vi.mocked(github.runGitHub).mockResolvedValue({ ok: true, stdout: "[]", stderr: "", exitCode: 0 } as any);
+			vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 		}
 
 		it("hides the badge and refuses the merge proof when the PR's head is a foreign branch", async () => {
@@ -12187,6 +12244,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(true);
 		setPushMessage(push);
 
@@ -12194,7 +12252,6 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		await vi.advanceTimersByTimeAsync(60_000);
 
 		expect(git.isBranchMergedViaGitHubPR).toHaveBeenCalledWith("/tmp/test-worktree", project);
-		expect(git.isContentMergedInto).not.toHaveBeenCalled();
 		expect(push).toHaveBeenCalledWith("branchMerged", expect.objectContaining({
 			taskId: task.id,
 			fingerprint: "v1:dev3/task-test:abc123",
@@ -12215,6 +12272,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(false);
 		setPushMessage(push);
 
@@ -12222,6 +12280,34 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		await vi.advanceTimersByTimeAsync(60_000);
 
 		expect(push).not.toHaveBeenCalledWith("branchMerged", expect.anything());
+	});
+
+	// A local-only project never pushes, so origin/<branch> is absent for every
+	// task — the PR proof can never fire there. The local merge check is the only
+	// thing that can, and it is safe now that a branch with no commits of its own
+	// no longer reads as merged.
+	it("prompts when the remote branch is gone but the branch was merged locally", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			status: "review-by-user",
+			worktreePath: "/tmp/test-worktree",
+			branchName: "dev3/task-test",
+		});
+		const push = vi.fn();
+
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
+		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(true);
+		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(false);
+		setPushMessage(push);
+
+		startMergeDetectionPoller();
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(push).toHaveBeenCalledWith("branchMerged", expect.objectContaining({ taskId: task.id }));
 	});
 
 	it("prompts when the remote branch is gone and the task's own PR merged, even though HEAD moved off the PR head (squash + rebase)", async () => {
@@ -12267,6 +12353,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(git.fetchOrigin).mockResolvedValue(true);
 		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
 		vi.mocked(git.getUnpushedCount).mockResolvedValue(-1);
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
 		vi.mocked(git.isBranchMergedViaGitHubPR).mockResolvedValue(false);
 		vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 4, baseUnreachable: false });
 		vi.mocked(github.isPullRequestMerged).mockResolvedValue(true);
@@ -12961,6 +13048,7 @@ describe("triggerColumnAgentIfNeeded", () => {
 			config: undefined,
 			extraEnv: {},
 			agentFamily: undefined,
+			launchModel: undefined,
 		});
 	});
 
@@ -13043,6 +13131,7 @@ describe("triggerColumnAgentIfNeeded", () => {
 			config: undefined,
 			extraEnv: {},
 			agentFamily: undefined,
+			launchModel: undefined,
 		});
 		vi.mocked(setupAgentHooks).mockResolvedValueOnce("--dangerously-bypass-hook-trust");
 
@@ -13900,16 +13989,6 @@ describe("toggleTaskWatch", () => {
 });
 
 describe("handlers.createPullRequest", () => {
-	// The handoff asks the host whether a `dev3://` handler is registered, so every
-	// expectation about the footer is platform-dependent — and CI shards run on Linux
-	// while this was written on macOS. Pin macOS for the block; the tests that assert
-	// the footer's ABSENCE set their own platform and this restores it.
-	const hostPlatform = process.platform;
-	const setPlatform = (value: string) =>
-		Object.defineProperty(process, "platform", { value, configurable: true });
-	beforeEach(() => setPlatform("darwin"));
-	afterEach(() => setPlatform(hostPlatform));
-
 	/**
 	 * The guarded sends this handoff performed. One stage is ONE `if-shell` command
 	 * list, so counting these counts stages that actually reached the server.
@@ -14005,27 +14084,30 @@ describe("handlers.createPullRequest", () => {
 		// Two stages, both guarded and both aimed at the pinned pane: the text, then Enter.
 		const sends = guardedSends();
 		expect(sends).toHaveLength(2);
-		expect(typedText(sends[0])).toContain("gh pr create");
+		expect(typedText(sends[0])).toContain("dev3 pr create");
 		expect(sends[1]?.join(" ")).toContain("send-keys -t %3 Enter");
 	});
 
-	it("keeps the deep-link block last so nothing is appended inside it", async () => {
+	// `dev3 pr create` pushes the branch and opens the pull request itself. Naming the
+	// raw commands as well invites the agent to do it by hand, which is how the footer
+	// used to be pasted with somebody else's task id.
+	it("hands over the dev3 command and tells the agent not to run git push / gh itself", async () => {
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		tmuxWithLivePanes();
 
-		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id, autoMerge: true });
+		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
 		const prompt = typedText(guardedSends()[0]);
-		expect(prompt.indexOf("gh pr merge --auto")).toBeLessThan(prompt.indexOf("dev3://task/task-1"));
-		expect(prompt.trimEnd().endsWith("Settings → Tasks.)_")).toBe(true);
+		expect(prompt).toContain("dev3 pr create");
+		expect(prompt).toContain("do not run git push or gh pr create yourself");
 	});
 
 	// A newline reaches the pane as a raw byte and can submit the prompt early on an
 	// agent that reads it as Enter, so the whole handoff stays on one line.
-	it("sends a single-line prompt even with the deep link appended", async () => {
+	it("sends a single-line prompt", async () => {
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
@@ -14034,61 +14116,32 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		const prompt = typedText(guardedSends()[0]);
-		expect(prompt).toContain("dev3://task/task-1");
-		expect(prompt).not.toContain("\n");
+		expect(typedText(guardedSends()[0])).not.toContain("\n");
 	});
 
-	it("omits the deep link when the user turned the setting off", async () => {
+	/**
+	 * The footer, its platform gate and the user's `prOriginTaskLink` preference all
+	 * live inside `dev3 pr create` now (covered by src/cli/__tests__/pr.test.ts). The
+	 * handoff must therefore carry no footer text at all — and must not read settings,
+	 * because a second copy of that decision is a second thing to get wrong.
+	 */
+	it("carries no footer text and reads no settings", async () => {
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
-		vi.mocked(loadSettings).mockResolvedValueOnce({ prOriginTaskLink: false } as never);
 		tmuxWithLivePanes();
 
-		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
-
-		const prompt = typedText(guardedSends()[0]);
-		expect(prompt).not.toContain("dev3://task/task-1");
-		expect(prompt).toContain("gh pr create");
-	});
-
-	// Only macOS registers a `dev3://` handler, so anywhere else the footer would put
-	// a dead link in front of everyone reading a public PR. The host platform decides
-	// before the preference does — and the preference is never rewritten on disk.
-	it.each(["win32", "linux"])("omits the deep link on %s even with the setting stored on", async (platform) => {
-		const project = makeProject();
-		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
-		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.getTask).mockResolvedValue(task);
-		vi.mocked(loadSettings).mockResolvedValueOnce({ prOriginTaskLink: true } as never);
-		tmuxWithLivePanes();
-		setPlatform(platform);
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
 		const prompt = typedText(guardedSends()[0]);
 		expect(prompt).not.toContain("dev3://task/task-1");
 		expect(prompt).not.toContain("open.html?task=task-1");
-		expect(prompt).toContain("gh pr create");
+		expect(loadSettings).not.toHaveBeenCalled();
 		expect(saveSettings).not.toHaveBeenCalled();
 	});
 
-	it("tells the agent to append a deep link back to the origin task", async () => {
-		const project = makeProject();
-		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
-		vi.mocked(data.getProject).mockResolvedValue(project);
-		vi.mocked(data.getTask).mockResolvedValue(task);
-		tmuxWithLivePanes();
-
-		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
-
-		const prompt = typedText(guardedSends()[0]);
-		expect(prompt).toContain("dev3://task/task-1");
-		expect(prompt).toContain("https://dev3.h0x91b.com/open.html?task=task-1");
-	});
-
-	it("sends the auto-merge variant prompt when autoMerge is set", async () => {
+	it("asks for auto-merge through the command's own flag when autoMerge is set", async () => {
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
@@ -14097,8 +14150,10 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id, autoMerge: true });
 
-		expect(typedText(guardedSends()[0])).toContain("gh pr create");
-		expect(typedText(guardedSends()[0])).toContain("gh pr merge --auto");
+		const prompt = typedText(guardedSends()[0]);
+		expect(prompt).toContain("dev3 pr create");
+		expect(prompt).toContain("--auto-merge");
+		expect(prompt).not.toContain("gh pr merge");
 	});
 
 	it("does not enable auto-merge in the default prompt", async () => {
@@ -14110,7 +14165,7 @@ describe("handlers.createPullRequest", () => {
 
 		await handlers.createPullRequest({ taskId: "task-1", projectId: project.id });
 
-		expect(typedText(guardedSends()[0])).not.toContain("gh pr merge --auto");
+		expect(typedText(guardedSends()[0])).not.toContain("--auto-merge");
 	});
 
 	it("reports a proven no-pane as not-delivered, and sends nothing", async () => {

@@ -1,17 +1,100 @@
 import { useState } from "react";
-import { AGENT_LAUNCH_AUTO_APPROVE_CHOICES, COORDINATOR_PROMPT, DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES, DEFAULT_PR_REVIEW_PROMPT, type GlobalSettings } from "../../../shared/types";
-import type { TFunction } from "../../i18n";
+import { COORDINATOR_PROMPT, DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES, DEFAULT_PR_REVIEW_PROMPT, type AutoApproveHms, type GlobalSettings, autoApproveMinutesFromHms, splitAutoApproveHms } from "../../../shared/types";
+import type { TFunction, TranslationKey } from "../../i18n";
 import SettingsSection from "./SettingsSection";
 import SettingsEntry from "./SettingsEntry";
 import SettingsToggle from "./SettingsToggle";
 
 const AUTO_OPEN_IMAGES_KEY = "dev3-auto-open-shared-images";
 
+const HMS_FIELDS: { field: keyof AutoApproveHms; labelKey: TranslationKey; max: number }[] = [
+	{ field: "hours", labelKey: "settings.autoApproveHours", max: 24 },
+	{ field: "minutes", labelKey: "settings.autoApproveMinutes", max: 59 },
+	{ field: "seconds", labelKey: "settings.autoApproveSeconds", max: 59 },
+];
+
+/**
+ * Hours/minutes/seconds picker for the launch dialog's auto-approve delay.
+ *
+ * "Never" is its own switch rather than three zeros — the stored `0` has to keep
+ * meaning "the user said never", not "the fields happen to be empty". Switching
+ * it off remembers the delay for the session so turning it back on does not lose
+ * a chosen 15 s.
+ */
+function AutoApproveDelayEntry({
+	t,
+	minutes,
+	onChange,
+}: {
+	t: TFunction;
+	minutes: number;
+	onChange: (minutes: number) => void;
+}) {
+	const enabled = minutes > 0;
+	const [remembered, setRemembered] = useState(
+		() => (enabled ? minutes : DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES),
+	);
+	const shown = splitAutoApproveHms(enabled ? minutes : remembered);
+	// Free text per field while typing: the stored value is clamped, so echoing it
+	// straight back would move digits under the cursor. Dropped on blur, when the
+	// field snaps to what was actually stored.
+	const [draft, setDraft] = useState<Partial<Record<keyof AutoApproveHms, string>>>({});
+
+	const commit = (field: keyof AutoApproveHms, raw: string) => {
+		const next = autoApproveMinutesFromHms({ ...shown, [field]: Number(raw) });
+		setRemembered(next);
+		if (enabled) onChange(next);
+	};
+
+	return (
+		<div>
+			<p className="block text-fg text-sm font-semibold mb-2">
+				{t("settings.agentLaunchAutoApprove")}
+			</p>
+			<p className="text-fg-3 text-sm mb-3">
+				{t("settings.agentLaunchAutoApproveDesc")}
+			</p>
+			<SettingsToggle
+				checked={enabled}
+				ariaLabel={t("settings.agentLaunchAutoApprove")}
+				onLabel={t("settings.on")}
+				offLabel={t("settings.agentLaunchAutoApproveOff")}
+				onToggle={() => onChange(enabled ? 0 : remembered)}
+			/>
+			<div className="flex items-end gap-3 mt-3">
+				{HMS_FIELDS.map(({ field, labelKey, max }) => (
+					<label key={field} className="flex flex-col gap-1.5">
+						<span className="text-fg-3 text-xs">{t(labelKey)}</span>
+						<input
+							type="number"
+							inputMode="numeric"
+							min={0}
+							max={max}
+							step={1}
+							disabled={!enabled}
+							value={draft[field] ?? String(shown[field])}
+							aria-label={t(labelKey)}
+							onChange={(e) => {
+								setDraft((d) => ({ ...d, [field]: e.target.value }));
+								commit(field, e.target.value);
+							}}
+							onBlur={() => setDraft((d) => ({ ...d, [field]: undefined }))}
+							className="w-20 px-3 py-3 bg-raised border border-edge rounded-xl text-fg text-sm text-center tabular-nums outline-none transition-colors duration-150 focus:border-edge-active disabled:opacity-50"
+						/>
+					</label>
+				))}
+			</div>
+		</div>
+	);
+}
+
 interface BehaviorSettingsSectionProps {
 	t: TFunction;
 	globalSettings: GlobalSettings;
 	tipsResetDone: boolean;
 	onDefaultDiffViewModeChange: (mode: "split" | "unified" | "auto") => void;
+	/** True = centred popup, false = the docked right-hand artifact panel. */
+	onOpenArtifactsInPopupToggle: (enabled: boolean) => void;
 	onSuggestCompletingTasksAfterMergeToggle: (enabled: boolean) => void;
 	onPrOriginTaskLinkToggle: (enabled: boolean) => void;
 	/** Minutes before an unanswered agent-launch dialog approves itself; 0 = never. */
@@ -34,6 +117,7 @@ export default function BehaviorSettingsSection({
 	globalSettings,
 	tipsResetDone,
 	onDefaultDiffViewModeChange,
+	onOpenArtifactsInPopupToggle,
 	onSuggestCompletingTasksAfterMergeToggle,
 	onPrOriginTaskLinkToggle,
 	onAgentLaunchAutoApproveChange,
@@ -135,28 +219,11 @@ export default function BehaviorSettingsSection({
 			</SettingsEntry>
 
 			<SettingsEntry anchor="agent-launch-auto-approve">
-			<div>
-				<p className="block text-fg text-sm font-semibold mb-2">
-					{t("settings.agentLaunchAutoApprove")}
-				</p>
-				<p className="text-fg-3 text-sm mb-3">
-					{t("settings.agentLaunchAutoApproveDesc")}
-				</p>
-				<select
-					value={String(globalSettings.agentLaunchAutoApproveMinutes ?? DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES)}
-					aria-label={t("settings.agentLaunchAutoApprove")}
-					onChange={(e) => onAgentLaunchAutoApproveChange(Number(e.target.value))}
-					className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm outline-none appearance-none"
-				>
-					{AGENT_LAUNCH_AUTO_APPROVE_CHOICES.map((minutes) => (
-						<option key={minutes} value={String(minutes)}>
-							{minutes === 0
-								? t("settings.agentLaunchAutoApproveOff")
-								: t.plural("settings.agentLaunchAutoApproveMinutes", minutes)}
-						</option>
-					))}
-				</select>
-			</div>
+			<AutoApproveDelayEntry
+				t={t}
+				minutes={globalSettings.agentLaunchAutoApproveMinutes ?? DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES}
+				onChange={onAgentLaunchAutoApproveChange}
+			/>
 			</SettingsEntry>
 
 			<SettingsEntry anchor="pr-origin-task-link">
@@ -231,6 +298,24 @@ export default function BehaviorSettingsSection({
 						</button>
 					))}
 				</div>
+			</div>
+			</SettingsEntry>
+
+			<SettingsEntry anchor="artifact-popup">
+			<div>
+				<p className="block text-fg text-sm font-semibold mb-2">
+					{t("settings.artifactPopup")}
+				</p>
+				<p className="text-fg-3 text-sm mb-3">
+					{t("settings.artifactPopupDesc")}
+				</p>
+				<SettingsToggle
+					checked={globalSettings.openArtifactsInPopup === true}
+					ariaLabel={t("settings.artifactPopup")}
+					onLabel={t("settings.on")}
+					offLabel={t("settings.off")}
+					onToggle={() => onOpenArtifactsInPopupToggle(globalSettings.openArtifactsInPopup !== true)}
+				/>
 			</div>
 			</SettingsEntry>
 

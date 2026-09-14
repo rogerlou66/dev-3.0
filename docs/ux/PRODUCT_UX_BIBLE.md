@@ -69,7 +69,7 @@ Evidence: `concept.md`, `AGENTS.md`, `src/mainview/state.ts`, `src/shared/types.
 | Label | — (overlay on tasks) | — | project | create, rename, recolor, assign, filter | `types.ts (Label)`, `LabelPicker.tsx`, `LabelFilterBar.tsx` |
 | Custom Column | — (board column) | — | project | create, rename, recolor, set LLM instruction, attach agent | `types.ts (CustomColumn)`, `KanbanBoard.tsx` |
 | Note | — (clamped preview in inspector → own overlay) | — | task | add, edit, delete | `types.ts (TaskNote)`, `NoteItem.tsx`, `task-info-panel/TaskNotes.tsx`, `TaskNotesOverlay.tsx` |
-| HTML Artifact | — (conditional Runtime-bar entry; rows in the archived task modal) | popup lightbox | task | view, fullscreen, navigate history, find in content (⌘F), download HTML/ZIP, open in web browser | `types.ts (SharedArtifact)`, `TaskArtifactViewer.tsx`, `show-artifact.ts` |
+| HTML Artifact | — (conditional Runtime-bar entry; rows in the archived task modal) | docked panel, or popup (`openArtifactsInPopup`) | task | view, fullscreen, navigate history, find in content (⌘F), download HTML/ZIP, open in web browser | `types.ts (SharedArtifact)`, `TaskArtifactViewer.tsx`, `show-artifact.ts` |
 | Automation | — (managed in `project-settings` tab `automations`) | — | project | create, edit, enable/disable, run now, view run history, delete | `types.ts (Automation)`, `ProjectSettings.tsx`, `automations-scheduler.ts` |
 | Paired host (Android-local) | Android connection gateway | existing connected dev3 route tree | Android client | scan/paste connection link, reconnect, forget | `android/`, `android-client-bridge.ts` |
 
@@ -87,7 +87,7 @@ The app uses a **screen router** (`Route` union + `useReducer` with a 15-entry b
 
 ### Global navigation
 
-Destinations: `dashboard`, `project` (Kanban — the daily home), `task`, `project-terminal`, `settings`, `project-settings`, `changelog`, `stats` (Productivity Stats / Velocity Cockpit). Debug-only: `gauge-demo`, `viewport-lab`.
+Destinations: `dashboard`, `project` (Kanban — the daily home), `task`, `project-terminal`, `settings`, `project-settings`, `changelog`, `stats` (Productivity Stats / Velocity Cockpit), `agent-traffic` (§5.9). Debug: `gauge-demo`, `viewport-lab`.
 
 Mechanism: `GlobalHeader` breadcrumbs (`Dashboard > Project > Task`) + back/forward + native application-menu `View`.
 
@@ -120,12 +120,12 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 | Kanban board | Primary single-project work surface | task cards, create-in-column, drag-move, column config, task filter (token-DSL search + funnel; label chips are a view of it) | durable global config | `KanbanBoard.tsx`, `KanbanColumn.tsx`, `LabelFilterBar.tsx`, `FilterFunnel.tsx` |
 | Task card | Compact task summary | status dot, labels, variant dots (≤3, clickable → sibling popover), open, context menu, git badge, native-backend marker (§5.6) | full settings, global destination, unbounded dot rows | `TaskCard.tsx` (large — watch density) |
 | Task info panel (inspector) | Active-task control: git, dev server, scripts, notes, tmux, open-in | object/git/dev-server actions, metadata, **capped** notes preview (§5.8) | global destination, cross-project action, an uncapped note list | `TaskInfoPanel.tsx` (densest surface) |
-| Agent traffic | Live project orbit of recorded message attempts (§5.9) | inspect tasks/messages, search, loaded-history window, delivery filter, open existing task | global destination, sending a message, task lifecycle action, inferred reply obligations | `agent-traffic/AgentTrafficLog.tsx` |
+| Agent traffic (destination) | Live map of recorded message attempts, either presentation (§5.9) | inspect tasks/messages, search, history window, delivery filter, pick a presentation, open existing task | sending a message, task lifecycle action, inferred reply obligations, own chrome above the header | `agent-traffic/AgentTrafficScreen.tsx` |
 | Task notes log | The whole agent-written note log of one task | read every note, add, edit, delete | task lifecycle action, git mutation, global destination | `TaskNotesOverlay.tsx` (sheet on narrow, dialog on wide — see 5.8) |
 | Terminal immersive fullscreen | Ephemeral task-bound terminal workspace for focused tmux work | tmux terminal, existing tmux window/pane controls, `dev3` brand, one wide Exit full screen action | global/app header, task switching UI, inspector controls, route persistence, any tmux pane/layout mutation | `App.tsx`, `TaskInfoPanel.tsx` |
 | Diff review viewer | Full-screen read + inline-review of a task's diff | view-mode toggle, file-tree nav, search, mark-read, per-file copy-path, inline comments, review export/copy/reset | task lifecycle action, git mutation, global destination | `TaskDiffViewer.tsx` (see 5.3) |
 | Task image viewer | Task-bound lightbox for images an agent surfaced via `dev3 show-image` (history rail, newest first) | image display, history nav (thumbnails + prev/next + arrows), copy image, download image (header icon + own right-click menu), reveal path, clear (destructive) | global destination, task lifecycle/git mutation, persistent inspector button (badge is conditional), SVG render (v1) | `TaskImageViewer.tsx` (planned; see UX_DECISIONS 2026-07-02) |
-| Task artifact viewer | Interactive HTML plus local CSS/JS/raster assets via `dev3 show-artifact`; the image viewer's lightbox, fullscreen on demand | sandboxed display, history nav, theme sync, floating ⌘F find over the content (§10), network integrations, HTML/ZIP download, open in the OS web browser (§10) | global destination, docking into a pane, any drag-resizable split, task lifecycle/git mutation, parent DOM/RPC access, native dialog (trusted scripts can self-navigate their iframe) | `TaskArtifactViewer.tsx`, `TaskImageViewer.tsx`, `shared-artifacts.ts` |
+| Task artifact viewer | Interactive HTML plus local CSS/JS/raster assets via `dev3 show-artifact`; docked resizable panel by default, the image lightbox when opted in or slotless | sandboxed display, history nav, theme sync, floating ⌘F find over the content (§10), network integrations, HTML/ZIP download, open in the OS web browser (§10) | global destination, task lifecycle/git mutation, parent DOM/RPC access, native dialog (trusted scripts can self-navigate their iframe), a second viewer instance | `TaskArtifactViewer.tsx`, `utils/artifact-dock.ts`, `shared-artifacts.ts` |
 
 **Archived tasks reach their agent outputs through enumerated rows, not the Runtime bar (`Observed`, 2026-08-08).** A completed/cancelled task has no Runtime bar, so `TaskDetailModal`'s archived view lists every image and artifact as its own clickable row (`SharedOutputsList.tsx`), above Notes: the deliverable outranks the commentary. Rows open the App-hosted viewers at their own index.
 | Modal | Focused create/confirm | create flow, confirm, focused config | navigation, persistent dashboard | `*Modal.tsx` |
@@ -148,7 +148,7 @@ A keyboard-summoned palette with **two modes on one shared shell** (`PaletteShel
 
 **Blocked reviews (2026-09-02):** Both boards retain Blocked after Your Review. Existing drag/status menus park settled human/peer reviews without a required reason or extra button. The persistent hold excludes Inbox/Needs You while retaining status/workspace; hooks cannot clear it. Explicit unblock/drag out or To Do/terminal cleanup clears it. Sidebar: separate Blocked tier; search: `is:blocked`/`status:blocked`; wait time: separate. See `decisions/2026/09/02/blocked-review-hold.md`.
 
-**An agent output is a popup, never a pane sibling (`Observed`, 2026-09-05).** Images and artifacts share one App-hosted lightbox, and the task workspace has no drag-resizable split at all — the docked artifact panel could wedge the UI while being resized, so it was removed rather than repaired (`decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md`). A new task-scoped viewer inherits it; a resizable dock needs its own record.
+**An agent output is mounted by App; a pane only offers it a slot (`Observed`, 2026-09-07).** Images always use that App-hosted lightbox. One artifact viewer, three shapes: the **docked drag-resizable right panel by default**; that lightbox when `openArtifactsInPopup` is on or nothing publishes a slot (archived modal, immersive fullscreen, narrow, an off-screen toast); **hidden** when the route leaves its task, never a popup over the next board. It portals into the slot, re-hosted on a flip (`decisions/2026/09/07/artifact-panel-default-popup-opt-in.md`). A new task-scoped viewer inherits the lightbox; a second dock needs a record.
 
 Note: native menu is the **overflow/expert** surface; frequent actions are mirrored into DOM toolbars (inspector, board).
 
@@ -345,36 +345,35 @@ One shared, non-interactive glyph (`NativeBackendMark`) — a bolt in a rounded 
 
 Evidence: `NativeBackendMark.tsx`, `ForeignCodeMark.tsx`, `TaskCard.tsx`, `TaskInfoPanel.tsx`, `TaskDiffViewer.tsx`, `ActiveTasksSidebar.tsx`, `GlobalHeader.tsx`.
 
-### 5.9 Agent traffic — live orbit — `Observed`
+### 5.9 Agent traffic — `Observed`
 
-The purple header control opens one live traffic overlay: a 3D project orbit, accessible task/message
-lists, and a selection inspector. It replaces the old traffic-log presentation, not a ninth destination.
-
-- **Beta, off by default, and off means invisible.** Settings → System → Advanced Experience gates
-  the control, kebab row, `⇧⌘M`, View menu, palette command and tip; no greyed-out trace.
-- **Presence follows data; the badge follows unread.** The labelled kebab row remains available;
-  the bar pill appears while the project has recorded agent traffic, never keyed to unread alone.
-  Unread uses the per-browser last-look stamp, initializes on first look, and caps at `9+`.
-- **Direct entry, responsive overlay.** Clicking the pill opens the orbit. On narrow widths only the
-  labelled kebab entry remains; use BottomSheet there and a dialog on wide, with focus trapping,
-  Escape dismissal and trigger focus restoration. Preserve the existing shortcut/menu/palette entries.
-- **Project grouping, not ownership.** Show active tasks and selected-history endpoints, not the
-  entire retained archive. Use real task identity, role, current column/runtime and overview; keep
-  positions stable. Historical endpoints stay readable without dead navigation. Seq is display-only.
-- **Live attempts, not read receipts.** Writer pushes and lazy Bun filesystem observers cover
-  durable appends, including older installed versions; no renderer polling, observers close at shutdown.
-  Each new attempt may pulse once: delivered travels its route; held, unconfirmed and not-delivered
-  pulse at the sender. Keep distinct verdict text/static cues; held proves no current queue state.
-  Animation never claims reading or answering. Respect reduced motion.
-- **Inspect before navigating.** A node or message opens the inspector; its explicit task action
-  opens an existing task. Accessible lists retain this behavior without WebGL. Search, delivery
-  filters and a loaded-history time window belong inside the overlay, not the global header.
-- **History is messages; task state is current.** Time filtering never reconstructs past task columns,
-  runtime or PR checks. Show retention, oldest stored day and partial-page limits. Subjects remain
-  complete; old rows fall back to their body head. Preserve spill-pointer and delivery evidence.
-- **No invented workflow.** The last recipient owes no inferred reply. Do not derive importance,
-  ownership, merge authorization/order, authored catch-up narratives or terminal progress from traffic.
-  No demo composer, terminal, import/export or synthetic queue belongs in this read-only surface.
+- **Two presentations, one feature.** Experiment 2 (Coordination, default) and 1 (orbit) share data/filters/selection.
+  A toolbar radiogroup selects one mounted stage; absent preference means 2.
+- **Beta, off by default.** Settings → System → Advanced Experience gates every entry point and
+  the tip. Off leaves no trace.
+- **Presence follows data; the badge follows unread.** Kebab persists; the desktop pill requires project
+  traffic even when read. Per-browser last-look; unread caps at `9+`.
+- **A route, not an overlay.** Entry points navigate to `agent-traffic`: standard header, Back/Forward,
+  `/app/agent-traffic`; Escape/⇧⌘M step back. Ninth destination by exception, never a nav item (yaml
+  `global_nav`). Entry picks the trailing hour and plays it once; nothing else replays.
+- **Identity, not ownership.** Active/history endpoints use real identity, role,
+  current runtime and overview. Seq is display only; historical nodes have no dead links.
+  Stable grid; wires avoid cards, never imply parentage. Quiet/hibernated bands have counted disclosure;
+  hibernated cards stay grey below the rest; completed/cancelled carry an explicit stamp.
+- **Coordination transport.** Play, pause, steps, speed and an event slider sit below the graph; Replay restarts, Live exits. Wire verdicts/counts follow the cursor. Replay reveals parked endpoints without waking.
+  Follow: pair glide, idle overview; named five-wide project blocks. Manual/minimap pan stops Follow; Focus frames one.
+  Lists on request; calendar days auto-load local history.
+- **Attempts, not receipts.** Writer pushes plus lazy fs observers cover appends from mixed versions, never polling; close at exit. Finite directional pulses accompany
+  recorded attempts only. In 2, violet drops show direction; failures stay red. Verdicts live in details.
+  Neither means read/queued. Reduced motion stops flights/glides.
+- **Inspect before navigating.** Nodes/messages open details; only the explicit task action navigates.
+  Lists work without WebGL. Search, delivery filters and history windows stay on the screen.
+- **History is recorded events; unrecorded state is unknown.** Status and column rebuild from
+  movement records; runtime and PR checks stay current. An unrecorded past reads neutral, never
+  today's status.
+  Show retention, oldest day and page limits. Preserve complete subjects (old rows use body head),
+  spill pointers and delivery proof. No inferred replies, importance, ownership, merge order,
+  narratives or progress; no composer, terminal, import/export or synthetic queue.
 
 Evidence: `agent-traffic/`, `agent-traffic.ts`, `shared/agent-message-log.ts`.
 
@@ -484,8 +483,7 @@ Global Settings vocabulary is deliberate: a left-nav item is a **Settings catego
 | Toolbar visible actions | 4 | overflow after 4 |
 | Tabs | 6 | more-menu / subpage |
 | Task info panel | 4 bars (2×2), ≤ 4 visible per bar | assign new control to one domain bar; overflow after 4 ⇒ promote that domain to its own row (see §5.1) |
-
-| Active Tasks sidebar row | 2 inline controls (lifecycle rail + priority badge) | demote to the row context menu; the row is a navigator, not a board |
+| Active Tasks sidebar row | 2 resting (lifecycle rail, priority) + 1 hide, hover or touch | demote to the row context menu; the row is a navigator, not a board |
 | Settings library toolbar (§8) | 4 visible controls; 5 always-visible editor fields | extra editor fields go behind the single `Advanced` disclosure; list rows stay actionless |
 
 **Split lifecycle controls count as one.** The status control may carry a second half that commits the pipeline's own terminal move (the ✓ → Completed) without spending a second card slot, provided it is glued to the status trigger, shares its hover surface, is desktop-only (narrow keeps the BottomSheet's promoted Completed row at ≥ 44px), and disappears when `getAllowedTransitions` forbids the target. Any action that is not the control's own lifecycle move costs its own slot — this is not a general licence for a second button.
@@ -621,7 +619,7 @@ Owner: `better-layout`. dev3-specific:
 | feature-gated preset | keep visible in the launch picker but **disabled** (muted + lock) until the gating capability is on; disabled-click → clickable toast that deep-links to the enabling settings section (`OPEN_SETTINGS_SECTION_EVENT` → `Route.section`); the capability's manager is a normal settings section | hiding the preset until enabled, auto-starting the dependency on selection, a bespoke modal | discoverable without a hidden side effect; configuration lives in settings (decision 112) |
 | privacy-sensitive display value (identity/secret) | render through the streamer-mode masking pattern: `streamer-private` / `streamer-private-media` class (or the `Private` wrapper, `src/mainview/streamer-mode.tsx`) so `data-streamer="on"` blurs it; the toggle itself is `configuration` (Settings → Appearance, `local` storage) + a `⇧⌘P` palette command + a `?streamer=on\|off` URL param (machine entry point — agent QA screenshots are ALWAYS masked, per AGENTS.md) | an unmasked email/org/home-path/tunnel-URL/QR on a new surface, a header quick-toggle button (chrome creep), hover-to-reveal (leaks live on stream) | recordings/screenshots are a first-class use (the developer demos the app); masking is CSS-only so coverage is one class per value, and every new identity-bearing surface is OWED the class in the same commit (decision 161) |
 | privacy-sensitive **object** | `Project.sensitive` in Project Settings → Board. In streamer mode, mask its names/tasks outside the project, keep entries visible but locked, block routes at `App.navigate`, redirect if masking starts inside it, and suppress every notification path. Replace (not blur) its `document.title`. | hiding the object, blurring controls, header counters, session unlocks, behavior outside streamer mode | One routing choke point prevents the accidental click; visible locked rows preserve continuity and explain the block. Decision 161 owns the full rationale. |
-| find in content (`⌘F` search over what a viewer renders) | **Content toolbar exists** (diff viewer §5.3) → a toggle + inline box in that toolbar, beside the other content controls. **Full-bleed content, no content toolbar** (terminal canvas, artifact iframe) → the search UI is a **floating bar over the content**, top-right, gated on focus being inside that viewer; `⌘F` is the primary trigger and must be registered in `keymap.ts`. **One earned magnifier icon button** in the viewer header may toggle that bar (accent-tinted while open) — an explicit, user-requested exception to §11 button-creep, justified because a keyboard-only find is invisible on a mouse-driven viewer. It is a *trigger for content UI*, not a content control: it opens the floating bar and owns no state of its own | a search input living in the header, a second entry point per viewer beyond that one icon, a global find destination, a permanent always-visible search field over content | find is scoped to the *rendered document*, so the UI belongs where that document is, and `⌘F` is the universal muscle memory; gating on viewer focus leaves the browser's native find intact everywhere else in remote mode. The single icon buys discoverability for pointer users at the cost of one header slot — do not let unrelated controls inherit this exception |
+| find in content (`⌘F` search over what a viewer renders) | **Content toolbar exists** (diff viewer §5.3) → a toggle + inline box in that toolbar, beside the other content controls. **Full-bleed content, no content toolbar** (terminal canvas, artifact iframe) → the search UI is a **floating bar over the content**, top-right; `⌘F` is the primary trigger and must be registered in `keymap.ts`. A **modal** viewer claims `⌘F` unconditionally; a non-modal one (the docked artifact panel, the terminal) only while focus is inside it, which leaves the browser's native find intact everywhere else in remote mode. **One earned magnifier icon button** in the viewer header may toggle that bar (accent-tinted while open) — an explicit §11 button-creep exception, and a *trigger for content UI* owning no state of its own | a search input living in the header, a second entry point per viewer beyond that one icon, a global find destination, a permanent always-visible search field over content | why in UX_DECISIONS 2026-07-30; do not let unrelated controls inherit the icon exception |
 | hand-off of viewed content to the OS (open in web browser) | the **viewer's own header**, one neutral icon-only button (external-link glyph) placed **immediately beside download** — the two are the same class: take this document out of dev3. Desktop hands the stored file path to the OS default browser through an RPC; browser/remote opens a blob URL of the already-composed document in a new tab, and the `window.open` must fire **synchronously inside the click** or the popup blocker eats it. Failure → toast, never a native dialog | a second entry point (context menu + header + inspector) for the same hand-off, an accent tint (it owns no state), a keyboard shortcut, gating the button on transport (both transports get a working path — only the mechanism differs) | a viewer is a reduced browser: real find, print, zoom, devtools and a window that survives navigating dev3 all live in the actual browser, so the escape hatch belongs on the document being viewed. It costs one header slot and is only earned next to an existing export control — the viewer header is now full (search, theme, download, open-in-browser, fullscreen, close); the next control replaces one |
 | layout boundary manipulation (resize a split) | **on the boundary itself** — a `role="separator"` overlay strip centred on the split, hit target ≥ 9px, resting grip visible at rest (`bg-fg-muted/40`), accent on hover/focus/drag, `col-resize`/`row-resize` cursor, ghost line during drag and one commit on pointer-up. Zero toolbar slots, so it is exempt from §11 button-creep. Hidden when the split does not exist (single pane) or is not visible (zoomed pane, narrow one-at-a-time carousel) | a "Resize panes" toolbar/inspector button, a size dropdown, a numeric field, a renderer-only resize that is not persisted through the owning backend, live per-pointermove commits over a live TUI | a boundary is a direct-manipulation object: the affordance must sit where the hand already is, and a control for it elsewhere is pure chrome on a canvas that is otherwise chrome-free (§10 find-in-content row). A resting grip is the only thing that makes an invisible boundary discoverable; commit-on-release exists because every intermediate ratio would SIGWINCH every pane and repaint the whole TUI |
 | launch favorite (quick-pick) | one compact **leading "Favorites" column** (peer to Provider/Model/Mode, with its own label so it aligns in-row) inside the launch picker (`AgentConfigPicker`, `showFavorites` on Launch/Retry, Spawn, Bug Hunters): a narrow fixed-width trigger showing a Nerd Font **star that fills gold** (`--favorite`) when the current `(agentId,configId)` is saved, opening a left-aligned portal **popover** (`FavoritesMenu`) — top row toggles **Save ↔ Remove** the current combo (gold when saved), below it the favorites list (apply on click, `×` per row removes, accent + check on the active one). Column is **always present** (save reachable at 0 favorites). NO persistent chip row, NO 1-click row star. Stored globally (`GlobalSettings.favorites`), cap 10, LFU-then-LRU eviction | a persistent chip row above the cascade (duplicates N× across variant pickers + vertical bloat), a right-side `[★│▾]` split (dangles below the Selects, misaligned), a 4th text dropdown eating width ×N, a favorites pseudo-provider, favorites in the Settings default-agent pickers, click-to-launch | the launch picker is instantiated **once per variant** in `LaunchVariantsModal`, so a persistent row rendered inside it duplicated the identical global list N times and pushed the cascade down; a leading labeled column with a narrow star trigger keeps favorites one earned icon (button-creep budget §11), aligned in-row, zero added height, and each trigger unambiguously targets its own picker (decision 125, sibling to 112) |
@@ -697,7 +695,7 @@ Every surface from §5 gets an explicit narrow form. "—" = unchanged.
 | Global header | single row, ≤9 utility buttons | reflow: logo + truncated breadcrumb + **one overflow (kebab)** for all utilities; never a 9-icon row (`useCompact` at 1600 only hides labels, it does not reflow for 390px) | `Observed` |
 | Hover terminal preview | popover on card hover | **disabled** on touch/narrow (no hover; popover obscures) — already gated in `useTerminalPreview` | `Observed` |
 | Task image viewer | lightbox + thumbnail rail | full-bleed; filmstrip → bottom scroll strip; image is live-content (axis-arbitrated swipe + prev/next + dots); touch entry = inspector badge + palette action | `Proposed` |
-| Task artifact viewer | popup lightbox | no special case — the card fills a small viewport; fullscreen unchanged | `Observed` |
+| Task artifact viewer | docked panel (default) / popup | narrow **forces the popup**: a 360px-minimum panel is unusable on a phone; fullscreen unchanged | `Observed` |
 | Toast | top-right, clamped | already `max-w-[calc(100vw-2rem)]` — OK | `Observed` (OK) |
 
 ### 12.4 Navigation & action reachability on touch — `Proposed`

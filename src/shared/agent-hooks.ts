@@ -64,6 +64,13 @@ export function codexHookCommand(dialect: HookCliDialect = DEFAULT_DIALECT): str
 
 export const CODEX_DEV3_HOOK_COMMAND = codexHookCommand();
 export const CLAUDE_STOP_FAILURE_HOOK_SUBCOMMAND = "hook claude-stop-failure";
+/**
+ * Reads the submitted prompt off stdin so agent traffic can show the human who
+ * started a turn. A SECOND entry beside the status move rather than a rewrite of
+ * it: every task's board status depends on that command, and folding a new job
+ * into it would put recording and status sync in one blast radius.
+ */
+export const CLAUDE_PROMPT_HOOK_SUBCOMMAND = "hook claude-prompt";
 export const CODEX_STATUS_HOOK_EVENTS = [
 	"SessionStart",
 	"UserPromptSubmit",
@@ -231,6 +238,13 @@ export function buildClaudeHooks(
 	const hooks: HookMap = {
 		UserPromptSubmit: [
 			{ hooks: [{ type: "command", command: workingCmd }] },
+			{
+				hooks: [{
+					type: "command",
+					command: `${dialect.cli} ${CLAUDE_PROMPT_HOOK_SUBCOMMAND}`,
+					timeout: 5,
+				}],
+			},
 		],
 		PreToolUse: [
 			{ hooks: [{ type: "command", command: workingCmd }] },
@@ -352,6 +366,19 @@ function isDev3Entry(group: MatcherGroup | HookEntry): boolean {
 export const DEV3_BASH_PERMISSION = "Bash(dev3:*)";
 
 /**
+ * Claude Code matches a Bash rule against the literal command text, so one rule
+ * per spelling the agent may type. The bare `dev3` covers what the protocol asks
+ * for; the dialect spelling covers the `~/.dev3.0/bin/dev3` (or absolute
+ * `dev3.exe`) form our own generated skills and hooks put in front of the agent.
+ * The worktree file has to carry both on its own — `~/.claude/settings.json`
+ * holds only the dialect one, and a session can run with that file missing.
+ */
+export function dev3BashPermissions(dialect: HookCliDialect = DEFAULT_DIALECT): string[] {
+	const dialectRule = `Bash(${dialect.cli} *)`;
+	return dialectRule === `Bash(dev3 *)` ? [DEV3_BASH_PERMISSION] : [DEV3_BASH_PERMISSION, dialectRule];
+}
+
+/**
  * Write `permissions.defaultMode` into a settings object. Idempotent.
  *
  * The `--permission-mode` CLI flag only governs the *lead* Claude session.
@@ -388,14 +415,18 @@ export function mergeCodexHooks(
 }
 
 /**
- * Add Bash(dev3:*) to permissions.allow in a settings object. Idempotent.
+ * Add the dev3 CLI bash rules to permissions.allow in a settings object.
+ * Idempotent.
  */
-export function ensureDevPermission(settings: Record<string, unknown>): Record<string, unknown> {
+export function ensureDevPermission(
+	settings: Record<string, unknown>,
+	dialect: HookCliDialect = DEFAULT_DIALECT,
+): Record<string, unknown> {
 	const base = asRecord(settings);
 	const permissions = asRecord(base.permissions);
 	const allow = Array.isArray(permissions.allow) ? [...permissions.allow as string[]] : [];
-	if (!allow.includes(DEV3_BASH_PERMISSION)) {
-		allow.push(DEV3_BASH_PERMISSION);
+	for (const rule of dev3BashPermissions(dialect)) {
+		if (!allow.includes(rule)) allow.push(rule);
 	}
 	return { ...base, permissions: { ...permissions, allow } };
 }

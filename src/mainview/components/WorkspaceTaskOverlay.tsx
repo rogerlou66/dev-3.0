@@ -29,6 +29,7 @@ interface WorkspaceTaskOverlayProps {
 	onTaskMissing: () => void;
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
 	skipCopyModeReset?: boolean;
+	dockArtifact?: boolean;
 }
 
 function collectFocusable(root: HTMLElement): HTMLElement[] {
@@ -49,6 +50,7 @@ function WorkspaceTaskOverlay({
 	onTaskMissing,
 	navigationGuardRef,
 	skipCopyModeReset,
+	dockArtifact,
 }: WorkspaceTaskOverlayProps) {
 	const t = useT();
 	const dialogRef = useRef<HTMLDivElement>(null);
@@ -205,6 +207,7 @@ function WorkspaceTaskOverlay({
 							navigationGuardRef={navigationGuardRef}
 							presentation="overlay"
 							skipCopyModeReset={skipCopyModeReset}
+							dockArtifact={dockArtifact}
 							loadTasks={false}
 						/>
 					) : (

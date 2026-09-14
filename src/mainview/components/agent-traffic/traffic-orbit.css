@@ -1,12 +1,12 @@
-.traffic-backdrop {
-	position: fixed;
-	inset: 0;
-	z-index: 100;
+/* The routed screen fills the shell below the app header; the frame keeps the
+   orbit's card look, which Experiment 2 flattens to a full-bleed stage. */
+.traffic-screen {
+	flex: 1;
+	min-height: 0;
 	display: flex;
-	padding: 28px;
-	background: rgb(var(--surface-base) / 0.7);
+	padding: 20px;
 }
-.traffic-dialog {
+.traffic-frame {
 	flex: 1;
 	min-width: 0;
 	min-height: 0;
@@ -18,9 +18,6 @@
 	box-shadow:
 		0 24px 80px rgb(0 0 0 / 0.24),
 		0 2px 10px rgb(0 0 0 / 0.12);
-}
-.traffic-sheet {
-	height: 85dvh;
 }
 .traffic-view {
 	height: 100%;
@@ -50,33 +47,23 @@
 	cursor: default;
 	opacity: 0.5;
 }
-.traffic-header {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	min-height: 60px;
-	padding: 12px 20px;
-	background: rgb(var(--surface-overlay) / 0.7);
-	border-bottom: 1px solid rgb(var(--border-default) / 0.5);
-}
-.traffic-header h2 {
-	margin: 0;
-	font-size: 18px;
-	font-weight: 600;
-}
 .traffic-orbit-name {
 	padding: 6px 14px;
 	color: rgb(var(--accent));
 	background: rgb(var(--accent) / 0.12);
 	border-radius: 8px;
 }
-.traffic-header-tail {
+/* Sized against `.traffic-toolbar > div`, which caps the filter controls' width
+   and would otherwise squeeze the tail too. */
+.traffic-toolbar > .traffic-toolbar-tail {
 	display: flex;
 	align-items: center;
 	gap: 12px;
 	margin-left: auto;
+	min-width: 0;
+	max-width: none;
 }
-.traffic-header-tail button,
+.traffic-toolbar-tail button,
 .traffic-timeline button,
 .traffic-inspector-heading button,
 .traffic-detail-actions button,
@@ -87,7 +74,7 @@
 	background: rgb(var(--surface-elevated));
 	color: rgb(var(--text-secondary));
 }
-.traffic-header-tail button:hover,
+.traffic-toolbar-tail button:hover,
 .traffic-timeline button:hover,
 .traffic-inspector button:hover {
 	background: rgb(var(--surface-elevated-hover));
@@ -96,6 +83,8 @@
 .traffic-live {
 	color: rgb(var(--success));
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .traffic-live::before {
 	content: "";
@@ -372,6 +361,7 @@
 	overflow-y: auto;
 }
 .traffic-message,
+.traffic-notification,
 .traffic-task-row {
 	display: flex;
 	width: 100%;
@@ -399,10 +389,38 @@
 	font-size: 10px;
 	font-variant-numeric: tabular-nums;
 }
-.traffic-message strong {
+.traffic-message strong,
+.traffic-notification strong {
 	font-size: 12px;
 	font-weight: 500;
 	overflow-wrap: anywhere;
+}
+/* The notification the replay cursor is standing on, marked the same way a
+   selected message is — one highlight vocabulary for the whole list. */
+.traffic-notification[aria-current="true"] {
+	background: rgb(var(--accent) / 0.12);
+}
+.traffic-notification-tail {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+}
+.traffic-notification-level {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-notification-level.level-success {
+	color: rgb(var(--success));
+}
+.traffic-notification-level.level-error {
+	color: rgb(var(--danger));
+}
+/* A held or never-shown notification must not read like a delivered one. */
+.traffic-notification[data-outcome="queued"] .traffic-verdict,
+.traffic-notification[data-outcome="no-window"] .traffic-verdict {
+	color: rgb(var(--warning-strong));
 }
 .traffic-verdict {
 	font-size: 11px;
@@ -501,8 +519,98 @@
 	background: rgb(var(--warning) / 0.12);
 	color: rgb(var(--warning-strong));
 }
+
+/* A group of labelled buttons has nothing to give: squeezed under the generic
+   `> div` width caps it does not shrink, it paints its last button over the
+   neighbouring control. Both groups therefore keep their natural width at every
+   width, and the wrapping the narrow toolbar already does moves them instead. */
+.traffic-toolbar > .traffic-toggles,
+.traffic-toolbar > .traffic-experiment {
+	flex: 0 0 auto;
+	min-width: 0;
+	max-width: none;
+}
+
+/* Above the collapse breakpoint the toolbar is one nowrap row, so something has
+   to give when the window narrows — and by default it is the tail, the only
+   child with `min-width: 0`. The readout collapsed to zero and the stage action
+   was cut by the edge, while the two selects sat at their full 240px. The
+   shrink budget belongs to the selects and the search field; the tail carries
+   the live status and the one stage action. */
+@media (min-width: 701px) {
+	.traffic-toolbar > .traffic-toolbar-tail {
+		flex: 0 0 auto;
+	}
+}
+/* Experiment 1 has no filter sheet to collapse into, and its own stage action
+   carries a label three words long in some translations, so below 900 it wraps
+   instead of hanging its last button past the edge. Experiment 2 keeps its
+   deliberate nowrap row here — that rule is more specific and still wins. */
+@media (max-width: 900px) {
+	.traffic-toolbar {
+		flex-wrap: wrap;
+	}
+}
+/* Between the collapse breakpoint and the width where everything fits at full
+   size, the selects alone cannot free enough room: the tail compacts the same
+   way it already does below 900 — icon-only stage action, tighter gaps, a capped
+   readout — and the selects go down to a still-readable floor.
+
+   The upper bound comes from the longest translation, not from English: the live
+   readout reads "Live" (36px) against "В реальном времени" (137px), and the two
+   button groups are another 74px wider in Russian. Full size fits from ~1310px
+   in English and only from ~1790px in Russian, so the band covers where SOME
+   locale needs it and English merely loses a label its tooltip still carries. */
+@media (min-width: 701px) and (max-width: 1500px) {
+	.traffic-toolbar {
+		gap: 8px;
+	}
+	.traffic-toolbar > div:not(.traffic-toolbar-tail) {
+		min-width: 96px;
+	}
+	.traffic-toolbar input {
+		min-width: 72px;
+	}
+	.traffic-toolbar > .traffic-toolbar-tail {
+		gap: 6px;
+	}
+	.traffic-toolbar-tail .traffic-action-label {
+		display: none;
+	}
+	.traffic-toolbar-tail .traffic-replay-start {
+		padding: 6px 8px;
+	}
+	.traffic-toolbar-tail .traffic-live {
+		max-width: 92px;
+	}
+}
+/* The tightest strip the one-row toolbar has to survive: around the width where
+   the filters collapse into their sheet, with every button group still on
+   screen. The groups cannot drop a button, so they give up padding instead. The
+   band deliberately reaches past the collapse point — the first pixels above it
+   are the widest the inline row ever has to be. */
+@media (min-width: 701px) and (max-width: 1050px) {
+	.traffic-toolbar {
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.traffic-toolbar > div:not(.traffic-toolbar-tail) {
+		min-width: 88px;
+	}
+	.traffic-toggles button,
+	.traffic-experiment button,
+	.traffic-list-toggle {
+		padding-left: 8px;
+		padding-right: 8px;
+		font-size: 11px;
+	}
+	.traffic-toolbar-tail .traffic-live {
+		max-width: 64px;
+		font-size: 11px;
+	}
+}
 @media (max-width: 1050px) {
-	.traffic-backdrop {
+	.traffic-screen {
 		padding: 12px;
 	}
 	.traffic-inspector {
@@ -517,21 +625,13 @@
 	}
 }
 @media (max-width: 700px) {
-	.traffic-header {
-		padding: 8px 12px;
-		min-height: 48px;
-		gap: 8px;
-	}
-	.traffic-header h2 {
-		font-size: 14px;
-	}
 	.traffic-orbit-name {
 		display: none;
 	}
-	.traffic-header-tail {
+	.traffic-toolbar > .traffic-toolbar-tail {
 		gap: 6px;
 	}
-	.traffic-header-tail button {
+	.traffic-toolbar-tail button {
 		padding: 5px;
 	}
 	.traffic-toolbar {
@@ -612,16 +712,9 @@
 }
 
 @media (max-width: 700px) {
-	.traffic-header > svg,
-	.traffic-header h2,
-	.traffic-header-tail > button:last-child {
-		display: none;
-	}
-	.traffic-header {
-		min-height: 40px;
-		padding: 4px 12px;
-	}
-	.traffic-header-tail {
+	/* The wrapped toolbar gives the tail its own row instead of dropping the
+	   stage action, which the old header row hid outright at this width. */
+	.traffic-toolbar > .traffic-toolbar-tail {
 		width: 100%;
 		justify-content: space-between;
 		margin-left: 0;

@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { load } from "js-toml";
 import { buildCodexHooks, CODEX_STATUS_HOOK_EVENTS, mentionsDev3Cli } from "../shared/agent-hooks";
+import { type CliVersion, isCliVersionAtLeast, parseCliVersion } from "../shared/agent-model-cli-requirements";
 import type { HookCliDialect } from "../shared/dev3-cli-path";
 import { createLogger } from "./logger";
 import { spawnSync } from "./spawn";
@@ -41,6 +42,7 @@ interface CodexConfig {
 	projects?: Record<string, { trust_level?: string; sandbox_mode?: string }>;
 	profiles?: Record<string, Record<string, unknown>>;
 	permissions?: Record<string, CodexPermissionsProfile | undefined>;
+	tui?: Record<string, unknown>;
 }
 
 interface CodexConfigOptions {
@@ -54,11 +56,7 @@ interface CodexConfigOptions {
 	dialect?: HookCliDialect;
 }
 
-interface CodexVersion {
-	major: number;
-	minor: number;
-	patch: number;
-}
+type CodexVersion = CliVersion;
 
 interface CodexSyntax {
 	filesystemRootKey: ":project_roots" | ":workspace_roots";
@@ -621,35 +619,17 @@ export function pruneCodexTrustEntries(
 	return removed;
 }
 
-export function parseCodexVersion(output: string): CodexVersion | null {
-	const match = output.match(/\bv?(\d+)\.(\d+)\.(\d+)\b/);
-	if (match == null) return null;
-
-	return {
-		major: Number(match[1]),
-		minor: Number(match[2]),
-		patch: Number(match[3]),
-	};
-}
-
-function isVersionAtLeast(version: CodexVersion | null, threshold: CodexVersion): boolean {
-	if (version == null) return false;
-	if (version.major !== threshold.major) return version.major > threshold.major;
-	if (version.minor !== threshold.minor) return version.minor > threshold.minor;
-	return version.patch >= threshold.patch;
-}
-
 export function getCodexSyntaxForVersion(versionText: string | null | undefined): CodexSyntax {
-	const version = versionText != null ? parseCodexVersion(versionText) : null;
+	const version = versionText != null ? parseCliVersion(versionText) : null;
 	return {
-		filesystemRootKey: isVersionAtLeast(version, CODEX_WORKSPACE_ROOTS_RENAME_VERSION)
+		filesystemRootKey: isCliVersionAtLeast(version, CODEX_WORKSPACE_ROOTS_RENAME_VERSION)
 			? ":workspace_roots"
 			: LEGACY_CODEX_SYNTAX.filesystemRootKey,
-		hooksFeatureKey: isVersionAtLeast(version, CODEX_HOOKS_RENAME_VERSION)
+		hooksFeatureKey: isCliVersionAtLeast(version, CODEX_HOOKS_RENAME_VERSION)
 			? "hooks"
 			: LEGACY_CODEX_SYNTAX.hooksFeatureKey,
-		profileV2: isVersionAtLeast(version, CODEX_PROFILE_V2_VERSION),
-		unixSocketsAsMap: isVersionAtLeast(version, CODEX_UNIX_SOCKETS_MAP_VERSION),
+		profileV2: isCliVersionAtLeast(version, CODEX_PROFILE_V2_VERSION),
+		unixSocketsAsMap: isCliVersionAtLeast(version, CODEX_UNIX_SOCKETS_MAP_VERSION),
 	};
 }
 
@@ -920,7 +900,23 @@ export function ensureCodexConfig(
 		}
 	}
 
-	// --- 6. Ensure dev3's status hooks are declared in the file ---
+	// --- 6. Seed [tui] whimsy = false once ---
+	// Codex's "Astra composer stars" repaint the area behind the input every
+	// 150ms for as long as the composer is on screen (its own
+	// tui/src/bottom_pane/chat_composer/sparkle.rs). Measured on codex-cli
+	// 0.154.0: an idle pane emits ~187 KB in 20 seconds and nothing else. In a
+	// dev3 pane that is pure cost — the animation is decorative, it inflates
+	// every terminal it runs in, and the effect only exists at all because the
+	// model happens to be named `*astra*`.
+	//
+	// Written ONLY when the key is absent, never forced: a user who sets it back
+	// to `true` keeps it across restarts. Codex's own default is `true`, so
+	// nobody spells it out and in practice every install gets the quiet default.
+	if (parsed.tui?.whimsy === undefined) {
+		config = upsertSectionLine(config, "[tui]", "whimsy", "false");
+	}
+
+	// --- 7. Ensure dev3's status hooks are declared in the file ---
 	config = ensureDev3HooksBlock(config, options.dialect);
 
 	return config;

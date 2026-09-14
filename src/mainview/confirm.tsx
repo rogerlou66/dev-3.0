@@ -93,7 +93,12 @@ export interface ConfirmOptions {
 	alternativeAction?: ConfirmAlternativeAction;
 	/** Render the three actions as consequence-explaining cards. */
 	outcomeCards?: ConfirmOutcomeCards;
-	/** Defaults to true. Disable when closing without a choice would be ambiguous. */
+	/**
+	 * Defaults to true, except for `agentInitiated` dialogs where it defaults to
+	 * false: an agent's CLI is blocked on the answer, so a stray click on empty
+	 * space would decline a request the user never read. Disable it explicitly
+	 * whenever closing without a choice would be ambiguous.
+	 */
 	dismissOnBackdrop?: boolean;
 }
 
@@ -102,7 +107,7 @@ interface PendingConfirm extends ConfirmOptions {
 	resolve: (value: boolean | string) => void;
 }
 
-let listener: ((req: PendingConfirm | null) => void) | null = null;
+let listener: ((req: PendingConfirm) => void) | null = null;
 let counter = 0;
 
 /**
@@ -115,6 +120,8 @@ let counter = 0;
  *
  * Requires `<ConfirmHost />` to be mounted once (in `App.tsx`). If it is not
  * mounted, the promise resolves `false` (fail-closed) instead of blocking.
+ *
+ * Overlapping calls queue instead of replacing each other — see {@link ConfirmHost}.
  */
 export function confirm(options: ConfirmOptions & { alternativeAction: ConfirmAlternativeAction }): Promise<boolean | string>;
 export function confirm(options: ConfirmOptions): Promise<boolean>;
@@ -154,21 +161,51 @@ export function whenConfirmHostMounted(timeoutMs = 10_000): Promise<boolean> {
 	});
 }
 
+/**
+ * Draws one dialog at a time and makes the rest wait their turn. A single slot
+ * would let a second `confirm()` overwrite the first, whose promise then never
+ * resolves — see `decisions/2026/09/08/queue-overlapping-confirm-dialogs.md`.
+ */
 export function ConfirmHost() {
-	const [pending, setPending] = useState<PendingConfirm | null>(null);
+	const [queue, setQueue] = useState<PendingConfirm[]>([]);
 
 	useEffect(() => {
-		listener = setPending;
+		listener = (req) => setQueue((current) => [...current, req]);
 		return () => {
 			listener = null;
 		};
 	}, []);
 
+	// A waiting entry whose caller aborted (the task was resolved on another
+	// window) has nothing left to ask. Resolve it where it stands rather than
+	// promoting a dialog nobody can act on. The head needs none of this — the
+	// mounted dialog watches its own signal.
+	useEffect(() => {
+		const waiting = queue.slice(1).filter((entry) => entry.signal);
+		const detach = waiting.map((entry) => {
+			const signal = entry.signal!;
+			const drop = () => {
+				entry.resolve(false);
+				setQueue((current) => current.filter((other) => other !== entry));
+			};
+			if (signal.aborted) {
+				drop();
+				return () => {};
+			}
+			signal.addEventListener("abort", drop);
+			return () => signal.removeEventListener("abort", drop);
+		});
+		return () => {
+			for (const off of detach) off();
+		};
+	}, [queue]);
+
+	const pending = queue[0];
 	if (!pending) return null;
 
 	const close = (result: boolean | string) => {
 		pending.resolve(result);
-		setPending(null);
+		setQueue((current) => current.filter((entry) => entry !== pending));
 	};
 
 	// Render the dialog as a child keyed by request id so it genuinely
@@ -226,6 +263,9 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 	const deferredState = useDeferredBlock(pending.deferred);
 	const gateActive = Boolean(pending.deferred?.gateConfirm) && !deferredState.settled;
 	const dangerTone = pending.tone === "danger";
+	// An agent request holds a blocked CLI, so an outside click is far more likely
+	// to be a misclick than an answer — opt those out of backdrop dismissal.
+	const dismissOnBackdrop = pending.dismissOnBackdrop ?? !pending.agentInitiated;
 
 	// Auto-close when the caller's signal aborts (task resolved elsewhere).
 	useEffect(() => {
@@ -244,7 +284,11 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 		<div
 			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
 			onMouseDown={(e) => {
-				if (e.target === e.currentTarget && pending.dismissOnBackdrop !== false) close(false);
+				if (e.target !== e.currentTarget) return;
+				if (dismissOnBackdrop) close(false);
+				// Swallow the press instead, so a dialog that stays open keeps focus on
+				// its buttons rather than dropping it on `body`.
+				else e.preventDefault();
 			}}
 		>
 			<div

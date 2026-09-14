@@ -157,6 +157,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "artifact-popup",
+		category: "tasks",
+		titleKey: "settings.artifactPopup",
+		descriptionKey: "settings.artifactPopupDesc",
+		anchor: "artifact-popup",
+		globalField: "openArtifactsInPopup",
+		storage: "global",
+	},
+	{
 		id: "default-diff-view",
 		category: "tasks",
 		titleKey: "settings.defaultDiffViewMode",
@@ -547,6 +556,9 @@ export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"helpModeDiscovered",
 	// Which guided tours have already run. Progress, not a preference.
 	"completedTours",
+	// Which traffic presentation was last picked. A view mode chosen on the surface
+	// itself (like the diff viewer's modes), not a settings row.
+	"agentTrafficExperiment",
 	// Legacy low-battery keys from the default-on era. Never read; kept on disk only
 	// so an older co-installed build keeps its own opt-out and announce flag.
 	"lowBatteryDisabled",
@@ -569,6 +581,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"agentCustomBinaryPaths",
 	"experimentalTerminalBidi",
 	"experimentalAgentTraffic",
+	"agentTrafficExperiment",
 	"playSoundOnTaskComplete",
 	"externalApps",
 	"tipsDisabled",
@@ -577,6 +590,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"taskOpenMode",
 	"terminalPathOpenMode",
 	"defaultDiffViewMode",
+	"openArtifactsInPopup",
 	"remoteSilentUpdate",
 	"preventSleepWhileRunning",
 	"skipQuitDialog",

@@ -21,6 +21,7 @@ import { handleConversations, handleImportCurrentSession, resolveImportTarget } 
 import { handleNotify, handleAttention, handleUi } from "./commands/ui-control";
 import { handleMessage } from "./commands/message";
 import { handlePeek } from "./commands/peek";
+import { handlePr } from "./commands/pr";
 import { handlePane } from "./commands/pane";
 import { handlePaneExec } from "./commands/pane-exec";
 import { PANE_RUN_VERB } from "../bun/pane-run-store";
@@ -31,6 +32,7 @@ import { handleInlineHtml } from "./commands/inline-html";
 import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleCopilotHook } from "./commands/copilot-hook";
+import { handleClaudePrompt } from "./commands/claude-prompt";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
 import { handleUpdate } from "./commands/update";
@@ -89,7 +91,7 @@ Commands:
   dev3 attention --clear [--task <id>]  Lower the attention badge and drop its accumulated reasons
   dev3 message --subject "<about 6 words>" "text" [--in <dur> | --at <hh:mm>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later); --subject is required and stored with the message
   dev3 show-image <path> [--caption "..."] [<path> ...]  Show images (screenshots/renders) in an in-app viewer bound to the task; each --caption annotates the preceding image
-  dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, and image under it
+  dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, image and MP4/WebM clip under it
   dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
   dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
   dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane
@@ -98,6 +100,13 @@ Commands:
   dev3 pane logs <run-id> [--lines <N>]  That run's outcome (running / exit code) + the tail of what it printed
   dev3 pane close <run-id>               Close the run's pane (kills the command)
   dev3 ui state [--json]                 Show focused task/project, foreground, user idle time + the worktree's tmux layout (ASCII pane map)
+  dev3 pr create --title "..." [--description "..."] [--base <branch>] [--draft] [--auto-merge[=squash|merge|rebase]]
+                                         Push this branch and open a pull request for it via gh
+                                         (needs an authenticated gh — exits 23 before pushing if not;
+                                          inside a task the body links back to the originating task)
+  dev3 pr auto-merge [<number|url>] [--strategy squash|merge|rebase] [--off]
+                                         Set (or clear) auto-merge on an existing pull request —
+                                         defaults to the one for the branch checked out here
   dev3 config show                       Show effective project settings (merged)
   dev3 config export                     Export settings to .dev3/config.json
   dev3 doctor [--json]                   Check install health (app bundle, tmux shim, brew state); works without the app running
@@ -222,6 +231,16 @@ async function main(): Promise<void> {
 	if (command === "hook" && subcommand === "copilot") {
 		return await handleCopilotHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
 	}
+	if (command === "hook" && subcommand === "claude-prompt") {
+		// Internal: Claude Code's UserPromptSubmit, read for recording only. It
+		// never blocks or fails the prompt — the status move is a separate entry
+		// on the same event.
+		return await handleClaudePrompt(
+			await Bun.stdin.text(),
+			socketPath || context?.socketPath || null,
+			context,
+		);
+	}
 	if (command === "hook" && subcommand === "claude-stop-failure") {
 		// Internal: Claude Code fires StopFailure instead of Stop when an API error
 		// ended the turn. Stays silent and successful whatever happens.
@@ -233,6 +252,11 @@ async function main(): Promise<void> {
 	}
 	if (command === "install-skills") {
 		return await handleInstallSkills();
+	}
+	if (command === "pr") {
+		// Pure git + gh against the checked-out branch: the app has nothing to say
+		// about it, and opening a pull request must work while dev3 is closed.
+		return await handlePr(subcommand, args, context);
 	}
 	if (command === PANE_RUN_VERB) {
 		// Internal: the process a `dev3 pane run` pane actually runs. It mirrors the

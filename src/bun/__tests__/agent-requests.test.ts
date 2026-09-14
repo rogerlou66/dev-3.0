@@ -19,6 +19,8 @@ import {
 	listPendingAgentRequests,
 	resolveAgentRequest,
 	setAgentRequestLaunchChoice,
+	markAgentRequestShown,
+	holdAgentRequestAutoApprove,
 	_resetAgentRequestsForTests,
 } from "../agent-requests";
 import type { TaskDialogSubject } from "../../shared/types";
@@ -264,5 +266,170 @@ describe("listPendingAgentRequests", () => {
 		createAgentRequest("complete", "task-1", "proj-1");
 
 		expect(listPendingAgentRequests("complete")).toEqual([]);
+	});
+});
+
+describe("the countdown measures time the user was actually given", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	it("restarts the timer when a queued dialog finally reaches the screen", async () => {
+		// Dialogs queue rather than stack. This one waits behind another for most
+		// of its delay, and would otherwise approve itself the moment it appeared.
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 5 * 60_000,
+		});
+		let settled = false;
+		void decision.then(() => { settled = true; });
+
+		vi.advanceTimersByTime(4 * 60_000 + 59_000);
+		markAgentRequestShown(requestId);
+
+		// The original deadline passes with the dialog freshly on screen.
+		vi.advanceTimersByTime(2_000);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		vi.advanceTimersByTime(5 * 60_000);
+		await Promise.resolve();
+		expect(settled).toBe(true);
+	});
+
+	it("hands back the deadline it will actually fire on, so the countdown agrees", () => {
+		const { requestId, autoApproveAt } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		vi.advanceTimersByTime(30_000);
+		const shown = markAgentRequestShown(requestId);
+		expect(shown).toBeGreaterThan(autoApproveAt!);
+		expect(shown! - Date.now()).toBe(60_000);
+	});
+
+	it("only restarts once, so a reloading window cannot postpone a launch forever", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		let settled = false;
+		void decision.then(() => { settled = true; });
+
+		markAgentRequestShown(requestId);
+		for (let i = 0; i < 5; i += 1) {
+			vi.advanceTimersByTime(10_000);
+			markAgentRequestShown(requestId);
+		}
+		vi.advanceTimersByTime(11_000);
+		await Promise.resolve();
+		expect(settled).toBe(true);
+	});
+
+	it("leaves a request with no timer alone rather than inventing a deadline", () => {
+		const { requestId } = createAgentRequest("launch", "task-1", "proj-1");
+		expect(markAgentRequestShown(requestId)).toBeNull();
+	});
+
+	it("keeps the original deadline for a request no client ever draws", async () => {
+		// A closed window must not be able to stall the requesting agent.
+		const { decision } = createAgentRequest("launch", "task-1", "proj-1", { autoApproveAfterMs: 60_000 });
+		let settled = false;
+		void decision.then(() => { settled = true; });
+		vi.advanceTimersByTime(61_000);
+		await Promise.resolve();
+		expect(settled).toBe(true);
+	});
+});
+
+// The countdown exists for an absent user. Once somebody touches the dialog, a
+// launch that fires on its own happens behind the back of the person reading it.
+describe("a user taking the dialog over", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	it("never auto-approves again, however long the dialog stays open", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		let settled = false;
+		void decision.then(() => { settled = true; });
+
+		expect(holdAgentRequestAutoApprove(requestId)).toBe(true);
+		vi.advanceTimersByTime(24 * 60 * 60_000);
+		await Promise.resolve();
+
+		expect(settled).toBe(false);
+	});
+
+	it("tells the other windows to stop their countdown", () => {
+		const { requestId } = createAgentRequest("launch", "task-1", "proj-1", { autoApproveAfterMs: 60_000 });
+
+		holdAgentRequestAutoApprove(requestId);
+
+		expect(push).toHaveBeenCalledWith("agentLaunchAutoApproveHeld", { requestId });
+	});
+
+	it("cannot be re-armed by a dialog reporting itself on screen", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		let settled = false;
+		void decision.then(() => { settled = true; });
+
+		holdAgentRequestAutoApprove(requestId);
+		// A second window drawing the same dialog, or the first one reloading.
+		expect(markAgentRequestShown(requestId)).toBeNull();
+		vi.advanceTimersByTime(10 * 60_000);
+		await Promise.resolve();
+
+		expect(settled).toBe(false);
+	});
+
+	it("cannot be re-armed by the agent retrying its request", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		let settled = false;
+		void decision.then(() => { settled = true; });
+
+		holdAgentRequestAutoApprove(requestId);
+		const retry = createAgentRequest("launch", "task-1", "proj-1", { autoApproveAfterMs: 60_000 });
+		expect(retry.isNew).toBe(false);
+		expect(retry.autoApproveAt).toBeNull();
+		vi.advanceTimersByTime(10 * 60_000);
+		await Promise.resolve();
+
+		expect(settled).toBe(false);
+	});
+
+	it("still answers the blocked agent when the user finally clicks Launch", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+		const launch = { variants: [{ agentId: "builtin-claude", configId: "claude-auto" }] };
+
+		holdAgentRequestAutoApprove(requestId);
+		vi.advanceTimersByTime(5 * 60_000);
+		resolveAgentRequest(requestId, { approved: true, launch });
+
+		await expect(decision).resolves.toEqual({ approved: true, launch });
+	});
+
+	it("still answers with a refusal on Decline", async () => {
+		const { requestId, decision } = createAgentRequest("launch", "task-1", "proj-1", {
+			autoApproveAfterMs: 60_000,
+		});
+
+		holdAgentRequestAutoApprove(requestId);
+		resolveAgentRequest(requestId, { approved: false });
+
+		await expect(decision).resolves.toEqual({ approved: false });
+	});
+
+	it("says nothing happened for a request that had no deadline, or none at all", () => {
+		const { requestId } = createAgentRequest("launch", "task-1", "proj-1");
+
+		expect(holdAgentRequestAutoApprove(requestId)).toBe(false);
+		expect(holdAgentRequestAutoApprove("unknown-id")).toBe(false);
+		expect(push).not.toHaveBeenCalledWith("agentLaunchAutoApproveHeld", expect.anything());
 	});
 });

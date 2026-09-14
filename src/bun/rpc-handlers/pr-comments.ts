@@ -235,7 +235,7 @@ async function sendAgentMessageNow(params: { taskId: string; projectId: string; 
 }> {
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
-	const { spilledPath, status } = await sendMessageImmediately(task, params.text, null, null, { hold: false });
+	const { spilledPath, status } = await sendMessageImmediately(task, params.text, null, null, { hold: false, origin: "user" });
 	return { spilledPath, status };
 }
 

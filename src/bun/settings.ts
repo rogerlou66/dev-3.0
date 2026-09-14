@@ -149,6 +149,10 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 					: d.defaultDiffViewMode === "auto"
 						? "auto"
 						: undefined,
+		// Default-off opt-in: no key means the artifact opens in the docked panel.
+		// Both booleans are kept — an explicit false is the user choosing the panel,
+		// not the absence of a choice.
+		openArtifactsInPopup: typeof d.openArtifactsInPopup === "boolean" ? d.openArtifactsInPopup : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		remoteSilentUpdate: d.remoteSilentUpdate === false ? false : undefined,
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
@@ -200,8 +204,14 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 				: undefined,
 		// Default-off beta toggle — only an explicit true is a stored opt-in.
 		experimentalTerminalBidi: d.experimentalTerminalBidi === true ? true : undefined,
-		// Default-off beta toggle — only an explicit true is a stored opt-in.
-		experimentalAgentTraffic: d.experimentalAgentTraffic === true ? true : undefined,
+		// Default-on beta toggle — both booleans are stored, because an explicit
+		// false is the user opting out and must not collapse into "never chose".
+		experimentalAgentTraffic:
+			typeof d.experimentalAgentTraffic === "boolean" ? d.experimentalAgentTraffic : undefined,
+		// Only a recorded pick survives; anything else falls back to the default view.
+		agentTrafficExperiment: d.agentTrafficExperiment === "1" || d.agentTrafficExperiment === "2"
+			? d.agentTrafficExperiment
+			: undefined,
 		// Cross-provider favorite pointers; shape-validated, capped, empty ⇒ undefined.
 		favorites: sanitizeFavorites(d.favorites),
 		// User shortcut rebinds; sparse by design — absent means "all defaults".

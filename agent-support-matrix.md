@@ -60,7 +60,7 @@ Injected into `.claude/settings.local.json`.
 
 | Hook event | Status transition | Purpose |
 |------------|------------------|---------|
-| `UserPromptSubmit` | → `in-progress` | User sent a message, agent starts working |
+| `UserPromptSubmit` | → `in-progress` | User sent a message, agent starts working. A **second** entry on the same event, `dev3 hook claude-prompt`, reads the payload's `prompt` and `prompt_id` and reports the submission for Agent traffic; the status-move entry above is untouched, so recording can never cost a task its board position |
 | `PreToolUse` | → `in-progress` | Agent is about to call a tool (also catches post-permission resume) |
 | `PostToolUse` | → `in-progress` | A tool finished, including answers submitted to `AskUserQuestion` |
 | `PermissionRequest` | → `user-questions` | Agent needs user approval for a tool call |
@@ -81,6 +81,8 @@ Generated in each task's `.codex/hooks.json` and **declared in `~/.codex/config.
 | `PermissionRequest` | → `user-questions` | Codex is waiting for a tool or network approval |
 | `PostToolUse` | → `in-progress` | Clears the waiting state after an approved tool finishes |
 | `Stop` | → `review-by-ai` / `review-by-user` | One atomic server-side transition selects the correct review target and returns valid JSON to Codex |
+
+The `UserPromptSubmit` payload also carries the submitted `prompt` and a `turn_id`, both forwarded on the existing `task.agentHook` request so a human's terminal prompt reaches Agent traffic without a second dev3 process per prompt. Whether a submission was the human is decided app-side against the receipts dev3 leaves for everything it types itself (`decisions/2026/09/10/prove-a-terminal-prompt-is-the-user.md`).
 
 Beyond status, the `SessionStart`/`UserPromptSubmit` hook payloads carry the Codex `session_id` (the resumable rollout id), and the hook process inherits `$TMUX_PANE`. dev3 records that id onto the matching `sessionState` pane so recovery can `codex resume <id>` the exact per-pane session — Codex has no launch-time session-id flag, so this is the only way to target a specific session (see decision 125).
 
@@ -125,14 +127,15 @@ For Gemini CLI specifically, dev-3.0 installs these managed skills only via the 
 ## LLM provider (per-agent backend)
 
 Each agent can run against its **native API** (default) or a registered
-third-party backend (today: **Amazon Bedrock** for Claude), chosen via a
+third-party backend (today: **Amazon Bedrock** for Claude and for Codex), chosen via a
 **per-agent** toggle inside that agent's row in **Settings → Coding Agents**
 (`CodingAgent.llmProvider` / `CodingAgent.providerConfig`). dev3's built-in
 configs select a model with `--model` using native aliases (e.g.
 `claude-opus-4-8[1m]`); third-party providers reject those, so when one is
 selected dev3 **omits `--model`** for that agent and injects the provider env
-instead. Agents on their native provider — and agents with no registered
-backend at all (Codex, Gemini, …, which show no toggle) — are unaffected.
+instead (Claude), or rewrites `--model` to the mapped id and appends the routing
+args (Codex). Agents on their native provider — and agents with no registered
+backend at all (Gemini, …, which show no toggle) — are unaffected.
 
 Providers are data, not code: each one is a `ProviderDefinition` in the
 `PROVIDER_REGISTRY` (`src/shared/llm-provider.ts`), keyed by an `LLM_PROVIDER` id
@@ -149,7 +152,8 @@ global agent setup (shell env / `~/.claude/settings.json`).
 | Provider | Injected env | Model id source |
 |----------|--------------|-----------------|
 | Anthropic | _(none)_ | `--model <alias>` as usual |
-| Bedrock | `CLAUDE_CODE_USE_BEDROCK=1`, `ANTHROPIC_MODEL` | alias→`<geo>.anthropic.*` map (geo = `global`/`us`/`eu`/`apac` toggle), or the per-model override |
+| Bedrock (Claude) | `CLAUDE_CODE_USE_BEDROCK=1`, `ANTHROPIC_MODEL` | alias→`<geo>.anthropic.*` map (geo = `global`/`us`/`eu`/`jp` toggle), or the per-model override |
+| Bedrock (Codex) | _(none — `--model <geo>.openai.<family>` + `-c model_provider="amazon-bedrock-runtime"`)_ | same geo toggle; per-model override |
 
 Known model aliases map to provider-native ids automatically
 (`src/shared/llm-provider.ts`); unknown/new models are derived from the alias so

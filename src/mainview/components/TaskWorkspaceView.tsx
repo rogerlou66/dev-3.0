@@ -19,6 +19,8 @@ interface TaskWorkspaceViewProps {
 	dispatch: Dispatch<AppAction>;
 	navigationGuardRef?: MutableRefObject<NavigationGuard | null>;
 	presentation?: "full-page" | "overlay" | "immersive";
+	/** An artifact of the open task should use the docked panel. */
+	dockArtifact?: boolean;
 	isTerminalFullscreen?: boolean;
 	onToggleTerminalFullscreen?: () => void;
 	skipCopyModeReset?: boolean;
@@ -36,6 +38,7 @@ function TaskWorkspaceView({
 	dispatch,
 	navigationGuardRef,
 	presentation = "full-page",
+	dockArtifact,
 	isTerminalFullscreen,
 	onToggleTerminalFullscreen,
 	skipCopyModeReset,
@@ -111,6 +114,7 @@ function TaskWorkspaceView({
 					inlineDiffRequest={inlineDiff.request}
 					onCloseInlineDiff={inlineDiff.close}
 					navigationGuardRef={navigationGuardRef}
+					dockArtifact={dockArtifact}
 					skipCopyModeReset={skipCopyModeReset}
 				/>
 			</div>

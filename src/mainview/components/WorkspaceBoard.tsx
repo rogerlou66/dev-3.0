@@ -142,7 +142,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 			labelNames: (project.labels ?? []).filter((label) => task.labelIds?.includes(label.id)).map((label) => label.name),
 			agentName: agents.find((agent) => agent.id === task.agentId)?.name ?? null,
 			statusValues: [task.status, t(statusKey(task.status)), ...(task.customColumnId ? (project.customColumns ?? []).filter((column) => column.id === task.customColumnId).map((column) => column.name) : [])],
-			priorityValue: task.priority?.toLowerCase() ?? "p3", hasPort: false, isAttention: isAttentionTask(task), spaceNames: null,
+			priorityValue: task.priority?.toLowerCase() ?? "p3", hasPort: false, isHidden: task.hidden === true, isAttention: isAttentionTask(task), spaceNames: null,
 		});
 	}
 

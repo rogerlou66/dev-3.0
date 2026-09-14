@@ -30,7 +30,7 @@ const keymap = {
 	"keymap.shortcut.goTo": "Ir a… (D panel · P proyecto · T tareas · S ajustes · dígito = proyecto N; P/T + dígito = tablero/tareas del proyecto N)",
 	"keymap.shortcut.zoomOutToSpace": "Ampliar al tablero del espacio",
 	"keymap.shortcut.focusSearch": "Enfocar búsqueda",
-	"keymap.shortcut.escape": "Cerrar diálogo / volver atrás",
+	"keymap.shortcut.escape": "Cerrar diálogo / volver atrás (no dentro de una tarea — ahí lo recibe el agente)",
 	"keymap.shortcut.newTask": "Nueva tarea",
 	"keymap.shortcut.addProject": "Añadir proyecto",
 	"keymap.shortcut.newWindow": "Nueva ventana",
@@ -42,7 +42,8 @@ const keymap = {
 	"keymap.shortcut.openIn": "Abrir el proyecto/worktree actual en una app (selector)",
 	"keymap.shortcut.keyboardShortcuts": "Mostrar este panel de atajos de teclado",
 	"keymap.shortcut.helpMode": "Explicar esta pantalla (modo ayuda)",
-	"keymap.shortcut.agentTrafficLog": "Registro de tráfico de agentes",
+	"keymap.shortcut.agentTrafficLog": "Tráfico de agentes",
+	"keymap.shortcut.trafficReplayPlayPause": "Reproducir o pausar la repetición del tráfico",
 	"keymap.shortcut.terminalFullscreen": "Alternar pantalla inmersiva del terminal (solo en terminal de tarea)",
 	"keymap.shortcut.artifactSearch": "Buscar en el artefacto HTML abierto",
 	"keymap.shortcut.toggleProjectTerminal": "Alternar terminal del proyecto",
@@ -56,6 +57,7 @@ const keymap = {
 	"keymap.fixed.holdModifier": "El ciclo necesita un modificador mantenido, algo que una combinación no expresa.",
 	"keymap.fixed.chordSequence": "Una secuencia de teclas una tras otra, no una combinación.",
 	"keymap.fixed.reserved": "Reservado: es la salida de cualquier diálogo o modo.",
+	"keymap.fixed.activatesFocused": "El espacio activa el control que tiene el foco, así que nada más puede reclamarlo.",
 	"keymap.fixed.shellOwned": "Pertenece al shell de la app, no a la página.",
 
 	// Editor de atajos (Ajustes → Teclado → Atajos de la app)

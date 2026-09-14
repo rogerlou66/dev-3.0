@@ -4,7 +4,7 @@ import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, r
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
-import { listPendingAgentRequests, resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
+import { holdAgentRequestAutoApprove as holdAutoApprove, listPendingAgentRequests, markAgentRequestShown as markShown, resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
 import { loadSettingsSync, recordFavoriteUsages } from "../settings";
 import { emitTaskSound } from "../lifecycle/executor";
 import { getPushMessage, isActive, log } from "./shared";
@@ -430,6 +430,17 @@ async function setTaskPriority(params: { taskId: string; projectId: string; prio
 		getPushMessage()?.("taskUpdated", { projectId: project.id, task });
 	}
 	log.info("← setTaskPriority done", { count: changed.length });
+	return changed;
+}
+
+async function setTaskHidden(params: { taskId: string; projectId: string; hidden: boolean }): Promise<Task[]> {
+	log.info("→ setTaskHidden", params);
+	const project = await data.getProject(params.projectId);
+	const changed = await data.setTaskHidden(project, params.taskId, params.hidden);
+	for (const task of changed) {
+		getPushMessage()?.("taskUpdated", { projectId: project.id, task });
+	}
+	log.info("← setTaskHidden done", { count: changed.length });
 	return changed;
 }
 
@@ -1003,6 +1014,24 @@ async function updateAgentLaunchChoice(params: {
 }
 
 /**
+ * A client put this dialog on screen. The countdown restarts from now, so a
+ * request that queued behind another still gets the full delay in front of a
+ * human instead of expiring unseen. Returns the deadline the timer will use.
+ */
+async function markAgentRequestShown(params: { requestId: string }): Promise<{ autoApproveAt: number | null }> {
+	return { autoApproveAt: markShown(params.requestId) };
+}
+
+/**
+ * A user touched the dialog, so the launch waits for their explicit answer. The
+ * bun-side timer is the one that actually launches, which is why this has to
+ * reach it and not just hide the countdown.
+ */
+async function holdAgentLaunchAutoApprove(params: { requestId: string }): Promise<void> {
+	holdAutoApprove(params.requestId);
+}
+
+/**
  * Quick shell (⇧⌘`): spawns a FRESH scratch operation in the built-in Operations
  * board on every press — exactly like clicking "Scratch Task" there. The task
  * gets the normal `Scratch — HH:mm` title and a managed work dir, and is launched
@@ -1226,6 +1255,7 @@ export const taskLifecycleHandlers = {
 	debugEmitTaskSound,
 	cancelTaskPreparation,
 	setTaskPriority,
+	setTaskHidden,
 	hibernateTask,
 	deleteTask,
 	moveTaskToProject,
@@ -1247,6 +1277,8 @@ export const taskLifecycleHandlers = {
 	respondToAgentCancellationRequest,
 	respondToAgentLaunchRequest,
 	updateAgentLaunchChoice,
+	markAgentRequestShown,
+	holdAgentLaunchAutoApprove,
 	getTaskTerminalBackend,
 	setTaskTerminalBackend,
 	getNativeTerminalAvailability,

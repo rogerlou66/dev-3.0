@@ -19,7 +19,8 @@ this page and the website all read from it.
 | Zoom out to the space board | ⇧⌘U | Ctrl+Shift+U |
 | Command palette | ⇧⌘P / ⇧⌘Space | Ctrl+Shift+P / Ctrl+Shift+Space |
 | Keyboard shortcuts panel | ⌘/ | Ctrl+/ |
-| Agent traffic log (beta — Settings → System → Advanced Experience) | ⇧⌘M | Ctrl+Shift+M |
+| Agent traffic screen (beta — Settings → System → Advanced Experience) | ⇧⌘M | Ctrl+Shift+M |
+| Play or pause the traffic replay (inside the traffic log) | Space | Space |
 | Help mode (explain this screen) | ⇧⌘/ | Ctrl+Shift+/ |
 | Open current project/worktree in an app (picker) | ⌘O | Ctrl+O |
 | Terminal immersive fullscreen | F11 / ⇧⌘F | F11 / Ctrl+Shift+F |
@@ -41,8 +42,13 @@ this page and the website all read from it.
 | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 | Ctrl+= / Ctrl+- / Ctrl+0 |
 | Hard refresh | ⌘R | Ctrl+R |
 | Toggle project terminal / open Quick Shell | ⌘J / ⇧⌘` | Ctrl+J / Ctrl+Shift+` |
-| Close dialog / step back | Esc | Esc |
+| Close dialog / step back (not inside a task) | Esc | Esc |
 | Quit / Hide | ⌘Q / ⌘H | Ctrl+Q / Ctrl+H |
+
+**Escape never leaves a task view.** Inside a task, Esc belongs to whatever runs in the terminal —
+it is how you interrupt the agent — so the app does not step back to the board on it. Modals,
+popovers and menus opened on top of a task still close on Esc, as everywhere else. Use ⌘K, `G`
+then `D`/`P`, or the breadcrumb to leave a task.
 
 ### In a browser (`dev3 remote`)
 

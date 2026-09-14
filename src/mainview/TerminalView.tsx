@@ -34,6 +34,7 @@ import { installRenderGuard, type RenderGuard } from "./terminal-render-guard";
 import { session } from "./terminal-session-stats";
 import { createTerminalLatencyProbe, registerLatencyProbe } from "./terminal-latency";
 import { createBreadcrumbTrail } from "./terminal-breadcrumbs";
+import { installCellLineBox, type CellLineBox } from "./terminal-cell-metrics";
 import { installGlyphCellFit, type GlyphCellFit } from "./terminal-glyph-cell-fit";
 import { installGlyphAtlas, type GlyphAtlasHandle } from "./terminal-glyph-atlas";
 import { getScrollThreshold } from "./scroll-speed";
@@ -46,6 +47,7 @@ import { isLargeTextPaste, uploadPastedText } from "./utils/uploadPastedText";
 import { imageFilesFromClipboard } from "./utils/clipboardImageFiles";
 import { createAnsiThemeFilter } from "./utils/ansi-theme-adapt";
 import { submitPastedText } from "./terminal-submit";
+import { spaceDroppedPaths } from "./terminal-drop-spacing";
 import { createFilePathLinkProvider, type FilePathLinkProvider } from "./terminal-file-links";
 import { createOsc8Tracker, createOsc8LinkProvider } from "./terminal-osc8-links";
 import { cellFromMouseEvent } from "./terminal-cell-hit";
@@ -401,6 +403,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	/** Hides the cursor while input would not reach this terminal. */
 	const cursorGateRef = useRef<CursorVisibilityGate | null>(null);
 	const renderGuardRef = useRef<RenderGuard | null>(null);
+	/** Gives the cell the height the font was designed to be set at. */
+	const cellLineBoxRef = useRef<CellLineBox | null>(null);
 	/** Keeps block, box-drawing and powerline glyphs on the cell background's box. */
 	const glyphFitRef = useRef<GlyphCellFit | null>(null);
 	const glyphAtlasRef = useRef<GlyphAtlasHandle | null>(null);
@@ -900,6 +904,10 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			if (term.renderer) {
 				cursorGateRef.current = installCursorVisibilityGate(term.renderer);
 				cursorGateRef.current.setCursorVisible(inputReachesTerminal());
+				// BEFORE the glyph fit, which fits glyphs to whatever cell this leaves:
+				// the vendor's cell ignores the font's line metrics entirely, so every
+				// font came out ~17px tall at size 16 (issue #1668).
+				cellLineBoxRef.current = installCellLineBox(term.renderer);
 				// Powerline prompts and block-drawn bars are only flush if the glyph
 				// shares the background's cell box; the vendor's own metrics do not.
 				glyphFitRef.current = installGlyphCellFit(term.renderer);
@@ -2190,6 +2198,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			glyphAtlasRef.current = null;
 			glyphFitRef.current?.dispose();
 			glyphFitRef.current = null;
+			cellLineBoxRef.current?.dispose();
+			cellLineBoxRef.current = null;
 			layoutObserver?.disconnect();
 			mouseCleanup?.();
 			imeTerminatorCleanup?.();
@@ -2670,7 +2680,9 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		}
 
 		if (wsRef.current?.readyState === WebSocket.OPEN) {
-			wsRef.current.send(text);
+			const cursor = termRef.current?.buffer?.active;
+			const line = cursor?.getLine?.((cursor.baseY ?? 0) + (cursor.cursorY ?? 0));
+			wsRef.current.send(spaceDroppedPaths(text, line, cursor?.cursorX ?? 0));
 		}
 		try { termRef.current?.focus(); } catch { /* disposed */ }
 	}

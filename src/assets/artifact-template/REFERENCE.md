@@ -70,7 +70,7 @@ Two rules for report code:
 
 ## Publishing and assets
 
-`dev3 show-artifact ./dev3-artifact-report --title "Report title"` publishes the directory: `index.html` plus every CSS, classic JavaScript, and raster file under it. Pass the HTML file instead when the report is a single file, and list files that live elsewhere after `--assets`:
+`dev3 show-artifact ./dev3-artifact-report --title "Report title"` publishes the directory: `index.html` plus every CSS, classic JavaScript, raster and MP4/WebM file under it. Pass the HTML file instead when the report is a single file, and list files that live elsewhere after `--assets`:
 
 ```bash
 dev3 show-artifact ./dev3-artifact-report --title "Report title"
@@ -87,7 +87,25 @@ host.innerHTML = `<img src="${src}" alt="Run 42 timeline">`;
 element.style.backgroundImage = `url("${dev3Artifact.asset("shots/grid.png")}")`;
 ```
 
-It is safe everywhere: with no viewer map (file://, the extracted ZIP) it returns the path unchanged, and it leaves absolute URLs, data URLs, and CDN links alone. The viewer also heals a bare relative `src` on `img` and `source` elements added after load, so an older report still renders — but write `asset()` in new code, because that fallback covers nothing else (CSS you build in JS, `fetch()`, canvas, a download link). Pass every imported stylesheet explicitly in `--assets` when it is not under the report directory. The extracted ZIP also opens directly through `file://`. Avoid ES modules and `fetch()` for local files because browsers restrict them for opaque and file origins.
+It is safe everywhere: with no viewer map (file://, the extracted ZIP) it returns the path unchanged, and it leaves absolute URLs, data URLs, and CDN links alone. The viewer also heals a bare relative `src` (and a `video` `poster`) on `img`, `source` and `video` elements added after load, so an older report still renders — but write `asset()` in new code, because that fallback covers nothing else (CSS you build in JS, `fetch()`, canvas, a download link). Pass every imported stylesheet explicitly in `--assets` when it is not under the report directory. The extracted ZIP also opens directly through `file://`. Avoid ES modules and `fetch()` for local files because browsers restrict them for opaque and file origins.
+
+### Bundled video clips
+
+MP4 and WebM files publish like any other asset — nested paths and spaces included — and play with ordinary HTML5 markup. Nothing app-side is needed:
+
+```html
+<video controls playsinline preload="metadata" poster="clips/tour-poster.png" width="720">
+  <source src="clips/tour.webm" type="video/webm">
+  <source src="clips/tour.mp4" type="video/mp4">
+</video>
+```
+
+- **Always `controls` and `playsinline`**, and `preload="metadata"` so opening the report does not decode every clip. `muted` + `autoplay` is the only autoplay a browser allows; a clip with sound plays on a click, never on load, on every engine.
+- **Limits:** 16 MB per clip, 48 MB for all clips in one artifact, 40 assets total. Past them `show-artifact` fails and names the file — nothing is silently dropped or re-encoded.
+- **Keep clips small anyway.** Every asset reaches the viewer inline in the document, so bytes are paid on each open, not on first play: aim for a few MB per clip (a 10 s 1080p screen capture lands around 1–3 MB).
+- Give both formats only when the codec matters; two encodes of the same clip double the budget. MP4/H.264 plays everywhere dev3 renders.
+- A clip whose `src` your report code builds at runtime goes through `dev3Artifact.asset("clips/tour.mp4")`, exactly like an image.
+- Video rides the downloadable ZIP and opens from `file://` too. `svg`, `mov`, `gif`-as-video and audio-only files are not artifact assets.
 
 ## Network access and external libraries
 
@@ -164,11 +182,12 @@ Keep form markup native and opt into the polished controls with one attribute. T
   <label class="check field full"><input type="checkbox" checked> Include experimental presets</label>
   <fieldset class="option-group field full"><legend>Review mode</legend><div class="choice-grid"><label class="check"><input type="radio" name="mode" checked> Automatic</label><label class="check"><input type="radio" name="mode"> Manual</label></div></fieldset>
   <label class="switch field full"><input type="checkbox" checked><span aria-hidden="true"></span> Auto-refresh</label>
+  <div class="field full"><label for="notes">Notes</label><textarea id="notes" rows="3" placeholder="Anything the agent should know…"></textarea></div>
   <div class="form-actions field full"><button type="reset">Reset</button><button class="primary" type="submit">Apply</button></div>
 </form>
 ```
 
-`.controls` is a two-column grid; `.field.full` spans both. `.check`, `.switch`, and `.option-group` skin native checkbox, radio, and switch markup without report JavaScript. A `.segmented` group of buttons (`<button class="active">`) toggles a view; report code flips `.active` and calls `remount()` on the chart. When report code changes an enhanced select or range, call `dev3Artifact.setControl(element, value)` so the native value, visual control, events, and output stay synchronized. `dev3Artifact.toast("Saved")` shows the transient message in `#toast`.
+`.controls` is a two-column grid; `.field.full` spans both. `.check`, `.switch`, and `.option-group` skin native checkbox, radio, and switch markup without report JavaScript. Every other standard control is skinned on the element itself — text, search, number, date, email, password, `textarea`, a plain `<select>` (its own caret, no `data-ui-select` needed), `select[multiple]`, `file`, `color`, checkbox and radio glyphs, plus placeholder, hover, focus ring, `:disabled`, `:read-only` and `:user-invalid` states. A `.field` wrapper adds the label and the full width; without one the control still looks right, so a control dropped straight into a panel or a table cell never needs styles of its own. A `.segmented` group of buttons (`<button class="active">`) toggles a view; report code flips `.active` and calls `remount()` on the chart. When report code changes an enhanced select or range, call `dev3Artifact.setControl(element, value)` so the native value, visual control, events, and output stay synchronized. `dev3Artifact.toast("Saved")` shows the transient message in `#toast`.
 
 ## Menus, dropdowns, and anything that opens over the report
 

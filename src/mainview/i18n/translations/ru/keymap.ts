@@ -30,7 +30,7 @@ const keymap = {
 	"keymap.shortcut.goTo": "Перейти к… (D дашборд · P проект · T задачи · S настройки · цифра = проект N; P/T + цифра = доска/задачи проекта N)",
 	"keymap.shortcut.zoomOutToSpace": "Выйти на доску пространства",
 	"keymap.shortcut.focusSearch": "Фокус в поиск",
-	"keymap.shortcut.escape": "Закрыть диалог / шаг назад",
+	"keymap.shortcut.escape": "Закрыть диалог / шаг назад (кроме открытой задачи — там его получает агент)",
 	"keymap.shortcut.newTask": "Новая задача",
 	"keymap.shortcut.addProject": "Добавить проект",
 	"keymap.shortcut.newWindow": "Новое окно",
@@ -42,7 +42,8 @@ const keymap = {
 	"keymap.shortcut.openIn": "Открыть текущий проект/worktree в приложении (выбор из списка)",
 	"keymap.shortcut.keyboardShortcuts": "Показать эту панель горячих клавиш",
 	"keymap.shortcut.helpMode": "Объяснить этот экран (режим подсказок)",
-	"keymap.shortcut.agentTrafficLog": "Журнал трафика агентов",
+	"keymap.shortcut.agentTrafficLog": "Трафик агентов",
+	"keymap.shortcut.trafficReplayPlayPause": "Запустить или остановить воспроизведение трафика",
 	"keymap.shortcut.terminalFullscreen": "Переключить иммерсивный fullscreen терминала (только в терминале задачи)",
 	"keymap.shortcut.artifactSearch": "Поиск в открытом HTML-артефакте",
 	"keymap.shortcut.toggleProjectTerminal": "Переключить терминал проекта",
@@ -56,6 +57,7 @@ const keymap = {
 	"keymap.fixed.holdModifier": "Для перебора нужен зажатый модификатор — обычной комбинацией это не выразить.",
 	"keymap.fixed.chordSequence": "Последовательность клавиш одна за другой, а не комбинация.",
 	"keymap.fixed.reserved": "Зарезервировано — это выход из любого диалога и режима.",
+	"keymap.fixed.activatesFocused": "Пробел нажимает элемент, на котором фокус, поэтому его нельзя отдать чему-то ещё.",
 	"keymap.fixed.shellOwned": "Принадлежит оболочке приложения, а не странице.",
 
 	// Редактор хоткеев (Настройки → Клавиатура → Хоткеи приложения)

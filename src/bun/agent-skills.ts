@@ -160,7 +160,7 @@ is genuinely ambiguous (e.g., multiple possible dev servers, unclear base branch
    | \`setupScript\` | Package manager install command. Detect from lockfile: \`bun.lockb\` → \`bun install\`, \`pnpm-lock.yaml\` → \`pnpm install\`, \`yarn.lock\` → \`yarn\`, \`package-lock.json\` → \`npm install\`. For Python: \`pip install -e .\` or \`poetry install\`. For Rust: \`cargo build\`. Chain multiple steps with \`&&\` if needed. |
    | \`devScript\` | The dev server command. Check \`package.json\` scripts for \`dev\`, \`start\`, \`serve\`. Use the full command: \`bun run dev\`, \`npm run dev\`, etc. If no dev server exists, leave empty. |
    | \`cleanupScript\` | Teardown hook that runs before the task worktree is removed — on \`completed\` / \`cancelled\`, when an active task is deleted (\`$DEV3_TASK_STATUS\` = \`deleted\`), or when task preparation is cancelled (\`$DEV3_TASK_STATUS\` = \`todo\`). Useful for copy-back, exports, cache cleanup, and tearing down per-worktree containers. Inside the script you can branch on \`$DEV3_TASK_STATUS\`, \`$DEV3_TASK_FROM_STATUS\`, and \`$DEV3_TASK_TO_STATUS\`, plus the workspace env vars from step 3b. |
-   | \`clonePaths\` | Heavy directories that should be CoW-cloned into new worktrees instead of re-downloaded. Common: \`node_modules\`, \`.venv\`, \`target\`, \`.next\`, \`build\`. Only include dirs that actually exist in the project. |
+   | \`clonePaths\` | Directories **and individual files** CoW-cloned from the project root into every new worktree instead of being re-downloaded or lost. Heavy dirs: \`node_modules\`, \`.venv\`, \`target\`, \`.next\`, \`build\`. Single files matter just as much: a git-ignored \`.npmrc\`, \`.env\`, or a personal instruction file reaches the worktree only through here. Glob patterns are expanded. A path missing from the project root is skipped silently; a path that exists but fails to copy is logged as an error and shown on the task. |
    | \`defaultBaseBranch\` | Check \`git symbolic-ref refs/remotes/origin/HEAD\` or look at common branches. Usually \`main\` or \`master\`. |
    | \`defaultCompareRefMode\` | Default diff comparison target. Use \`"remote"\` for \`origin/<baseBranch>\` (recommended default) or \`"local"\` for the local base branch. |
    | \`peerReviewEnabled\` | Default \`true\`. Only set \`false\` for personal/solo projects. |
@@ -237,7 +237,7 @@ EOF
 | \`setupScript\` | string | Runs after a new worktree is created (install deps, generate code, etc.). Gets the workspace env vars from step 3b |
 | \`devScript\` | string | Dev server command (powers the "Dev Server" button in the UI) |
 | \`cleanupScript\` | string | Runs before the task worktree is removed (\`completed\` / \`cancelled\` / task deleted / preparation cancelled) |
-| \`clonePaths\` | string[] | Dirs to CoW-clone into worktrees (faster than re-downloading) |
+| \`clonePaths\` | string[] | Files and dirs (globs allowed) CoW-cloned into every worktree. Runs BEFORE the agent launches — unlike \`setupScript\`, which in the default \`parallel\` mode starts alongside the already-running agent — so this is the only hook that can put a git-ignored file in place before the agent reads it. Missing sources are skipped |
 | \`defaultBaseBranch\` | string | Base branch for new task branches (default: \`main\`) |
 | \`defaultCompareRefMode\` | \`"remote" \| "local"\` | Default diff comparison target (\`origin/<baseBranch>\` vs local base branch) |
 | \`peerReviewEnabled\` | boolean | Whether peer review is required (default: \`true\`) |
@@ -256,6 +256,8 @@ EOF
 | \`.dev3/config.local.json\` | No (git-ignored) | Machine-specific overrides (personal) |
 
 **Always ask the user** which file to save to before writing. Suggest repo config as default.
+
+**A project can opt out entirely.** Project Settings → Project Config has a **Use repository dev3 configuration** switch (on by default). While it is off, dev3 reads neither file for that project and refuses to write them, so writing a config there accomplishes nothing — tell the user to switch it back on first.
 
 ## CLI commands
 
@@ -331,14 +333,13 @@ Re-query \`list-panes\` / \`list-windows\` whenever you need a pane id — cache
 
 ## 3. When to use a tmux pane vs inline Bash
 
-Run a command **in a separate tmux pane** when at least one of these is true:
+**Inline Bash is the default.** Run a command **in a separate tmux pane** only when one of these is true:
 
-- It is **long-running** and the user benefits from watching live (dev server, build watcher, log tail, test watcher).
-- It produces **streaming logs** that the user might want to scroll through later.
-- You want to **demo or debug interactively** — let the user see exactly what happened, not a post-hoc summary.
-- The user explicitly says "run it in a pane / tab / window" or "so I can see it".
+- The user asked for it — "run it in a pane / tab / window", "so I can see it", "run the build on the right".
+- The process must **outlive your turn** and someone will watch it: a dev process, a watcher, a log tail.
+- You are **demoing or debugging in front of the user** and they need to see it happen, not a summary afterwards.
 
-Keep using **inline Bash** for quick one-shot commands (file reads, short git, type-checks, single test runs) where streaming visibility adds nothing.
+Everything else stays inline, builds, test suites and checks included, however long they take. Being slow is not a reason — a pane is a window into the user's terminal, not a way to free up your own tool call.
 
 **Do NOT use a tmux pane as a substitute for the canonical dev server** — the project has \`dev3 dev-server start\` for that, which is wired to \`devScript\` and the UI. Use ad-hoc panes for things the user wants to *watch alongside* the dev server, not to replace it.
 
@@ -441,7 +442,7 @@ Useful when you start a watcher in a pane and want to verify a few minutes later
 - **Killing user-owned panes/windows.** The user may have things running you cannot see (a debugger, a REPL, a long upload). Default to creating new panes; only destroy what you created yourself, or what the user explicitly asked you to remove.
 - **Running the canonical dev server in an ad-hoc pane.** Use \`dev3 dev-server start\` instead — it integrates with the UI and \`devScript\`. Ad-hoc panes are for things the user wants to *watch on the side*.
 - **Opening a new-window for a background process.** \`new-window\` hides the process behind a tab — the user has to click to see it. For celery, docker exec, watchers, log tails, dev servers — use \`split-window\` so the output sits next to the agent. Only open a new window when the user explicitly asks for a tab.
-- **Long-running commands stealing your tool slot.** Inline \`bun run dev\` from the Bash tool blocks your tool call for a long time. A tmux pane fires-and-forgets and you get your next tool call back immediately.
+- **Opening a pane to free up your own tool call.** A slow build or a long test run belongs inline — waiting is yours to do. Split only for a process that has to keep running after your turn ends, and only when the user will look at it.
 `;
 
 const CLAUDE_TMUX_SKILL = `---
@@ -719,7 +720,7 @@ A **flow** is a path through dev3's features. Most work travels one **main flow*
    **Review blocked by an external dependency?** Drag a settled **Your Review** or **PR Review** task into **Blocked**, or choose **Move to Blocked** in its status menu. It leaves Inbox and Needs You while its workspace and underlying review stage remain intact. Use **Unblock task** or drag it back when ready; agent updates cannot silently unblock it. Search with \`is:blocked\` or \`status:blocked\`.
 7. **How the agent reaches you → it pings, you don't poll.** It raises an attention badge when it needs help, fires toasts / desktop notifications on milestones, and moves the task into the **User questions** status when it needs an answer. Subscribe to any task for watch notifications.
 8. **Review the changes → Show Diff.** On the card, *Show Diff* lets you hide test noise and leave inline comments — each one has its own **Send to agent** so a fix can start the moment you spot it, or ship the whole batch at the end. Confirmed sends mark comments **Sent** and keep them for reference; ambiguous delivery leaves them retryable and never auto-resends. Turn on **AI Review** so a machine pass (the AI review column) pre-chews the diff before your human pass.
-9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. Every PR dev3 opens ends with a deep link back to its task, so anyone reading it can jump straight in — switch that off under **Settings → Tasks & Board → Link pull requests back to the task** if a public PR shouldn't reveal it was made with dev3.
+9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. Every PR dev3 opens ends with a deep link back to its task, so anyone reading it can jump straight in — switch that off under **Settings → Tasks & Board → Link pull requests back to the task** if a public PR shouldn't reveal it was made with dev3. An agent does the same in one command, and should reach for it before raw \`gh\`: \`dev3 pr create --title "..." --description "..." [--auto-merge]\` pushes the branch, opens the PR with that footer already appended and targets the base branch the task was created from — and refuses with exit 23 before pushing anything if \`gh\` is missing or logged out. Auto-merge on a PR that is already open is \`dev3 pr auto-merge [--strategy squash|merge|rebase]\`, and \`--off\` clears it.
 10. **What completing does → the worktree is destroyed, notes survive.** Finishing a task removes its worktree and branch checkout, but its **notes** persist as project memory that future agents find via search. So durable findings belong in notes, not just the chat. Completion is guarded: dev3 warns about uncommitted changes, unpushed commits, and unmerged branches before destroying anything — and it auto-saves a diff snapshot on every branch refresh, so work is recoverable even if a worktree gets wiped.
 11. **Changed your mind → reopen or restart.** Reopening a completed or cancelled task resumes the previous agent conversation instead of starting fresh. Want a truly clean slate? Move the task to Cancelled and back to Todo — fresh worktree, clean agent session.
 
@@ -811,6 +812,7 @@ Off the main flow entirely.
 - **"What is this screen?" → help mode.** Click the \`?\` in the header (or press ⇧⌘/) — every zone on screen gets an (i) badge; click one to learn what it does.
 - **A quick shell at the repo root → Project Terminal (⌘\\\`).** Next to it, the **Git Pull** button pulls the project's main worktree without touching a terminal — a blue dot on it means origin has new commits.
 - **Run project scripts and Makefile targets** — the ƒ Scripts button lists them; pick one and it runs in a live pane.
+- **Don't want a repo's dev3 config running on your machine → switch it off.** Project Settings → Project Config has **Use repository dev3 configuration**, on by default. Off, dev3 stops reading \`.dev3/config.json\` and \`.dev3/config.local.json\` for that project — in the checkout and in every task worktree — so its setup, dev, cleanup, env and agent settings never run; settings come from dev3 and saves land in dev3. The choice is stored only in dev3: no file appears in the repo and \`.gitignore\` is untouched. Nothing already running is restarted, and switching back on restores every value at once.
 - **Huge monorepo → check out less.** Toggle off "Include All Files" in Project Settings so every worktree checks out only the directories you actually need.
 - **Machine running out of RAM → hibernate a task.** The header shows how many gigabytes are still free; hover it for the breakdown of who ate the rest, dev3's own tasks included. **Hibernate**, on the open task's session bar, stops that task's agent, terminal, and dev server and frees its ports, while the worktree, your uncommitted changes, notes, and PR state stay untouched. It asks for confirmation first, and spells out the one thing that does not survive: the terminal scrollback. The card greys out and sinks below the live tasks; waking is explicit — open its terminal and pick a plain shell or a resume of the agent's conversation.
 - **Rate limit closing in → hot-swap the account.** The header carries live Claude/Codex rate-limit usage and yellows near the cap; click it to land in **Settings → Agent Accounts**, where several logins per agent CLI sit side by side and the active one switches without a re-login (add one by running the login command dev3 hands you, then verify — or import the login you already have). The switch applies to every *new* agent session dev3 launches — new tasks, spawned agents, bug hunters, auto-review — while running sessions keep theirs, and each launch can pick a non-default account. An **API profile** replaces the subscription login entirely: the Anthropic API, an Anthropic-compatible gateway (OpenRouter, a LiteLLM proxy), or Bedrock, with per-model overrides.
@@ -1276,8 +1278,32 @@ export function claudeBashPermission(dialect: HookCliDialect = hookCliDialect())
 }
 
 /**
- * Pure: ensure a parsed Claude Code settings object has both
- *   1. the dev3 CLI bash command allow-listed (no approval prompt), and
+ * The dev3 exception dev3 declares for Claude Code's auto-mode classifier.
+ *
+ * The classifier is a second gate that runs after the permission rules, and it
+ * reads its `autoMode` config ONLY from `~/.claude/settings.json`, managed
+ * settings, or `--settings` — never from a repo's `.claude/settings*.json`, so a
+ * checked-in file cannot grant itself exceptions. A worktree-scoped rule
+ * therefore cannot clear it, and without this entry `dev3 task move --status
+ * completed` reads to the classifier as an agent destroying a working directory
+ * and comes back as `Blocked by classifier`.
+ *
+ * Entries are prose, not tool patterns — the classifier reads them as
+ * natural-language rules. This one names the dev3 CLI and nothing else.
+ */
+export const DEV3_AUTO_MODE_ALLOW_ENTRY =
+	"dev3 task lifecycle: the `dev3` CLI is the dev3 app's own control plane, and `dev3 task move` — `--status completed` and `--status cancelled` included — is a request to the running app, not local destruction. The app answers it with its own approval dialog that the user clicks, and the worktree it then removes is disposable task scratch space whose work is preserved elsewhere before the move is ever requested. Applies to `dev3` however it is spelled (`~/.dev3.0/bin/dev3`, an absolute `dev3.exe`), and only to `dev3` subcommands — nothing else on the command line is cleared by this entry.";
+
+/**
+ * Splices the classifier's built-in rules back in. An `allow` array without it
+ * REPLACES the whole built-in list, so a user who has not taken ownership of the
+ * list must keep it — and one who deliberately dropped it keeps it dropped.
+ */
+const AUTO_MODE_DEFAULTS = "$defaults";
+
+/**
+ * Pure: ensure a parsed Claude Code settings object has
+ *   1. the dev3 CLI bash command allow-listed (no approval prompt),
  *   2. the dev3 sockets DIRECTORY in `sandbox.network.allowUnixSockets`, so
  *      Claude Code's macOS seatbelt sandbox lets the CLI connect to the running
  *      app's Unix socket (`~/.dev3.0/sockets/<pid>.sock`). Without it the connect
@@ -1287,8 +1313,11 @@ export function claudeBashPermission(dialect: HookCliDialect = hookCliDialect())
  * Uses the sockets DIRECTORY, not a `*.sock` glob: each allowUnixSockets entry
  * compiles to a seatbelt `(subpath ...)` rule — a literal directory-prefix match
  * with no `*` expansion — so the directory covers the PID-named socket across app
- * restarts while a glob would match nothing. Mutates `settings` in place and
- * returns whether anything changed (so the caller can skip a needless write).
+ * restarts while a glob would match nothing.
+ *
+ * And 3. the dev3 exception in `autoMode.allow` — the only scope the auto-mode
+ * classifier reads it from. Mutates `settings` in place and returns whether
+ * anything changed (so the caller can skip a needless write).
  */
 export function applyClaudeSettings(settings: Record<string, unknown>, socketsPath: string): boolean {
 	let changed = false;
@@ -1315,6 +1344,19 @@ export function applyClaudeSettings(settings: Record<string, unknown>, socketsPa
 	network.allowUnixSockets = sockets;
 	sandbox.network = network;
 	settings.sandbox = sandbox;
+
+	// 3. autoMode.allow — tell the classifier what the dev3 CLI is.
+	const autoMode = (settings.autoMode ?? {}) as Record<string, unknown>;
+	const autoAllow = Array.isArray(autoMode.allow) ? (autoMode.allow as string[]) : [];
+	if (!autoAllow.includes(DEV3_AUTO_MODE_ALLOW_ENTRY)) {
+		// An empty list is Claude Code's own default state, not a deliberate
+		// opt-out, so the built-ins have to be spliced back in with it.
+		if (autoAllow.length === 0) autoAllow.push(AUTO_MODE_DEFAULTS);
+		autoAllow.push(DEV3_AUTO_MODE_ALLOW_ENTRY);
+		changed = true;
+	}
+	autoMode.allow = autoAllow;
+	settings.autoMode = autoMode;
 
 	return changed;
 }

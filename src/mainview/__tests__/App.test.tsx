@@ -43,6 +43,13 @@ vi.mock("../rpc", () => ({
 				codex: { accounts: [], activeId: null, currentIdentity: null },
 			}),
 			getAgents: vi.fn().mockResolvedValue([]),
+			createTask: vi.fn(),
+			renameTask: vi.fn(),
+			setTaskLabels: vi.fn(),
+			spawnVariants: vi.fn(),
+			scheduleTaskLaunch: vi.fn(),
+			addAttempts: vi.fn(),
+			toggleTaskWatch: vi.fn(),
 			getGlobalSettings: vi.fn().mockResolvedValue({
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
@@ -63,6 +70,9 @@ vi.mock("../rpc", () => ({
 			listPendingCancellationRequests: vi.fn().mockResolvedValue([]),
 			getUnsavedWork: vi.fn().mockResolvedValue({ insertions: 0, deletions: 0, unpushed: 0, ahead: 0, baseUnreachable: false }),
 			respondToAgentLaunchRequest: vi.fn().mockResolvedValue(undefined),
+			// The launch dialog reports itself on screen on mount so the bun side
+			// restarts its countdown; null means there is no timer to restart.
+			markAgentRequestShown: vi.fn().mockResolvedValue({ autoApproveAt: null }),
 			checkAgentAvailability: vi.fn().mockResolvedValue([]),
 			getRemoteAccessQR: vi.fn().mockResolvedValue({
 				qrDataUrl: "data:image/png;base64,test",
@@ -126,8 +136,8 @@ vi.mock("../components/Dashboard", () => ({
 	),
 }));
 vi.mock("../components/WorkspaceTaskOverlay", () => ({
-	default: ({ taskId, onRequestClose, onOpenFullPage, navigationGuardRef }: { taskId: string; onRequestClose: () => void; onOpenFullPage: () => void; navigationGuardRef?: { current: { isDirty: () => boolean; onSave: () => Promise<void> } | null } }) => (
-		<div data-testid="workspace-task-overlay" data-task-id={taskId}>
+	default: ({ taskId, dockArtifact, onRequestClose, onOpenFullPage, navigationGuardRef }: { taskId: string; dockArtifact?: boolean; onRequestClose: () => void; onOpenFullPage: () => void; navigationGuardRef?: { current: { isDirty: () => boolean; onSave: () => Promise<void> } | null } }) => (
+		<div data-testid="workspace-task-overlay" data-task-id={taskId} data-dock-artifact={dockArtifact ? "true" : "false"}>
 			<button onClick={onOpenFullPage}>Open full page</button>
 			<button onClick={onRequestClose}>Close task workspace</button>
 			<button onClick={() => {
@@ -155,18 +165,20 @@ vi.mock("../components/ProjectView", () => ({
 		activeTaskId?: string;
 		taskView?: boolean;
 		bellCounts?: Map<string, number>;
+		dockArtifact?: boolean;
 	}) => (
 		<div
 			data-testid="project-screen"
 			data-project-id={props.projectId}
 			data-active-task-id={props.activeTaskId ?? ""}
 			data-task-view={props.taskView ? "true" : "false"}
+			data-dock-artifact={props.dockArtifact ? "true" : "false"}
 			data-bell-count={String(props.bellCounts?.get("t-overflow") ?? 0)}
 		/>
 	),
 }));
 vi.mock("../components/TaskWorkspaceView", () => ({
-	default: (props: { presentation?: "full-page" | "overlay" | "immersive" }) => <div data-testid="task-screen" data-immersive={props.presentation === "immersive" ? "true" : "false"} />,
+	default: (props: { presentation?: "full-page" | "overlay" | "immersive"; dockArtifact?: boolean }) => <div data-testid="task-screen" data-immersive={props.presentation === "immersive" ? "true" : "false"} data-dock-artifact={props.dockArtifact ? "true" : "false"} />,
 }));
 vi.mock("../components/TaskTerminal", () => ({
 	default: () => <div data-testid="task-screen" />,
@@ -185,6 +197,11 @@ vi.mock("../labs/native-pane/NativePaneLayoutLab", () => ({
 }));
 vi.mock("../components/ProjectTerminal", () => ({
 	default: () => <div data-testid="project-terminal-screen" />,
+}));
+// The screen's own data loading lives in agent-traffic-ui.test.tsx; here only
+// its routing matters.
+vi.mock("../components/agent-traffic/AgentTrafficScreen", () => ({
+	default: () => <div data-testid="agent-traffic-screen" />,
 }));
 vi.mock("../components/TaskImageViewer", () => ({
 	default: ({ initialIndex, newIds }: { initialIndex: number; newIds?: string[] }) => (
@@ -205,8 +222,11 @@ vi.mock("../confirm", () => ({
 import { initTaskSoundPlayback, playTaskSoundFromPush, setTaskCompletionSoundEnabled } from "../task-sounds";
 import { adjustZoom, applyZoom, ZOOM_STEP, DEFAULT_ZOOM } from "../zoom";
 import { setStreamerMode } from "../streamer-mode";
+import { setAgentTrafficEnabledForTests, syncAgentTrafficFromGlobalSettings } from "../agent-traffic-flag";
+import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "../agent-traffic-events";
 
 const mockedAdjustZoom = vi.mocked(adjustZoom);
+
 const mockedApplyZoom = vi.mocked(applyZoom);
 
 async function renderApp() {
@@ -367,6 +387,67 @@ describe("App keyboard shortcuts", () => {
 			await userEvent.click(screen.getByRole("button", { name: "Quit" }));
 			expect(api.request.quitApp).toHaveBeenCalledWith({ dontShowAgain: true });
 		});
+
+		it("counts down and quits on its own after 10 seconds", async () => {
+			vi.mocked(api.request.quitApp).mockResolvedValue(undefined);
+			await renderApp();
+			vi.useFakeTimers();
+			try {
+				requestQuitDialog();
+				expect(screen.getByText("Quitting in 10s")).toBeInTheDocument();
+				act(() => vi.advanceTimersByTime(4_000));
+				expect(screen.getByText("Quitting in 6s")).toBeInTheDocument();
+				expect(api.request.quitApp).not.toHaveBeenCalled();
+				act(() => vi.advanceTimersByTime(6_000));
+				expect(api.request.quitApp).toHaveBeenCalledWith({ dontShowAgain: false });
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("the first click drops the countdown — only an abandoned dialog quits itself", async () => {
+			vi.mocked(api.request.quitApp).mockResolvedValue(undefined);
+			await renderApp();
+			requestQuitDialog();
+			await userEvent.click(screen.getByRole("checkbox"));
+			expect(screen.queryByText(/Quitting in/)).not.toBeInTheDocument();
+			vi.useFakeTimers();
+			try {
+				act(() => vi.advanceTimersByTime(15_000));
+				expect(api.request.quitApp).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("a keystroke drops the countdown too", async () => {
+			vi.mocked(api.request.quitApp).mockResolvedValue(undefined);
+			await renderApp();
+			requestQuitDialog();
+			await userEvent.keyboard("{Tab}");
+			expect(screen.queryByText(/Quitting in/)).not.toBeInTheDocument();
+			vi.useFakeTimers();
+			try {
+				act(() => vi.advanceTimersByTime(15_000));
+				expect(api.request.quitApp).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("stops counting down once the dialog is dismissed", async () => {
+			vi.mocked(api.request.quitApp).mockResolvedValue(undefined);
+			await renderApp();
+			requestQuitDialog();
+			await userEvent.keyboard("{Escape}");
+			vi.useFakeTimers();
+			try {
+				act(() => vi.advanceTimersByTime(15_000));
+				expect(api.request.quitApp).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 
 	describe("hide (Cmd+H / Ctrl+H)", () => {
@@ -520,6 +601,19 @@ describe("App keyboard shortcuts", () => {
 			expect(screen.queryByTestId("workspace-task-overlay")).not.toBeInTheDocument();
 			expect(screen.getByTestId("dashboard-screen")).toBeInTheDocument();
 			await waitFor(() => expect(trigger).toHaveFocus());
+		});
+
+		it("keeps an overlay artifact visible and docked until its workspace closes", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			act(() => window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+				detail: { taskId: "overlay-task", projectId: project.id, artifacts: [{ id: "overlay-report", name: "Report", storedPath: "/tmp/report.html", createdAt: "2026-09-14T00:00:00Z" }], index: 0 },
+			})));
+			await waitFor(() => expect(screen.getByTestId("workspace-task-overlay")).toHaveAttribute("data-dock-artifact", "true"));
+			expect(screen.getByTestId("artifact-viewer")).not.toHaveAttribute("data-presentation", "offscreen");
+			await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
+			expect(screen.getByTestId("artifact-viewer-offscreen")).toBeInTheDocument();
 		});
 
 		it("hands off to the existing full-page task route", async () => {
@@ -940,6 +1034,31 @@ describe("App keyboard shortcuts", () => {
 			{ id: "p2", name: "Beta", path: "/b", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
 		];
 
+	/**
+	 * Run `body` with the agent-traffic beta on, from two projects and a board route.
+	 * App feeds the module mirror from the loaded settings on mount, so the flag has
+	 * to be true in the settings the mock returns as well as in the mirror.
+	 */
+	async function withTrafficBeta(body: () => Promise<void>) {
+		setAgentTrafficEnabledForTests(true);
+		try {
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+				experimentalAgentTraffic: true,
+			});
+			vi.mocked(api.request.getProjects).mockResolvedValue(twoProjects);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1" }),
+			});
+			await body();
+		} finally {
+			setAgentTrafficEnabledForTests(false);
+		}
+	}
+
 		// Task-view preservation is gated on the `dev3-task-open-mode` setting.
 		// Remove it between tests so the default ("split") applies unless a test opts in.
 		afterEach(() => {
@@ -1033,6 +1152,52 @@ describe("App keyboard shortcuts", () => {
 			const after = screen.getByTestId("project-screen");
 			expect(after).toHaveAttribute("data-project-id", "p2");
 			expect(after).toHaveAttribute("data-task-view", "false");
+		});
+
+		// Agent traffic used to be an overlay that covered the whole screen and
+		// survived every navigation, so Cmd+2 switched project *behind* it and read
+		// as a dead key. As a route it simply gets replaced.
+		it("leaves the agent traffic screen when it switches project", async () => {
+			await withTrafficBeta(async () => {
+				await renderApp();
+				await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+				expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+				// The app header comes with the screen — the overlay had none. (The
+				// label is on both the <header> and its <nav>, hence the query.)
+				expect(document.querySelector('header[aria-label="Application header"]')).not.toBeNull();
+
+				await userEvent.keyboard("{Meta>}2{/Meta}");
+
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p2");
+				expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+			});
+		});
+
+		it("steps back to where it was opened from, by shortcut and by Escape", async () => {
+			await withTrafficBeta(async () => {
+				await renderApp();
+				await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+				expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+				// The same key that opened it leaves it — what the overlay's toggle did.
+				await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
+				expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+
+				await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+				expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+				await userEvent.keyboard("{Escape}");
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
+			});
+		});
+
+		it("navigates when any entry point fires the open event", async () => {
+			await withTrafficBeta(async () => {
+				await renderApp();
+				await act(async () => {
+					window.dispatchEvent(new CustomEvent(OPEN_AGENT_TRAFFIC_LOG_EVENT));
+				});
+				expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+			});
 		});
 	});
 
@@ -1230,9 +1395,11 @@ describe("App keyboard shortcuts", () => {
 			createdAt: 0,
 		});
 
-		// The viewer is a popup App owns, never a surface handed down to a screen —
-		// decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md.
-		it("hosts the artifact popup itself, over whichever screen is open", async () => {
+		// The viewer is always mounted by App, never by a screen; the screen only
+		// offers a docking slot for the default panel presentation. A task that is
+		// not on screen has no slot, so it falls back to the popup —
+		// decisions/2026/09/07/artifact-panel-default-popup-opt-in.md.
+		it("hosts the artifact viewer itself, over whichever screen is open", async () => {
 			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
 				route: JSON.stringify({ screen: "project", projectId: "p1" }),
@@ -1293,6 +1460,181 @@ describe("App keyboard shortcuts", () => {
 				hasFocus.mockRestore();
 			}
 		});
+
+		// Default presentation: the open task's pane is offered the docking slot.
+		it("offers the docking slot to the open task's screen when no preference is stored", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], index: 0 },
+				}));
+			});
+
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true"));
+		});
+
+		// An artifact belonging to a task that is not the one on screen has no pane
+		// of its own, so the slot stays closed and the popup is the only host.
+		it("keeps the slot closed for an artifact of another task", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-other", projectId: "p1", artifacts: [artifact("a")], index: 0 },
+				}));
+			});
+
+			const card = await screen.findByTestId("artifact-viewer");
+			// A popup, never hidden: a viewer that never had a pane has no task screen
+			// to wait for, so hiding it would swallow the artifact outright.
+			expect(card).toHaveAttribute("data-presentation", "popup");
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "false");
+		});
+
+		it("keeps the slot closed when the popup preference is stored", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+				openArtifactsInPopup: true,
+			});
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], index: 0 },
+				}));
+			});
+
+			const card = await screen.findByTestId("artifact-viewer");
+			expect(card).toHaveAttribute("data-presentation", "popup");
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "false");
+		});
+
+		// The bug this guards: leaving the task used to clear the docking slot, and the
+		// same viewer re-hosted itself as a centred popup over whatever board came
+		// next — decisions/2026/09/07/docked-artifact-waits-offscreen.md.
+		it("hides a docked viewer when the route leaves its task, and brings it back", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			// Explicit: an earlier test in this file leaves the popup preference on.
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+			});
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], index: 0 },
+				}));
+			});
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true"));
+
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", {
+					detail: { taskId: "t-other", projectId: "p1" },
+				}));
+			});
+
+			const card = await screen.findByTestId("artifact-viewer");
+			await waitFor(() => expect(card).toHaveAttribute("data-presentation", "offscreen"));
+			expect(screen.getByTestId("artifact-viewer-offscreen")).toBeInTheDocument();
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "false");
+
+			// Still mounted, so coming back re-hosts the very same viewer.
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", {
+					detail: { taskId: "t-artifact", projectId: "p1" },
+				}));
+			});
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true"));
+			expect(screen.getByTestId("artifact-viewer")).not.toHaveAttribute("data-presentation", "offscreen");
+			expect(screen.queryByTestId("artifact-viewer-offscreen")).not.toBeInTheDocument();
+		});
+
+		// The popup is what the user asked for, and a paneless surface has nothing to
+		// go back to — neither hides when the route moves on.
+		it("keeps a popup-preference viewer on screen after leaving the task", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+				openArtifactsInPopup: true,
+			});
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], index: 0 },
+				}));
+			});
+			await screen.findByTestId("artifact-viewer");
+
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", {
+					detail: { taskId: "t-other", projectId: "p1" },
+				}));
+			});
+
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-other"));
+			expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-presentation", "popup");
+		});
+
+		it("keeps a paneless viewer on screen after leaving the task", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+			// Explicit: an earlier test in this file leaves the popup preference on.
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+			});
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+			});
+
+			await renderApp();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+					detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], index: 0, paneless: true },
+				}));
+			});
+			await screen.findByTestId("artifact-viewer");
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "false");
+
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", {
+					detail: { taskId: "t-other", projectId: "p1" },
+				}));
+			});
+
+			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-other"));
+			expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-presentation", "popup");
+		});
 	});
 
 	describe("agent-to-agent message toast", () => {
@@ -1304,7 +1646,19 @@ describe("App keyboard shortcuts", () => {
 		afterEach(() => {
 			setStreamerMode(false);
 			delete document.documentElement.dataset.streamer;
+			setAgentTrafficEnabledForTests(false);
 		});
+
+		/** Flip the beta on the way production does: through the settings mirror. */
+		function enableTrafficBeta() {
+			act(() => {
+				syncAgentTrafficFromGlobalSettings({ experimentalAgentTraffic: true });
+			});
+		}
+
+		function toastButton() {
+			return screen.findByRole("button", { name: "#7 Coordinator → #42 Receiver — check the payload" });
+		}
 
 		async function renderWithBoard() {
 			vi.mocked(api.request.getProjects).mockResolvedValue(twoProjects);
@@ -1331,8 +1685,16 @@ describe("App keyboard shortcuts", () => {
 			});
 		}
 
+		/** The opted-out user: the beta ships on, so "off" is a stored false. */
+		function disableTrafficBeta() {
+			act(() => {
+				syncAgentTrafficFromGlobalSettings({ experimentalAgentTraffic: false });
+			});
+		}
+
 		it("names both sides and clicks through to the receiving task", async () => {
 			await renderWithBoard();
+			disableTrafficBeta();
 			dispatchAgentMessage();
 
 			expect(screen.getByText("#7 Coordinator → #42 Receiver")).toBeInTheDocument();
@@ -1342,6 +1704,129 @@ describe("App keyboard shortcuts", () => {
 			await waitFor(() => {
 				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
 			});
+		});
+
+		it("opens the traffic screen instead of the task when the beta is on", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+
+			await userEvent.click(await toastButton());
+
+			expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+			// It is a route, not an overlay: the app header and Back come with it.
+			expect(document.querySelector('header[aria-label="Application header"]')).not.toBeNull();
+			// The fallback must NOT fire as well — that would navigate behind the screen.
+			expect(screen.queryByTestId("project-screen")).toBeNull();
+
+			// Back returns to where the click came from, in one press.
+			await userEvent.click(screen.getByRole("button", { name: /^Back/ }));
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+		});
+
+		// The toast outlives the toggle, so the destination cannot be captured when
+		// the toast is built — it has to be decided at click time.
+		it("follows a beta switched on after the toast was already on screen", async () => {
+			await renderWithBoard();
+			dispatchAgentMessage();
+			enableTrafficBeta();
+
+			await userEvent.click(await toastButton());
+
+			expect(screen.getByTestId("agent-traffic-screen")).toBeInTheDocument();
+		});
+
+		// The shortcut toggles the screen; a toast has nothing to toggle back to, so
+		// it stays put. Navigating again would push a second identical route and make
+		// the next Back press do nothing visible.
+		it("stays put, and adds no history entry, when the click lands on the screen itself", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+			expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+
+			await userEvent.click(await toastButton());
+
+			expect(screen.getAllByTestId("agent-traffic-screen")).toHaveLength(1);
+
+			// One Back leaves the screen. A duplicated entry would land on it again.
+			await userEvent.click(screen.getByRole("button", { name: /^Back/ }));
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+		});
+
+		// Keyboard parity: the toast's hit area is a real button, and Enter on it
+		// must reach the same destination a pointer click does.
+		it("opens the traffic screen from the keyboard too", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+
+			(await toastButton()).focus();
+			await userEvent.keyboard("{Enter}");
+
+			expect(screen.getByTestId("agent-traffic-screen")).toBeInTheDocument();
+		});
+
+		// An ordinary `dev3 notify` toast is not traffic — the beta must not steal
+		// its click away from the task it points at.
+		it("leaves an unrelated CLI toast pointing at its task", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:cliToast", {
+					detail: { taskId: "t-receiver", projectId: "p1", message: "build finished", level: "success" },
+				}));
+			});
+
+			await userEvent.click(await screen.findByRole("button", { name: /build finished/ }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
+			});
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+		});
+
+		// The traffic screen already shows the message in full; a toast on top of it
+		// previews what is right there and covers its own destination.
+		it("raises no toast while this window is on the traffic screen", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+			expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+
+			dispatchAgentMessage();
+
+			expect(screen.queryByText("#7 Coordinator → #42 Receiver")).not.toBeInTheDocument();
+		});
+
+		// Off the screen the toast is the only signal there is — the beta being on
+		// must not silence it board-wide.
+		it("still raises the toast on another route with the beta on", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+
+			expect(await toastButton()).toBeInTheDocument();
+		});
+
+		// Suppression is about THIS message on ITS screen, not about muting the
+		// traffic screen: an ordinary `dev3 notify` still gets through there.
+		it("leaves an unrelated CLI toast visible on the traffic screen", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+			expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
+
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:cliToast", {
+					detail: { taskId: "t-receiver", projectId: "p1", message: "build finished", level: "success" },
+				}));
+			});
+
+			expect(await screen.findByRole("button", { name: /build finished/ })).toBeInTheDocument();
 		});
 
 		it("drops the toast when the SENDER's project is sensitive on camera", async () => {
@@ -1764,6 +2249,118 @@ describe("App keyboard shortcuts", () => {
 		});
 	});
 
+	// The launch dialog that New Task opens is owned by App, and App used to load
+	// the presets exactly once per session. Connecting a provider from inside that
+	// dialog seeds new presets, and they stayed invisible until an app restart
+	// (Seq 1884): the offers vanished and nothing replaced them.
+	describe("New Task → launch dialog follows preset changes", () => {
+		const baseClaude = {
+			id: "builtin-claude",
+			name: "Claude",
+			baseCommand: "claude",
+			isDefault: true,
+			configurations: [{ id: "claude-default", name: "Default (Sonnet 5)", model: "claude-sonnet-5" }],
+			defaultConfigId: "claude-default",
+		};
+		const seededClaude = {
+			...baseClaude,
+			configurations: [
+				...baseClaude.configurations,
+				// The shape `seedPresetForTier` writes when a provider is connected:
+				// its own group label is what the Model field offers.
+				{
+					id: "best-value",
+					name: "Best value",
+					groupLabel: "Best value",
+					model: "claude-sonnet-5",
+					modelRoles: { main: "ds-v41-flash" },
+					seededTier: "practical" as const,
+				},
+			],
+		};
+
+		async function openLaunchDialogFromScratch() {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "task", projectId: "p1", taskId: "t1" }),
+			});
+			vi.mocked(api.request.createTask).mockResolvedValue({
+				id: "t-scratch",
+				seq: 7,
+				projectId: "p1",
+				title: "Scratch — 12:00",
+				description: "Scratch — 12:00",
+				status: "todo",
+				baseBranch: "main",
+				worktreePath: null,
+				branchName: null,
+				groupId: null,
+				variantIndex: null,
+				agentId: null,
+				configId: null,
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+			});
+
+			await renderApp();
+			await userEvent.keyboard("{Meta>}n{/Meta}");
+			await userEvent.click(await screen.findByText("Scratch Task"));
+			// The launch dialog's Model field — proof onCreateAndRun landed.
+			await waitFor(() => expect(document.getElementById("variant-0-model")).toBeTruthy());
+			return document.getElementById("variant-0-model") as HTMLButtonElement;
+		}
+
+		async function modelOptionLabels(modelButton: HTMLButtonElement): Promise<string[]> {
+			await userEvent.click(modelButton);
+			const overlays = document.querySelectorAll(".bg-overlay.border");
+			const dropdown = overlays[overlays.length - 1];
+			const labels = Array.from(dropdown?.querySelectorAll("button") ?? []).map((b) => b.textContent?.trim() ?? "");
+			await userEvent.click(modelButton);
+			return labels;
+		}
+
+		it("offers a preset seeded after the dialog opened", async () => {
+			vi.mocked(api.request.getAgents).mockResolvedValue([baseClaude]);
+			const modelButton = await openLaunchDialogFromScratch();
+
+			expect((await modelOptionLabels(modelButton)).join("|")).not.toContain("Best value");
+
+			// What `saveAgents` fans out when Connect a provider seeds the presets.
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent("rpc:agentsUpdated", { detail: [seededClaude] }));
+			});
+
+			expect((await modelOptionLabels(modelButton)).join("|")).toContain("Best value");
+		});
+
+		it("renders a favorite pointing at a preset that arrived on the push", async () => {
+			vi.mocked(api.request.getAgents).mockResolvedValue([baseClaude]);
+			vi.mocked(api.request.getGlobalSettings).mockResolvedValue({
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first",
+				updateChannel: "stable",
+				favorites: [{ agentId: "builtin-claude", configId: "best-value", uses: 1, lastUsedAt: 1 }],
+			});
+			await openLaunchDialogFromScratch();
+
+			const favTrigger = document.getElementById("variant-0-favorites") as HTMLButtonElement;
+			await userEvent.click(favTrigger);
+			// Unresolvable against the pre-push list, so the chip is dropped.
+			expect(document.body.textContent).not.toContain("Best value");
+			await userEvent.click(favTrigger);
+
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent("rpc:agentsUpdated", { detail: [seededClaude] }));
+			});
+
+			await userEvent.click(favTrigger);
+			await waitFor(() => expect(document.body.textContent).toContain("Best value"));
+		});
+	});
+
 	describe("dev3:// deep links", () => {
 		const dlProjects = [
 			{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
@@ -1867,6 +2464,51 @@ describe("App keyboard shortcuts", () => {
 			} finally {
 				zone.remove();
 			}
+		});
+
+		it("Escape inside a task view does not navigate, and stays unconsumed for the terminal", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t1" }),
+			});
+			await renderApp();
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t1");
+
+			// Focus deliberately outside any [data-terminal] node: the old guard only
+			// skipped navigation while the terminal held focus, which is exactly how
+			// an interrupt turned into "back to the board".
+			(document.body as HTMLElement).focus();
+
+			// Registered after the app's own window listener, so it observes whether
+			// the app consumed the key. Unconsumed is what lets the shell have it.
+			let prevented: boolean | null = null;
+			const observe = (e: KeyboardEvent) => { prevented = e.defaultPrevented; };
+			window.addEventListener("keydown", observe);
+			try {
+				await userEvent.keyboard("{Escape}");
+			} finally {
+				window.removeEventListener("keydown", observe);
+			}
+
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t1");
+			expect(prevented).toBe(false);
+		});
+
+		it("Escape in the split task view (taskView, no active task) does not navigate either", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1", taskView: true }),
+			});
+			await renderApp();
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-task-view", "true");
+
+			await userEvent.keyboard("{Escape}");
+
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-task-view", "true");
 		});
 	});
 

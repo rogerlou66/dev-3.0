@@ -1,0 +1,1576 @@
+/* Coordination v3 shares the feature shell and uses its own stage and transport. */
+.traffic-view {
+	user-select: none;
+	-webkit-user-select: none;
+}
+.traffic-inspector,
+.traffic-view input {
+	user-select: text;
+	-webkit-user-select: text;
+}
+.traffic-inspector[hidden] {
+	display: none;
+}
+.traffic-screen:has(.traffic-view[data-experiment="2"]) {
+	padding: 0;
+}
+.traffic-frame:has(.traffic-view[data-experiment="2"]) {
+	border-radius: 0;
+	max-width: none;
+	box-shadow: none;
+}
+.traffic-view[data-experiment="2"] {
+	position: relative;
+	background: rgb(var(--surface-base));
+}
+/* Stays in flow at every width. Floated over the stage it was anchored to the
+   view while the stage overlays are anchored to the stage, so the two drifted
+   apart with the toolbar's height and the quiet/parked pills landed on top of
+   these labels. */
+.traffic-view[data-experiment="2"] .traffic-summary {
+	gap: 18px;
+	padding: 10px 22px;
+	border: 0;
+	background: rgb(var(--surface-base));
+}
+.traffic-view[data-experiment="2"] .traffic-summary strong {
+	font-size: 12px;
+}
+.traffic-view[data-experiment="2"] .traffic-summary p {
+	font-size: 11px;
+	margin-top: 4px;
+}
+.traffic-view[data-experiment="2"] .traffic-stat {
+	display: none;
+}
+.traffic-view[data-experiment="2"] .traffic-stat b {
+	font-size: 12px;
+}
+.traffic-view[data-experiment="2"] .traffic-content {
+	position: relative;
+}
+.traffic-view[data-experiment="2"] .traffic-inspector {
+	width: 360px;
+	flex: 0 0 360px;
+	background: rgb(var(--surface-raised));
+}
+.traffic-list-toggle,
+.traffic-replay-start {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 8px 12px;
+	border-radius: 7px;
+	color: rgb(var(--text-secondary));
+	background: rgb(var(--surface-elevated));
+}
+.traffic-toolbar-tail .traffic-replay-start {
+	background: rgb(var(--accent-fill));
+	color: white;
+}
+.traffic-toolbar-tail .traffic-replay-start:hover:not(:disabled) {
+	background: rgb(var(--accent-fill-hover));
+	color: white;
+}
+.traffic-nodes {
+	flex: 1;
+	min-height: 230px;
+	position: relative;
+	overflow: hidden;
+	touch-action: none;
+	cursor: grab;
+	isolation: isolate;
+	background-image: radial-gradient(
+		rgb(var(--border-default) / 0.6) 1px,
+		transparent 1px
+	);
+	background-size: 22px 22px;
+}
+.traffic-nodes:active {
+	cursor: grabbing;
+}
+.traffic-nodes-scene,
+.traffic-nodes-wires,
+.traffic-nodes-cards {
+	position: absolute;
+	top: 0;
+	left: 0;
+}
+.traffic-nodes-scene {
+	transform-origin: 0 0;
+}
+/* Fills the scene instead of collapsing to nothing: the cards inside are all
+   absolutely positioned, so a zero-height box would paint the whole graph from
+   a layer that measures 0x0. The scene's size comes from the inline style. */
+.traffic-nodes-cards {
+	width: 100%;
+	height: 100%;
+}
+.traffic-project-group {
+	position: absolute;
+	border: 1px solid rgb(var(--border-default) / 0.4);
+	border-radius: 18px;
+	background: rgb(var(--surface-raised) / 0.25);
+	pointer-events: none;
+}
+/* `top` and `width` come from the inline style — both depend on the zoom, see
+   group-heading.ts. The name hangs above the frame, never inside it. */
+.traffic-project-heading {
+	position: absolute;
+	left: 24px;
+	transform-origin: top left;
+	font-size: 13px;
+	font-weight: 600;
+	color: rgb(var(--text-secondary));
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.traffic-nodes-wires {
+	overflow: visible;
+	pointer-events: none;
+}
+.traffic-wire {
+	fill: none;
+	/* --wire is set per edge to one of the 16 --wire-N tokens; --agent is the
+	   fallback for a wire drawn before a colour was assigned. */
+	stroke: rgb(var(--wire, var(--agent)) / 0.55);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	transition: opacity 200ms;
+}
+.traffic-wire.is-active {
+	stroke: rgb(var(--wire, var(--agent)) / 0.95);
+}
+/* Direction: the dash pattern runs from sender to recipient, one cycle per
+   --flow-duration. Offset decreases, which is what moves the pattern toward the
+   end of the path; growing it would run the wave backwards. The element only
+   exists while a message is in transit, so an idle wire carries no animation. */
+.traffic-wire-flow {
+	fill: none;
+	stroke: rgb(var(--wire, var(--agent)) / 0.92);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	animation: traffic-wire-flow var(--flow-duration, 1.2s) linear infinite;
+}
+@keyframes traffic-wire-flow {
+	from { stroke-dashoffset: 0; }
+	to { stroke-dashoffset: calc(-1 * var(--flow-cycle, 41px)); }
+}
+.traffic-wire.verdict-held,
+.traffic-wire.verdict-unconfirmed {
+	stroke-dasharray: 5 5;
+}
+.traffic-wire.verdict-not-delivered {
+	stroke: rgb(var(--danger) / 0.45);
+	stroke-dasharray: 3 5;
+}
+.traffic-wire.is-dim {
+	opacity: 0.14;
+}
+.traffic-flight {
+	fill: rgb(var(--agent));
+	filter: drop-shadow(0 0 12px rgb(var(--agent) / 0.8));
+}
+.traffic-flight.verdict-not-delivered {
+	fill: rgb(var(--danger));
+	filter: drop-shadow(0 0 12px rgb(var(--danger) / 0.8));
+}
+.traffic-node-card {
+	position: absolute;
+	padding: 0;
+	text-align: left;
+	border: 0;
+	border-radius: 10px;
+	/* Matches the 20px (w-5) rail of a Kanban card and an Active Tasks row. */
+	--node-rail: 20px;
+	color: rgb(var(--text-primary));
+	/* Same grammar as an Active Tasks row: the status colour washes the whole
+	   surface faintly instead of only marking an edge. */
+	background:
+		linear-gradient(
+			0deg,
+			color-mix(in srgb, var(--node-status) 6%, transparent),
+			color-mix(in srgb, var(--node-status) 6%, transparent)
+		),
+		rgb(var(--surface-elevated) / 0.96);
+	box-shadow:
+		0 8px 22px rgb(0 0 0 / 0.13),
+		inset 0 0 0 1px rgb(var(--border-default) / 0.55);
+	overflow: hidden;
+}
+.traffic-node-card::before {
+	content: "";
+	position: absolute;
+	inset: 0 14px auto var(--node-rail);
+	height: 2px;
+	background: var(--node-status);
+	opacity: 0.85;
+}
+/* The lifecycle rail of the Active Tasks row and the Kanban card, brought over
+   as a strip only: the traffic card keeps its full status word in the body, so
+   the rail carries the stage ring and never a second, shorter status word. It is
+   deliberately inert — the scene has no move-to menu and gains none here. */
+.traffic-node-rail {
+	position: absolute;
+	inset: 0 auto 0 0;
+	width: var(--node-rail);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding-top: 13px;
+	background: color-mix(in srgb, var(--node-status) 14%, transparent);
+	pointer-events: none;
+}
+/* The person, for as long as their message is playing: an icon over the card
+   they wrote to, with no card of their own. Nothing of the card grammar —
+   surface, status rail, title rows — applies to a human. */
+.traffic-user-speaker {
+	position: absolute;
+	z-index: 2;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	pointer-events: none;
+	text-align: center;
+	color: rgb(var(--text-primary));
+	animation: traffic-speaker-in 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+@keyframes traffic-speaker-in {
+	from { opacity: 0; transform: translateY(6px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.traffic-user-speaker {
+		animation: none;
+	}
+}
+.traffic-user-disc {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 76px;
+	height: 76px;
+	border-radius: 50%;
+	background:
+		linear-gradient(135deg, rgb(var(--accent) / 0.16), transparent 70%),
+		rgb(var(--surface-elevated));
+	box-shadow:
+		0 8px 22px rgb(0 0 0 / 0.16),
+		inset 0 0 0 1.5px rgb(var(--accent) / 0.55);
+	transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-user-speaker .traffic-icon {
+	width: 38px;
+	height: 38px;
+	color: rgb(var(--accent));
+}
+.traffic-user-speaker strong {
+	font-size: 15px;
+}
+/* What the person is saying, over their own head. Same bubble language as the
+   wire subject, but glued to the person in scene space instead of chasing a
+   point on the wire — a speaker's words do not float away from the speaker.
+   In the flow of the pair, not absolute over it: the box the collision search
+   reserved is only honest if the bubble takes its share of it. */
+.traffic-user-speech {
+	--message-tone: var(--agent);
+	position: relative;
+	margin-bottom: 6px;
+	width: max-content;
+	max-width: 264px;
+	padding: 9px 13px;
+	border-radius: 12px;
+	background: rgb(var(--surface-overlay));
+	box-shadow: 0 8px 25px rgb(0 0 0 / 0.2), inset 0 0 0 1px rgb(var(--message-tone) / 0.3);
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 1.35;
+	text-align: left;
+}
+/* Four lines, and the fourth is whole. The clamp sits here rather than on the
+   padded bubble because WebKit clips a -webkit-box at its content edge, so on a
+   padded box the line after the clamp shows through the padding, cut in half. */
+.traffic-user-speech-text {
+	display: -webkit-box;
+	-webkit-line-clamp: 4;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	/* The clamp already hides the fifth line; the 2px is slack against sub-pixel
+	   rounding, which would otherwise shave the bottom of the fourth. */
+	max-height: calc(4 * 1.35em + 2px);
+}
+.traffic-user-speech.is-failed {
+	--message-tone: var(--danger);
+}
+/* The run from a displaced pair to the card they wrote to. Accent, dashed and
+   short: it names a recipient, it is not a wire carrying traffic. */
+.traffic-speaker-tether {
+	stroke: rgb(var(--accent) / 0.75);
+	stroke-linecap: round;
+	fill: none;
+}
+.traffic-user-speech::after {
+	content: "";
+	position: absolute;
+	top: 100%;
+	left: 50%;
+	width: 12px;
+	height: 12px;
+	margin-left: -6px;
+	background: rgb(var(--surface-overlay));
+	box-shadow: inset 0 0 0 1px rgb(var(--message-tone) / 0.3);
+	clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.traffic-node-card.is-coordinator {
+	background:
+		linear-gradient(135deg, rgb(var(--success) / 0.065), transparent 70%),
+		rgb(var(--surface-elevated));
+	border: 1px dashed rgb(var(--success) / 0.65);
+}
+.traffic-node-card.is-coordinator::before {
+	display: none;
+}
+.traffic-node-card:hover {
+	box-shadow:
+		0 8px 22px rgb(0 0 0 / 0.13),
+		inset 0 0 0 1px rgb(var(--accent) / 0.7);
+}
+.traffic-node-card.is-selected {
+	box-shadow:
+		0 0 0 2px rgb(var(--accent)),
+		0 8px 22px rgb(0 0 0 / 0.13);
+}
+.traffic-node-card.is-lit {
+	box-shadow:
+		0 0 0 1px rgb(var(--agent) / 0.65),
+		0 0 28px rgb(var(--agent) / 0.12);
+}
+.traffic-node-card.is-dim {
+	opacity: 0.28;
+}
+.traffic-node-full {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 13px 15px 13px calc(var(--node-rail) + 12px);
+	height: 100%;
+}
+/* Never let flex shrink a clamped block below a whole line — a shrunk line box
+   is the half-cut glyph row that made these cards look broken. */
+.traffic-node-full > * {
+	flex: 0 0 auto;
+	min-height: 0;
+}
+.traffic-node-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 10px;
+	color: rgb(var(--text-muted));
+}
+.traffic-node-dot {
+	width: 5px;
+	height: 5px;
+	flex: 0 0 5px;
+	border-radius: 50%;
+	background: var(--node-status);
+}
+.traffic-node-head b {
+	font-family: var(--dev3-mono-stack);
+	font-weight: 500;
+}
+.traffic-node-head em {
+	font-style: normal;
+	font-size: 10px;
+	color: rgb(var(--success));
+}
+/* The sidebar's title weight, not a headline: this is a task row that happens to
+   sit on a stage, so it reads at the same pitch as everywhere else in the app. */
+.traffic-node-full > strong {
+	font-size: 15px;
+	line-height: 1.35;
+	font-weight: 500;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+/* Kept as the card's full status word — the rail carries no second, shorter one.
+   Set in the uppercase tracked type the app uses for a lifecycle label. */
+.traffic-node-state {
+	color: var(--node-ink);
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.traffic-node-overview {
+	font-size: 12px;
+	line-height: 1.5;
+	color: rgb(var(--text-tertiary));
+	display: -webkit-box;
+	-webkit-line-clamp: 3;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+.traffic-node-message {
+	margin-top: auto;
+	color: rgb(var(--agent));
+	font-size: 11px;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.traffic-node-compact {
+	display: none;
+}
+.traffic-nodes[data-detail="compact"] .traffic-node-full {
+	display: none;
+}
+.traffic-nodes[data-detail="compact"] .traffic-node-compact {
+	display: flex;
+	position: absolute;
+	top: 9px;
+	left: calc(var(--node-rail) + 6px);
+	flex-direction: column;
+	gap: 7px;
+	transform-origin: 0 0;
+	transform: scale(var(--node-inverse));
+	width: calc((100% - var(--node-rail) - 16px) / var(--node-inverse));
+}
+/* Zoomed out, the ring is a few pixels of noise while the coloured strip still
+   reads. The strip stays, the ring waits for the full tier. */
+.traffic-nodes[data-detail="compact"] .traffic-node-rail > * {
+	display: none;
+}
+.traffic-node-compact .traffic-node-head {
+	font-size: 9px;
+}
+.traffic-node-compact > strong {
+	font-size: 12px;
+	line-height: 1.35;
+	font-weight: 600;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+/* Uppercase and tracking cost about a third of the width, and the compact body is
+   the narrowest place the status word lives — "Agent is Working" clipped to
+   "AGENT IS WORK…". A truncated status is worse than an unstyled one. */
+.traffic-node-compact .traffic-node-state {
+	font-size: 10px;
+	text-transform: none;
+	letter-spacing: normal;
+	font-weight: 500;
+}
+.traffic-nodes[data-detail="cell"] .traffic-node-card {
+	background: var(--node-status);
+	border-radius: 6px;
+}
+.traffic-nodes[data-detail="cell"] .traffic-node-card > *,
+.traffic-nodes[data-detail="cell"] .traffic-node-card::before {
+	display: none;
+}
+.traffic-node-cell {
+	display: none;
+}
+/* The seq is the only thing left on the card here, so it owns the whole box.
+   Its size comes from the inline style — it scales with the card, not with the
+   zoom, so the number stays inside the rectangle at every scale. */
+.traffic-nodes[data-detail="cell"] .traffic-node-cell {
+	display: flex;
+	position: absolute;
+	inset: 0;
+	align-items: center;
+	justify-content: center;
+	font-weight: 700;
+	line-height: 1;
+	font-variant-numeric: tabular-nums;
+	letter-spacing: -0.02em;
+}
+.traffic-node-card.is-parked {
+	filter: grayscale(1);
+	opacity: 0.65;
+}
+.traffic-node-card.is-parked.is-selected,
+.traffic-node-card.is-parked:hover {
+	opacity: 1;
+}
+.traffic-node-card.is-completed,
+.traffic-node-card.is-cancelled {
+	background:
+		linear-gradient(
+			140deg,
+			color-mix(in srgb, var(--node-status) 8%, transparent),
+			transparent
+		),
+		rgb(var(--surface-elevated));
+}
+/* A finished card must read as finished from across the stage, so the verdict is
+   a filled stamp carrying its own icon and word — colour is never the only cue.
+   The status rule at the top of the card stays 2px for everything else and goes
+   full-bleed and thicker here, which is the one difference the eye catches at
+   overview zoom. */
+.traffic-node-card.is-completed::before,
+.traffic-node-card.is-cancelled::before {
+	inset: 0 0 auto;
+	height: 4px;
+	opacity: 1;
+}
+.traffic-node-stamp {
+	display: inline-flex;
+	align-items: center;
+	align-self: flex-start;
+	gap: 5px;
+	max-width: 100%;
+	padding: 3px 9px 3px 7px;
+	border-radius: 6px;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	color: var(--node-ink);
+	background: color-mix(in srgb, var(--node-status) 20%, transparent);
+	box-shadow: inset 0 0 0 1px
+		color-mix(in srgb, var(--node-status) 55%, transparent);
+}
+.traffic-node-stamp .traffic-icon {
+	width: 13px;
+	height: 13px;
+	/* 2px stroke beside the 600-weight word it labels. */
+	stroke-width: 2;
+}
+.traffic-node-compact .traffic-node-stamp {
+	padding: 2px 7px 2px 5px;
+	font-size: 10px;
+	gap: 4px;
+}
+.traffic-node-compact .traffic-node-stamp .traffic-icon {
+	width: 11px;
+	height: 11px;
+}
+/* Frozen in place but not yet born: the layout is computed from every node in
+   the window, so a card appearing mid-replay never shifts its neighbours. */
+.traffic-node-card.is-unborn {
+	opacity: 0;
+	pointer-events: none;
+	transform: scale(0.96);
+	transition:
+		opacity 220ms cubic-bezier(0.2, 0, 0, 1),
+		transform 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-node-card:not(.is-unborn) {
+	transition:
+		opacity 260ms cubic-bezier(0.2, 0, 0, 1),
+		transform 260ms cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-nodes-bands {
+	position: absolute;
+	left: 20px;
+	top: 14px;
+	display: flex;
+	gap: 7px;
+	z-index: 2;
+}
+.traffic-nodes-bands button {
+	padding: 6px 9px;
+	border-radius: 7px;
+	font-size: 11px;
+	color: rgb(var(--text-tertiary));
+	background: rgb(var(--surface-raised) / 0.92);
+	box-shadow: inset 0 0 0 1px rgb(var(--border-default) / 0.5);
+}
+.traffic-nodes-bands button[aria-pressed="true"] {
+	color: rgb(var(--accent));
+	background: rgb(var(--accent) / 0.12);
+}
+.traffic-minimap {
+	position: absolute;
+	right: 20px;
+	top: 16px;
+	width: 148px;
+	padding: 8px 9px 5px;
+	border-radius: 9px;
+	background: rgb(var(--surface-raised) / 0.85);
+	box-shadow: 0 12px 34px rgb(0 0 0 / 0.12);
+	cursor: grab;
+	touch-action: none;
+	text-align: left;
+	z-index: 2;
+}
+.traffic-minimap:active {
+	cursor: grabbing;
+}
+.traffic-minimap:focus-visible {
+	outline: 2px solid rgb(var(--accent));
+	outline-offset: 3px;
+}
+.traffic-minimap svg {
+	display: block;
+	width: 100%;
+	height: 72px;
+}
+.traffic-minimap span {
+	display: block;
+	margin-top: 4px;
+	font: 9px var(--dev3-mono-stack);
+	color: rgb(var(--text-tertiary));
+}
+.traffic-minimap-node {
+	fill: rgb(var(--warning) / 0.5);
+}
+.traffic-minimap-node.is-hub {
+	fill: rgb(var(--success) / 0.65);
+}
+.traffic-minimap-node.is-selected {
+	fill: rgb(var(--accent));
+}
+.traffic-minimap-view {
+	fill: rgb(var(--accent) / 0.04);
+	stroke: rgb(var(--accent) / 0.65);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
+}
+.traffic-nodes-empty {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-nodes .traffic-camera-controls {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	right: 20px;
+	bottom: 14px;
+	top: auto;
+	left: auto;
+	gap: 3px;
+	padding: 4px;
+	border: 0;
+	border-radius: 9px;
+	background: rgb(var(--surface-raised) / 0.92);
+}
+.traffic-nodes .traffic-camera-controls button {
+	width: auto;
+	font-size: 11px;
+	display: inline-flex;
+	justify-content: center;
+	align-items: center;
+	gap: 6px;
+	min-width: 32px;
+	min-height: 32px;
+	padding: 5px;
+}
+.traffic-camera-controls span {
+	min-width: 40px;
+	font: 11px var(--dev3-mono-stack);
+	text-align: center;
+}
+.traffic-nodes .traffic-map-caption {
+	position: absolute;
+	left: 22px;
+	bottom: 16px;
+	right: auto;
+	top: auto;
+	margin: 0;
+	max-width: 52%;
+	font-size: 10px;
+	color: rgb(var(--text-tertiary));
+	pointer-events: none;
+	/* Same plate as the band pills: bare text over the dot grid reads as noise. */
+	padding: 5px 8px;
+	border-radius: 7px;
+	background: rgb(var(--surface-raised) / 0.92);
+	box-shadow: inset 0 0 0 1px rgb(var(--border-default) / 0.5);
+}
+.traffic-icon {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.65;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.traffic-camera-controls .is-active,
+.traffic-transport .is-active {
+	color: rgb(var(--accent));
+	background: rgb(var(--accent) / 0.1);
+}
+.traffic-edge-subject {
+	--message-tone: var(--agent);
+	position: absolute;
+	z-index: 3;
+	pointer-events: none;
+	transform: translate(-50%, -100%);
+	width: max-content;
+	padding: 9px 13px;
+	border-radius: 12px;
+	background: rgb(var(--surface-overlay));
+	box-shadow: 0 8px 25px rgb(0 0 0 / 0.2), inset 0 0 0 1px rgb(var(--message-tone) / 0.3);
+}
+.traffic-edge-subject.is-failed {
+	--message-tone: var(--danger);
+}
+.traffic-edge-subject.is-below {
+	transform: translate(-50%, 0);
+}
+.traffic-edge-subject strong {
+	display: -webkit-box;
+	max-width: 264px;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	font-size: 13px;
+	font-weight: 500;
+}
+.traffic-message-tail {
+	position: absolute;
+	bottom: -22px;
+	overflow: visible;
+	fill: rgb(var(--surface-overlay));
+	stroke: rgb(var(--message-tone) / 0.3);
+	stroke-width: 1px;
+}
+.traffic-edge-subject.is-below .traffic-message-tail {
+	bottom: auto;
+	top: -22px;
+	transform: scaleY(-1);
+}
+/* The `dev3 notify` preview over the card that sent it. Its own silhouette, so a
+   notification never reads as one more message between two cards. */
+.traffic-notification-cloud {
+	--cloud-tone: var(--agent);
+	position: absolute;
+	z-index: 4;
+	pointer-events: none;
+	transform: translate(-50%, -100%);
+}
+.traffic-notification-cloud.is-below {
+	transform: translate(-50%, 0);
+}
+.traffic-notification-cloud.level-success {
+	--cloud-tone: var(--success);
+}
+.traffic-notification-cloud.level-error {
+	--cloud-tone: var(--danger);
+}
+.traffic-notification-cloud-outline {
+	position: absolute;
+	inset: 0;
+	overflow: visible;
+	fill: rgb(var(--surface-overlay));
+	stroke: rgb(var(--cloud-tone) / 0.55);
+	stroke-width: 1.5;
+	filter: drop-shadow(0 8px 22px rgb(0 0 0 / 0.28));
+}
+/* The trail shares the body's fill and stroke, so it reads as the same object
+   drifting off rather than two decorations that happen to sit nearby. */
+.traffic-notification-cloud-puff {
+	fill: rgb(var(--surface-overlay));
+	stroke: rgb(var(--cloud-tone) / 0.55);
+	stroke-width: 1.5;
+	paint-order: stroke fill;
+}
+.traffic-notification-cloud-body {
+	position: absolute;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	width: max-content;
+}
+.traffic-notification-cloud-level {
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 1;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: rgb(var(--cloud-tone));
+}
+.traffic-notification-cloud-body strong {
+	display: -webkit-box;
+	max-width: 250px;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 1.25;
+}
+/* Zoomed out the cloud sits over a card a fraction of its size, so the text drops
+   to one line and the level word carries the meaning on its own. */
+.traffic-notification-cloud.is-compact .traffic-notification-cloud-body strong {
+	-webkit-line-clamp: 1;
+	max-width: 168px;
+	font-size: 11px;
+}
+.traffic-playback {
+	margin: 0 16px 8px;
+	background: rgb(var(--surface-raised) / 0.88);
+	border-radius: 10px;
+	flex-shrink: 0;
+}
+.traffic-event-readout {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 39px;
+	padding: 6px 14px;
+	border-bottom: 1px solid rgb(var(--border-default) / 0.3);
+}
+.traffic-event-readout time,
+.traffic-event-counter {
+	color: rgb(var(--text-secondary));
+	font: 10px var(--dev3-mono-stack);
+	white-space: nowrap;
+}
+.traffic-event-readout > .traffic-icon {
+	color: rgb(var(--agent));
+}
+.traffic-event-subject {
+	display: flex;
+	gap: 10px;
+	align-items: center;
+	min-width: 0;
+	flex: 1;
+	text-align: left;
+}
+.traffic-event-subject b {
+	color: rgb(var(--agent));
+	font: 11px var(--dev3-mono-stack);
+	white-space: nowrap;
+}
+.traffic-event-subject span {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.traffic-transport {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 8px 10px 2px;
+}
+.traffic-transport > button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 32px;
+	min-height: 34px;
+	border-radius: 7px;
+	color: rgb(var(--text-tertiary));
+	flex-shrink: 0;
+}
+.traffic-transport > select {
+	background: rgb(var(--surface-elevated));
+	border: 1px solid rgb(var(--border-default) / 0.5);
+	border-radius: 6px;
+	font-size: 11px;
+	padding: 6px 4px;
+	color: rgb(var(--text-secondary));
+}
+.traffic-transport .traffic-play-button {
+	color: rgb(var(--accent));
+	background: rgb(var(--accent) / 0.1);
+}
+.traffic-play-icons {
+	position: relative;
+	display: block;
+	width: 16px;
+	height: 16px;
+}
+.traffic-play-icons > svg {
+	position: absolute;
+	inset: 0;
+	transition:
+		transform 300ms cubic-bezier(0.2, 0, 0, 1),
+		opacity 300ms cubic-bezier(0.2, 0, 0, 1),
+		filter 300ms cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-play-icons > svg:last-child,
+.traffic-play-icons.is-playing > svg:first-child {
+	transform: scale(0.25);
+	opacity: 0;
+	filter: blur(4px);
+}
+.traffic-play-icons.is-playing > svg:last-child {
+	transform: scale(1);
+	opacity: 1;
+	filter: blur(0);
+}
+.traffic-replay-track {
+	min-width: 50px;
+	flex: 1;
+	position: relative;
+	padding: 10px 5px 0;
+	margin: 0 10px;
+}
+.traffic-replay-track input {
+	display: block;
+	width: 100%;
+	accent-color: rgb(var(--accent));
+	height: 18px;
+}
+.traffic-replay-dots {
+	position: absolute;
+	top: 2px;
+	left: 5px;
+	right: 5px;
+	height: 4px;
+}
+.traffic-replay-dots i {
+	position: absolute;
+	width: 4px;
+	height: 4px;
+	border-radius: 1px;
+	background: rgb(var(--agent));
+}
+.traffic-replay-dots i.is-current {
+	background: rgb(var(--accent));
+	height: 8px;
+	top: -2px;
+}
+.traffic-replay-times {
+	display: flex;
+	justify-content: space-between;
+	color: rgb(var(--text-tertiary));
+	font: 9px var(--dev3-mono-stack);
+	padding-top: 3px;
+}
+.traffic-replay-window {
+	min-width: 150px;
+}
+.traffic-replay-note {
+	padding: 5px 14px 9px;
+	margin: 0;
+	color: rgb(var(--text-tertiary));
+	font-size: 10px;
+	text-align: right;
+}
+/* The presentation picker, shaped like the diff viewer's mode segments. */
+/* One filter axis as a row of independent toggles — same shell as the
+   presentation segments beside it, but multi-select, so the pressed state is
+   `aria-pressed` rather than `aria-checked`. */
+.traffic-toggles {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid rgb(var(--border-default) / 0.7);
+	border-radius: 9px;
+	background: rgb(var(--surface-base) / 0.5);
+	flex-shrink: 0;
+}
+.traffic-toggles button {
+	padding: 6px 12px;
+	min-height: 30px;
+	border: 0;
+	border-radius: 7px;
+	font-size: 12px;
+	font-weight: 600;
+	color: rgb(var(--text-tertiary));
+	background: transparent;
+}
+.traffic-toggles button:hover:not(:disabled) {
+	color: rgb(var(--text-primary));
+	background: rgb(var(--surface-elevated));
+}
+.traffic-toggles button[aria-pressed="true"] {
+	color: white;
+	background: rgb(var(--accent-fill));
+}
+.traffic-toggles button[aria-pressed="true"]:hover:not(:disabled) {
+	background: rgb(var(--accent-fill-hover));
+}
+
+.traffic-experiment {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid rgb(var(--border-default) / 0.7);
+	border-radius: 9px;
+	background: rgb(var(--surface-base) / 0.5);
+	flex-shrink: 0;
+}
+.traffic-experiment button {
+	padding: 6px 12px;
+	min-height: 30px;
+	border: 0;
+	border-radius: 7px;
+	font-size: 12px;
+	font-weight: 600;
+	color: rgb(var(--text-tertiary));
+	background: transparent;
+}
+.traffic-experiment button:hover {
+	color: rgb(var(--text-primary));
+	background: rgb(var(--surface-elevated));
+}
+.traffic-experiment button[aria-checked="true"] {
+	color: white;
+	background: rgb(var(--accent-fill));
+}
+.traffic-experiment button[aria-checked="true"]:hover {
+	background: rgb(var(--accent-fill-hover));
+}
+
+@media (max-width: 900px) {
+	.traffic-view[data-experiment="2"] .traffic-stat {
+		display: none;
+	}
+	.traffic-view[data-experiment="2"] .traffic-toolbar {
+		gap: 6px;
+		padding: 8px 12px;
+	}
+	.traffic-view[data-experiment="2"] .traffic-summary {
+		padding: 8px 14px;
+	}
+	.traffic-view[data-experiment="2"] .traffic-inspector {
+		position: absolute;
+		inset: 0 0 0 auto;
+		width: min(360px, 100%);
+		z-index: 5;
+	}
+	.traffic-nodes {
+		min-height: 260px;
+	}
+	.traffic-minimap {
+		width: 85px;
+		right: 12px;
+		top: 12px;
+		padding: 5px;
+	}
+	.traffic-minimap svg {
+		height: 42px;
+	}
+	.traffic-minimap span {
+		display: none;
+	}
+	.traffic-nodes .traffic-map-caption {
+		display: none;
+	}
+	.traffic-nodes .traffic-camera-controls {
+		right: 12px;
+		bottom: 12px;
+	}
+	.traffic-camera-controls button,
+	.traffic-transport > button {
+		min-height: 44px;
+	}
+	.traffic-playback {
+		margin: 0 8px 8px;
+	}
+	.traffic-event-counter,
+	.traffic-event-readout > .traffic-icon {
+		display: none;
+	}
+	.traffic-event-readout {
+		gap: 6px;
+		padding: 6px 10px;
+	}
+	.traffic-event-subject {
+		gap: 6px;
+	}
+	.traffic-event-subject b {
+		font-size: 9px;
+	}
+	.traffic-transport {
+		gap: 2px;
+		padding: 4px 6px;
+	}
+	.traffic-replay-track {
+		margin: 0 4px;
+	}
+	.traffic-replay-window {
+		min-width: 0;
+		width: 85px;
+	}
+	.traffic-replay-note {
+		font-size: 9px;
+		text-align: left;
+	}
+	.traffic-experiment button {
+		min-height: 44px;
+		padding: 6px 10px;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.traffic-node-card,
+	/* Both card selectors carry a `:not()`, so the bare class alone would lose on
+	   specificity and the fade would survive reduced motion. */
+	.traffic-node-card.is-unborn,
+	.traffic-node-card:not(.is-unborn),
+	.traffic-wire,
+	.traffic-play-icons > svg {
+		transition: none;
+	}
+	.traffic-node-card.is-unborn {
+		transform: none;
+	}
+	.traffic-view[data-experiment="2"] button:active {
+		transform: none;
+	}
+	/* The wave is not rendered at all under reduced motion (TrafficNodes drops it),
+	   so this only covers a wave already on screen when the setting flips. */
+	.traffic-wire-flow {
+		animation: none;
+	}
+}
+
+.traffic-replay-track input[type="range"] {
+	appearance: none;
+	background: transparent;
+	margin: 0;
+	cursor: pointer;
+}
+.traffic-replay-track input::-webkit-slider-runnable-track {
+	height: 1px;
+	background: rgb(var(--border-default) / 0.6);
+}
+.traffic-replay-track input::-webkit-slider-thumb {
+	appearance: none;
+	width: 6px;
+	height: 20px;
+	margin-top: -9px;
+	border-radius: 2px;
+	background: rgb(var(--accent));
+}
+.traffic-replay-track input::-moz-range-track {
+	height: 1px;
+	background: rgb(var(--border-default) / 0.6);
+}
+.traffic-replay-track input::-moz-range-thumb {
+	border: 0;
+	width: 6px;
+	height: 20px;
+	border-radius: 2px;
+	background: rgb(var(--accent));
+}
+
+.traffic-filter-fields {
+	display: grid;
+	gap: 16px;
+	padding: 16px;
+}
+.traffic-filter-fields input {
+	min-height: 44px;
+	padding: 8px 12px;
+	border: 1px solid rgb(var(--border-default));
+	border-radius: 8px;
+	background: rgb(var(--surface-base));
+	color: rgb(var(--text-primary));
+}
+@media (max-width: 900px) {
+	.traffic-view[data-experiment="2"] .traffic-toolbar {
+		flex-wrap: nowrap;
+	}
+	/* Between 700 and 900 this toolbar never wraps, so the tail shrinks instead:
+	   the readout keeps its dot and ellipsizes, and Replay drops to its icon (the
+	   label stays as its accessible name and tooltip). Below 700 there is no room
+	   left to shrink into, and the wrap rule below gives the tail its own row. */
+	.traffic-view[data-experiment="2"] .traffic-toolbar-tail {
+		gap: 6px;
+		flex: 0 1 auto;
+	}
+	.traffic-view[data-experiment="2"] .traffic-toolbar-tail .traffic-live {
+		max-width: 92px;
+		font-size: 11px;
+	}
+	.traffic-view[data-experiment="2"]
+		.traffic-toolbar-tail
+		.traffic-action-label {
+		display: none;
+	}
+	.traffic-view[data-experiment="2"] .traffic-replay-start {
+		padding: 6px 8px;
+	}
+	/* Natural width, never grown and never squeezed: the picker is two labelled
+	   buttons, and growing it here left the collapsed filter row short of the
+	   space the buttons themselves need. */
+	.traffic-view[data-experiment="2"] .traffic-experiment {
+		min-width: 0;
+		max-width: none;
+		flex: 0 0 auto;
+	}
+	.traffic-view[data-experiment="2"] .traffic-experiment button {
+		white-space: nowrap;
+		padding: 6px;
+		font-size: 11px;
+	}
+	.traffic-view[data-experiment="2"] .traffic-main {
+		flex: 1;
+		min-height: 0;
+	}
+	.traffic-view[data-experiment="2"] .traffic-content {
+		overflow: hidden;
+	}
+	.traffic-view[data-experiment="2"] .traffic-nodes {
+		min-height: 200px;
+	}
+	.traffic-transport {
+		display: grid;
+		grid-template-columns: 36px 36px 36px 48px 1fr auto;
+		gap: 4px;
+	}
+	.traffic-replay-track {
+		grid-row: 1;
+		grid-column: 1 / -1;
+		margin: 0 8px;
+	}
+	.traffic-replay-window {
+		width: auto;
+		min-width: 0;
+	}
+	.traffic-transport > button,
+	.traffic-transport > select {
+		padding: 4px;
+	}
+}
+
+.traffic-period-trigger {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 34px;
+	padding: 6px 10px;
+	border-radius: 7px;
+	border: 1px solid rgb(var(--border-default) / 0.6);
+	background: rgb(var(--surface-elevated) / 0.65);
+	color: rgb(var(--text-secondary));
+	font-size: 12px;
+	white-space: nowrap;
+}
+.traffic-period-trigger span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.traffic-calendar-popover {
+	position: fixed;
+	z-index: 9999;
+	width: 320px;
+	max-height: calc(100dvh - 24px);
+	overflow-y: auto;
+	border-radius: 12px;
+	background: rgb(var(--surface-raised));
+	color: rgb(var(--text-primary));
+	box-shadow:
+		0 1px 3px rgb(0 0 0 / 0.12),
+		0 10px 40px rgb(0 0 0 / 0.22),
+		inset 0 0 0 1px rgb(var(--border-default) / 0.4);
+}
+.traffic-calendar {
+	padding: 14px;
+	color: rgb(var(--text-primary));
+}
+.traffic-calendar button {
+	cursor: pointer;
+	border: 0;
+	border-radius: 7px;
+	background: transparent;
+	color: inherit;
+	font-size: 12px;
+	min-height: 36px;
+}
+.traffic-calendar button:hover:not(:disabled) {
+	background: rgb(var(--surface-elevated));
+}
+.traffic-calendar button[aria-pressed="true"] {
+	background: rgb(var(--accent-fill));
+	color: white;
+}
+.traffic-calendar button:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+.traffic-calendar button:focus-visible,
+.traffic-period-trigger:focus-visible {
+	outline: 2px solid rgb(var(--accent));
+	outline-offset: 2px;
+}
+.traffic-calendar-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding-bottom: 12px;
+	border-bottom: 1px solid rgb(var(--border-default) / 0.4);
+}
+.traffic-calendar-presets button {
+	padding: 6px 9px;
+}
+.traffic-calendar-month {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 0;
+}
+.traffic-calendar-month strong {
+	font-size: 13px;
+	text-transform: capitalize;
+}
+.traffic-calendar-month button {
+	width: 36px;
+	font-size: 22px;
+}
+.traffic-calendar-weekdays,
+.traffic-calendar-days {
+	display: grid;
+	grid-template-columns: repeat(7, 1fr);
+	gap: 4px;
+	text-align: center;
+}
+.traffic-calendar-weekdays {
+	color: rgb(var(--text-tertiary));
+	font-size: 11px;
+	margin-bottom: 6px;
+}
+.traffic-calendar-days button[aria-current="date"] {
+	box-shadow: inset 0 0 0 1px rgb(var(--accent));
+}
+@media (max-width: 900px) {
+	.traffic-period-trigger {
+		min-height: 44px;
+	}
+}
+@media (max-width: 699px) {
+	.traffic-calendar button {
+		min-height: 44px;
+	}
+}
+.traffic-calendar button[aria-pressed="true"]:hover {
+	background: rgb(var(--accent-fill-hover));
+	color: white;
+}
+
+/* ── Completion celebration ──────────────────────────────────────────────────
+   A bounded, run-once show over the card that just reached `completed`: two
+   confetti waves, three small fireworks staggered behind them, and a badge
+   naming the verdict and — only when the movement log proves one — how long it
+   took. The whole thing is three seconds, and the last particle lands before
+   the closing fade so nothing is cut mid-flight. Keyframes rather than
+   transitions because this is a staged sequence that plays once (better-ui #4);
+   the badge is a static cue that survives `prefers-reduced-motion`, so motion
+   is never the only channel. Timings live in `completion-celebration.ts`; the
+   numbers here mirror them. */
+.traffic-celebration {
+	position: absolute;
+	pointer-events: none;
+	z-index: 3;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	/* The overlay leaves rather than being cut: 2680ms still, then 320ms out. */
+	animation: traffic-celebration-out 320ms cubic-bezier(0.2, 0, 0, 1) 2680ms both;
+}
+@keyframes traffic-celebration-out {
+	from {
+		opacity: 1;
+	}
+	to {
+		opacity: 0;
+	}
+}
+.traffic-node-card.is-celebrating {
+	box-shadow:
+		0 0 0 2px rgb(var(--success) / 0.9),
+		0 10px 30px rgb(var(--success) / 0.22),
+		0 8px 22px rgb(0 0 0 / 0.13);
+	/* The ring is a colour change, not motion: it fades in and out with the
+	   overlay instead of snapping, and survives reduced motion untouched. */
+	transition: box-shadow 320ms cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-celebration-badge {
+	position: relative;
+	top: -14px;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 100%;
+	padding: 4px 10px 4px 8px;
+	border-radius: 8px;
+	font-size: 12px;
+	font-weight: 600;
+	white-space: nowrap;
+	color: rgb(var(--text-primary));
+	background: rgb(var(--surface-elevated));
+	box-shadow:
+		inset 0 0 0 1px rgb(var(--success) / 0.6),
+		0 6px 16px rgb(0 0 0 / 0.18);
+	/* better-ui #7: scale 0.25 → 1, opacity 0 → 1, blur 4px → 0. */
+	animation: traffic-celebration-badge 320ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+.traffic-celebration-badge .traffic-icon {
+	width: 13px;
+	height: 13px;
+	/* 2px stroke beside the 600-weight word it labels. */
+	stroke-width: 2;
+	color: rgb(var(--success));
+}
+@keyframes traffic-celebration-badge {
+	from {
+		opacity: 0;
+		transform: scale(0.25);
+		filter: blur(4px);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+		filter: blur(0);
+	}
+}
+.traffic-celebration-piece {
+	position: absolute;
+	left: 50%;
+	top: 8px;
+	width: 6px;
+	height: 6px;
+	border-radius: 1.5px;
+	background: rgb(var(--success));
+	opacity: 0;
+	animation: traffic-celebration-piece 1200ms cubic-bezier(0.2, 0, 0, 1)
+		var(--piece-delay) both;
+}
+.traffic-celebration-piece:nth-child(3n) {
+	background: rgb(var(--accent));
+}
+.traffic-celebration-piece:nth-child(3n + 1) {
+	background: rgb(var(--agent));
+	border-radius: 50%;
+}
+@keyframes traffic-celebration-piece {
+	0% {
+		opacity: 0;
+		transform: translate(-50%, 0) rotate(0deg) scale(0.4);
+	}
+	18% {
+		opacity: 1;
+	}
+	70% {
+		opacity: 1;
+		/* Translate first, then spin the piece: rotating before the offset would
+		   rotate the direction too and collapse the fan. */
+		transform: translate(-50%, 0)
+			translate(
+				calc(cos(var(--piece-angle)) * var(--piece-distance)),
+				calc(sin(var(--piece-angle)) * var(--piece-distance))
+			)
+			rotate(var(--piece-spin))
+			scale(1);
+	}
+	100% {
+		opacity: 0;
+		/* The piece falls out of its arc instead of vanishing at the top of it —
+		   what makes a burst read as confetti rather than as a starburst. */
+		transform: translate(-50%, 0)
+			translate(
+				calc(cos(var(--piece-angle)) * var(--piece-distance)),
+				calc(sin(var(--piece-angle)) * var(--piece-distance) + 22px)
+			)
+			rotate(calc(var(--piece-spin) * 1.35))
+			scale(0.9);
+	}
+}
+/* Fireworks: a small ring of sparks going off beside the card, staggered behind
+   the confetti so the three seconds keep re-lighting instead of decaying once.
+   Positioned in the margin around the card — never over the title or the badge. */
+.traffic-celebration-firework {
+	position: absolute;
+	width: 0;
+	height: 0;
+}
+.traffic-celebration-spark {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 4px;
+	height: 4px;
+	margin: -2px 0 0 -2px;
+	border-radius: 50%;
+	background: rgb(var(--success));
+	opacity: 0;
+	box-shadow: 0 0 6px rgb(var(--success) / 0.7);
+	animation: traffic-celebration-spark 760ms cubic-bezier(0.2, 0, 0, 1)
+		var(--spark-delay) both;
+}
+.traffic-celebration-firework:nth-child(2) .traffic-celebration-spark {
+	background: rgb(var(--accent));
+	box-shadow: 0 0 6px rgb(var(--accent) / 0.7);
+}
+.traffic-celebration-firework:nth-child(3) .traffic-celebration-spark {
+	background: rgb(var(--agent));
+	box-shadow: 0 0 6px rgb(var(--agent) / 0.7);
+}
+.traffic-celebration-firework:nth-child(4) .traffic-celebration-spark {
+	background: rgb(var(--success));
+	box-shadow: 0 0 7px rgb(var(--success) / 0.8);
+}
+@keyframes traffic-celebration-spark {
+	0% {
+		opacity: 0;
+		transform: translate(0, 0) scale(0.4);
+	}
+	12% {
+		opacity: 1;
+	}
+	100% {
+		opacity: 0;
+		transform: translate(
+				calc(cos(var(--spark-angle)) * var(--spark-distance)),
+				calc(sin(var(--spark-angle)) * var(--spark-distance) + 6px)
+			)
+			scale(0.5);
+	}
+}
+/* Static success treatment: the badge stays, every particle goes. The card ring
+   is a colour change, not motion, so it stays too. */
+.traffic-celebration[data-reduced="true"] .traffic-celebration-badge {
+	animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.traffic-celebration-piece,
+	.traffic-celebration-firework {
+		display: none;
+	}
+	.traffic-celebration-badge {
+		animation: none;
+	}
+	/* The overlay still leaves on its own, by an opacity fade only — the one
+	   substitution reduced-motion asks for, rather than a hard cut. */
+	.traffic-celebration {
+		animation-duration: 200ms;
+		animation-delay: 2800ms;
+	}
+}
+
+/* Phone width: the row of filter controls alone fills it, so the readout and the
+   stage action take a row of their own rather than being squeezed out of the
+   nowrap toolbar above. The label comes back with the space. */
+@media (max-width: 700px) {
+	.traffic-view[data-experiment="2"] .traffic-toolbar {
+		flex-wrap: wrap;
+	}
+	.traffic-view[data-experiment="2"] .traffic-toolbar-tail .traffic-live {
+		max-width: none;
+	}
+	.traffic-view[data-experiment="2"]
+		.traffic-toolbar-tail
+		.traffic-action-label {
+		display: inline;
+	}
+}

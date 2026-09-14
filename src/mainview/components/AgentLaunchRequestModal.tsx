@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentCheckResult, AgentLaunchChoice, AgentLaunchRequest, CodingAgent, GlobalSettings, LaunchVariant, TaskPriority } from "../../shared/types";
 import { api } from "../rpc";
 import { useEscapeKey } from "../hooks/useEscapeKey";
@@ -99,7 +99,59 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 	// Countdown only — the timer that actually approves lives in the bun process
 	// and closes this dialog through `agentRequestResolved`. Rendering it from
 	// the deadline (not a local tick budget) keeps a backgrounded tab honest.
-	const autoApproveAt = request.autoApproveAt;
+	//
+	// The deadline is re-read on mount rather than taken from the push: dialogs
+	// queue instead of stacking, so this one may have waited minutes behind
+	// another, and the bun side restarts its timer the moment we say we are on
+	// screen. Drawing the original deadline would show a countdown the timer no
+	// longer agrees with.
+	const [autoApproveAt, setAutoApproveAt] = useState(request.autoApproveAt);
+	// One-way: once a user has taken this dialog over, nothing re-arms the
+	// countdown — not the deadline arriving late from `markAgentRequestShown`,
+	// not a re-render, not another client.
+	const heldRef = useRef(false);
+	const [held, setHeld] = useState(false);
+	useEffect(() => {
+		let cancelled = false;
+		api.request.markAgentRequestShown({ requestId: request.requestId })
+			.then(({ autoApproveAt: deadline }) => {
+				// Null means the bun side has no timer to restart — an already
+				// answered request, or one that never had a deadline. Keep what the
+				// push gave us rather than blanking a live countdown.
+				if (!cancelled && !heldRef.current && deadline !== null) setAutoApproveAt(deadline);
+			})
+			.catch(() => {});
+		return () => { cancelled = true; };
+	}, [request.requestId]);
+
+	/**
+	 * The countdown belongs to an absent user. The first real interaction means
+	 * somebody is reading this dialog, and starting a task behind their back while
+	 * they pick a model is the bug this exists to prevent. The bun process owns
+	 * the timer that actually launches, so this has to travel there — hiding the
+	 * countdown alone would leave the launch armed.
+	 */
+	function takeOver() {
+		if (heldRef.current || !autoApproveAt) return;
+		heldRef.current = true;
+		setHeld(true);
+		setAutoApproveAt(null);
+		api.request.holdAgentLaunchAutoApprove({ requestId: request.requestId }).catch(() => {});
+	}
+
+	// The dialog is broadcast to every client; a copy on another window must stop
+	// counting down to a launch that can no longer fire on its own.
+	useEffect(() => {
+		const onHeld = (e: Event) => {
+			if ((e as CustomEvent<{ requestId: string }>).detail?.requestId !== request.requestId) return;
+			heldRef.current = true;
+			setHeld(true);
+			setAutoApproveAt(null);
+		};
+		window.addEventListener("rpc:agentLaunchAutoApproveHeld", onHeld);
+		return () => window.removeEventListener("rpc:agentLaunchAutoApproveHeld", onHeld);
+	}, [request.requestId]);
+
 	const [secondsLeft, setSecondsLeft] = useState(() => (autoApproveAt ? secondsUntil(autoApproveAt) : 0));
 	useEffect(() => {
 		if (!autoApproveAt) return;
@@ -111,7 +163,9 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 	// Mirror every pick back to the pending request, so an auto-approval that
 	// fires while the user is away launches with what they last selected.
 	function reportChoice(next: AgentLaunchChoice) {
-		if (!autoApproveAt) return;
+		// `held` keeps this alive for the interaction that did the holding: its own
+		// click races the hold reaching the bun side, and the timer may still fire.
+		if (!autoApproveAt && !held) return;
 		api.request.updateAgentLaunchChoice({ requestId: request.requestId, launch: next }).catch(() => {});
 	}
 
@@ -146,12 +200,22 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 		onRespond(true, { variants, priority });
 	}
 
+	// The backdrop deliberately does not dismiss: a CLI is blocked on this answer,
+	// so a stray click on empty space must not decline someone's launch. Declining
+	// stays deliberate — the Decline button or Escape. Its only job is to swallow
+	// the press, which keeps focus on the autofocused Decline instead of dropping
+	// it on `body`.
 	return (
 		<div
 			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
 			onMouseDown={(e) => {
-				if (e.target === e.currentTarget) onRespond(false);
+				if (e.target === e.currentTarget) e.preventDefault();
 			}}
+			// Capture, so nothing inside can swallow the signal. Only events a human
+			// produces are listened for: mount, autofocus and programmatic updates
+			// raise none of them, and a passing cursor raises no pointerdown either.
+			onPointerDownCapture={takeOver}
+			onKeyDownCapture={takeOver}
 		>
 			<div
 				ref={trapRef}
@@ -302,6 +366,13 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 							aria-live="off"
 						>
 							{t("agentLaunch.autoApproveIn", { time: formatCountdown(secondsLeft) })}
+						</p>
+					)}
+					{/* A countdown that simply vanishes reads as a glitch; say why it is
+					    gone instead, in the slot it occupied. */}
+					{held && !launching && (
+						<p data-testid="agent-launch-held" className="text-fg-3 text-xs mr-auto">
+							{t("agentLaunch.autoApproveHeld")}
 						</p>
 					)}
 					<button

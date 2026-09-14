@@ -6,6 +6,7 @@ import {
 	buildGenericSkillContent,
 	claudeBashPermission,
 	CLAUDE_SKILL_BODY,
+	DEV3_AUTO_MODE_ALLOW_ENTRY,
 	getAskDev3SkillContent,
 	getBugHunterSkillContent,
 	getClaudeSkillContent,
@@ -175,7 +176,9 @@ describe("dev3 skill content", () => {
 
 	it("teaches the backend-neutral pane commands, so a Windows agent is not sent to a binary it has no chance of finding", () => {
 		for (const skill of [CLAUDE_SKILL_BODY, getCodexSkillContent(), getGenericSkillContent()]) {
-			expect(skill).toContain("## Panes — run long commands next to yourself");
+			expect(skill).toContain("## Panes — for what the user wants to watch");
+			// A pane is opt-in: the user asked, or the process outlives the turn. Slowness alone is not a trigger.
+			expect(skill).toContain("**Your own shell is the default.**");
 			expect(skill).toContain("dev3 pane list");
 			expect(skill).toContain("dev3 pane run");
 			expect(skill).toContain("dev3 pane logs");
@@ -506,10 +509,11 @@ describe("applyClaudeSettings (Claude Code sandbox socket allowlist, issue #726)
 		expect(sandbox.network.allowUnixSockets[0]).not.toContain("*");
 	});
 
-	it("is a no-op (returns false) when both entries are already present", () => {
+	it("is a no-op (returns false) when every entry is already present", () => {
 		const settings: Record<string, unknown> = {
 			permissions: { allow: ["Bash(~/.dev3.0/bin/dev3 *)"] },
 			sandbox: { network: { allowUnixSockets: [SOCKETS] } },
+			autoMode: { allow: ["$defaults", DEV3_AUTO_MODE_ALLOW_ENTRY] },
 		};
 		expect(applyClaudeSettings(settings, SOCKETS)).toBe(false);
 	});
@@ -529,6 +533,55 @@ describe("applyClaudeSettings (Claude Code sandbox socket allowlist, issue #726)
 		expect(permissions.deny).toEqual(["Bash(rm *)"]);
 		const sandbox = settings.sandbox as { network: { allowUnixSockets: string[] } };
 		expect(sandbox.network.allowUnixSockets).toEqual(["/tmp/other.sock", SOCKETS]);
+	});
+
+	// The classifier is a second gate, and it reads autoMode ONLY from this file —
+	// never from a worktree's .claude/settings*.json. Without the entry,
+	// `dev3 task move --status completed` comes back as "Blocked by classifier".
+	it("declares the dev3 exception to the auto-mode classifier, with the built-ins kept", () => {
+		const settings: Record<string, unknown> = {};
+		applyClaudeSettings(settings, SOCKETS);
+
+		const autoMode = settings.autoMode as { allow: string[] };
+		expect(autoMode.allow).toEqual(["$defaults", DEV3_AUTO_MODE_ALLOW_ENTRY]);
+	});
+
+	it("names only the dev3 CLI in that entry", () => {
+		expect(DEV3_AUTO_MODE_ALLOW_ENTRY).toContain("dev3");
+		expect(DEV3_AUTO_MODE_ALLOW_ENTRY).toMatch(/only to `dev3` subcommands/);
+	});
+
+	it("appends to an owned allow list without re-adding $defaults the user dropped", () => {
+		const settings: Record<string, unknown> = {
+			autoMode: { allow: ["Deploying to staging is allowed"], environment: ["$defaults"] },
+		};
+		const changed = applyClaudeSettings(settings, SOCKETS);
+
+		expect(changed).toBe(true);
+		const autoMode = settings.autoMode as { allow: string[]; environment: string[] };
+		expect(autoMode.allow).toEqual(["Deploying to staging is allowed", DEV3_AUTO_MODE_ALLOW_ENTRY]);
+		expect(autoMode.environment).toEqual(["$defaults"]);
+	});
+
+	it("keeps the user's own soft_deny and hard_deny lists untouched", () => {
+		const settings: Record<string, unknown> = {
+			autoMode: { soft_deny: ["$defaults", "Never touch prod"], hard_deny: ["$defaults"] },
+		};
+		applyClaudeSettings(settings, SOCKETS);
+
+		const autoMode = settings.autoMode as Record<string, string[]>;
+		expect(autoMode.soft_deny).toEqual(["$defaults", "Never touch prod"]);
+		expect(autoMode.hard_deny).toEqual(["$defaults"]);
+		expect(autoMode.allow).toEqual(["$defaults", DEV3_AUTO_MODE_ALLOW_ENTRY]);
+	});
+
+	it("replaces a non-array autoMode.allow rather than throwing", () => {
+		const settings: Record<string, unknown> = { autoMode: { allow: "everything" } };
+		expect(() => applyClaudeSettings(settings, SOCKETS)).not.toThrow();
+		expect((settings.autoMode as { allow: string[] }).allow).toEqual([
+			"$defaults",
+			DEV3_AUTO_MODE_ALLOW_ENTRY,
+		]);
 	});
 
 	it("does not duplicate the socket when only the permission is missing", () => {
@@ -582,26 +635,40 @@ describe("skill content per platform dialect", () => {
 	});
 });
 
-// The origin-task PR footer is only useful where the OS resolves `dev3://`. On
-// every other platform the injected skill must not order the agent to publish a
-// dead link into a public pull request.
-describe("PR origin-task footer — gated on a real dev3:// handler", () => {
-	it("hands macOS the footer, verbatim", () => {
+// The PR instruction hands the job to `dev3 pr create`, which appends the
+// origin-task footer itself. The footer is only useful where the OS resolves
+// `dev3://`, so on every other platform the injected skill must say the command
+// leaves it out — and must never order the agent to hand-write one.
+describe("PR instruction — dev3 pr create, and the footer it owns", () => {
+	it("routes macOS through the command and says the footer is automatic", () => {
 		const text = skillPrLinkInstruction("darwin");
-		expect(text).toContain("**Link the PR back to this task.**");
-		expect(text).toContain("https://dev3.h0x91b.com/open.html?task=<TASK_ID>");
-		expect(text).toContain("dev3://task/<TASK_ID>");
+		expect(text).toContain("dev3 pr create");
+		expect(text).toContain("dev3 pr auto-merge");
+		expect(text).toContain("links the PR back to this task itself");
+		// The old instruction pasted the footer template for the agent to copy.
+		// `dev3 pr create` builds it, so the template must not reappear here.
+		expect(text).not.toContain("open.html");
+		expect(text).not.toContain("<TASK_ID>");
 	});
 
 	for (const platform of ["win32", "linux"] as NodeJS.Platform[]) {
-		it(`refuses the footer on ${platform} and hands out no link at all`, () => {
+		it(`still routes ${platform} through the command, with no link anywhere`, () => {
 			const text = skillPrLinkInstruction(platform);
-			expect(text).toContain("Do NOT append a dev3 origin-task footer");
+			expect(text).toContain("dev3 pr create");
+			expect(text).toContain("adds no origin-task footer here");
 			expect(text).not.toContain("open.html");
 			expect(text).not.toContain("dev3://task/");
 			expect(text).not.toContain("Origin task in dev3");
 		});
 	}
+
+	it("never tells the agent to run gh pr create or git push itself", () => {
+		for (const platform of ["darwin", "win32", "linux"] as NodeJS.Platform[]) {
+			const text = skillPrLinkInstruction(platform);
+			expect(text).not.toContain("gh pr create");
+			expect(text).not.toContain("git push");
+		}
+	});
 
 	it("composes the platform's own variant into every injected body", async () => {
 		const original = process.platform;
@@ -610,7 +677,7 @@ describe("PR origin-task footer — gated on a real dev3:// handler", () => {
 			vi.resetModules();
 			const win = await import("../../shared/agent-skill-content");
 			for (const body of [win.CLAUDE_SKILL_BODY, win.CODEX_SKILL_BODY, win.GENERIC_SKILL_BODY]) {
-				expect(body).toContain("Do NOT append a dev3 origin-task footer");
+				expect(body).toContain("adds no origin-task footer here");
 				expect(body).not.toContain("Origin task in dev3");
 				expect(body).not.toContain("open.html");
 			}
@@ -619,8 +686,8 @@ describe("PR origin-task footer — gated on a real dev3:// handler", () => {
 			vi.resetModules();
 			const mac = await import("../../shared/agent-skill-content");
 			for (const body of [mac.CLAUDE_SKILL_BODY, mac.CODEX_SKILL_BODY, mac.GENERIC_SKILL_BODY]) {
-				expect(body).toContain("🔗 **Origin task in dev3:**");
-				expect(body).not.toContain("Do NOT append a dev3 origin-task footer");
+				expect(body).toContain("links the PR back to this task itself");
+				expect(body).not.toContain("adds no origin-task footer here");
 			}
 		} finally {
 			Object.defineProperty(process, "platform", { value: original, configurable: true });

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PATHS } from "../electrobun-platform";
@@ -22,11 +22,11 @@ import { isFreshStartMode } from "../fresh-start";
 import { spawn } from "../spawn";
 import { getCurrentUiTheme, setCurrentUiTheme } from "../theme-state";
 import { extractConfigFromParams, getPushMessage, getSystemRequirements, log, resolveBinaryPath, setFocusMode } from "./shared";
-import { binaryCandidatesOnPath, hasModelProviderSection, tmuxSearchPaths } from "./shared-pure";
+import { binaryCandidatesOnPath, tmuxSearchPaths } from "./shared-pure";
 import { agentBinaryPathOverride, isExecutableFile } from "../executable";
 import { harnessReadinessFrom } from "../harness-readiness";
 import { validateEnvMap } from "../../shared/env-text";
-import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH } from "../../shared/types";
+import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH, repoConfigEnabled } from "../../shared/types";
 import type { LowBatteryStatus } from "../../shared/low-battery";
 import { installAgentSkills } from "../agent-skills";
 import { forceSelectLowBatteryStyle, lowBatteryStatus } from "../low-battery";
@@ -36,6 +36,16 @@ import { forceSelectLowBatteryStyle, lowBatteryStatus } from "../low-battery";
 function assertValidEnvParam(env: unknown): void {
 	const problems = validateEnvMap(env);
 	if (problems.length > 0) throw new Error(`Invalid env config: ${problems.join("; ")}`);
+}
+
+/**
+ * Writing a .dev3 file dev3 has been told to ignore would create a file the user
+ * never sees applied. The UI hides these editors, so this is the RPC boundary
+ * refusing a client that asked anyway.
+ */
+function assertRepoConfigEnabled(project: Project): void {
+	if (repoConfigEnabled(project)) return;
+	throw new Error("Repository dev3 configuration is disabled for this project — enable it in Project Settings to edit .dev3 config files.");
 }
 
 /** A rename must never be able to blank a project's name out of the board. */
@@ -63,6 +73,12 @@ async function getProjectConfigs(params: { projectId: string; worktreePath?: str
 	log.info("→ getProjectConfigs", { projectId: params.projectId, worktreePath: params.worktreePath });
 	const project = await data.getProject(params.projectId);
 	const configPath = params.worktreePath || project.path;
+	// Repo config off: the files are not read, so the editor gets nothing to show
+	// or to save back. The UI replaces the Worktree tab with an explanation.
+	if (!repoConfigEnabled(project)) {
+		log.info("← getProjectConfigs (repo config ignored)");
+		return { repo: {}, local: {} };
+	}
 	const repo = repoConfig.loadRepoConfigRaw(configPath);
 	const local = repoConfig.loadLocalConfigRaw(configPath);
 	log.info("← getProjectConfigs");
@@ -81,13 +97,20 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 	log.info("→ updateProjectSettings", { projectId: params.projectId });
 	assertValidEnvParam(params.env);
 	const project = await data.getProject(params.projectId);
+	// A save may only reach a repo file while the project reads repo files both
+	// before and after this request: a save that is itself switching them off must
+	// not write one on its way out.
+	const routeToFiles = project.kind !== "virtual"
+		&& repoConfigEnabled(project)
+		&& repoConfigEnabled({ useRepoConfig: params.useRepoConfig ?? project.useRepoConfig });
 	// Fields a .dev3 file already owns are written back to that file — writing them
 	// to projects.json would leave the file shadowing them on the very next read.
-	const configUpdates = project.kind === "virtual"
-		? extractConfigFromParams(params)
-		: await repoConfig.saveConfigToWinningLayer(project.path, extractConfigFromParams(params));
+	const configUpdates = routeToFiles
+		? await repoConfig.saveConfigToWinningLayer(project.path, extractConfigFromParams(params))
+		: extractConfigFromParams(params);
 	const updates = {
 		...configUpdates,
+		...(params.useRepoConfig !== undefined ? { useRepoConfig: params.useRepoConfig } : {}),
 		...(params.name !== undefined ? { name: requireProjectName(params.name) } : {}),
 		...(params.githubAuthHost !== undefined ? { githubAuthHost: params.githubAuthHost } : {}),
 		...(params.githubAuthLogin !== undefined ? { githubAuthLogin: params.githubAuthLogin } : {}),
@@ -114,6 +137,7 @@ async function saveRepoConfig(params: { projectId: string; worktreePath?: string
 	log.info("→ saveRepoConfig", { projectId: params.projectId, worktreePath: params.worktreePath, autoCommit: params.autoCommit });
 	assertValidEnvParam(params.env);
 	const project = await data.getProject(params.projectId);
+	assertRepoConfigEnabled(project);
 	const configPath = params.worktreePath || project.path;
 	const config = extractConfigFromParams(params) as Dev3RepoConfig;
 	await repoConfig.saveRepoConfig(configPath, config);
@@ -137,6 +161,7 @@ async function saveLocalConfig(params: { projectId: string; worktreePath?: strin
 	log.info("→ saveLocalConfig", { projectId: params.projectId, worktreePath: params.worktreePath });
 	assertValidEnvParam(params.env);
 	const project = await data.getProject(params.projectId);
+	assertRepoConfigEnabled(project);
 	const configPath = params.worktreePath || project.path;
 	const config = extractConfigFromParams(params) as Dev3RepoConfig;
 	await repoConfig.saveRepoLocalConfig(configPath, config);
@@ -147,7 +172,8 @@ async function getRepoConfigSources(params: { projectId: string; worktreePath?: 
 	log.info("→ getRepoConfigSources", { projectId: params.projectId, worktreePath: params.worktreePath });
 	const project = await data.getProject(params.projectId);
 	const configPath = params.worktreePath || project.path;
-	const sources = await repoConfig.getConfigSources(configPath);
+	// No file is read, so no field can be attributed to one.
+	const sources = repoConfigEnabled(project) ? await repoConfig.getConfigSources(configPath) : [];
 	log.info("← getRepoConfigSources", { count: sources.length });
 	return sources;
 }
@@ -272,6 +298,9 @@ async function toggleFavoriteAgent(params: { agentId: string; configId: string }
 	const favorites = toggleFavorite(settings.favorites ?? [], params.agentId, params.configId, Date.now());
 	const next: GlobalSettings = { ...settings, favorites };
 	await saveSettings(next);
+	// Every other surface keeps its own copy of the settings — the Settings
+	// screen's star would otherwise never reach the launch dialog's favorites.
+	getPushMessage()?.("globalSettingsUpdated", next);
 	log.info("← toggleFavoriteAgent", { count: favorites.length });
 	return next;
 }
@@ -620,19 +649,6 @@ async function setAgentBinaryPath(params: { agentId: string; path: string }): Pr
 	log.info("<- setAgentBinaryPath saved");
 }
 
-/** Preflight for the Codex Bedrock backend: dev3 only routes codex at the
- *  provider via `-c model_provider=...`; the `[model_providers.amazon-bedrock]`
- *  section itself must exist in the user's ~/.codex/config.toml. */
-async function checkCodexBedrockConfig(): Promise<{ configured: boolean }> {
-	log.info("-> checkCodexBedrockConfig");
-	try {
-		const toml = readFileSync(join(homedir(), ".codex", "config.toml"), "utf8");
-		return { configured: hasModelProviderSection(toml, "amazon-bedrock") };
-	} catch {
-		return { configured: false };
-	}
-}
-
 async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system" }): Promise<void> {
 	log.info("→ setTmuxTheme", params);
 	const settings = await loadSettings();
@@ -690,6 +706,5 @@ export const settingsConfigHandlers = {
 	checkAgentAvailability,
 	checkHarnessReadiness,
 	setAgentBinaryPath,
-	checkCodexBedrockConfig,
 	setTmuxTheme,
 };

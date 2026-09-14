@@ -18,8 +18,6 @@ import { DEFAULT_TMUX_SOCKET } from "../tmux";
 import { dev3TaskTempPath } from "../temp-paths";
 import { deliverAgentPrompt } from "../agent-prompt-delivery";
 import type { AgentPromptDelivery } from "../../shared/agent-prompt-delivery";
-import { buildTaskPrDeepLinkLine, deepLinkSchemeRegistered } from "../../shared/deep-link";
-import { loadSettings } from "../settings";
 import { auxPaneAlive, auxPaneTitle, openAuxPane } from "../task-aux-panes";
 import {
 	scheduleMessage as scheduleMessageCore,
@@ -301,15 +299,16 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 	log.debug("getBranchStatus: raw results", { status, uncommitted, unpushed, branchDiff, prNumber, prUrl, ref });
 	const canRebase = status.behind > 0 ? await git.canRebaseCleanly(task.worktreePath, ref) : false;
 	// ahead === 0 means HEAD is an ancestor of `ref`: every commit of this branch
-	// is already in the base, so content strategies would trivially say "merged".
-	// Git alone cannot tell "merged, then rebased away" from "brand-new branch,
-	// nothing committed yet" — only this task's own merged PR proves work landed.
-	// No PR (or no GitHub / offline) ⇒ not merged, never a false positive.
+	// is already in the base. `isContentMergedInto` owns that case now — it demands
+	// positive proof that work landed (a merge commit carrying HEAD, or a reflog tip
+	// this branch committed and `ref` now contains) instead of reading the empty
+	// diff of a brand-new branch as a merge. This task's own merged PR still proves
+	// the "squash-merged, then rebased away" shape that leaves no local trace.
 	const prNumberForMergeProof = prInfo?.number ?? null;
-	const mergedByContent = status.ahead > 0
-		? await git.isContentMergedInto(task.worktreePath, ref, project) === true
-		: prNumberForMergeProof != null
-			&& await github.isPullRequestMerged(project, task.worktreePath, prNumberForMergeProof, branchForPush || null) === true;
+	const mergedByContent = await git.isContentMergedInto(task.worktreePath, ref, project) === true
+		|| (status.ahead === 0
+			&& prNumberForMergeProof != null
+			&& await github.isPullRequestMerged(project, task.worktreePath, prNumberForMergeProof, branchForPush || null) === true);
 	const mergeCompletionFingerprint = mergedByContent
 		? (await getMergeCompletionFingerprint(task, branchForPush)).fingerprint
 		: null;
@@ -683,27 +682,18 @@ async function pushTask(params: { taskId: string; projectId: string }): Promise<
 }
 
 /**
- * PR handoff prompt. `deepLinkLine` is the footer content the agent appends so the
- * PR carries a deep link back to the originating task (one source of truth in
- * `shared/deep-link.ts`), or null when the user opted out.
+ * PR handoff prompt. `dev3 pr create` is the whole recipe now: it pushes the
+ * branch, opens the pull request through `gh`, targets the task's own base branch
+ * and appends the origin-task footer itself (from `shared/deep-link.ts`, honouring
+ * the user's opt-out) — so the prompt no longer carries the footer text, and the
+ * agent can no longer paste it with the wrong task id.
  *
- * Two rules hold this together:
- *  - The whole prompt stays on ONE line. It is typed into the pane as raw bytes, so
- *    an embedded newline can submit it early on an agent that reads `\n` as Enter —
- *    hence the `---` divider is described in words rather than embedded.
- *  - The link goes LAST. It ends the prompt, and any sentence behind it would read
- *    as part of the line the agent was told to copy exactly.
+ * The prompt stays on ONE line: it is typed into the pane as raw bytes, and an
+ * embedded newline can submit it early on an agent that reads `\n` as Enter.
  */
-function createPrAgentPrompt(deepLinkLine: string | null, autoMerge: boolean): string {
-	const base =
-		"Please push this branch and open a pull request for it using the gh CLI (first run git push, then gh pr create). Choose an appropriate title and description based on the work in this conversation.";
-	const merge = autoMerge
-		? " Finally, enable auto-merge on the PR with gh pr merge --auto so it merges automatically once checks pass."
-		: "";
-	const deepLink = deepLinkLine
-		? ` End the PR description with a blank line, then a \`---\` divider on its own line, then exactly this line so reviewers can jump straight back to the originating dev3 task: ${deepLinkLine}`
-		: "";
-	return base + merge + deepLink;
+function createPrAgentPrompt(autoMerge: boolean): string {
+	const flag = autoMerge ? " --auto-merge" : "";
+	return `Please open a pull request for this branch by running: dev3 pr create --title "..." --description "..."${flag} — it pushes the branch, opens the PR through gh and ends the description with a link back to this dev3 task, so do not run git push or gh pr create yourself and do not write that footer by hand. Choose the title and description from the work in this conversation (pass a long description with --description @<file> rather than inline).`;
 }
 
 const COMMIT_AGENT_PROMPT =
@@ -734,15 +724,10 @@ async function createPullRequest(params: { taskId: string; projectId: string; au
 		throw new Error("Create pull request needs a GitHub remote — `gh` is the only forge client dev3 speaks");
 	}
 
-	// Only macOS registers a `dev3://` handler, so anywhere else the footer would
-	// publish a dead link into a public PR — the host decides before the preference does.
-	const linkOptOut =
-		!deepLinkSchemeRegistered(process.platform) || (await loadSettings()).prOriginTaskLink === false;
-	const prompt = createPrAgentPrompt(
-		linkOptOut ? null : buildTaskPrDeepLinkLine(task.id),
-		params.autoMerge ?? false,
-	);
-	const delivery = await deliverAgentPrompt(task, prompt);
+	// The footer's two gates (no `dev3://` handler on this platform, and the user's
+	// `prOriginTaskLink` preference) now live in `dev3 pr create` itself, so this
+	// handoff neither reads settings nor builds the line.
+	const delivery = await deliverAgentPrompt(task, createPrAgentPrompt(params.autoMerge ?? false));
 	log.info("← createPullRequest", { taskId: task.id.slice(0, 8), status: delivery.status, reason: delivery.reason });
 	return { delivery };
 }
@@ -966,7 +951,9 @@ async function scheduleMessage(params: {
 }): Promise<Task> {
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
-	return scheduleMessageCore(project, task, { text: params.text, at: params.at, target: params.target });
+	// The only caller is ScheduleMessageModal, so a human typed this. Stamped at
+	// queue time because the fire happens hours later, when nothing could tell.
+	return scheduleMessageCore(project, task, { text: params.text, at: params.at, target: params.target, origin: "user" });
 }
 
 /** Cancel one pending scheduled message (chip → "Cancel"). */

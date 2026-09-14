@@ -12,9 +12,10 @@ vi.mock("../../rpc", () => ({
 }));
 
 vi.mock("../TaskWorkspaceView", () => ({
-	default: ({ taskId }: { taskId: string }) => (
+	default: ({ taskId, dockArtifact }: { taskId: string; dockArtifact?: boolean }) => (
 		<div>
 			<div data-testid="workspace-view">workspace:{taskId}</div>
+			{dockArtifact && <div data-testid="artifact-dock" />}
 			<button data-terminal="true">terminal</button>
 		</div>
 	),
@@ -95,6 +96,17 @@ describe("WorkspaceTaskOverlay", () => {
 		expect(onRequestClose).toHaveBeenCalledOnce();
 		await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
 		expect(onRequestClose).toHaveBeenCalledTimes(2);
+	});
+
+	it("forwards artifact docking without intercepting terminal Escape", () => {
+		const onRequestClose = vi.fn();
+		const { props, rerender } = renderOverlay({ dockArtifact: true, onRequestClose });
+		expect(screen.getByTestId("artifact-dock")).toBeInTheDocument();
+		screen.getByRole("button", { name: "terminal" }).focus();
+		fireEvent.keyDown(window, { key: "Escape" });
+		expect(onRequestClose).not.toHaveBeenCalled();
+		rerender(<I18nProvider><WorkspaceTaskOverlay {...props} dockArtifact={false} /></I18nProvider>);
+		expect(screen.queryByTestId("artifact-dock")).not.toBeInTheDocument();
 	});
 
 	it("keeps Escape inside the terminal and closes from outside or Back", () => {

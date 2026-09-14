@@ -45,6 +45,8 @@ export interface TaskQueryContext {
 	/** True when the task needs the user's attention (see `is:attention`). */
 	isAttention: boolean;
 	isBlocked?: boolean;
+	/** True when the task is hidden from the Active Tasks sidebar (`is:hidden`). */
+	isHidden: boolean;
 	/** The task's effective priority level (e.g. "p2"), lowercased. */
 	priorityValue: string;
 	/** Names of every space the task's project belongs to; [] when it is in none.
@@ -95,13 +97,14 @@ const FACET_DEFS: Record<FacetKey, FacetDef> = {
 	is: {
 		key: "is",
 		kind: "flag",
-		flagValues: ["attention", "home", "blocked"],
+		flagValues: ["attention", "home", "blocked", "hidden"],
 		match: (ctx, v) => {
 			if (v === "blocked") return ctx.isBlocked === true;
 			if (v === "attention") return ctx.isAttention;
 			// `home` is the computed no-space group, not a space called "Home" —
 			// a flag value, so it can never collide with a real space name.
 			if (v === "home") return ctx.spaceNames !== null && ctx.spaceNames.length === 0;
+			if (v === "hidden") return ctx.isHidden;
 			return false;
 		},
 	},

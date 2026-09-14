@@ -389,7 +389,7 @@ function getCodexProfileLaunchFlag(): CodexProfileLaunchFlag {
  * ensureCodexTrust, blocking the main loop each time.
  */
 let cachedCodexVersion: string | null | undefined;
-function getCodexVersionCached(): string | null {
+export function getCodexVersionCached(): string | null {
 	if (cachedCodexVersion === undefined) {
 		cachedCodexVersion = detectCodexVersion();
 	}
@@ -435,7 +435,7 @@ export interface CommandOptions {
 	/** The LLM backend selected for this agent. The provider registry decides how
 	 *  the pinned model is delivered: via injected env (Claude on Bedrock —
 	 *  ANTHROPIC_MODEL, --model omitted) or via a rewritten --model value plus
-	 *  routing args (Codex on Bedrock — `-c model_provider="amazon-bedrock"`). */
+	 *  routing args (Codex on Bedrock — `-c model_provider="amazon-bedrock-runtime"`). */
 	llmProvider?: LlmProvider;
 	/** Per-launch managed account selection (agent account switcher). `undefined`
 	 *  → use the registry default (the preselect); `null` → force the system
@@ -776,6 +776,12 @@ export interface ResolvedAgentCommand<A extends CodingAgent | null = CodingAgent
 	config: AgentConfiguration | undefined;
 	extraEnv: Record<string, string>;
 	agentFamily: AgentFamily | undefined;
+	/** The model id this launch actually carries, after provider pinning and API
+	 *  profile overrides — what a CLI-capability gate must be judged on, not the
+	 *  preset's own `model`. Undefined when a third-party backend delivers the
+	 *  model via env, since then the request never reaches the vendor endpoint
+	 *  whose version floor the gate knows about. */
+	launchModel: string | undefined;
 }
 
 export async function resolveCommandForAgent(
@@ -811,18 +817,33 @@ export async function resolveCommandForAgent(
 	await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 	const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
-	const command = resolveAgentCommand(
-		agentWithPath,
-		resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
-		ctx,
-		routed.options,
-	);
+	const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
+	const command = resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
 	// `agent` stays the stored record — callers derive the base command from it,
 	// and swapping in the override path there would change what they persist.
 	// The family rides alongside instead: a path override can pin one the stored
 	// record does not carry, and every caller needs the same answer to resume,
 	// trust and hook this launch exactly the way it was built.
-	return { command, agent, config, extraEnv, agentFamily: agentWithPath.agentFamily };
+	return {
+		command,
+		agent,
+		config,
+		extraEnv,
+		agentFamily: agentWithPath.agentFamily,
+		launchModel: nativeLaunchModel(launchConfig, providerOpts, routed.pinnedModel),
+	};
+}
+
+/** The model a CLI-capability gate may judge, or undefined when this launch does
+ *  not talk to the agent vendor's own endpoint (a third-party backend or a
+ *  routed/proxied model), where the vendor's version floor says nothing. */
+function nativeLaunchModel(
+	config: AgentConfiguration | undefined,
+	options: CommandOptions,
+	pinnedModel: boolean,
+): string | undefined {
+	if (options.llmProvider || pinnedModel) return undefined;
+	return config?.model;
 }
 
 /** The launch-time model pipeline shared by both resolveCommand* entry points:
@@ -927,13 +948,16 @@ export async function resolveCommandForProject(
 		await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 		const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
-		const command = resolveAgentCommand(
-			agentWithPath,
-			resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
-			ctx,
-			routed.options,
-		);
-		return { command, agent, config, extraEnv, agentFamily: agentWithPath.agentFamily };
+		const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
+		const command = resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
+		return {
+			command,
+			agent,
+			config,
+			extraEnv,
+			agentFamily: agentWithPath.agentFamily,
+			launchModel: nativeLaunchModel(launchConfig, providerOpts, routed.pinnedModel),
+		};
 	}
 
 	log.warn("Default agent not found, falling back to bash", {
@@ -946,6 +970,7 @@ export async function resolveCommandForProject(
 		config: undefined,
 		extraEnv: buildTaskEnv(project, taskTitle, "", worktreePath),
 		agentFamily: undefined,
+		launchModel: undefined,
 	};
 }
 

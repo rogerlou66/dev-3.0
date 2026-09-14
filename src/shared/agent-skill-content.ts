@@ -25,12 +25,12 @@ import { PANE_RUN_AUTO_CLOSE_SECONDS, PANE_RUN_FAILED_AUTO_CLOSE_SECONDS } from 
  * replaced rather than softened.
  */
 export function skillPrLinkInstruction(platform: NodeJS.Platform = process.platform): string {
-	if (!deepLinkSchemeRegistered(platform)) {
-		return `**Do NOT append a dev3 origin-task footer to a pull request on this platform.** \`dev3://\` links only open the app where the OS registered the scheme, which is macOS today, so that footer would publish a dead link into a public PR (the \`https\` form only redirects back to the same scheme). Name the task by its \`seq\` number in plain text when a reviewer needs it.`;
-	}
-	return `**Link the PR back to this task.** Unless the user turned it off in dev3 settings, end every PR description for this task with a deep link back to it. Take \`<TASK_ID>\` from \`dev3 current\`; after your description add a blank line, a \`---\` line, then exactly this — GitHub strips \`dev3://\`, so the \`https\` form is the clickable one and the raw link is the copy-paste fallback:
+	const command = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
 
-\`🔗 **Origin task in dev3:** [open in dev3](https://dev3.h0x91b.com/open.html?task=<TASK_ID>) · \\\`dev3://task/<TASK_ID>\\\`\``;
+	if (!deepLinkSchemeRegistered(platform)) {
+		return `${command} **It adds no origin-task footer here — and nor do you:** \`dev3://\` opens the app on macOS only, so it would be a dead link in a public PR.`;
+	}
+	return `${command} **It links the PR back to this task itself**, with the right id and the user's opt-out honoured — never hand-write that footer.`;
 }
 
 const SKILL_HEADER = `# dev3 — Task Lifecycle Protocol
@@ -194,7 +194,7 @@ Inside a dev3 task, an unqualified "artifact", interactive report, dashboard or 
 1. \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\` — never edit the pristine source.
 2. Read the copied \`AUTHORING.md\` (the card), then edit only \`index.html\` and \`report.js\` unless the format itself must change. Open a \`REFERENCE.md\` section only when the report needs it. Do not read the shell files for ordinary reports.
 3. Keep content and data local; external chart/UI libraries and live \`fetch\`/WebSocket are allowed as \`REFERENCE.md\` documents.
-4. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` — the directory publishes as a unit: \`index.html\` plus every CSS, JS, and image under it. Keep assets beside or below the HTML with relative paths; only a file outside the directory goes after \`--assets\`.
+4. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` — the directory publishes as a unit: \`index.html\` plus every CSS, JS, image and MP4/WebM clip (16 MB each, 48 MB together) under it. Keep assets beside or below the HTML with relative paths; only a file outside the directory goes after \`--assets\`.
 
 Re-running \`show-artifact\` **updates** the report: the same \`--title\` (or an explicit \`--artifact-id <slug>\`, which survives re-wording) adds a VERSION to the row the user already has. Revise by publishing again, never by inventing \`report-v2.html\`; \`--new\` only for a genuinely different report that happens to share a title.
 
@@ -226,21 +226,20 @@ For ANY question about project configuration — setup/dev/cleanup scripts, clon
 `;
 
 const SKILL_PANES = `
-## Panes — run long commands next to yourself
+## Panes — for what the user wants to watch
 
-Your terminal has panes the user watches live. **Never assume which backend you are on** — dev3 runs tmux and a native backend, and tmux does not exist on Windows at all. \`dev3 pane list\` names the backend, every pane, which is yours, and what a screen read can do here.
-
-Anything long-running or streaming (build, test run, watcher, log tail) goes in a neighbouring pane instead of blocking your own tool call, read back from the run's log — which works on every backend and OS:
+\`dev3 pane run\` puts one command in a pane beside yours, on every backend and OS, where the user sees it live. **Your own shell is the default.** Open a pane in two cases: the user asked to watch something run ("run the build on the right"), or the process must outlive your turn — a watcher, a log tail, a long-lived process someone keeps an eye on. Everything else stays inline — builds, test suites, checks — however long they take. A pane is a window into the user's terminal, not a way to free up your own tool call.
 
 \`\`\`bash
-dev3 pane run "bun run build" --label Build   # opens a pane to your right, prints a run id
-dev3 pane logs <run-id> [--lines 400]         # outcome + tail (1..2000, default 200)
-dev3 pane close <run-id>                      # close that pane (kills the command)
+dev3 pane list                                 # which backend you are on — never assume, tmux is absent on Windows
+dev3 pane run "npm run watch" --label Watch    # opens a pane to your right, prints a run id
+dev3 pane logs <run-id> [--lines 400]          # outcome + tail (1..2000, default 200)
+dev3 pane close <run-id>                       # close that pane (kills the command)
 \`\`\`
 
-The outcome line distinguishes **still running** from **finished, exit code N** — never read a quiet tail as a finished command. Runs are non-interactive (stdin closed): builds, tests, servers, watchers. Quick one-shot commands stay inline in your own shell, and the canonical dev server is \`dev3 dev-server start\`, not a pane run.
+The outcome line distinguishes **still running** from **finished, exit code N** — never read a quiet tail as a finished command. Runs are non-interactive: stdin is closed. The canonical dev server is \`dev3 dev-server start\`, not a pane run.
 
-**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run as you go, and again before ending a turn, so \`dev3 pane list\` shows nothing of yours but work still needed. A watcher, dev server or red build parked in their terminal is litter they must clear. The auto-close timer is a backstop for abandoned panes, not a substitute: exit 0 closes itself after ${PANE_RUN_AUTO_CLOSE_SECONDS} seconds, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} minutes so the user still sees it. Closing destroys nothing — the output stays in the run's log.
+**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run as you go, and again before ending a turn, so \`dev3 pane list\` shows nothing of yours but work still needed. The auto-close timer is a backstop for abandoned panes, not a substitute: exit 0 closes itself after ${PANE_RUN_AUTO_CLOSE_SECONDS} seconds, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} minutes so the user still sees it. Closing destroys nothing — the output stays in the run's log.
 
 Reading the SCREEN of a pane you did not start ("look at the error on the right") is a different thing and **tmux-only today**: \`dev3 peek --pane <N>\` returns a tail on tmux, only the pane summary on native. On tmux you may also drive tmux directly for layout work the user asks for (rename / swap / move windows, resize) — load \`/dev3-tmux\`. On native those commands do not exist.
 `;

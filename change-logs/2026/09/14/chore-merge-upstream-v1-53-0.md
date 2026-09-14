@@ -1,0 +1,1 @@
+Merge upstream v1.53.0 while preserving Workspace Board overlays, Blocked review holds, Android support, Copilot and Antigravity integration, CJK input, and manual desktop updates without external telemetry. Adapt artifact docking and Agent traffic ordering to the fork's workspace and review flows.

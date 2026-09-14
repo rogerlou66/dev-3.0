@@ -265,11 +265,7 @@ describe("TaskWorkspaceView", () => {
 		expect(document.activeElement).toBe(screen.getByTestId("terminal-view"));
 	});
 
-	// Artifacts are a popup hosted by App, never a pane sibling. The workspace
-	// therefore has no drag-resizable split at all — the resize path that could
-	// wedge the UI does not exist to be reached.
-	// decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md
-	it("has no resizable split beside the terminal", () => {
+	it("has no resizable split when no artifact is docked", () => {
 		renderWorkspace(
 			<TaskWorkspaceView
 				projectId="p1"
@@ -283,6 +279,25 @@ describe("TaskWorkspaceView", () => {
 		);
 		expect(screen.getByTestId("terminal-view")).toBeInTheDocument();
 		expect(screen.queryAllByRole("separator")).toHaveLength(0);
+	});
+
+	it("keeps the artifact dock through overlay immersion without remounting the terminal", () => {
+		const props = {
+			projectId: "p1", taskId: "t1", tasks: [task], projects: [project],
+			navigate: vi.fn(), dispatch: vi.fn(), loadTasks: false, dockArtifact: true,
+		};
+		const { rerender } = renderWorkspace(<TaskWorkspaceView {...props} presentation="overlay" />);
+		expect(screen.getByTestId("artifact-dock")).toBeInTheDocument();
+		expect(screen.getAllByRole("separator")).toHaveLength(1);
+		rerender(<TaskWorkspaceView {...props} presentation="immersive" skipCopyModeReset />);
+		expect(screen.getByTestId("artifact-dock")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Open Inline Diff" })).not.toBeInTheDocument();
+		expect(mountLog).toEqual(["t1"]);
+		expect(unmountLog).toEqual([]);
+		rerender(<TaskWorkspaceView {...props} presentation="overlay" dockArtifact={false} />);
+		expect(screen.queryByTestId("artifact-dock")).not.toBeInTheDocument();
+		expect(screen.queryAllByRole("separator")).toHaveLength(0);
+		expect(unmountLog).toEqual([]);
 	});
 
 	// Regression test for the `key={taskId}` prop on TaskTerminal in

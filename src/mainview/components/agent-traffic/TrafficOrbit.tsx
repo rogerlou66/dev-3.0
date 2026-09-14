@@ -21,6 +21,7 @@ import {
 	type TrafficNode,
 	type TrafficRecord,
 } from "./traffic-model";
+import { ALL_PROJECTS, isAggregateScope } from "./traffic-scope";
 
 interface Props {
 	projects?: { id: string; name: string }[];
@@ -167,8 +168,10 @@ export default function TrafficOrbit(props: Props) {
 						labelPriority.set(key, 1000 + records.length - index);
 				}
 			}
-			const scope = latest.current.scope ?? "all";
-			const all = scope === "all";
+			const scope = latest.current.scope ?? ALL_PROJECTS;
+			// Any aggregate scope has no single project to pin as the primary lane;
+			// the narrowing itself already happened upstream of these nodes.
+			const all = isAggregateScope(scope);
 			const projects = [
 				...new Set([
 					...input.map((node) => node.projectId),
@@ -334,14 +337,18 @@ export default function TrafficOrbit(props: Props) {
 					label.hidden = true;
 					label.tabIndex = -1;
 					label.type = "button";
-					label.className = `traffic-node-label ${coordinator ? "is-coordinator" : ""} ${node.key === selected ? "is-selected" : ""}`;
+					label.className = `traffic-node-label ${coordinator ? "is-coordinator" : ""} ${node.user ? "is-user" : ""} ${node.key === selected ? "is-selected" : ""}`;
+					// The user has no seq and no title, and the task fallbacks would print
+					// "#—" and "historical" about a person. One honest label instead.
 					const seq = document.createElement("b");
-					seq.textContent = nodeSeq(node);
+					seq.textContent = node.user ? t("traffic.node.you") : nodeSeq(node);
 					label.append(seq);
-					const title = document.createElement("span");
-					title.className = "streamer-private";
-					title.textContent = node.title || t("traffic.orbit.historical");
-					label.append(title);
+					if (!node.user) {
+						const title = document.createElement("span");
+						title.className = "streamer-private";
+						title.textContent = node.title || t("traffic.orbit.historical");
+						label.append(title);
+					}
 					if (coordinator) {
 						const role = document.createElement("small");
 						role.textContent = t("traffic.orbit.coordinator");

@@ -12,14 +12,29 @@ git history, PRs, and the records in `decisions/`. Newest first.
 
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 
+## 2026-09-08 — Agent traffic becomes the ninth destination, not an overlay
+
+Routed screen under the standard header with Back/Forward and a fixed anonymous screen path; entry autoplays the trailing hour once. Reverses the 2026-08-25 "still an overlay" ruling — bible §5.9, yaml `agent_traffic_screen`. Why: `decisions/2026/09/08/agent-traffic-becomes-a-destination.md`.
+
+## 2026-09-07 — Agent traffic gets a second presentation, defaulting to it
+
+Two gated presentations; Coordination v3 replay/follow/focus live on the traffic screen — bible §5.9, yaml `agent_traffic_screen`. Why: `decisions/2026/09/07/coordination-v3-replay-and-camera.md`.
+
+## 2026-09-07 — The artifact panel is the default; the popup is one opt-in toggle
+
+One App viewer docks by default or uses a lightbox via `openArtifactsInPopup` in Settings → Tasks & Board; leaving a task hides it, preserving drafts. No second viewer or three-way mode — bible §3/§5/§12.3, yaml `task_artifact_viewer`. Why: `decisions/2026/09/07/artifact-panel-default-popup-opt-in.md`, `decisions/2026/09/07/docked-artifact-waits-offscreen.md`.
+
+## 2026-09-07 — Tasks can leave the Active Tasks queue without stopping
+
+`Task.hidden` hides a whole variant group from the Active Tasks sidebar only; row toggle, conditional reveal in the filter row (dot when one needs you), `is:hidden` token. Why: `decisions/2026/09/07/hide-tasks-from-active-sidebar.md`.
+
 ## 2026-09-05 — HTML artifacts open as a popup
 
-Artifacts use the App lightbox; the resizable task split is removed — bible §3 + §12.3, yaml `task_artifact_viewer`. Why: `decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md`.
+Superseded 2026-09-07 by the entry above. `decisions/2026/09/05/artifact-popup-replaces-resizable-panel.md`.
 
 ## 2026-09-05 — Agent traffic becomes a live orbit
 
-The existing overlay owns the project orbit, accessible lists and inspector; real append events animate attempts without inventing workflow — bible §5.9. Why: `decisions/2026/09/05/live-agent-traffic-orbit.md`.
-
+Superseded in part 2026-09-07 (the orbit is Experiment 1) — bible §5.9. Why: `decisions/2026/09/05/live-agent-traffic-orbit.md`.
 
 ## 2026-09-03 — Touch scrollback return is a floating button
 
@@ -35,7 +50,7 @@ One round floating button over the canvas, only while that pane is scrolled up, 
 
 2026-08-26 — Header presence follows data, unread is only the badge (§5.9). Why: `decisions/2026/08/26/header-slot-presence-follows-data-not-unread.md`.
 
-2026-08-25 — Traffic remains an overlay (§5.9); presentation superseded 2026-09-05. Why: `decisions/2026/08/25/agent-traffic-readout-and-log.md`.
+2026-08-25 — Traffic was an overlay (§5.9); presentation superseded 2026-09-05, overlay reversed 2026-09-08. Why: `decisions/2026/08/25/agent-traffic-readout-and-log.md`.
 
 ## 2026-08-25 — A self-previewing option list earns a disclosure, not a Settings category
 - **Rule:** the terminal font picker stays in Settings → Terminal behind a collapsed "Compare all N" disclosure of preview rows; no category of its own. **Why:** `decisions/2026/08/25/terminal-font-width-is-clamped-to-the-reference.md`.
