@@ -5,13 +5,8 @@ import {
 	buildTaskDeepLink,
 	buildProjectDeepLink,
 	buildNewTaskDeepLink,
-	buildTaskWebLink,
-	buildTaskPrDeepLinkLine,
-	buildTaskPrDeepLinkSection,
 	deepLinkSchemeRegistered,
 	buildSpaceDeepLink,
-	buildSpaceWebLink,
-	DEEP_LINK_WEB_BASE,
 } from "../../shared/deep-link";
 
 vi.mock("../spaces-data", () => ({
@@ -94,7 +89,6 @@ describe("build* + round-trip", () => {
 	it("builds and re-parses a project link", () => {
 		expect(parseDeepLink(buildProjectDeepLink("p1"))).toEqual({ kind: "project", projectId: "p1" });
 		expect(parseDeepLink(buildSpaceDeepLink("sp 1/x"))).toEqual({ kind: "space", spaceId: "sp 1/x" });
-		expect(buildSpaceWebLink("sp_1")).toBe(`${DEEP_LINK_WEB_BASE}/open.html?space=sp_1`);
 	});
 
 	it("round-trips new-task text with special characters", () => {
@@ -113,53 +107,6 @@ describe("build* + round-trip", () => {
 
 	it("keeps an unescaped legacy link readable", () => {
 		expect(parseDeepLink("dev3://task/plain-id")).toEqual({ kind: "task", taskId: "plain-id" });
-	});
-});
-
-describe("buildTaskWebLink", () => {
-	it("points at the https open page on the landing domain", () => {
-		expect(buildTaskWebLink("t1")).toBe(`${DEEP_LINK_WEB_BASE}/open.html?task=t1`);
-	});
-
-	it("url-encodes the task id", () => {
-		expect(buildTaskWebLink("a/b c")).toBe(`${DEEP_LINK_WEB_BASE}/open.html?task=a%2Fb%20c`);
-	});
-});
-
-describe("buildTaskPrDeepLinkLine", () => {
-	it("carries both links and names the opt-out", () => {
-		const line = buildTaskPrDeepLinkLine("abc-123");
-		expect(line).toContain(buildTaskWebLink("abc-123"));
-		expect(line).toContain("`dev3://task/abc-123`");
-		expect(line).toContain("Settings → Tasks");
-	});
-
-	// It rides inside the handoff prompt, which is typed into the pane byte for byte:
-	// one newline could submit the prompt early on a non-Claude agent.
-	it("contains no newline", () => {
-		expect(buildTaskPrDeepLinkLine("abc-123")).not.toContain("\n");
-	});
-});
-
-describe("buildTaskPrDeepLinkSection", () => {
-	it("carries both the clickable https link and the raw dev3:// link", () => {
-		const section = buildTaskPrDeepLinkSection("abc-123");
-		expect(section).toContain(buildTaskWebLink("abc-123"));
-		expect(section).toContain(buildTaskDeepLink("abc-123"));
-	});
-
-	it("puts a blank line before the rule so it cannot turn a text line into a heading", () => {
-		const section = buildTaskPrDeepLinkSection("t1");
-		expect(section.startsWith("\n\n---")).toBe(true);
-		expect(section).not.toMatch(/[^\n]\n---/);
-	});
-
-	it("wraps the raw scheme link in a code span for copy-paste", () => {
-		expect(buildTaskPrDeepLinkSection("t1")).toContain("`dev3://task/t1`");
-	});
-
-	it("tells the reader the footer can be turned off", () => {
-		expect(buildTaskPrDeepLinkSection("t1")).toContain("Settings → Tasks");
 	});
 });
 
@@ -261,7 +208,7 @@ describe("pending deep-link nav slot", () => {
 });
 
 // Only the macOS bundle registers the scheme; a link is inert everywhere else,
-// which is what gates the PR footer and the injected skill's instruction.
+// which determines whether local links can be opened by the OS.
 describe("deepLinkSchemeRegistered", () => {
 	it("is true on macOS and false on every other platform", () => {
 		expect(deepLinkSchemeRegistered("darwin")).toBe(true);

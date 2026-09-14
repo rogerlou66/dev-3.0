@@ -1,3 +1,5 @@
+Superseded on 2026-09-14 by `decisions/2026/09/14/remove-pr-origin-links.md`: PR origin-task links and the web redirect have been removed. Local URL navigation remains.
+
 # The PR origin-task deep link ships only where the scheme is registered
 
 ## Context

@@ -73,16 +73,13 @@ function fullSizeContext(): TemplateContext {
 }
 
 describe("the protocol body fits the budget", () => {
-	// Both platforms, because the body is not platform-invariant: the PR-footer
-	// section is rewritten where `dev3://` is not registered, and the Windows
-	// wording is the LONGER one — measuring only on the dev machine reads a
-	// number no Windows user ever gets.
+	// Check both platforms so host-specific instructions stay within budget.
 	for (const platform of ["darwin", "win32"] as const) {
 		for (const [name, ,] of BODIES) {
 			it(`${name} on ${platform}`, async () => {
 				asPlatform(platform);
 				// Re-evaluated per platform: the bodies are composed at module load,
-				// and `skillPrLinkInstruction` branches on the platform.
+				// so module-level platform-specific instructions are recomputed.
 				vi.resetModules();
 				const mod = await import("../../shared/agent-skill-content");
 				const body = (mod as unknown as Record<string, string>)[`${name.toUpperCase()}_SKILL_BODY`] ?? "";

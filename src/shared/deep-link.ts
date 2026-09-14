@@ -19,19 +19,11 @@ export const DEEP_LINK_SCHEME = "dev3";
  * Whether the OS has a handler for `dev3://` at all. Only the macOS bundle
  * registers the scheme (CFBundleURLTypes); nothing in this codebase writes a
  * Windows registry key or a Linux `.desktop` MimeType entry, so a deep link is
- * inert everywhere else — including the `https` redirect page, which only bounces
- * back to the same scheme.
+ * inert everywhere else.
  */
 export function deepLinkSchemeRegistered(platform: NodeJS.Platform = process.platform): boolean {
 	return platform === "darwin";
 }
-
-// GitHub (and most markdown renderers) strip links whose scheme is not http(s)/
-// mailto, so a bare `dev3://…` in a PR body renders as un-clickable text. This
-// https page on the landing-site domain redirects to the `dev3://` scheme, which
-// is what makes a deep link clickable inside a pull request. See
-// decisions/2026/08/13/pr-origin-task-deep-link.md.
-export const DEEP_LINK_WEB_BASE = "https://dev3.h0x91b.com";
 
 /** Parsed intent of an inbound deep link (before backend resolution). */
 export type DeepLinkTarget =
@@ -116,14 +108,6 @@ export function buildSpaceDeepLink(spaceId: string): string {
 	return `${DEEP_LINK_SCHEME}://space/${encodeURIComponent(spaceId)}`;
 }
 
-/**
- * `https://dev3.h0x91b.com/open.html?space=<spaceId>` — the clickable, GitHub-safe
- * twin of {@link buildSpaceDeepLink}, same bounce as the task link.
- */
-export function buildSpaceWebLink(spaceId: string): string {
-	return `${DEEP_LINK_WEB_BASE}/open.html?space=${encodeURIComponent(spaceId)}`;
-}
-
 /** `dev3://new-task?project=…&text=…` — both params optional. */
 export function buildNewTaskDeepLink(opts?: { projectId?: string; text?: string }): string {
 	const params = new URLSearchParams();
@@ -131,36 +115,4 @@ export function buildNewTaskDeepLink(opts?: { projectId?: string; text?: string 
 	if (opts?.text) params.set("text", opts.text);
 	const qs = params.toString();
 	return `${DEEP_LINK_SCHEME}://new-task${qs ? `?${qs}` : ""}`;
-}
-
-/**
- * `https://dev3.h0x91b.com/open.html?task=<taskId>` — the clickable, GitHub-safe
- * form of `buildTaskDeepLink`. The static `docs/open.html` page bounces it to the
- * `dev3://task/<taskId>` scheme so the app opens the task.
- */
-export function buildTaskWebLink(taskId: string): string {
-	return `${DEEP_LINK_WEB_BASE}/open.html?task=${encodeURIComponent(taskId)}`;
-}
-
-/**
- * The footer content, on ONE line: a clickable https link (redirects to the scheme),
- * the raw `dev3://` link as a copy-paste fallback, and where to switch the footer
- * off. Newline-free on purpose — it rides inside the agent-handoff prompt, which
- * reaches the pane as raw bytes, and a newline can submit the prompt early on an
- * agent that reads `\n` as Enter.
- */
-export function buildTaskPrDeepLinkLine(taskId: string): string {
-	return `🔗 **Origin task in dev3:** [open in dev3](${buildTaskWebLink(taskId)}) · \`${buildTaskDeepLink(taskId)}\` _(dev3 added this footer — turn it off in Settings → Tasks.)_`;
-}
-
-/**
- * The rendered footer: the divider plus {@link buildTaskPrDeepLinkLine}. Used by the
- * agent skill and the tests; the handoff prompt itself passes the LINE, never this,
- * because a prompt with newlines is typed into the pane byte for byte.
- *
- * The leading blank line is load-bearing: `---` directly under a line of text is
- * setext syntax, which turns that line into an <h2> and draws no rule at all.
- */
-export function buildTaskPrDeepLinkSection(taskId: string): string {
-	return `\n\n---\n\n${buildTaskPrDeepLinkLine(taskId)}`;
 }

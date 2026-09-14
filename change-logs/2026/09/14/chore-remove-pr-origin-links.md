@@ -1,0 +1,1 @@
+Remove automatic origin-task links from pull request descriptions, their settings control, and the public redirect page. PR creation now uses only the supplied description; local dev3 URL navigation remains available.

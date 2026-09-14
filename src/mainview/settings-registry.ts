@@ -202,15 +202,6 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
-		id: "pr-origin-task-link",
-		category: "tasks",
-		titleKey: "settings.prOriginTaskLink",
-		descriptionKey: "settings.prOriginTaskLinkDesc",
-		anchor: "pr-origin-task-link",
-		globalField: "prOriginTaskLink",
-		storage: "global",
-	},
-	{
 		id: "task-complete-sound",
 		category: "notifications",
 		titleKey: "settings.taskCompleteSound",
@@ -543,8 +534,9 @@ export type SettingsEntryAnchor = (typeof SETTINGS_ENTRIES)[number] extends infe
 /** GlobalSettings fields intentionally kept outside the visible settings registry. */
 export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"resolvedTheme",
-	// Retired field preserved for older versions sharing settings.json.
+	// Retired fields preserved for older versions sharing settings.json.
 	"analyticsDistinctId",
+	"prOriginTaskLink",
 	"customBinaryPaths",
 	"agentBinaryPaths",
 	"agentCustomBinaryPaths",
@@ -574,6 +566,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"theme",
 	"resolvedTheme",
 	"analyticsDistinctId",
+	"prOriginTaskLink",
 	"staticAccessCode",
 	"cloneBaseDirectory",
 	"customBinaryPaths",
@@ -601,7 +594,6 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"agentRateLimitTracking",
 	"watchByDefault",
 	"suggestCompletingTasksAfterMerge",
-	"prOriginTaskLink",
 	"agentLaunchAutoApproveMinutes",
 	"agentsLayoutRevision",
 	"pxpipeProxyEnabled",

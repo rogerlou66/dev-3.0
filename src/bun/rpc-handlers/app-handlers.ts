@@ -1012,11 +1012,6 @@ async function checkCanaryChannelAvailable(): Promise<{ available: boolean }> {
 	return { available: hostPublishesCanary() };
 }
 
-async function checkPrOriginTaskLinkSupported(): Promise<{ supported: boolean }> {
-	const { deepLinkSchemeRegistered } = await import("../../shared/deep-link");
-	return { supported: deepLinkSchemeRegistered(process.platform) };
-}
-
 async function getPreventSleepState(): Promise<{ enabled: boolean; available: boolean; forcedByRemote: boolean }> {
 	const { isCaffeinateAvailable, isPreventSleepEnabled } = await import("../caffeinate");
 	const { isRemoteAccessActive } = await import("../remote-access-server");
@@ -1105,7 +1100,6 @@ export const appHandlers = {
 	resetTipState,
 	checkCaffeinateAvailable,
 	checkCanaryChannelAvailable,
-	checkPrOriginTaskLinkSupported,
 	getPreventSleepState,
 	setPreventSleep,
 	copyTerminalSelection,

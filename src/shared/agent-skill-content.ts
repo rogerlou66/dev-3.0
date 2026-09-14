@@ -15,23 +15,10 @@ import {
 	AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS,
 	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
 } from "./agent-message-hold-timing";
-import { deepLinkSchemeRegistered } from "./deep-link";
 import { PANE_RUN_AUTO_CLOSE_SECONDS, PANE_RUN_FAILED_AUTO_CLOSE_SECONDS } from "./pane-runs";
 
-/**
- * How the agent should link a PR back to its task — or why it must not. The
- * footer is only useful where the OS resolves `dev3://`; on any other platform it
- * would publish a dead link into a public pull request, so the instruction is
- * replaced rather than softened.
- */
-export function skillPrLinkInstruction(platform: NodeJS.Platform = process.platform): string {
-	const command = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
-
-	if (!deepLinkSchemeRegistered(platform)) {
-		return `${command} **It adds no origin-task footer here — and nor do you:** \`dev3://\` opens the app on macOS only, so it would be a dead link in a public PR.`;
-	}
-	return `${command} **It links the PR back to this task itself**, with the right id and the user's opt-out honoured — never hand-write that footer.`;
-}
+/** PR creation and auto-merge instructions shared by every harness. */
+export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
 
 const SKILL_HEADER = `# dev3 — Task Lifecycle Protocol
 
@@ -127,7 +114,7 @@ const SKILL_COMPLETION_REQUEST = `
 
 **Preservation gate (mandatory):** never move a task to \`completed\` or request approval while its work exists only in a disposable worktree. Allowed only when the result is safely preserved in the destination the task requires — usually a PR merged into \`main\`, but possibly an external file, a task note, a shared artifact — or when the user explicitly asks to complete it. A local commit, passing tests, or an open unmerged PR is not enough. Unclear destination or unpreserved work → keep the task open and ask. \`cancelled\` asks the same way.
 
-${skillPrLinkInstruction()}
+${SKILL_PR_INSTRUCTION}
 `;
 
 const SKILL_MANUAL_COMPLETION = `

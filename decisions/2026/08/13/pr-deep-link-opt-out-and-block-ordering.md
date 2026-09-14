@@ -1,3 +1,5 @@
+Superseded on 2026-09-14 by `decisions/2026/09/14/remove-pr-origin-links.md`: PR origin-task links and the web redirect have been removed. Local URL navigation remains.
+
 # PR deep-link opt-out, block ordering, and symmetric id encoding
 
 ## Context

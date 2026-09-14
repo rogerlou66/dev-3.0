@@ -1,11 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import type { ParsedArgs } from "../args";
 import { exitError, exitUsage } from "../output";
 import { readTaskDirect, type CliContext } from "../context";
 import { rejectUnknownFlags } from "../flag-validation";
-import { DEV3_HOME } from "../../bun/paths";
-import { buildTaskPrDeepLinkSection, deepLinkSchemeRegistered } from "../../shared/deep-link";
 import { CLI_EXIT_CODE_GH_UNAVAILABLE } from "../../shared/cli-exit-codes";
 
 const USAGE = `Usage: dev3 pr create --title "..." [--description "..."] [--base <branch>] [--draft] [--auto-merge[=squash|merge|rebase]]
@@ -25,9 +22,6 @@ export interface PrDeps {
 	/** Run a binary and capture its output. Tests inject a fake. */
 	run(command: string, args: string[], cwd: string): PrCommandResult;
 	cwd: string;
-	platform: NodeJS.Platform;
-	/** `false` when the user turned the PR→task footer off in Settings → Tasks. */
-	originTaskLinkEnabled(): boolean;
 }
 
 export const realPrDeps: PrDeps = {
@@ -40,25 +34,11 @@ export const realPrDeps: PrDeps = {
 		}
 	},
 	cwd: process.cwd(),
-	platform: process.platform,
-	originTaskLinkEnabled: () => {
-		// Read settings.json directly rather than through src/bun/settings.ts: that
-		// module pulls the backend's logger and data layer into the CLI's startup
-		// graph, and this is one boolean.
-		try {
-			const file = `${DEV3_HOME}/settings.json`;
-			if (!existsSync(file)) return true;
-			const parsed = JSON.parse(readFileSync(file, "utf-8")) as { prOriginTaskLink?: unknown };
-			return parsed.prOriginTaskLink !== false;
-		} catch {
-			return true;
-		}
-	},
 };
 
 /**
  * `dev3 pr` — the pull-request verbs that used to be a hand-written `gh` recipe:
- * `create` (push + open, footer included) and `auto-merge` (set or clear it).
+ * `create` (push + open) and `auto-merge` (set or clear it).
  *
  * It is `gh` end to end and deliberately so: `gh` is the only forge client dev3
  * speaks, and an unauthenticated `gh` is refused up front (exit 23) rather than
@@ -141,7 +121,7 @@ async function createPr(args: ParsedArgs, context: CliContext | null, deps: PrDe
 		exitError(`git push failed for branch ${branch}`, push.stderr.trim() || push.stdout.trim());
 	}
 
-	const ghArgs = ["pr", "create", "--title", title, "--body", prBody(args.flags.description, context, deps)];
+	const ghArgs = ["pr", "create", "--title", title, "--body", args.flags.description?.trim() ?? ""];
 	if (base) ghArgs.push("--base", base);
 	if (draft) ghArgs.push("--draft");
 
@@ -242,18 +222,6 @@ function taskBaseBranch(context: CliContext | null): string | undefined {
 	const task = readTaskDirect(context.projectId, context.taskId);
 	const base = task?.baseBranch;
 	return typeof base === "string" && base.trim() ? base.trim() : undefined;
-}
-
-/**
- * The PR body: the description plus the origin-task footer. The footer is
- * dropped on a host with no `dev3://` handler (the link would be dead in a
- * public pull request), when the user opted out, and outside a task worktree.
- */
-function prBody(description: string | undefined, context: CliContext | null, deps: PrDeps): string {
-	const body = description?.trim() ?? "";
-	if (!context?.taskId) return body;
-	if (!deepLinkSchemeRegistered(deps.platform) || !deps.originTaskLinkEnabled()) return body;
-	return `${body}${buildTaskPrDeepLinkSection(context.taskId)}`;
 }
 
 /** `gh pr create` prints the URL on its own line, sometimes after other chatter. */

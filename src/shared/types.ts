@@ -1339,11 +1339,7 @@ export interface GlobalSettings {
 	 * applied to the completion dialog: that one destroys a worktree.
 	 */
 	agentLaunchAutoApproveMinutes?: number;
-	/**
-	 * When false, the Create-PR handoff stops asking the agent to append the
-	 * deep link back to the originating task. Default on; the opt-out exists
-	 * because a public PR would otherwise advertise that dev3 produced it.
-	 */
+	/** Retired PR backlink preference, retained for N-2 on-disk readability. */
 	prOriginTaskLink?: boolean;
 	/**
 	 * One-time migration marker: when this is behind the app's current
@@ -5734,17 +5730,6 @@ export type AppRPCSchema = {
 			checkCanaryChannelAvailable: {
 				params: void;
 				response: { available: boolean };
-			};
-			/**
-			 * Can THIS host's PRs carry a working `dev3://` back-link? True on macOS only —
-			 * Windows and Linux register no handler for the scheme, so the link would be
-			 * dead for whoever clicks it. Asked of the host because browser-side platform
-			 * sniffing would answer for the machine holding the browser, not the one
-			 * opening the PR.
-			 */
-			checkPrOriginTaskLinkSupported: {
-				params: void;
-				response: { supported: boolean };
 			};
 			getPreventSleepState: {
 				params: void;

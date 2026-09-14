@@ -103,8 +103,7 @@ Commands:
   dev3 ui state [--json]                 Show focused task/project, foreground, user idle time + the worktree's tmux layout (ASCII pane map)
   dev3 pr create --title "..." [--description "..."] [--base <branch>] [--draft] [--auto-merge[=squash|merge|rebase]]
                                          Push this branch and open a pull request for it via gh
-                                         (needs an authenticated gh — exits 23 before pushing if not;
-                                          inside a task the body links back to the originating task)
+                                         (needs an authenticated gh — exits 23 before pushing if not)
   dev3 pr auto-merge [<number|url>] [--strategy squash|merge|rebase] [--off]
                                          Set (or clear) auto-merge on an existing pull request —
                                          defaults to the one for the branch checked out here

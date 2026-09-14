@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	applyClaudeSettings,
 	buildClaudeSkillContent,
@@ -24,7 +24,7 @@ import {
 } from "../../shared/cli-exit-codes";
 import { ARTIFACT_TEMPLATE_FILES } from "../../shared/artifact-template";
 import { AGENT_MESSAGE_HOLD_IDLE_SECONDS } from "../../shared/agent-message-hold-timing";
-import { skillPrLinkInstruction } from "../../shared/agent-skill-content";
+import { SKILL_PR_INSTRUCTION, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../../shared/agent-skill-content";
 import { hookCliDialect } from "../../shared/dev3-cli-path";
 
 // The Claude SKILL.md is deliberately short (the protocol lives in the system
@@ -635,63 +635,16 @@ describe("skill content per platform dialect", () => {
 	});
 });
 
-// The PR instruction hands the job to `dev3 pr create`, which appends the
-// origin-task footer itself. The footer is only useful where the OS resolves
-// `dev3://`, so on every other platform the injected skill must say the command
-// leaves it out — and must never order the agent to hand-write one.
-describe("PR instruction — dev3 pr create, and the footer it owns", () => {
-	it("routes macOS through the command and says the footer is automatic", () => {
-		const text = skillPrLinkInstruction("darwin");
-		expect(text).toContain("dev3 pr create");
-		expect(text).toContain("dev3 pr auto-merge");
-		expect(text).toContain("links the PR back to this task itself");
-		// The old instruction pasted the footer template for the agent to copy.
-		// `dev3 pr create` builds it, so the template must not reappear here.
-		expect(text).not.toContain("open.html");
-		expect(text).not.toContain("<TASK_ID>");
-	});
-
-	for (const platform of ["win32", "linux"] as NodeJS.Platform[]) {
-		it(`still routes ${platform} through the command, with no link anywhere`, () => {
-			const text = skillPrLinkInstruction(platform);
-			expect(text).toContain("dev3 pr create");
-			expect(text).toContain("adds no origin-task footer here");
-			expect(text).not.toContain("open.html");
-			expect(text).not.toContain("dev3://task/");
-			expect(text).not.toContain("Origin task in dev3");
-		});
-	}
-
-	it("never tells the agent to run gh pr create or git push itself", () => {
-		for (const platform of ["darwin", "win32", "linux"] as NodeJS.Platform[]) {
-			const text = skillPrLinkInstruction(platform);
-			expect(text).not.toContain("gh pr create");
-			expect(text).not.toContain("git push");
-		}
-	});
-
-	it("composes the platform's own variant into every injected body", async () => {
-		const original = process.platform;
-		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-			vi.resetModules();
-			const win = await import("../../shared/agent-skill-content");
-			for (const body of [win.CLAUDE_SKILL_BODY, win.CODEX_SKILL_BODY, win.GENERIC_SKILL_BODY]) {
-				expect(body).toContain("adds no origin-task footer here");
-				expect(body).not.toContain("Origin task in dev3");
-				expect(body).not.toContain("open.html");
-			}
-
-			Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
-			vi.resetModules();
-			const mac = await import("../../shared/agent-skill-content");
-			for (const body of [mac.CLAUDE_SKILL_BODY, mac.CODEX_SKILL_BODY, mac.GENERIC_SKILL_BODY]) {
-				expect(body).toContain("links the PR back to this task itself");
-				expect(body).not.toContain("adds no origin-task footer here");
-			}
-		} finally {
-			Object.defineProperty(process, "platform", { value: original, configurable: true });
-			vi.resetModules();
+// PR creation instructions are identical across platforms.
+describe("PR instructions", () => {
+	it("uses the CLI without instructing agents to append task links", () => {
+		expect(SKILL_PR_INSTRUCTION).toContain("dev3 pr create");
+		expect(SKILL_PR_INSTRUCTION).toContain("dev3 pr auto-merge");
+		for (const body of [CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY]) {
+			expect(body).toContain(SKILL_PR_INSTRUCTION);
+			expect(body).not.toContain("links the PR back");
+			expect(body).not.toContain("origin-task footer");
+			expect(body).not.toContain("open.html");
 		}
 	});
 });
