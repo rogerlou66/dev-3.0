@@ -12,7 +12,7 @@ import { agentBinaryPathOverride } from "./executable";
 import { DEV3_HOME } from "./paths";
 // Writer and pruner share one path constant: whatever registers an entry must
 // agree with whatever removes it.
-import { GEMINI_TRUSTED_FOLDERS } from "./worktree-trust";
+import { ANTIGRAVITY_TRUST_SETTINGS, GEMINI_TRUSTED_FOLDERS } from "./worktree-trust";
 import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
@@ -1027,6 +1027,38 @@ export async function ensureGeminiTrust(dirPath: string): Promise<void> {
 	} catch (err) {
 		// Non-fatal — worst case the user sees the trust dialog
 		log.warn("Failed to register Gemini worktree trust", { error: String(err) });
+	}
+}
+
+// ---- Antigravity Trust ----
+
+/**
+ * Ensure a directory is marked as trusted in
+ * ~/.gemini/antigravity-cli/settings.json (`trustedWorkspaces`) so `agy`
+ * loads the workspace-local `.agents/hooks.json` instead of ignoring it as
+ * untrusted. Resolves symlinks (e.g. /tmp → /private/tmp on macOS). Distinct
+ * file from Gemini's own `trustedFolders.json`.
+ */
+export async function ensureAntigravityTrust(dirPath: string): Promise<void> {
+	try {
+		const resolved = await realpath(dirPath);
+		const file = Bun.file(ANTIGRAVITY_TRUST_SETTINGS);
+		let data: Record<string, unknown> = {};
+		if (await file.exists()) {
+			data = await file.json();
+		}
+
+		const workspaces = Array.isArray(data.trustedWorkspaces) ? data.trustedWorkspaces as string[] : [];
+		if (workspaces.includes(resolved)) return; // already trusted
+
+		data.trustedWorkspaces = [...workspaces, resolved];
+
+		mkdirSync(dirname(ANTIGRAVITY_TRUST_SETTINGS), { recursive: true });
+		await Bun.write(ANTIGRAVITY_TRUST_SETTINGS, JSON.stringify(data, null, 2));
+		log.info("Registered worktree as trusted in ~/.gemini/antigravity-cli/settings.json", { path: resolved });
+	} catch (err) {
+		// Non-fatal — worst case the workspace-local hooks are skipped as untrusted.
+		log.warn("Failed to register Antigravity worktree trust", { error: String(err) });
 	}
 }
 

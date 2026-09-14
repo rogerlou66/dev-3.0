@@ -74,8 +74,8 @@ export function resolveDev3CliPath(lookup: Dev3CliLookup = {}): string {
 	return candidates.find(exists) ?? candidates[candidates.length - 1];
 }
 
-/** Copilot's new hook subcommand must use the launcher's CLI, including in dev builds. */
-export function resolveCopilotHookCliPath(
+/** Worktree-local hook subcommands (Copilot, Antigravity) must use the launcher's CLI, including in dev builds. */
+export function resolveHookCliPath(
 	lookup: Dev3CliLookup & { execPath?: string; sourceCliPath?: string } = {},
 ): string {
 	const platform = lookup.platform ?? process.platform;

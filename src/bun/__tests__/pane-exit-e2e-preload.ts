@@ -54,6 +54,7 @@ mock.module("../agents", () => ({
 	ensureClaudeTrust: async () => {},
 	ensureCodexTrust: async () => {},
 	ensureGeminiTrust: async () => {},
+	ensureAntigravityTrust: async () => {},
 	isClaudeCommand: () => false,
 	getAllAgents: () => [],
 	buildResumeCommand: () => null,

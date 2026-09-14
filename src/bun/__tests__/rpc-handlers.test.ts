@@ -214,6 +214,7 @@ vi.mock("../agents", () => ({
 	ensureClaudeTrust: vi.fn(),
 	ensureCodexTrust: vi.fn(),
 	ensureGeminiTrust: vi.fn(),
+	ensureAntigravityTrust: vi.fn(),
 	getCodexVersionCached: vi.fn(() => null),
 	isClaudeCommand: vi.fn(() => false),
 	skillInvocationPrefix: vi.fn((command: string) => (command === "codex" ? "$" : "/")),

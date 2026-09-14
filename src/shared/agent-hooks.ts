@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { PermissionMode, TaskStatus } from "./types";
 import { CLI_EXIT_CODE_APP_NOT_RUNNING } from "./cli-exit-codes";
-import { type HookCliDialect, hookCliDialect, resolveDev3CliPath } from "./dev3-cli-path";
+import { type HookCliDialect, hookCliCommandPath, hookCliDialect, resolveDev3CliPath } from "./dev3-cli-path";
 
 /** Dialect of the machine generating the hooks (the frozen POSIX string on macOS/Linux). */
 const DEFAULT_DIALECT = hookCliDialect();
@@ -561,11 +561,65 @@ export function buildCopilotHooks(cliPath?: string, dev3Home?: string): Record<s
 	};
 }
 
-function readPreservedSettings(path: string): Record<string, unknown> {
+export const ANTIGRAVITY_STATUS_HOOK_EVENTS = ["PreInvocation", "Stop"] as const;
+export type AntigravityStatusHookEvent = typeof ANTIGRAVITY_STATUS_HOOK_EVENTS[number];
+
+/**
+ * Quote a raw (unresolved-tilde) CLI path so it survives being embedded in the
+ * one command string Antigravity hands to `sh -c` / `cmd /c`. `dialect.cli`
+ * already comes pre-quoted for both platforms; this only fires when the caller
+ * passes an explicit `cliPath` (the resolved bundle path, which may contain
+ * spaces on macOS: "/Applications/dev3 dev.app/...").
+ */
+function quoteHookCliPath(path: string, dialect: HookCliDialect): string {
+	if (!dialect.posixShell) return hookCliCommandPath(path);
+	return /\s/.test(path) ? `'${path.replaceAll("'", `'\\''`)}'` : path;
+}
+
+/**
+ * Build the `"dev3"` named hook entry for Antigravity's `hooks.json`.
+ *
+ * Only `PreInvocation`/`Stop` are wired (decision:
+ * decisions/2026/09/14/antigravity-worktree-local-hooks.md) — those are the
+ * only two lifecycle events agy exposes that map onto a dev3 status move.
+ * Handlers run through `sh -c`/`cmd /c` and must always emit valid JSON: agy
+ * blocks the agent loop on a hook and expects `{}`/`{"decision":"allow"}`.
+ */
+export function buildAntigravityHooks(cliPath?: string, dialect: HookCliDialect = DEFAULT_DIALECT): Record<string, unknown> {
+	const cli = cliPath ? quoteHookCliPath(cliPath, dialect) : dialect.cli;
+	const handler = (event: AntigravityStatusHookEvent): HookEntry => ({
+		type: "command",
+		command: `${cli} hook antigravity --event ${event}`,
+		timeout: 5,
+	});
+	return {
+		dev3: {
+			PreInvocation: [handler("PreInvocation")],
+			Stop: [handler("Stop")],
+		},
+	};
+}
+
+/**
+ * Read the worktree-local `.agents/hooks.json`, merge in the `"dev3"` hook,
+ * write it back. Preserves every other named hook untouched; throws (without
+ * writing) on malformed JSON or non-object content rather than clobbering it.
+ * Idempotent: returns whether anything actually changed.
+ */
+export function writeAntigravityHooks(worktreePath: string, options?: { cliPath?: string }): boolean {
+	const agentsDir = join(worktreePath, ".agents");
+	mkdirSync(agentsDir, { recursive: true });
+	const hooksPath = join(agentsDir, "hooks.json");
+	const previous = readPreservedSettings(hooksPath, "Antigravity hooks");
+	const generated = buildAntigravityHooks(options?.cliPath);
+	return writeIfChanged(hooksPath, { ...previous, ...generated }, previous);
+}
+
+function readPreservedSettings(path: string, label = "Copilot hooks"): Record<string, unknown> {
 	if (!existsSync(path)) return {};
 	const parsed: unknown = JSON.parse(readFileSync(path, "utf-8").replace(/^\uFEFF/, ""));
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error(`Cannot install Copilot hooks: expected an object in ${path}`);
+		throw new Error(`Cannot install ${label}: expected an object in ${path}`);
 	}
 	return parsed as Record<string, unknown>;
 }

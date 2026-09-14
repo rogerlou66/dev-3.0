@@ -24,6 +24,13 @@ const USER_HOME = resolveUserHome();
 export const GEMINI_TRUSTED_FOLDERS = `${USER_HOME}/.gemini/trustedFolders.json`;
 
 /**
+ * `~/.gemini/antigravity-cli/settings.json` — Antigravity's own settings file,
+ * distinct from Gemini's. `trustedWorkspaces` is a flat array of absolute
+ * paths; other keys (e.g. `colorScheme`) must survive every read-modify-write.
+ */
+export const ANTIGRAVITY_TRUST_SETTINGS = `${USER_HOME}/.gemini/antigravity-cli/settings.json`;
+
+/**
  * The roots dev3 creates disposable working directories under: git worktrees for
  * ordinary projects, `ops/<slug>/<taskId>/work` for virtual ones. Both get trust
  * registered the same way at launch, so both need forgetting. The roots
@@ -93,6 +100,28 @@ function updateGeminiTrustedFolders(
 	return removed;
 }
 
+/** Read `trustedWorkspaces`, apply `shouldRemove`, write back only if something changed. */
+function updateAntigravityTrustedWorkspaces(shouldRemove: (path: string) => boolean): string[] {
+	if (!existsSync(ANTIGRAVITY_TRUST_SETTINGS)) return [];
+
+	let data: Record<string, unknown>;
+	try {
+		data = JSON.parse(readFileSync(ANTIGRAVITY_TRUST_SETTINGS, "utf-8"));
+	} catch (err) {
+		log.warn("Skipping ~/.gemini/antigravity-cli/settings.json prune (unparsable)", { error: String(err) });
+		return [];
+	}
+	if (data == null || typeof data !== "object" || Array.isArray(data)) return [];
+
+	const existing = Array.isArray(data.trustedWorkspaces) ? data.trustedWorkspaces as string[] : [];
+	const removed = existing.filter(shouldRemove);
+	if (removed.length === 0) return [];
+
+	data.trustedWorkspaces = existing.filter((path) => !shouldRemove(path));
+	writeFileSync(ANTIGRAVITY_TRUST_SETTINGS, JSON.stringify(data, null, 2));
+	return removed;
+}
+
 /**
  * Drop every trust registration for a worktree dev3 just removed. Best-effort:
  * a failure here must never block teardown.
@@ -141,6 +170,13 @@ export async function forgetWorktreeTrust(worktreePath: string | null | undefine
 				log.info("Pruned worktree from Claude Code's .claude.json", { count: claudeRemoved });
 			}
 		});
+
+		step("antigravity", () => {
+			const removed = updateAntigravityTrustedWorkspaces((path) => targets.includes(normalize(path)));
+			if (removed.length > 0) {
+				log.info("Pruned worktree from ~/.gemini/antigravity-cli/settings.json", { paths: removed });
+			}
+		});
 	} catch (err) {
 		log.warn("Failed to prune worktree trust", { error: String(err) });
 	}
@@ -181,6 +217,13 @@ export function sweepStaleWorktreeTrust(): void {
 			.reduce((sum, result) => sum + result.removed, 0);
 		if (claudeRemoved > 0) {
 			log.info("Swept dead worktrees from Claude Code's .claude.json", { count: claudeRemoved });
+		}
+	});
+
+	step("antigravity", () => {
+		const removed = updateAntigravityTrustedWorkspaces((path) => isDev3ManagedPath(path) && !existsSync(path));
+		if (removed.length > 0) {
+			log.info("Swept dead worktrees from ~/.gemini/antigravity-cli/settings.json", { count: removed.length });
 		}
 	});
 }

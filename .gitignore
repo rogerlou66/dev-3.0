@@ -8,6 +8,7 @@ node_modules/
 .claude/scheduled_tasks.lock
 .codex/hooks.json
 .github/hooks/dev3.json
+.agents/hooks.json
 src/shared/build-info.generated.ts
 src/bun/changelog-bundled.ts
 changelog.json

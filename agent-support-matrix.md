@@ -44,9 +44,9 @@ Last updated: 2026-08-25
 | **Model selection** | `--model` (omitted on a third-party provider — see below) | `--model` | `--model` | `--model` | `--model` | `--model` |
 | **LLM provider (backend)** | Anthropic / Amazon Bedrock (per-agent toggle) | — | — | — | — | — |
 | **Agent selection** | — | — | — | — | `--agent` via additional args | `--agent` |
-| **Auto-trust worktree** | Yes (`ensureClaudeTrust`) | — | Yes (`ensureCodexTrust`) | Yes (`ensureGeminiTrust`) | — | — |
-| **Status hooks (automatic)** | Yes (6 hooks) | — | Yes (6 worktree-local hooks, automatically trusted) | — | — | — |
-| **Status management** | Automatic via hooks | Manual (SKILL.md) | Automatic via hooks with `user-questions`/legacy-session fallback | Manual (SKILL.md) | Manual (SKILL.md) | Manual (SKILL.md) |
+| **Auto-trust worktree** | Yes (`ensureClaudeTrust`) | — | Yes (`ensureCodexTrust`) | Yes (`ensureGeminiTrust`) | Yes (`ensureAntigravityTrust`) | — |
+| **Status hooks (automatic)** | Yes (6 hooks) | — | Yes (6 worktree-local hooks, automatically trusted) | — | Yes (2 worktree-local hooks) | — |
+| **Status management** | Automatic via hooks | Manual (SKILL.md) | Automatic via hooks with `user-questions`/legacy-session fallback | Manual (SKILL.md) | Automatic via hooks | Manual (SKILL.md) |
 | **Rate-limit tracking** | Yes (statusLine wrapper injected via `--settings`, `dev3 statusline`) | — | Yes (rollout files + cached live monthly credits via `codex app-server`) | — | — | — |
 | **dev3 artifact starter** | Yes (`DEV3_ARTIFACT_TEMPLATE_DIR`) | Yes | Yes | Yes | Yes | Yes |
 
@@ -85,6 +85,23 @@ Generated in each task's `.codex/hooks.json` and **declared in `~/.codex/config.
 The `UserPromptSubmit` payload also carries the submitted `prompt` and a `turn_id`, both forwarded on the existing `task.agentHook` request so a human's terminal prompt reaches Agent traffic without a second dev3 process per prompt. Whether a submission was the human is decided app-side against the receipts dev3 leaves for everything it types itself (`decisions/2026/09/10/prove-a-terminal-prompt-is-the-user.md`).
 
 Beyond status, the `SessionStart`/`UserPromptSubmit` hook payloads carry the Codex `session_id` (the resumable rollout id), and the hook process inherits `$TMUX_PANE`. dev3 records that id onto the matching `sessionState` pane so recovery can `codex resume <id>` the exact per-pane session — Codex has no launch-time session-id flag, so this is the only way to target a specific session (see decision 125).
+
+### Antigravity CLI
+
+Generated in each task's worktree-local `.agents/hooks.json`, auto-discovered by
+`agy` only when the workspace is trusted (`ensureAntigravityTrust` registers it
+in `~/.gemini/antigravity-cli/settings.json`, a file distinct from Gemini CLI's
+own `trustedFolders.json`). Handlers run through `sh -c`/`cmd /c` and dev3's
+own named hook (`"dev3"`) is replaced on every launch while every other named
+hook in the file is preserved untouched.
+
+| Hook event | Status transition | Purpose |
+|------------|------------------|---------|
+| `PreInvocation` | → `in-progress` | A new invocation is starting (mapped onto `task.agentHook`'s `UserPromptSubmit`) |
+| `Stop` | → `review-by-ai` / `review-by-user` | Turn ended (mapped onto `task.agentHook`'s `Stop`); skipped when the payload's `fullyIdle` is `false` — an intermediate stop still expecting more steps, not a real turn end |
+
+Antigravity has no event for "waiting for permission approval" — an approval
+prompt never moves the task to `user-questions`, unlike Claude Code and Codex.
 
 ## Windows: how generated commands are spelled
 

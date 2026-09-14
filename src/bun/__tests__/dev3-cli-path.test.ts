@@ -4,35 +4,35 @@ import {
 	POSIX_DEV3_CLI,
 	hookCliCommandPath,
 	resolveDev3CliPath,
-	resolveCopilotHookCliPath,
+	resolveHookCliPath,
 	windowsDev3CliCandidates,
 } from "../../shared/dev3-cli-path";
 
 const EXEC_DIR = "C:\\Program Files\\dev3\\bin";
 const HOME = "C:\\Users\\dev";
 
-describe("resolveCopilotHookCliPath", () => {
+describe("resolveHookCliPath", () => {
 	it.each(["darwin", "linux"] as const)("prefers the current %s bundle over the shared CLI", (platform) => {
 		const bundled = "/apps/dev3 dev/Contents/Resources/app/cli/dev3";
-		expect(resolveCopilotHookCliPath({ platform, execPath: "/apps/dev3 dev/Contents/MacOS/bun", exists: (p) => p === bundled }))
+		expect(resolveHookCliPath({ platform, execPath: "/apps/dev3 dev/Contents/MacOS/bun", exists: (p) => p === bundled }))
 			.toBe(bundled);
 	});
 	it("uses the running headless CLI before another installed binary", () => {
-		expect(resolveCopilotHookCliPath({ platform: "linux", execPath: "/opt/dev3/dev3", exists: () => true }))
+		expect(resolveHookCliPath({ platform: "linux", execPath: "/opt/dev3/dev3", exists: () => true }))
 			.toBe("/opt/dev3/dev3");
 	});
 	it("supports Windows bundle paths without shell quoting", () => {
 		const bundled = "C:\\Program Files\\dev3\\cli\\dev3.exe";
-		expect(resolveCopilotHookCliPath({ platform: "win32", execPath: "C:\\Program Files\\dev3\\bun.exe", exists: (p) => p === bundled }))
+		expect(resolveHookCliPath({ platform: "win32", execPath: "C:\\Program Files\\dev3\\bun.exe", exists: (p) => p === bundled }))
 			.toBe(bundled);
 	});
 	it("uses a source-built CLI when the runtime is unbundled Bun", () => {
 		const sourceCliPath = "/checkout/src/cli/dev3";
-		expect(resolveCopilotHookCliPath({ platform: "darwin", execPath: "/usr/local/bin/bun", sourceCliPath, exists: (p) => p === sourceCliPath }))
+		expect(resolveHookCliPath({ platform: "darwin", execPath: "/usr/local/bin/bun", sourceCliPath, exists: (p) => p === sourceCliPath }))
 			.toBe(sourceCliPath);
 	});
 	it("retains the shared fallback without mistaking Bun for a CLI", () => {
-		expect(resolveCopilotHookCliPath({ platform: "darwin", execPath: "/usr/local/bin/bun", exists: () => false }))
+		expect(resolveHookCliPath({ platform: "darwin", execPath: "/usr/local/bin/bun", exists: () => false }))
 			.toBe(POSIX_DEV3_CLI);
 	});
 });

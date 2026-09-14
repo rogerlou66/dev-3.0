@@ -127,6 +127,7 @@ vi.mock("../agents", () => ({
 	ensureClaudeTrust: vi.fn(async () => undefined),
 	ensureCodexTrust: vi.fn(async () => undefined),
 	ensureGeminiTrust: vi.fn(async () => undefined),
+	ensureAntigravityTrust: vi.fn(async () => undefined),
 	getCodexVersionCached: vi.fn(() => null),
 }));
 

@@ -181,7 +181,7 @@ describe("trustKinds", () => {
 		[claudeAdapter, ["claude"]],
 		[codexAdapter, ["claude", "codex"]],
 		[geminiAdapter, ["claude", "gemini"]],
-		[antigravityAdapter, ["claude"]],
+		[antigravityAdapter, ["claude", "antigravity"]],
 		[cursorAdapter, ["claude"]],
 		[opencodeAdapter, ["claude"]],
 		[genericAdapter, ["claude"]],
@@ -199,12 +199,14 @@ describe("hooksSpec", () => {
 	it("Codex is a bare codex spec", () => {
 		expect(codexAdapter.hooksSpec()).toEqual({ kind: "codex" });
 	});
-	it("Gemini / Antigravity / Cursor / OpenCode / Generic install no hooks", () => {
+	it("Gemini / Cursor / OpenCode / Generic install no hooks", () => {
 		expect(geminiAdapter.hooksSpec()).toBeNull();
-		expect(antigravityAdapter.hooksSpec()).toBeNull();
 		expect(cursorAdapter.hooksSpec()).toBeNull();
 		expect(opencodeAdapter.hooksSpec()).toBeNull();
 		expect(genericAdapter.hooksSpec()).toBeNull();
+	});
+	it("Antigravity is a bare antigravity spec", () => {
+		expect(antigravityAdapter.hooksSpec()).toEqual({ kind: "antigravity" });
 	});
 });
 

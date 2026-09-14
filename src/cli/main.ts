@@ -32,6 +32,7 @@ import { handleInlineHtml } from "./commands/inline-html";
 import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleCopilotHook } from "./commands/copilot-hook";
+import { handleAntigravityHook } from "./commands/antigravity-hook";
 import { handleClaudePrompt } from "./commands/claude-prompt";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
@@ -230,6 +231,12 @@ async function main(): Promise<void> {
 	}
 	if (command === "hook" && subcommand === "copilot") {
 		return await handleCopilotHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
+	}
+	if (command === "hook" && subcommand === "antigravity") {
+		// Internal lifecycle adapter for Antigravity's worktree-local hooks.json.
+		// agy blocks its agent loop on the hook and expects valid JSON back, so
+		// this always exits successfully regardless of app/socket state.
+		return await handleAntigravityHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
 	}
 	if (command === "hook" && subcommand === "claude-prompt") {
 		// Internal: Claude Code's UserPromptSubmit, read for recording only. It

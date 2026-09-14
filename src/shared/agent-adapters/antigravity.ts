@@ -25,7 +25,7 @@ export const antigravityAdapter: AgentAdapter = {
 	supportsPreAssignedSessionId: false,
 	// Antigravity discovers dev3 through the shared ~/.agents skill and rule files.
 	skillBody: GENERIC_SKILL_BODY,
-	trustKinds: ["claude"],
+	trustKinds: ["claude", "antigravity"],
 
 	launchArgs(baseCmd, config, ctx, options) {
 		const args: string[] = [];
@@ -60,6 +60,6 @@ export const antigravityAdapter: AgentAdapter = {
 	},
 
 	hooksSpec() {
-		return null;
+		return { kind: "antigravity" };
 	},
 };

@@ -8,6 +8,7 @@ import { join } from "node:path";
 let forgetWorktreeTrust: typeof import("../worktree-trust").forgetWorktreeTrust;
 let sweepStaleWorktreeTrust: typeof import("../worktree-trust").sweepStaleWorktreeTrust;
 let TRUST_FILE: string;
+let ANTIGRAVITY_TRUST_FILE: string;
 let CODEX_CONFIG: string;
 
 let tmpHome: string;
@@ -58,12 +59,14 @@ beforeAll(async () => {
 	worktreesRoot = join(tmpHome, ".dev3.0", "worktrees");
 	opsRoot = join(tmpHome, ".dev3.0", "ops");
 	mkdirSync(join(tmpHome, ".gemini"), { recursive: true });
+	mkdirSync(join(tmpHome, ".gemini", "antigravity-cli"), { recursive: true });
 	mkdirSync(join(tmpHome, ".codex"), { recursive: true });
 	CODEX_CONFIG = join(tmpHome, ".codex", "config.toml");
 	const mod = await import("../worktree-trust");
 	forgetWorktreeTrust = mod.forgetWorktreeTrust;
 	sweepStaleWorktreeTrust = mod.sweepStaleWorktreeTrust;
 	TRUST_FILE = mod.GEMINI_TRUSTED_FOLDERS;
+	ANTIGRAVITY_TRUST_FILE = mod.ANTIGRAVITY_TRUST_SETTINGS;
 });
 
 afterAll(() => {
@@ -76,6 +79,7 @@ beforeEach(() => {
 	rmSync(worktreesRoot, { recursive: true, force: true });
 	rmSync(opsRoot, { recursive: true, force: true });
 	rmSync(TRUST_FILE, { force: true });
+	rmSync(ANTIGRAVITY_TRUST_FILE, { force: true });
 	rmSync(CODEX_CONFIG, { force: true });
 	rmSync(join(tmpHome, ".claude.json"), { force: true });
 });
@@ -158,6 +162,60 @@ describe("sweepStaleWorktreeTrust", () => {
 		sweepStaleWorktreeTrust();
 
 		expect(readFileSync(TRUST_FILE, "utf-8")).toBe(raw);
+	});
+});
+
+describe("~/.gemini/antigravity-cli/settings.json trustedWorkspaces", () => {
+	function writeAntigravityTrust(workspaces: string[], extra?: Record<string, unknown>): void {
+		writeFileSync(ANTIGRAVITY_TRUST_FILE, JSON.stringify({ ...extra, trustedWorkspaces: workspaces }, null, 2));
+	}
+
+	function readAntigravityTrust(): { trustedWorkspaces: string[]; [key: string]: unknown } {
+		return JSON.parse(readFileSync(ANTIGRAVITY_TRUST_FILE, "utf-8"));
+	}
+
+	it("forgets the removed worktree, keeping other entries and unrelated keys", async () => {
+		const gone = deadWorktreePath("aaaa9999");
+		const alive = makeWorktree("bbbb8888");
+		writeAntigravityTrust([gone, alive], { colorScheme: "dark" });
+
+		await forgetWorktreeTrust(gone);
+
+		expect(readAntigravityTrust()).toEqual({ colorScheme: "dark", trustedWorkspaces: [alive] });
+	});
+
+	it("never touches a path outside the dev3 worktrees root", async () => {
+		const ownWorkspace = join(tmpHome, "Desktop", "my-project");
+		writeAntigravityTrust([ownWorkspace]);
+
+		await forgetWorktreeTrust(ownWorkspace);
+
+		expect(readAntigravityTrust().trustedWorkspaces).toEqual([ownWorkspace]);
+	});
+
+	it("sweeps dead dev3 worktree entries at startup, keeping live and user-owned ones", () => {
+		const alive = makeWorktree("cccc7777");
+		const ownWorkspace = join(tmpHome, "Desktop", "my-project");
+		mkdirSync(ownWorkspace, { recursive: true });
+		writeAntigravityTrust([alive, ownWorkspace, deadWorktreePath("dddd6666")]);
+
+		sweepStaleWorktreeTrust();
+
+		expect(readAntigravityTrust().trustedWorkspaces.sort()).toEqual([alive, ownWorkspace].sort());
+	});
+
+	it("leaves an unparsable file untouched (fails closed)", () => {
+		writeFileSync(ANTIGRAVITY_TRUST_FILE, "{ not json");
+
+		sweepStaleWorktreeTrust();
+
+		expect(readFileSync(ANTIGRAVITY_TRUST_FILE, "utf-8")).toBe("{ not json");
+	});
+
+	it("is a no-op when the file is absent", async () => {
+		await forgetWorktreeTrust(deadWorktreePath("eeee5555"));
+		sweepStaleWorktreeTrust();
+		expect(() => readFileSync(ANTIGRAVITY_TRUST_FILE, "utf-8")).toThrow();
 	});
 });
 

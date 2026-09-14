@@ -5,16 +5,17 @@
  * so that task status transitions happen automatically via the agent's built-in
  * event system, rather than relying solely on SKILL.md instructions.
  *
- * Currently supports Claude Code and Codex. Extensible for Gemini, Cursor, etc.
+ * Currently supports Claude Code, Codex, GitHub Copilot CLI, and Antigravity CLI.
+ * Extensible for Gemini, Cursor, etc.
  */
 
 import type { AgentFamily, PermissionMode, TaskStatus } from "../shared/types";
 import { createLogger } from "./logger";
 import { getAgentAdapter } from "../shared/agent-adapters/registry";
-import { writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
+import { writeAntigravityHooks, writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
 import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass } from "./codex-config";
 import { join } from "node:path";
-import { resolveCopilotHookCliPath } from "../shared/dev3-cli-path";
+import { resolveHookCliPath } from "../shared/dev3-cli-path";
 import { DEV3_HOME } from "./paths";
 
 export {
@@ -22,6 +23,7 @@ export {
 	buildCodexHooks,
 	mergeClaudeHooks,
 	mergeCodexHooks,
+	writeAntigravityHooks,
 	writeClaudeHooks,
 	writeCodexHooks,
 } from "../shared/agent-hooks";
@@ -79,11 +81,25 @@ export function setupAgentHooks(
 		return Promise.resolve(null);
 	}
 	if (spec.kind === "copilot") {
-		const cliPath = resolveCopilotHookCliPath({
+		const cliPath = resolveHookCliPath({
 			sourceCliPath: join(import.meta.dir, "..", "cli", process.platform === "win32" ? "dev3.exe" : "dev3"),
 		});
 		writeCopilotHooks(worktreePath, { cliPath, dev3Home: DEV3_HOME });
 		log.info("Copilot lifecycle hooks installed", { worktreePath });
+		return Promise.resolve(null);
+	}
+	if (spec.kind === "antigravity") {
+		const cliPath = resolveHookCliPath({
+			sourceCliPath: join(import.meta.dir, "..", "cli", process.platform === "win32" ? "dev3.exe" : "dev3"),
+		});
+		try {
+			writeAntigravityHooks(worktreePath, { cliPath });
+			log.info("Antigravity lifecycle hooks installed", { worktreePath });
+		} catch (err) {
+			// Malformed hand-edited hooks.json must not block the launch — same
+			// non-fatal posture as every trust routine below.
+			log.warn("Failed to install Antigravity hooks (non-fatal)", { worktreePath, error: String(err) });
+		}
 		return Promise.resolve(null);
 	}
 

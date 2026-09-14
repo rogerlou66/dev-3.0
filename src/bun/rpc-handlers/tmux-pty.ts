@@ -558,6 +558,7 @@ async function ensureAgentTrust(
 			if (kind === "claude") await agents.ensureClaudeTrust(worktreePath, projectPath, accountId);
 			else if (kind === "codex") await agents.ensureCodexTrust(worktreePath);
 			else if (kind === "gemini") await agents.ensureGeminiTrust(worktreePath);
+			else if (kind === "antigravity") await agents.ensureAntigravityTrust(worktreePath);
 			log.info(`${kind} trust ensured`, { worktreePath });
 		} catch (err) {
 			log.error(`ensure ${kind} trust failed (non-fatal)`, {
