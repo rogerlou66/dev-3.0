@@ -14,6 +14,12 @@ Keep the fork's Workspace Board, overlay/full-page/immersive presentations, addi
 
 Map Questions into Working for traffic ordering, and project Blocked only for live cards: movement history cannot prove historical hold state. Keep `--claude-hook` on all generated Claude hooks so Copilot cannot execute them twice. Retain manual desktop updates and local traffic records without restoring analytics modules.
 
+## Verification
+
+`bun install --frozen-lockfile`, `bun run lint`, and `bun run build` passed. The final local suite passed 14,619 tests across 873 files (3 existing skips), including the restored uncommitted extra-key work. Real tmux guarded-send and native task-terminal lifecycle checks passed with isolated cleanup.
+
+An isolated headless instance built from the merge verified task creation, live custom-harness updates, Workspace overlay artifact docking and hiding on close, Blocked/Unblock UI operations, reload persistence (`status=review-by-user`, `blocked=true`), search, and Agent traffic rendering. Browser console errors were empty. The shell test preset received the task brief as a filename and exited; the remaining interactive shell and separate real-terminal tests provide terminal evidence, not a successful coding-agent launch. Original unstaged additions/removals and all eight untracked files were verified unchanged; Android sources are unchanged.
+
 ## Risks
 
 Automated regression and browser checks do not prove every native Android device or physical macOS input method. Old app builds can overwrite globally installed skills at startup; application and CLI versions must remain aligned. No remote push or production installation is part of this merge.
