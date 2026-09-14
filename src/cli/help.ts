@@ -147,7 +147,7 @@ const COMMANDS: CommandHelp[] = [
 			{
 				name: "open",
 				usage: "dev3 task open [<id>] [--task <id>]",
-				summary: "Focus the app on a task (same navigation as a dev3://task/<id> link).",
+				summary: "Focus the app on a task.",
 				details: [
 					"Without an id, targets the current worktree's task.",
 					"Honors the split-vs-fullscreen task open-mode preference.",

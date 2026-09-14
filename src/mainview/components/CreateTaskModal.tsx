@@ -46,7 +46,7 @@ interface CreateTaskModalProps {
 	project: Project;
 	projects?: Project[];
 	dispatch: Dispatch<AppAction>;
-	/** Prefilled task description (e.g. from a `dev3://new-task?text=…` deep link). */
+	/** Prefilled task description for guided onboarding. */
 	initialText?: string;
 	onClose: () => void;
 	onCreateAndRun?: (task: Task, project: Project) => void;

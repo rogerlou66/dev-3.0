@@ -1,3 +1,5 @@
+Superseded on 2026-09-14 by `decisions/2026/09/14/remove-pr-origin-links.md`: the application URL protocol has been removed; CLI task opening uses internal navigation.
+
 # 144 — `dev3://` URL scheme (inbound deep links)
 
 ## Context

@@ -119,7 +119,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	globalSettingsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:globalSettingsUpdated", { detail: payload })),
 	agentsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentsUpdated", { detail: payload })),
 	openTaskFromNotification: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", { detail: payload })),
-	openDeepLink: (payload) => window.dispatchEvent(new CustomEvent("rpc:openDeepLink", { detail: payload })),
+	openTaskNavigation: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskNavigation", { detail: payload })),
 	cliToast: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliToast", { detail: payload })),
 	agentMessageLogChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentMessageLogChanged", { detail: payload })),
 	notificationLogChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:notificationLogChanged", { detail: payload })),
