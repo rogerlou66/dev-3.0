@@ -1,0 +1,26 @@
+[data-appearance-preset="cmux"] {
+	--surface-base: 36 40 59;
+	--surface-raised: 41 46 66;
+	--surface-raised-hover: 48 54 76;
+	--surface-elevated: 47 53 75;
+	--surface-elevated-hover: 56 63 87;
+	--surface-overlay: 54 61 85;
+	--text-primary: 192 202 245;
+	--text-secondary: 185 195 229;
+	--text-tertiary: 173 184 218;
+	--text-muted: 157 169 204;
+	--border-default: 93 106 141;
+	--border-active: 122 140 181;
+	--bg-grad-from: #24283b;
+	--bg-grad-mid: #24283b;
+	--bg-grad-to: #24283b;
+	--glass-column-rgb: 41 46 66;
+	--glass-column-alpha: 0.85;
+	--glass-header-rgb: 41 46 66;
+	--glass-header-alpha: 0.92;
+}
+
+[data-appearance-preset="cmux"] body,
+[data-appearance-preset="cmux"] .font-sans {
+	font-family: 'SF Mono', 'JetBrainsMono Nerd Font Mono', 'PingFang SC', monospace;
+}

@@ -1,7 +1,9 @@
+import { bootstrapAppearancePreset, getAppearancePreset } from "./appearance-preset";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { init } from "ghostty-web";
 import "./index.css";
+import "./appearance-preset.css";
 import "./rpc";
 import App from "./App";
 import { I18nProvider, resolveInitialLocale } from "./i18n";
@@ -65,20 +67,23 @@ const systemThemeMq = window.matchMedia("(prefers-color-scheme: dark)");
 // Consumed once on first call so OS-change reruns don't override the user's manual choice.
 let injectedThemeState = getWindowInjectedThemeState();
 
-function applySavedTheme() {
+function applySavedTheme(persist = false) {
 	const { preference, resolved } = getInitialThemeState({
 		localStorageTheme: localStorage.getItem("dev3-theme"),
 		prefersDark: systemThemeMq.matches,
 		...injectedThemeState,
 	});
 	injectedThemeState = {};
-	document.documentElement.dataset.theme = resolved;
+	const effectiveTheme = getAppearancePreset() === "cmux" ? "dark" : resolved;
+	document.documentElement.dataset.theme = effectiveTheme;
 	localStorage.setItem("dev3-theme", preference);
-	api.request.setTmuxTheme({ theme: resolved, preference }).catch(() => {});
+	if (persist) api.request.setTmuxTheme({ theme: effectiveTheme, preference }).catch(() => {});
 }
 
+bootstrapTerminalFont();
+bootstrapAppearancePreset();
 applySavedTheme();
-systemThemeMq.addEventListener("change", applySavedTheme);
+systemThemeMq.addEventListener("change", () => applySavedTheme(true));
 
 // Apply saved zoom before React mounts (see zoom.ts for implementation)
 bootstrapZoom();
@@ -98,10 +103,6 @@ initKeyboardLock();
 
 // Load saved terminal scroll speed into cache before terminals mount
 bootstrapScrollSpeed();
-
-// Same, for the terminal font — the first terminal must be built with it, because
-// cell metrics are measured at construction.
-bootstrapTerminalFont();
 
 // Mirror the page's own geometry into the backend log — the other half of the
 // display-change diagnostic the backend writes (see viewport-diagnostics.ts).

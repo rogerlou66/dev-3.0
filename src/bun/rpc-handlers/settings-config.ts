@@ -232,13 +232,13 @@ function getShellAvailability(): ShellAvailability {
  */
 async function applyTmuxConfigChange(
 	theme: "dark" | "light",
-	options: { refreshShell: boolean; dimInactivePanes: boolean },
+	options: { refreshShell: boolean; dimInactivePanes: boolean; appearancePreset?: "default" | "cmux" },
 ): Promise<void> {
 	try {
 		if (options.refreshShell) process.env.SHELL = getUserShell();
 		setTmuxPaneDimming(options.dimInactivePanes);
 		writeTmuxConfigs();
-		await pty.applyTmuxTheme(theme);
+		await pty.applyTmuxTheme(theme, options.appearancePreset ?? "default");
 	} catch (err) {
 		log.warn("Failed to push the settings change into tmux (non-fatal)", { error: String(err) });
 	}
@@ -258,7 +258,15 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	// Preserve the retired analytics id solely for N-2 on-disk compatibility with
 	// older installed versions that still read the shared settings file.
 	const stored = await loadSettings();
-	const next: GlobalSettings = { ...params, analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId };
+	const next: GlobalSettings = {
+		...params,
+		appearancePreset: params.appearancePreset ?? stored.appearancePreset,
+		...(stored.appearancePreset === "cmux" && params.appearancePreset === undefined
+			? { theme: stored.theme, resolvedTheme: "dark" as const }
+			: {}),
+		analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId,
+	};
+	if (next.appearancePreset === "cmux") next.resolvedTheme = "dark";
 	await saveSettings(next);
 	// Apply the low-battery toggle straight away — a switch that only takes effect
 	// after an app restart does not mean what its label says. Flipping it off is a
@@ -280,9 +288,10 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	const shellChanged = stored.terminalShell !== next.terminalShell;
 	const dimChanged = (stored.dimInactivePanes !== false) !== (next.dimInactivePanes !== false);
 	if (process.platform !== "win32" && (shellChanged || dimChanged)) {
-		await applyTmuxConfigChange(next.resolvedTheme ?? getCurrentUiTheme(), {
+		await applyTmuxConfigChange(next.appearancePreset === "cmux" ? "dark" : next.resolvedTheme ?? getCurrentUiTheme(), {
 			refreshShell: shellChanged,
 			dimInactivePanes: next.dimInactivePanes !== false,
+			appearancePreset: next.appearancePreset,
 		});
 	}
 	getPushMessage()?.("globalSettingsUpdated", next);
@@ -649,16 +658,24 @@ async function setAgentBinaryPath(params: { agentId: string; path: string }): Pr
 	log.info("<- setAgentBinaryPath saved");
 }
 
-async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system" }): Promise<void> {
+async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" }): Promise<void> {
 	log.info("→ setTmuxTheme", params);
 	const settings = await loadSettings();
-	await saveSettings({
+	const appearancePreset = params.appearancePreset ?? settings.appearancePreset ?? "default";
+	const resolvedTheme = appearancePreset === "cmux" ? "dark" : params.theme;
+	const next: GlobalSettings = {
 		...settings,
-		...(params.preference !== undefined ? { theme: params.preference } : {}),
-		resolvedTheme: params.theme,
-	});
-	setCurrentUiTheme(params.theme);
-	await pty.applyTmuxTheme(params.theme);
+		appearancePreset,
+		...(params.preference !== undefined && (appearancePreset !== "cmux" || settings.appearancePreset !== "cmux")
+			? { theme: params.preference } : {}),
+		resolvedTheme,
+	};
+	await saveSettings(next);
+	setCurrentUiTheme(resolvedTheme);
+	await pty.applyTmuxTheme(resolvedTheme, appearancePreset);
+	if (settings.appearancePreset !== appearancePreset || settings.theme !== next.theme || settings.resolvedTheme !== resolvedTheme) {
+		getPushMessage()?.("globalSettingsUpdated", next);
+	}
 }
 
 async function getLowBatteryStatus(): Promise<LowBatteryStatus> {

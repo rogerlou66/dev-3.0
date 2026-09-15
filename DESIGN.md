@@ -4,6 +4,8 @@ Native desktop project manager for AI agents. Kanban board with glass morphism, 
 
 Two themes: **dark** (default) and **light**, toggled via `data-theme` attribute on `<html>`. System preference is respected.
 
+The optional **cmux appearance preset** fixes the effective theme to dark and applies SF Mono with the TokyoNight Storm palette through `data-appearance-preset="cmux"`. Saved theme and terminal font preferences remain intact; Default restores them. The preset keeps the existing type scale and semantic status colors, uses `#24283b` for the base and active terminal background, and retains a bundled font fallback and separate Nerd Font icons.
+
 ---
 
 ## 1. Visual Theme & Atmosphere

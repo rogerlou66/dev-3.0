@@ -1,3 +1,4 @@
+import { syncAppearanceSettings } from "./appearance-preset";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAppState, canGoBack, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
@@ -590,7 +591,7 @@ function App() {
 	useEffect(() => {
 		let alive = true;
 		api.request.getGlobalSettings()
-			.then((next) => { if (alive) { setGlobalSettings(next); setSettingsLoaded(true); } })
+			.then((next) => { if (alive) { syncAppearanceSettings(next); setGlobalSettings(next); setSettingsLoaded(true); } })
 			.catch(() => {});
 		return () => { alive = false; };
 	}, []);

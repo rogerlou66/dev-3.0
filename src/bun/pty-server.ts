@@ -60,8 +60,8 @@ const log = createLogger("pty");
  * Sources the corresponding config file, which re-sets all theme variables
  * and re-applies every setting that depends on them.
  */
-export async function applyTmuxTheme(theme: "dark" | "light"): Promise<void> {
-	const configPath = setActiveTmuxTheme(theme);
+export async function applyTmuxTheme(theme: "dark" | "light", appearancePreset: "default" | "cmux" = "default"): Promise<void> {
+	const configPath = setActiveTmuxTheme(theme, appearancePreset);
 	// Source the themed config on every known socket (typically just "dev3")
 	const sockets = new Set<string>();
 	for (const session of sessions.values()) {

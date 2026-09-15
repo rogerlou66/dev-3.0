@@ -60,7 +60,7 @@ vi.mock("../cloudflare-tunnel", () => ({
 }));
 
 // Mutable so the port tests can drive the `remotePort` setting.
-const mockSettings: { theme: string; resolvedTheme: string; remotePort?: number } = {
+const mockSettings: { theme: string; resolvedTheme: string; appearancePreset?: "default" | "cmux"; remotePort?: number } = {
 	theme: "light",
 	resolvedTheme: "light",
 };
@@ -211,6 +211,17 @@ describe("serveStatic (real function)", () => {
 import { injectInitialThemeBootstrap } from "../remote-access-server";
 
 describe("injectInitialThemeBootstrap", () => {
+	it("bootstraps cmux as dark while retaining the underlying light preference", () => {
+		mockSettings.appearancePreset = "cmux";
+		try {
+			const html = injectInitialThemeBootstrap("<html><head></head><body></body></html>");
+			expect(html).toContain('window.__DEV3_INITIAL_APPEARANCE_PRESET__="cmux"');
+			expect(html).toContain('window.__DEV3_INITIAL_THEME__="light"');
+			expect(html).toContain('window.__DEV3_INITIAL_RESOLVED_THEME__="dark"');
+		} finally {
+			delete mockSettings.appearancePreset;
+		}
+	});
 	it("injects the persisted theme state into the initial HTML", () => {
 		const html = injectInitialThemeBootstrap("<html><head></head><body></body></html>");
 

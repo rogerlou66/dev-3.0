@@ -1,4 +1,13 @@
 const settings = {
+	"settings.appearancePreset": "Appearance preset",
+	"settings.appearancePresetDesc": "Match cmux with SF Mono and TokyoNight Storm colors, or use your saved appearance settings.",
+	"settings.appearancePresetDefault": "Default",
+	"settings.appearancePresetDefaultDesc": "Your saved theme and terminal font settings",
+	"settings.appearancePresetCmuxDesc": "SF Mono · TokyoNight Storm · Dark",
+	"settings.appearancePresetThemeManaged": "The cmux preset uses a fixed dark theme. Switch to Default above to restore and edit your saved theme.",
+	"settings.appearancePresetFontManaged": "Managed by the cmux appearance preset: SF Mono, size 14. Choose Default in Appearance to restore and edit your saved font settings.",
+	"settings.appearancePresetFontMissing": "SF Mono is unavailable on this device. The cmux preset uses the bundled JetBrains Mono Nerd Font instead.",
+	"settings.appearancePresetSaveError": "Could not save the appearance preset. Try again.",
 	// GlobalSettings
 	"settings.screenTitle": "Settings",
 	"settings.autoOpenImages": "Auto-open shared images",

@@ -2081,9 +2081,15 @@ describe("handlers.saveGlobalSettings", () => {
 
 			await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
 
-			expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light");
+			expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
 		},
 	);
+
+	it.skipIf(process.platform === "win32")("retains cmux while rewriting shell and dimming settings", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ appearancePreset: "cmux", theme: "light", terminalShell: "sh" } as GlobalSettings);
+		await handlers.saveGlobalSettings({ appearancePreset: "cmux", theme: "light", terminalShell: "bash", dimInactivePanes: false } as GlobalSettings);
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", "cmux");
+	});
 
 	it.skipIf(process.platform === "win32")("leaves tmux alone when the shell did not change", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
@@ -2114,6 +2120,35 @@ describe("handlers.saveGlobalSettings", () => {
 });
 
 describe("handlers.setTmuxTheme", () => {
+	it("saves the original preference when enabling cmux for the first time", async () => {
+		vi.clearAllMocks();
+		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
+		await handlers.setTmuxTheme({ theme: "dark", preference: "light", appearancePreset: "cmux" });
+		expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+			appearancePreset: "cmux", theme: "light", resolvedTheme: "dark",
+		}));
+	});
+
+	it("pins cmux to dark and keeps the saved preference when an older client requests light", async () => {
+		vi.clearAllMocks();
+		vi.mocked(loadSettings).mockResolvedValue({ appearancePreset: "cmux", theme: "system" } as GlobalSettings);
+		await handlers.setTmuxTheme({ theme: "light", preference: "light" });
+		expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+			appearancePreset: "cmux", theme: "system", resolvedTheme: "dark",
+		}));
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", "cmux");
+	});
+
+	it("allows an explicit return to Default to restore a light theme", async () => {
+		vi.clearAllMocks();
+		vi.mocked(loadSettings).mockResolvedValue({ appearancePreset: "cmux", theme: "light" } as GlobalSettings);
+		await handlers.setTmuxTheme({ theme: "light", preference: "light", appearancePreset: "default" });
+		expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+			appearancePreset: "default", theme: "light", resolvedTheme: "light",
+		}));
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
+	});
+
 	beforeEach(() => vi.clearAllMocks());
 
 	it("persists the theme preference and resolved theme before applying tmux theme", async () => {
@@ -2130,7 +2165,7 @@ describe("handlers.setTmuxTheme", () => {
 			theme: "system",
 			resolvedTheme: "light",
 		}));
-		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light");
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
 	});
 });
 

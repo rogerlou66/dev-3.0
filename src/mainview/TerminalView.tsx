@@ -1,3 +1,5 @@
+import { getAppearancePreset, useAppearancePreset } from "./appearance-preset";
+import { CMUX_TERMINAL_THEME } from "./cmux-terminal-theme";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, FitAddon } from "ghostty-web";
 import { useT } from "./i18n";
@@ -485,6 +487,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		return pending;
 	}, [setScrolledIntoHistory, taskId]);
 	const mouseGestureDraggedRef = useRef(false);
+	const appearancePreset = useAppearancePreset();
 	const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">(
 		() => (document.documentElement.dataset.theme as "dark" | "light") || "dark",
 	);
@@ -818,7 +821,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				fontFamily: TERMINAL_FONT,
 				cursorBlink: true,
 				cursorStyle: "bar",
-				theme: resolvedTheme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
+				theme: getAppearancePreset() === "cmux" ? CMUX_TERMINAL_THEME : resolvedTheme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
 			});
 
 			debugLog("terminal", "[TerminalView] Terminal created, loading FitAddon...");
@@ -2269,10 +2272,10 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		try {
 			if (termRef.current) {
 				termRef.current.options.theme =
-					resolvedTheme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
+					getAppearancePreset() === "cmux" ? CMUX_TERMINAL_THEME : resolvedTheme === "light" ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
 			}
 		} catch { /* disposed */ }
-	}, [resolvedTheme]);
+	}, [resolvedTheme, appearancePreset]);
 
 	// Keep the cursor in sync with where input actually goes: focus moving to the
 	// artifact iframe, another pane, or another app must take the cursor with it.
@@ -2687,7 +2690,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		try { termRef.current?.focus(); } catch { /* disposed */ }
 	}
 
-	const termBg = resolvedTheme === "light"
+	const termBg = appearancePreset === "cmux" ? CMUX_TERMINAL_THEME.background : resolvedTheme === "light"
 		? LIGHT_TERMINAL_THEME.background
 		: DARK_TERMINAL_THEME.background;
 

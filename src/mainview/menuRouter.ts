@@ -1,3 +1,4 @@
+import { applyThemePreference } from "./appearance-preset";
 import { api } from "./rpc";
 import { startClosePanePicker } from "./close-pane-picker";
 import { toggleStreamerMode } from "./streamer-mode";
@@ -56,11 +57,7 @@ function currentTask(state: AppState) {
 }
 
 function applyTheme(preference: "light" | "dark" | "system"): void {
-	const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-	const resolved = preference === "system" ? (prefersDark ? "dark" : "light") : preference;
-	document.documentElement.dataset.theme = resolved;
-	localStorage.setItem("dev3-theme", preference);
-	api.request.setTmuxTheme({ theme: resolved, preference }).catch(() => {});
+	void applyThemePreference(preference).catch(() => {});
 }
 
 export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<void> {

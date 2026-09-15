@@ -106,6 +106,15 @@ export type SettingsEntry = {
  */
 export const SETTINGS_ENTRIES = [
 	{
+		id: "appearance-preset",
+		category: "appearance",
+		titleKey: "settings.appearancePreset",
+		descriptionKey: "settings.appearancePresetDesc",
+		anchor: "appearance-preset",
+		globalField: "appearancePreset",
+		storage: "global",
+	},
+	{
 		id: "theme",
 		category: "appearance",
 		titleKey: "settings.theme",
@@ -572,6 +581,7 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"taskSortOrder",
 	"updateChannel",
 	"theme",
+	"appearancePreset",
 	"resolvedTheme",
 	"analyticsDistinctId",
 	"staticAccessCode",

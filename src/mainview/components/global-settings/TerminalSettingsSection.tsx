@@ -1,3 +1,4 @@
+import { useAppearancePreset } from "../../appearance-preset";
 import { useState } from "react";
 import type { TFunction } from "../../i18n";
 import {
@@ -66,14 +67,18 @@ export default function TerminalSettingsSection({
 	onTerminalShellChange: (shell: ShellFlavor | undefined) => void;
 	onDimInactivePanesToggle: (enabled: boolean) => void;
 }) {
+	const managed = useAppearancePreset() === "cmux";
+	const displayedFontFamily = managed ? "SF Mono" : terminalFontFamily;
+	const displayedFontSize = managed ? 14 : terminalFontSize;
 	const resolved = shellAvailability?.resolved ?? null;
 	// Windows answers with no POSIX resolution at all — the whole choice is moot
 	// there, so the control stays off the screen instead of lying about it.
 	const showShellPicker = !shellAvailability || resolved !== null;
 	const [galleryOpen, setGalleryOpen] = useState(false);
-	const fontAvailable = isTerminalFontAvailable(terminalFontFamily);
+	const fontAvailable = isTerminalFontAvailable(displayedFontFamily);
 	/** How much this font had to shrink to stay inside the reference cell, in percent. */
-	const narrowedBy = Math.round((1 - terminalFontScale(terminalFontFamily)) * 1000) / 10;
+	const displayedFontScale = managed ? 1 : terminalFontScale(displayedFontFamily);
+	const narrowedBy = Math.round((1 - displayedFontScale) * 1000) / 10;
 	// The reference font is a normal option; the empty value stays reserved for
 	// "never chose one", which is what every existing user has stored.
 	const fontOptions = BUNDLED_TERMINAL_FONTS.map((font) => ({
@@ -186,10 +191,13 @@ export default function TerminalSettingsSection({
 					<p className="block text-fg text-sm font-semibold mb-2">
 						{t("settings.terminalFont")}
 					</p>
-					<p className="text-fg-3 text-sm mb-3">{t("settings.terminalFontDesc")}</p>
+					<p className="text-fg-3 text-sm mb-3">{t(managed ? "settings.appearancePresetFontManaged" : "settings.terminalFontDesc")}</p>
 					<div className="flex flex-col gap-3 sm:flex-row sm:items-start">
 						<div className="flex-1 min-w-0">
-							<Select
+							{managed ? (
+								<input disabled value={displayedFontFamily} aria-label={t("settings.terminalFontFamily")}
+									className="w-full h-10 px-3 rounded-lg bg-raised border border-edge text-fg-2 text-sm opacity-50 cursor-not-allowed" />
+							) : <Select
 								value={terminalFontFamily}
 								options={fontOptions}
 								onChange={applyTerminalFontFamily}
@@ -198,12 +206,12 @@ export default function TerminalSettingsSection({
 								placeholder={t("settings.terminalFontBundled")}
 								searchPlaceholder={t("settings.terminalFontSearch")}
 								searchLabel={t("settings.terminalFontFamily")}
-							/>
+							/>}
 						</div>
 						<button
 							type="button"
 							onClick={() => applyTerminalFontFamily(DEFAULT_TERMINAL_FONT_FAMILY)}
-							disabled={terminalFontFamily === DEFAULT_TERMINAL_FONT_FAMILY}
+							disabled={managed || terminalFontFamily === DEFAULT_TERMINAL_FONT_FAMILY}
 							className="px-3 h-10 rounded-lg bg-raised border border-edge text-fg-2 text-sm hover:border-edge-active transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
 						>
 							{t("settings.zoomReset")}
@@ -211,7 +219,7 @@ export default function TerminalSettingsSection({
 					</div>
 					{!fontAvailable && (
 						<p className="text-warning-strong text-sm mt-2">
-							{t("settings.terminalFontMissing")}
+							{t(managed ? "settings.appearancePresetFontMissing" : "settings.terminalFontMissing")}
 						</p>
 					)}
 					{narrowedBy > 0 && (
@@ -222,27 +230,28 @@ export default function TerminalSettingsSection({
 					<p
 						className="mt-3 px-3 py-2 rounded-lg bg-base border border-edge text-fg-2 overflow-hidden text-ellipsis whitespace-nowrap"
 						style={{
-							fontFamily: terminalFontStack(terminalFontFamily),
-							fontSize: terminalFontSize * terminalFontScale(terminalFontFamily),
+							fontFamily: terminalFontStack(displayedFontFamily),
+							fontSize: displayedFontSize * displayedFontScale,
 						}}
 					>
 						{TERMINAL_FONT_PREVIEW}
 					</p>
 					<button
 						type="button"
+						disabled={managed}
 						onClick={() => setGalleryOpen((open) => !open)}
-						aria-expanded={galleryOpen}
-						className="mt-3 px-3 h-9 rounded-lg bg-raised border border-edge text-fg-2 text-sm hover:border-edge-active transition-colors"
+						aria-expanded={galleryOpen && !managed}
+						className="mt-3 px-3 h-9 rounded-lg bg-raised border border-edge text-fg-2 text-sm hover:border-edge-active transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
 					>
-						{galleryOpen
+						{galleryOpen && !managed
 							? t("settings.terminalFontCompareHide")
 							: t.plural("settings.terminalFontCompare", BUNDLED_TERMINAL_FONTS.length)}
 					</button>
-					{galleryOpen && (
+					{galleryOpen && !managed && (
 						<TerminalFontGallery
 							t={t}
 							value={terminalFontFamily}
-							size={terminalFontSize}
+							size={displayedFontSize}
 							onSelect={applyTerminalFontFamily}
 						/>
 					)}
@@ -254,25 +263,26 @@ export default function TerminalSettingsSection({
 					<label className="block text-fg text-sm font-semibold mb-2">
 						{t("settings.terminalFontSize")}
 					</label>
-					<p className="text-fg-3 text-sm mb-3">{t("settings.terminalFontSizeDesc")}</p>
+					<p className="text-fg-3 text-sm mb-3">{t(managed ? "settings.appearancePresetFontManaged" : "settings.terminalFontSizeDesc")}</p>
 					<div className="flex items-center gap-4">
 						<input
 							type="range"
 							min={MIN_TERMINAL_FONT_SIZE}
 							max={MAX_TERMINAL_FONT_SIZE}
 							step={1}
-							value={terminalFontSize}
+							value={displayedFontSize}
+							disabled={managed}
 							onChange={(event) => applyTerminalFontSize(parseInt(event.target.value, 10))}
 							aria-label={t("settings.terminalFontSize")}
 							className="flex-1 h-2 rounded-full appearance-none cursor-pointer bg-raised border border-edge accent-accent"
 						/>
 						<span className="w-12 text-right text-fg text-lg font-semibold tabular-nums">
-							{terminalFontSize}
+							{displayedFontSize}
 						</span>
 						<button
 							type="button"
 							onClick={() => applyTerminalFontSize(DEFAULT_TERMINAL_FONT_SIZE)}
-							disabled={terminalFontSize === DEFAULT_TERMINAL_FONT_SIZE}
+							disabled={managed || terminalFontSize === DEFAULT_TERMINAL_FONT_SIZE}
 							className="px-3 h-10 rounded-lg bg-raised border border-edge text-fg-2 text-sm hover:border-edge-active transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
 						>
 							{t("settings.zoomReset")}

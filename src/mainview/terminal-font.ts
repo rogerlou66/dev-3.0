@@ -73,6 +73,12 @@ export const BUNDLED_TERMINAL_FONTS: readonly BundledTerminalFont[] = [
 
 let currentFamily = DEFAULT_TERMINAL_FONT_FAMILY;
 let currentSize = DEFAULT_TERMINAL_FONT_SIZE;
+let fontOverride: { family: string; size: number } | null = null;
+
+export function setTerminalFontOverride(value: { family: string; size: number } | null) {
+	fontOverride = value;
+	emit();
+}
 
 function clampSize(size: number): number {
 	if (!Number.isFinite(size)) return DEFAULT_TERMINAL_FONT_SIZE;
@@ -93,7 +99,7 @@ export function bundledTerminalFont(family: string): BundledTerminalFont | undef
  * the historical stack follows, so a family this machine does not have falls back to
  * exactly what the terminal looked like before — never to an unstyled default.
  */
-export function terminalFontStack(family: string = currentFamily): string {
+export function terminalFontStack(family: string = fontOverride?.family ?? currentFamily): string {
 	const trimmed = family.trim();
 	if (!trimmed) return DEFAULT_TERMINAL_FONT_STACK;
 	return `${quoteFamily(trimmed)}, ${DEFAULT_TERMINAL_FONT_STACK}`;
@@ -128,7 +134,7 @@ function measureWidth(font: string): number | null {
  * Measuring the same string against three generics is the test that actually works:
  * if the family resolves, its own metrics win and at least one width shifts.
  */
-export function isTerminalFontAvailable(family: string = currentFamily): boolean {
+export function isTerminalFontAvailable(family: string = fontOverride?.family ?? currentFamily): boolean {
 	const trimmed = family.trim();
 	if (!trimmed) return true;
 	if (bundledTerminalFont(trimmed)) return true;
@@ -153,7 +159,7 @@ const customScaleCache = new Map<string, number>();
  * against the reference and cached, so the rule covers locally installed fonts too;
  * when it cannot be measured the answer is 1, never a guess that shrinks text.
  */
-export function terminalFontScale(family: string = currentFamily): number {
+export function terminalFontScale(family: string = fontOverride?.family ?? currentFamily): number {
 	const trimmed = family.trim();
 	if (!trimmed) return 1;
 	const bundled = bundledTerminalFont(trimmed);
@@ -177,10 +183,10 @@ export function getTerminalFontSize(): number {
 
 /** The size the renderer actually gets: the user's number, never rendered wider. */
 export function effectiveTerminalFontSize(
-	family: string = currentFamily,
-	size: number = currentSize,
+	family: string = fontOverride?.family ?? currentFamily,
+	size: number = fontOverride?.size ?? currentSize,
 ): number {
-	return size * terminalFontScale(family);
+	return fontOverride ? size : size * terminalFontScale(family);
 }
 
 /**
@@ -201,7 +207,7 @@ function emit() {
 	applyChromeStack();
 	window.dispatchEvent(
 		new CustomEvent(TERMINAL_FONT_CHANGED_EVENT, {
-			detail: { family: currentFamily, size: currentSize, stack: terminalFontStack() },
+			detail: { family: fontOverride?.family ?? currentFamily, size: fontOverride?.size ?? currentSize, stack: terminalFontStack() },
 		}),
 	);
 }

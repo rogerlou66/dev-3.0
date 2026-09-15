@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import {
 	TMUX_CONF_DARK_PATH,
 	TMUX_CONF_LIGHT_PATH,
+	TMUX_CONF_CMUX_PATH,
 	activeTmuxConfigPath,
 	setActiveTmuxTheme,
 	buildThemeConfig,
@@ -34,6 +35,13 @@ describe("tmux config paths", () => {
 		expect(activeTmuxConfigPath()).toBe(TMUX_CONF_LIGHT_PATH);
 		expect(setActiveTmuxTheme("dark")).toBe(TMUX_CONF_DARK_PATH);
 		expect(activeTmuxConfigPath()).toBe(TMUX_CONF_DARK_PATH);
+	});
+
+	it("pins cmux independently of system theme and restores the Default config", () => {
+		expect(setActiveTmuxTheme("light", "cmux")).toBe(TMUX_CONF_CMUX_PATH);
+		expect(activeTmuxConfigPath()).toBe(TMUX_CONF_CMUX_PATH);
+		expect(setActiveTmuxTheme("light", "default")).toBe(TMUX_CONF_LIGHT_PATH);
+		expect(setActiveTmuxTheme("dark", "default")).toBe(TMUX_CONF_DARK_PATH);
 	});
 
 	it("tmuxClientCwd points at the immortal DEV3_HOME (decision 103)", () => {
@@ -150,6 +158,33 @@ describe("buildThemeConfig", () => {
 			}
 		} finally {
 			setTmuxPaneDimming(true);
+			writeTmuxConfigs();
+		}
+	});
+
+	it("applies the cmux palette before the plugin computes pane and status styles", () => {
+		const config = buildThemeConfig("mocha", true, "cmux");
+		expect(config).toContain('set -gq @thm_bg "#24283b"');
+		expect(config).toContain('set -gq @thm_fg "#c0caf5"');
+		expect(config).toContain('set -gq @thm_mantle "#1f2335"');
+		expect(config.indexOf('set -gq @thm_bg')).toBeGreaterThan(config.indexOf("catppuccin_mocha_tmux.conf"));
+		expect(config.indexOf('set -gq @thm_bg')).toBeLessThan(config.indexOf("catppuccin_tmux.conf"));
+		expect(buildThemeConfig("mocha")).not.toContain("#24283b");
+		expect(buildThemeConfig("latte")).not.toContain("#24283b");
+	});
+
+	it("rewrites cmux with dimming off without changing its selected path", () => {
+		try {
+			setActiveTmuxTheme("dark", "cmux");
+			setTmuxPaneDimming(false);
+			writeTmuxConfigs();
+			const config = readFileSync(TMUX_CONF_CMUX_PATH, "utf-8");
+			expect(activeTmuxConfigPath()).toBe(TMUX_CONF_CMUX_PATH);
+			expect(config).toContain('set -gq @thm_bg "#24283b"');
+			expect(config).toContain('set -gF window-style "bg=#{@thm_bg},fg=#{@thm_fg}"');
+		} finally {
+			setTmuxPaneDimming(true);
+			setActiveTmuxTheme("dark");
 			writeTmuxConfigs();
 		}
 	});

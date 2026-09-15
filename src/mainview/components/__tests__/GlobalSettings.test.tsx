@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import GlobalSettings from "../GlobalSettings";
 import { I18nProvider } from "../../i18n";
@@ -259,6 +259,37 @@ describe("GlobalSettings", () => {
 	});
 
 	describe("theme switching", () => {
+		it("preserves a pushed cmux preset when saving another setting and restores the pushed theme", async () => {
+			setupMocks(mockAgents, { ...mockGlobalSettings, appearancePreset: "default", theme: "dark" });
+			localStorage.setItem("dev3-theme", "dark");
+			const user = userEvent.setup();
+			renderGlobalSettings();
+			await waitForLoad();
+			expect(screen.getByText("Dark").closest("button")).toHaveAttribute("aria-pressed", "true");
+			await user.click(screen.getByRole("button", { name: /^cmux / }));
+			expect(screen.getByText("Light").closest("button")).toBeDisabled();
+
+			act(() => window.dispatchEvent(new CustomEvent("rpc:globalSettingsUpdated", {
+				detail: { ...mockGlobalSettings, appearancePreset: "cmux", theme: "light" },
+			})));
+			await user.click(screen.getByRole("button", { name: "Tasks & Board" }));
+			await user.click(screen.getByText("Newest first"));
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+				appearancePreset: "cmux",
+				theme: "light",
+				taskSortOrder: "newest-first",
+			}));
+
+			await user.click(screen.getByRole("button", { name: "Appearance" }));
+			await user.click(screen.getByRole("button", { name: /^Default / }));
+			act(() => window.dispatchEvent(new CustomEvent("rpc:globalSettingsUpdated", {
+				detail: { ...mockGlobalSettings, appearancePreset: "default", theme: "light", taskSortOrder: "newest-first" },
+			})));
+			await user.click(screen.getByRole("button", { name: "Appearance" }));
+			expect(screen.getByText("Light").closest("button")).toHaveAttribute("aria-pressed", "true");
+			expect(screen.getByText("Light").closest("button")).not.toBeDisabled();
+		});
+
 		it("applies dark theme", async () => {
 			setupMocks();
 			const user = userEvent.setup();
@@ -269,7 +300,7 @@ describe("GlobalSettings", () => {
 
 			expect(document.documentElement.dataset.theme).toBe("dark");
 			expect(localStorage.getItem("dev3-theme")).toBe("dark");
-			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "dark", preference: "dark" });
+			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "dark", preference: "dark", appearancePreset: "default" });
 		});
 
 		it("applies light theme", async () => {
@@ -282,7 +313,7 @@ describe("GlobalSettings", () => {
 
 			expect(document.documentElement.dataset.theme).toBe("light");
 			expect(localStorage.getItem("dev3-theme")).toBe("light");
-			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "light", preference: "light" });
+			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "light", preference: "light", appearancePreset: "default" });
 		});
 
 		it("applies system theme based on prefers-color-scheme", async () => {
@@ -307,7 +338,7 @@ describe("GlobalSettings", () => {
 
 			expect(document.documentElement.dataset.theme).toBe("dark");
 			expect(localStorage.getItem("dev3-theme")).toBe("system");
-			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "dark", preference: "system" });
+			expect(mockedApi.request.setTmuxTheme).toHaveBeenCalledWith({ theme: "dark", preference: "system", appearancePreset: "default" });
 		});
 	});
 

@@ -1,3 +1,7 @@
+import { useState } from "react";
+import { setAppearancePreset, useAppearancePreset } from "../../appearance-preset";
+import { isTerminalFontAvailable } from "../../terminal-font";
+import { toast } from "../../toast";
 import type { Locale } from "../../i18n";
 import {
 	ALL_LOCALES,
@@ -37,19 +41,50 @@ export default function AppearanceSettingsSection({
 	onLocaleChange,
 }: AppearanceSettingsSectionProps) {
 	const streamerMode = useStreamerMode();
+	const preset = useAppearancePreset();
+	const managed = preset === "cmux";
+	const [saving, setSaving] = useState(false);
+	async function changePreset(next: "default" | "cmux") {
+		setSaving(true);
+		try {
+			await setAppearancePreset(next);
+		} catch {
+			toast.error(t("settings.appearancePresetSaveError"));
+		} finally {
+			setSaving(false);
+		}
+	}
 	return (
 		<SettingsSection title={t("settings.categoryAppearance")} helpTopicId="settings.appearance">
+			<SettingsEntry anchor="appearance-preset">
+				<div>
+					<p className="block text-fg text-sm font-semibold mb-2">{t("settings.appearancePreset")}</p>
+					<p className="text-fg-3 text-sm mb-3">{t("settings.appearancePresetDesc")}</p>
+					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+						<ThemeCard name={t("settings.appearancePresetDefault")} description={t("settings.appearancePresetDefaultDesc")}
+							active={!managed} disabled={saving} onClick={() => void changePreset("default")}
+							preview={{ bg: "#171924", raised: "#1e2133", text: "#eceef8", accent: "#5e9eff" }} />
+						<ThemeCard name="cmux" description={t("settings.appearancePresetCmuxDesc")}
+							active={managed} disabled={saving} onClick={() => void changePreset("cmux")}
+							preview={{ bg: "#24283b", raised: "#292e42", text: "#c0caf5", accent: "#7aa2f7" }} />
+					</div>
+					{managed && !isTerminalFontAvailable("SF Mono") && (
+						<p className="text-warning-strong text-sm mt-3">{t("settings.appearancePresetFontMissing")}</p>
+					)}
+				</div>
+			</SettingsEntry>
 			<SettingsEntry anchor="theme">
 				<div>
 					<p className="block text-fg text-sm font-semibold mb-2">
 						{t("settings.theme")}
 					</p>
-					<p className="text-fg-3 text-sm mb-3">{t("settings.themeDesc")}</p>
+					<p className="text-fg-3 text-sm mb-3">{t(managed ? "settings.appearancePresetThemeManaged" : "settings.themeDesc")}</p>
 				<div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
 					<ThemeCard
 						name={t("settings.themeDark")}
 						description={t("settings.themeDarkDesc")}
-						active={theme === "dark"}
+						active={managed || theme === "dark"}
+						disabled={managed}
 						onClick={() => onThemeChange("dark")}
 						preview={{
 							bg: "#171924",
@@ -61,7 +96,8 @@ export default function AppearanceSettingsSection({
 					<ThemeCard
 						name={t("settings.themeLight")}
 						description={t("settings.themeLightDesc")}
-						active={theme === "light"}
+						active={!managed && theme === "light"}
+						disabled={managed}
 						onClick={() => onThemeChange("light")}
 						preview={{
 							bg: "#f5f6fa",
@@ -73,7 +109,8 @@ export default function AppearanceSettingsSection({
 					<ThemeCard
 						name={t("settings.themeSystem")}
 						description={t("settings.themeSystemDesc")}
-						active={theme === "system"}
+						active={!managed && theme === "system"}
+						disabled={managed}
 						onClick={() => onThemeChange("system")}
 						preview={{
 							bg: "linear-gradient(135deg, #171924 50%, #f5f6fa 50%)",
@@ -169,17 +206,21 @@ function ThemeCard({
 	active,
 	onClick,
 	preview,
+	disabled = false,
 }: {
 	name: string;
 	description: string;
 	active: boolean;
 	onClick: () => void;
+	disabled?: boolean;
 	preview: { bg: string; raised: string; text: string; accent: string };
 }) {
 	return (
 		<button
 			onClick={onClick}
-			className={`min-w-0 p-4 rounded-xl border-2 transition-colors text-left ${
+			disabled={disabled}
+			aria-pressed={active}
+			className={`disabled:opacity-50 disabled:cursor-not-allowed min-w-0 p-4 rounded-xl border-2 transition-colors text-left ${
 				active
 					? "border-accent shadow-lg shadow-accent/10"
 					: "border-edge hover:border-edge-active"

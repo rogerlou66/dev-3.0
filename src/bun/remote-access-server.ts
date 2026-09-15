@@ -418,17 +418,19 @@ export async function serveStatic(pathname: string, staticRootOverride?: string)
 	});
 }
 
-function getInitialThemeBootstrap(): { preference: "dark" | "light" | "system"; resolved: "dark" | "light" } {
+function getInitialThemeBootstrap(): { preference: "dark" | "light" | "system"; resolved: "dark" | "light"; appearancePreset: "default" | "cmux" } {
 	const settings = loadSettingsSync();
-	const resolved = settings.resolvedTheme ?? getCurrentUiTheme();
-	const preference = settings.theme ?? resolved;
-	return { preference, resolved };
+	const appearancePreset = settings.appearancePreset ?? "default";
+	const preference = settings.theme ?? settings.resolvedTheme ?? getCurrentUiTheme();
+	const resolved = appearancePreset === "cmux" ? "dark" : settings.resolvedTheme ?? getCurrentUiTheme();
+	return { preference, resolved, appearancePreset };
 }
 
 export function injectInitialThemeBootstrap(html: string): string {
-	const { preference, resolved } = getInitialThemeBootstrap();
+	const { preference, resolved, appearancePreset } = getInitialThemeBootstrap();
 	const script =
-		`<script>window.__DEV3_INITIAL_THEME__=${JSON.stringify(preference)};` +
+		`<script>window.__DEV3_INITIAL_APPEARANCE_PRESET__=${JSON.stringify(appearancePreset)};` +
+		`window.__DEV3_INITIAL_THEME__=${JSON.stringify(preference)};` +
 		`window.__DEV3_INITIAL_RESOLVED_THEME__=${JSON.stringify(resolved)};` +
 		`</script>`;
 

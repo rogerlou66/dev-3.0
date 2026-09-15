@@ -37,6 +37,24 @@ describe("saveSettings", () => {
 		rmSync(TEST_HOME, { recursive: true, force: true });
 	});
 
+	it("round-trips the cmux preset without changing the saved theme preference", async () => {
+		vi.spyOn(Bun, "write").mockImplementation(async (target, data) => {
+			writeFileSync(String(target), String(data), "utf-8");
+			return 0;
+		});
+		await saveSettings(makeSettings({ appearancePreset: "cmux", theme: "light" }));
+		for (const settings of [await loadSettings(), loadSettingsSync()]) {
+			expect(settings.appearancePreset).toBe("cmux");
+			expect(settings.theme).toBe("light");
+		}
+	});
+
+	it.each([undefined, "unknown", 14])("defaults an absent or invalid preset (%s)", async (appearancePreset) => {
+		writeFileSync(settingsPath, JSON.stringify({ ...makeSettings(), appearancePreset }), "utf-8");
+		expect((await loadSettings()).appearancePreset).toBe("default");
+		expect(loadSettingsSync().appearancePreset).toBe("default");
+	});
+
 	it("does not corrupt the existing settings file if a write crashes mid-save", async () => {
 		const previousSettings = makeSettings({ updateChannel: "canary" });
 		writeFileSync(settingsPath, JSON.stringify(previousSettings, null, 2), "utf-8");
@@ -223,6 +241,7 @@ describe("saveSettings", () => {
 			return 0;
 		});
 		const full: Required<GlobalSettings> = {
+			appearancePreset: "cmux",
 			coordinatorPrompt: "Coordinate, do not code.",
 			staticAccessCode: "correct-horse-battery-staple",
 			remoteTunnel: { provider: "custom", command: "ngrok http {port} --log stdout", urlPattern: "https://\\S+" },

@@ -1,7 +1,7 @@
 /**
  * Bundled tmux configuration, moved from pty-server.ts.
  *
- * Two theme-specific configs are written at module load: dark and light.
+ * Three theme-specific configs are written at module load: dark, light, and cmux.
  * Each sets @catppuccin_flavor, sources the Catppuccin plugin for styling,
  * then applies our functional settings (keybindings, scrollback, etc.).
  *
@@ -61,6 +61,7 @@ export const TMUX_LAST_AGENT_PANE_OPTION = "@dev3_last_agent_pane";
 
 export const TMUX_CONF_DARK_PATH = dev3TempPath("dev3-tmux-dark.conf");
 export const TMUX_CONF_LIGHT_PATH = dev3TempPath("dev3-tmux-light.conf");
+export const TMUX_CONF_CMUX_PATH = dev3TempPath("dev3-tmux-cmux.conf");
 
 /** Path currently loaded — switched by setActiveTmuxTheme() on theme change. */
 let activeConfigPath = TMUX_CONF_DARK_PATH;
@@ -70,8 +71,8 @@ export function activeTmuxConfigPath(): string {
 }
 
 /** Switch the active themed config and return its path. */
-export function setActiveTmuxTheme(theme: "dark" | "light"): string {
-	activeConfigPath = theme === "light" ? TMUX_CONF_LIGHT_PATH : TMUX_CONF_DARK_PATH;
+export function setActiveTmuxTheme(theme: "dark" | "light", appearancePreset: "default" | "cmux" = "default"): string {
+	activeConfigPath = appearancePreset === "cmux" ? TMUX_CONF_CMUX_PATH : theme === "light" ? TMUX_CONF_LIGHT_PATH : TMUX_CONF_DARK_PATH;
 	return activeConfigPath;
 }
 
@@ -267,13 +268,25 @@ function paneDimConfig(dimInactivePanes: boolean): string {
 	].join("\n");
 }
 
-export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true): string {
+const CMUX_PALETTE = Object.entries({
+	bg: "#24283b", fg: "#c0caf5", mantle: "#1f2335", crust: "#1b1e2d",
+	overlay_0: "#565f89", overlay_1: "#737aa2", overlay_2: "#9aa5ce",
+	surface_0: "#292e42", surface_1: "#414868", surface_2: "#545c7e",
+	subtext_0: "#a9b1d6", subtext_1: "#9aa5ce",
+	rosewater: "#c0caf5", flamingo: "#c0caf5", pink: "#bb9af7", mauve: "#bb9af7",
+	red: "#f7768e", maroon: "#f7768e", peach: "#ff9e64", yellow: "#e0af68",
+	green: "#9ece6a", teal: "#73daca", sky: "#7dcfff", sapphire: "#7aa2f7",
+	blue: "#7aa2f7", lavender: "#7aa2f7",
+}).map(([name, color]) => `set -gq @thm_${name} "${color}"`).join("\n");
+
+export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true, appearancePreset: "default" | "cmux" = "default"): string {
 	const pluginDir = CATPPUCCIN_PLUGIN_DIR;
 	return [
 		`# dev3 tmux config — Catppuccin ${flavor}`,
 		`set -g @catppuccin_flavor "${flavor}"`,
 		// Source palette DIRECTLY (source -F with #{d:current_file} is unreliable)
 		`source "${pluginDir}/themes/catppuccin_${flavor}_tmux.conf"`,
+		appearancePreset === "cmux" ? CMUX_PALETTE : "",
 		`source "${pluginDir}/catppuccin_options_tmux.conf"`,
 		`source "${pluginDir}/catppuccin_tmux.conf"`,
 		paneDimConfig(dimInactivePanes),
@@ -297,7 +310,7 @@ export function setTmuxPaneDimming(enabled: boolean): void {
 }
 
 /**
- * Rewrite both themed configs. Called at startup, and again when a setting the
+ * Rewrite all themed configs. Called at startup, and again when a setting the
  * config embeds changes: the shell (baked into `default-shell`) and whether
  * inactive panes are dimmed.
  */
@@ -305,8 +318,9 @@ export function writeTmuxConfigs(): void {
 	writeShellInit();
 	writeFileSync(TMUX_CONF_DARK_PATH, buildThemeConfig("mocha", dimInactivePanes));
 	writeFileSync(TMUX_CONF_LIGHT_PATH, buildThemeConfig("latte", dimInactivePanes));
+	writeFileSync(TMUX_CONF_CMUX_PATH, buildThemeConfig("mocha", dimInactivePanes, "cmux"));
 }
 
-// Write Catppuccin plugin files + both themed configs + shell init at startup
+// Write Catppuccin plugin files + themed configs + shell init at startup
 writeCatppuccinPlugin();
 writeTmuxConfigs();

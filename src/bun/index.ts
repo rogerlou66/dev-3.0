@@ -17,6 +17,7 @@ import {
 } from "./updater";
 import { loadSettings, loadSettingsSync } from "./settings";
 import { setTmuxPaneDimming, writeTmuxConfigs } from "./tmux/config";
+import { setCurrentUiTheme } from "./theme-state";
 import { shouldAutoOpenDevTools } from "./devtools-auto-open";
 import { installSignalQuitConfirmation, isQuitConfirmed, markQuitConfirmed, markQuitDialogPending } from "./quit-manager";
 import { initNativeNotifications } from "./native-notifications";
@@ -520,12 +521,13 @@ setPushMessage((name, payload) => {
 // raise agent notifications. Queued entries flush when Focus Mode is disabled.
 setFocusMode(loadSettingsSync().focusMode === true);
 
-// The tmux configs were written at import time on the built-in default (dimmed);
-// hand the module the user's own answer and rewrite them before any pane spawns.
-if (loadSettingsSync().dimInactivePanes === false) {
-	setTmuxPaneDimming(false);
-	writeTmuxConfigs();
-}
+// Restore the saved pane palette and dimming before any pane spawns.
+const initialAppearance = loadSettingsSync();
+setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
+writeTmuxConfigs();
+const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
+setCurrentUiTheme(initialUiTheme);
+await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, initialAppearance.appearancePreset);
 
 // `exposedPortsChanged` rides its own hook because port-tunnels lives below
 // rpc-handlers — same broadcast target as above.

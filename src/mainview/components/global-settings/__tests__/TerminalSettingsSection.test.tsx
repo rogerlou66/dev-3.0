@@ -14,6 +14,9 @@ import {
 	terminalFontStack,
 } from "../../../terminal-font";
 
+const presetState = vi.hoisted(() => ({ value: "default" as "default" | "cmux" }));
+vi.mock("../../../appearance-preset", () => ({ useAppearancePreset: () => presetState.value }));
+
 vi.mock("../TerminalBackendSetting", () => ({ default: () => null }));
 
 const MAC: ShellAvailability = {
@@ -192,6 +195,7 @@ function renderFontSection(family = "", size = DEFAULT_TERMINAL_FONT_SIZE) {
 }
 
 beforeEach(() => {
+	presetState.value = "default";
 	localStorage.clear();
 	bootstrapTerminalFont();
 });
@@ -201,6 +205,19 @@ const realCreateElement = document.createElement;
 afterEach(() => vi.restoreAllMocks());
 
 describe("terminal font controls", () => {
+	it("shows the cmux font and size without allowing saved preferences to change", () => {
+		presetState.value = "cmux";
+		renderFontSection("Menlo", 20);
+		const family = screen.getByLabelText("settings.terminalFontFamily") as HTMLInputElement;
+		const size = screen.getByLabelText("settings.terminalFontSize") as HTMLInputElement;
+		expect(family.value).toBe("SF Mono");
+		expect(family.disabled).toBe(true);
+		expect(size.value).toBe("14");
+		expect(size.disabled).toBe(true);
+		expect((screen.getByText(COMPARE) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getAllByText("settings.appearancePresetFontManaged")).toHaveLength(2);
+	});
+
 	it("commits a family the app never shipped in its list", async () => {
 		// The whole point of `allowCustom`: our shortlist cannot know what this
 		// machine has installed, so typing a family must be enough.

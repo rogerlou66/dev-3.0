@@ -1192,6 +1192,7 @@ export interface GlobalSettings {
 	 */
 	taskSortOrder: "oldest-first" | "newest-first";
 	updateChannel: UpdateChannel;
+	appearancePreset?: "default" | "cmux";
 	theme?: "dark" | "light" | "system";
 	resolvedTheme?: "dark" | "light";
 	/**
@@ -5708,7 +5709,7 @@ export type AppRPCSchema = {
 				response: PRInfo[];
 			};
 			setTmuxTheme: {
-				params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system" };
+				params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" };
 				response: void;
 			};
 			/**

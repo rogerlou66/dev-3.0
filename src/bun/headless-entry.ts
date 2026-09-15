@@ -24,6 +24,8 @@ import { dirname, resolve } from "node:path";
 import { handlers, setPushMessage, getPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, setFocusMode, pushTerminalBell } from "./rpc-handlers";
 import { createLogger, getLogPath } from "./logger";
 import { DEV3_HOME } from "./paths";
+import { setTmuxPaneDimming, writeTmuxConfigs } from "./tmux/config";
+import { setCurrentUiTheme } from "./theme-state";
 import { ensureDev3CliSymlink } from "./cli-self-install";
 import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { applyFullShellEnvToProcess, getUserShell, resolveShellEnv } from "./shell-env";
@@ -272,7 +274,13 @@ setPushMessage((name, payload) => {
 
 // Initialize the backend gate before remote pollers and CLI requests can raise
 // agent notifications for a browser session.
-setFocusMode((await loadSettings()).focusMode === true);
+const initialAppearance = await loadSettings();
+setFocusMode(initialAppearance.focusMode === true);
+setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
+writeTmuxConfigs();
+const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
+setCurrentUiTheme(initialUiTheme);
+await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, initialAppearance.appearancePreset);
 
 // Port-tunnels module needs the same broadcast hook for `exposedPortsChanged`
 // events so connected browsers see new public URLs appear in real time.

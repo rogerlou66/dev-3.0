@@ -1,3 +1,4 @@
+import { applyThemePreference } from "../appearance-preset";
 import {
 	useCallback,
 	useEffect,
@@ -65,7 +66,6 @@ import {
 import {
 	DEFAULT_GLOBAL_SETTINGS,
 	normalizeExternalApps,
-	resolveTheme,
 	toStoredDiffViewMode,
 	toStoredTaskOpenMode,
 	type Theme,
@@ -166,6 +166,16 @@ function GlobalSettings({
 		globalSettingsRef.current = next;
 		setGlobalSettings(next);
 	}, []);
+
+	useEffect(() => {
+		const onSettingsUpdated = (event: Event) => {
+			const next = (event as CustomEvent<GlobalSettingsType>).detail;
+			setGlobalSettingsState(next);
+			if (next.theme) setTheme(next.theme);
+		};
+		window.addEventListener("rpc:globalSettingsUpdated", onSettingsUpdated);
+		return () => window.removeEventListener("rpc:globalSettingsUpdated", onSettingsUpdated);
+	}, [setGlobalSettingsState]);
 
 	const applyGlobalSettingsLocally = useCallback(
 		(updater: GlobalSettingsUpdater) => {
@@ -283,13 +293,7 @@ function GlobalSettings({
 
 	const applyThemeChange = useCallback((nextTheme: Theme) => {
 		setTheme(nextTheme);
-		const prefersDark = window.matchMedia(
-			"(prefers-color-scheme: dark)",
-		).matches;
-		const resolvedTheme = resolveTheme(nextTheme, prefersDark);
-		document.documentElement.dataset.theme = resolvedTheme;
-		localStorage.setItem("dev3-theme", nextTheme);
-		api.request.setTmuxTheme({ theme: resolvedTheme, preference: nextTheme }).catch(() => {});
+		void applyThemePreference(nextTheme).catch(() => {});
 	}, []);
 
 	const handleTaskSortOrderChange = useCallback(

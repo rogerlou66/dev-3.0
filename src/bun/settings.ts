@@ -114,6 +114,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		defaultConfigId: resolveDefaultConfigId(d.defaultConfigId),
 		taskSortOrder: d.taskSortOrder === "newest-first" ? "newest-first" : "oldest-first",
 		updateChannel: coerceUpdateChannel(d.updateChannel, hostPublishesCanary()),
+		appearancePreset: d.appearancePreset === "cmux" ? "cmux" : "default",
 		theme: d.theme === "light" || d.theme === "system" || d.theme === "dark" ? d.theme : undefined,
 		resolvedTheme: d.resolvedTheme === "light" || d.resolvedTheme === "dark" ? d.resolvedTheme : undefined,
 		// Preserve the retired analytics id for older versions sharing settings.json.
