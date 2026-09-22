@@ -8,7 +8,10 @@ import Electrobun, {
 } from "electrobun/bun";
 import { startDisplayWatch } from "./display-watch";
 import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell, getActiveContext } from "./rpc-handlers";
+import { applyFreezeDiagnosticsSetting, configureFreezeDiagnostics, recordFreezeDiagnostic, stopFreezeDiagnostics } from "./freeze-diagnostics";
+import { resolve } from "node:path";
 import { startRendererWatchdog } from "./renderer-watchdog";
+import { applyArtifactFreezeRecovery, markArtifactFreezeRecovered, recordArtifactFreezeEvidence } from "./artifact-freeze-recovery";
 import {
 	checkForUpdateWithChannel,
 	getLocalVersion,
@@ -174,7 +177,7 @@ log.info("Log files", { dir: getLogPath() });
 
 	// Install dev3 skill into all supported AI agent directories (~/.claude, ~/.codex, etc.).
 	// Overwritten on every start to match the running app version (same pattern as CLI binary).
-	installAgentSkills({ configureCodex: false, lowBattery: loadSettingsSync().lowBatteryEnabled });
+	await installAgentSkills({ configureCodex: false, lowBattery: loadSettingsSync().lowBatteryEnabled });
 
 	// Append ~/.dev3.0/bin to the user's shell rc files (idempotent).
 	// This makes `dev3` available in all terminals, not just worktree tmux
@@ -245,7 +248,7 @@ if (shellEnv.path) {
 
 // Codex profile migration depends on `codex --version`. Run it only after the
 // user's shell PATH is available; the app bundle starts with a minimal PATH.
-ensureCodexConfigFile(homedir());
+await ensureCodexConfigFile(homedir());
 
 // Windows has no other entry point: nothing but the unpublished Setup extractor
 // ever writes a .lnk, so without this a zip user cannot start dev3 after a reboot.
@@ -397,6 +400,12 @@ async function getMainViewUrl(): Promise<string> {
 
 const url = await getMainViewUrl();
 log.info("Loading URL", { url });
+configureFreezeDiagnostics({
+	workerPath: resolve(PATHS.VIEWS_FOLDER, "..", "freeze-diagnostics", "worker.ts"),
+	version: APP_VERSION, build: lastBuildTime,
+});
+// The saved switch decides, so a Finder launch behaves like a terminal one.
+applyFreezeDiagnosticsSetting(loadSettingsSync().freezeDiagnosticsEnabled === true);
 
 // --- Application Menu ---
 
@@ -491,6 +500,16 @@ setOpenNewWindow(() => {
 // Reopen every window the last session ended with, each on its own saved
 // screen/geometry. A first run (or fresh-start dev mode) has no session and
 // gets the usual single window.
+// Before any window loads, or the first artifact of this session reopens in the
+// presentation the previous session froze with. Consumes at most one piece of
+// evidence and writes at most one setting; a healthy launch does neither.
+try {
+	const outcome = await applyArtifactFreezeRecovery();
+	if (outcome.enabled) log.warn("Artifacts switched to the popup after a frozen session", { freezeAt: outcome.freezeAt });
+} catch (err) {
+	log.warn("Artifact freeze recovery failed (non-fatal)", { error: String(err) });
+}
+
 const restoreSession = loadWindowSession();
 if (restoreSession.length > 1) log.info("Restoring window session", { windows: restoreSession.length });
 // A dev launch (`bun run dev` / the task dev server) must not pull the user out
@@ -544,6 +563,13 @@ startRendererWatchdog({
 		const { projectId, taskId } = getActiveContext();
 		return { activeProject: projectId?.slice(0, 8) ?? null, activeTask: taskId?.slice(0, 8) ?? null };
 	},
+	// A window that goes quiet with an artifact in it leaves a record on disk, so
+	// the next launch can put artifacts in the popup instead. See
+	// artifact-freeze-recovery.ts — association, not a proven cause.
+	// Written synchronously: the app may be force-quit seconds from now, and a
+	// write that has not landed by then is the same as no evidence at all.
+	onFreezeEvidence: recordArtifactFreezeEvidence,
+	onFreezeRecovered: markArtifactFreezeRecovered,
 });
 
 // Reconcile persisted lifecycle hints before background activity starts.
@@ -558,12 +584,14 @@ startPRDetectionPoller();
 // The board's dev-server read needs the native aux pane, which lives behind
 // `bun:ffi` — injected here instead of imported by the poller (see
 // `setNativeDevServerProbe`).
-setNativeDevServerProbe(async (task, socket) => {
+setNativeDevServerProbe(async (task, socket, serverName) => {
 	const { taskTerminalBackendIdentity } = await import("./task-terminal-backend");
 	if (taskTerminalBackendIdentity(task) !== "native") return null;
 	const { auxPaneAlive, nativeAuxPaneShellPid } = await import("./task-aux-panes");
-	const alive = await auxPaneAlive(task, "devServer", socket);
-	return { alive, rootPid: alive ? await nativeAuxPaneShellPid(task, "devServer") : null };
+	const { devServerScriptBase } = await import("../shared/dev-servers");
+	const slot = devServerScriptBase(serverName);
+	const alive = await auxPaneAlive(task, "devServer", socket, slot);
+	return { alive, rootPid: alive ? await nativeAuxPaneShellPid(task, "devServer", slot) : null };
 });
 
 // Start background port scan poller (detects listening TCP ports per task)
@@ -583,7 +611,10 @@ startPortScanPoller(
 // window back if the new layout left part of it on no screen.
 startDisplayWatch({
 	getDisplays: () => Screen.getAllDisplays(),
-	onChange: ({ reason, displays }) => handleDisplayConfigurationChange(reason, displays),
+	onChange: ({ reason, displays }) => {
+		recordFreezeDiagnostic({ kind: "display", reason });
+		handleDisplayConfigurationChange(reason, displays);
+	},
 });
 
 // Start background resource usage monitor (discovers tmux sessions directly, not via pty-server)
@@ -756,6 +787,7 @@ setOnPaneExited((taskId, paneId) => {
 
 function runGlobalQuitCleanup(): void {
 	log.info("App is quitting, running global cleanup");
+	stopFreezeDiagnostics();
 	stopAgentMessageLogWatches();
 	// Snapshot window geometry so an update restart reopens on the same screen.
 	try { flushWindowState(); } catch (err) { log.warn("flushWindowState failed", { error: String(err) }); }

@@ -4,26 +4,14 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { PermissionMode, TaskStatus } from "./types";
 import { CLI_EXIT_CODE_APP_NOT_RUNNING } from "./cli-exit-codes";
-import { type HookCliDialect, hookCliCommandPath, hookCliDialect, resolveDev3CliPath } from "./dev3-cli-path";
+import { type HookCliDialect, hookCliCommandPath, hookCliDialect } from "./dev3-cli-path";
 
 /** Dialect of the machine generating the hooks (the frozen POSIX string on macOS/Linux). */
 const DEFAULT_DIALECT = hookCliDialect();
 
 export const DEV3_CLI = DEFAULT_DIALECT.cli;
-export const CLAUDE_HOOK_FLAG = "--claude-hook";
-export const COPILOT_SESSION_ENV = "DEV3_COPILOT_SESSION";
-
-export function shouldSkipClaudeHook(args: readonly string[], env: NodeJS.ProcessEnv): boolean {
-	return args.includes(CLAUDE_HOOK_FLAG) && env[COPILOT_SESSION_ENV] === "1";
-}
-
-function markClaudeHook(command: string): string {
-	if (command.includes(CLAUDE_HOOK_FLAG)) return command;
-	return command.replace(/(?= \|\||$)/, ` ${CLAUDE_HOOK_FLAG}`);
-}
 export const CODEX_STOP_HOOK_FLAG = "--codex-stop-hook";
 /** Makes the CLI exit 0 instead of `CLI_EXIT_CODE_APP_NOT_RUNNING`, still warning on stderr. */
 export const TOLERATE_APP_OFFLINE_FLAG = "--tolerate-app-offline";
@@ -63,6 +51,268 @@ export function codexHookCommand(dialect: HookCliDialect = DEFAULT_DIALECT): str
 }
 
 export const CODEX_DEV3_HOOK_COMMAND = codexHookCommand();
+
+/**
+ * The GitHub Copilot CLI lifecycle events dev3 subscribes to, each paired with
+ * the generic status event it stands for.
+ *
+ * `permissionRequest` is deliberately absent. Verified on copilot 1.0.83: it
+ * fires on every permission evaluation, including the ones `--allow-all-tools`
+ * approves without ever showing the user anything — so treating it as
+ * "waiting for a human" would park a working task in Has Questions on its first
+ * tool call. Asking the human is a *tool* in Copilot, not an event, so that
+ * signal is read off `preToolUse` instead — see `copilotStatusEvent`.
+ */
+export const COPILOT_STATUS_HOOK_EVENTS = {
+	sessionStart: "SessionStart",
+	userPromptSubmitted: "UserPromptSubmit",
+	preToolUse: "PreToolUse",
+	postToolUse: "PostToolUse",
+	agentStop: "Stop",
+} as const satisfies Record<string, AgentStatusHookEvent>;
+
+export type CopilotStatusHookEvent = keyof typeof COPILOT_STATUS_HOOK_EVENTS;
+
+/**
+ * The tool Copilot calls to put a question to the human and wait for the answer
+ * — its `AskUserQuestion`. `--no-ask-user` turns it off by this exact name.
+ */
+export const COPILOT_ASK_USER_TOOL = "ask_user";
+
+/**
+ * The generic status event one Copilot hook delivery stands for.
+ *
+ * `preToolUse` normally means "working", but the tool about to run may be the
+ * one that blocks on the human: `ask_user` does not return until they answer, so
+ * that delivery is the task's only "waiting for you" signal. The matching
+ * `postToolUse` carries the answer and moves it back to working on its own.
+ */
+export function copilotStatusEvent(
+	event: string,
+	toolName?: string,
+): AgentStatusHookEvent | undefined {
+	if (event === "preToolUse" && toolName === COPILOT_ASK_USER_TOOL) return "PermissionRequest";
+	return COPILOT_STATUS_HOOK_EVENTS[event as CopilotStatusHookEvent];
+}
+
+/**
+ * Where the Copilot CLI reads this machine's user-level hooks from. Verified
+ * against copilot 1.0.83: a `<home>/hooks/*.json` file fires, while the
+ * documented repository-level `.github/hooks/` was never even consulted in a
+ * fresh checkout — so dev3 installs here and nowhere else.
+ */
+export const COPILOT_SETTINGS_FILE = "settings.json";
+
+/**
+ * Copilot's own state file, which is where folder trust actually lives.
+ *
+ * Verified on copilot 1.0.83 with one variable changed at a time: the same
+ * worktree listed in `settings.json` still opens on "Confirm folder trust",
+ * and listed in `config.json` opens straight into the session. It also holds
+ * the signed-in account, so dev3 only ever merges into it — see
+ * `updateCopilotConfig`.
+ */
+export const COPILOT_CONFIG_FILE = "config.json";
+
+/**
+ * The command dev3 declares for one Copilot status hook.
+ *
+ * Copilot has no worktree-scoped hook source either, so like Codex these live in
+ * the user's own config dir and fire in unrelated repos too. The same
+ * `DEV3_TASK_ID` guard keeps that free: outside a dev3 pane nothing is spawned.
+ * The guard exits 0 and prints nothing, which Copilot reads as "no opinion" —
+ * any other exit code on `preToolUse` is fail-closed and would block the tool.
+ *
+ * Copilot picks the `bash` or `powershell` entry by platform itself, so unlike
+ * Codex there is no shell ambiguity to work around; this file is machine-local,
+ * so only the local dialect is ever emitted.
+ */
+export function copilotHookCommand(
+	event: CopilotStatusHookEvent,
+	dialect: HookCliDialect = DEFAULT_DIALECT,
+): { bash: string } | { powershell: string } {
+	const run = `${dialect.cli} hook copilot ${event}`;
+	if (dialect.posixShell) {
+		return { bash: `[ -z "$${CODEX_HOOK_SESSION_ENV}" ] || exec ${run}` };
+	}
+	return { powershell: `if ($env:${CODEX_HOOK_SESSION_ENV}) { & ${run} }; exit 0` };
+}
+
+/** dev3's Copilot hook entries, keyed by event. */
+export function buildCopilotHooks(
+	dialect: HookCliDialect = DEFAULT_DIALECT,
+): Record<string, unknown[]> {
+	const hooks: Record<string, unknown[]> = {};
+	for (const event of Object.keys(COPILOT_STATUS_HOOK_EVENTS) as CopilotStatusHookEvent[]) {
+		hooks[event] = [{ type: "command", ...copilotHookCommand(event, dialect), timeoutSec: 5 }];
+	}
+	return hooks;
+}
+
+/** Whether a Copilot hook entry is one dev3 wrote (it names the dev3 CLI in
+ *  whichever shell key this platform uses). */
+function isDev3CopilotEntry(entry: unknown): boolean {
+	const record = asRecord(entry);
+	return mentionsDev3Cli(record.bash as string | undefined)
+		|| mentionsDev3Cli(record.powershell as string | undefined);
+}
+
+/**
+ * Merge dev3's hooks into a Copilot `settings.json` object, replacing whatever
+ * dev3 wrote before and leaving every other entry — a colleague's, a plugin's —
+ * exactly where it was. Idempotent.
+ *
+ * Inline in `settings.json` rather than a `hooks/dev3.json` of our own, even
+ * though a private file would be tidier: `~/.copilot/hooks/` can belong to root.
+ * A managed machine's MDM creates it to drop a policy hook in, and every later
+ * write by the user's own processes fails with EACCES — which is exactly how
+ * this shipped first, with the board silently never following a Copilot task.
+ * `settings.json` sits in the Copilot home itself, which Copilot maintains as
+ * the user, so it is writable wherever Copilot runs at all.
+ */
+export function mergeCopilotHooks(
+	existing: Record<string, unknown>,
+	dialect: HookCliDialect = DEFAULT_DIALECT,
+): Record<string, unknown> {
+	const settings = asRecord(existing);
+	const merged: Record<string, unknown> = { ...asRecord(settings.hooks) };
+
+	for (const [event, entries] of Object.entries(buildCopilotHooks(dialect))) {
+		const current = merged[event];
+		const kept = Array.isArray(current) ? current.filter((e) => !isDev3CopilotEntry(e)) : [];
+		merged[event] = [...kept, ...entries];
+	}
+
+	return { ...settings, hooks: merged };
+}
+
+/**
+ * Add a worktree to Copilot's `trustedFolders`, so the agent does not open on
+ * "Confirm folder trust" in a pane nobody is watching. Idempotent; never removes
+ * a folder the user trusted themselves.
+ */
+export function ensureCopilotTrustedFolder(
+	existing: Record<string, unknown>,
+	resolvedPath: string,
+): Record<string, unknown> {
+	const config = asRecord(existing);
+	const current = Array.isArray(config.trustedFolders) ? config.trustedFolders : [];
+	if (current.includes(resolvedPath)) return config;
+	return { ...config, trustedFolders: [...current, resolvedPath] };
+}
+
+/**
+ * Where Copilot remembers "Yes, and don't ask again for `<command>` in this
+ * repo". Keyed by the repository's main working tree — dev3 worktrees of the
+ * same project share one entry, which is what Copilot itself writes when the
+ * user approves from inside a worktree.
+ */
+export const COPILOT_PERMISSIONS_FILE = "permissions-config.json";
+
+/**
+ * Pre-approve the dev3 CLI for one repository, so a task agent is not stopped by
+ * "Do you want to run this command?" on the status move its own protocol told it
+ * to make. Same intent as `DEV3_BASH_PERMISSION` for Claude. Idempotent, and it
+ * only ever adds: an approval the user granted themselves is never dropped.
+ */
+export function ensureCopilotCommandApproval(
+	existing: Record<string, unknown>,
+	repoPath: string,
+	command: string = DEV3_CLI,
+): Record<string, unknown> {
+	const config = asRecord(existing);
+	const locations = asRecord(config.locations);
+	const location = asRecord(locations[repoPath]);
+	const approvals = Array.isArray(location.tool_approvals) ? location.tool_approvals : [];
+
+	const commands = approvals.find(
+		(entry) => asRecord(entry).kind === "commands",
+	) as Record<string, unknown> | undefined;
+	const identifiers = Array.isArray(commands?.commandIdentifiers) ? commands.commandIdentifiers : [];
+	if (identifiers.includes(command)) return config;
+
+	const updated = { kind: "commands", commandIdentifiers: [...identifiers, command] };
+	return {
+		...config,
+		locations: {
+			...locations,
+			[repoPath]: {
+				...location,
+				tool_approvals: [...approvals.filter((e) => asRecord(e).kind !== "commands"), updated],
+			},
+		},
+	};
+}
+
+/** `config.json` opens with `//` lines Copilot rewrites back every run; they are
+ *  carried through verbatim so dev3's edit does not strip them. */
+function splitConfigHeader(raw: string): { header: string; body: string } {
+	const header = /^(?:[ \t]*\/\/[^\n]*\n)*/.exec(raw)?.[0] ?? "";
+	return { header, body: raw.slice(header.length) };
+}
+
+/**
+ * Read → merge → write Copilot's `config.json`, skipping an identical write.
+ *
+ * This file is Copilot's own, and it carries the signed-in account. An existing
+ * file dev3 cannot parse is therefore left completely alone: a missing trust
+ * entry costs one dialog, a clobbered `loggedInUsers` costs the login.
+ */
+export function updateCopilotConfig(
+	copilotHome: string,
+	update: (config: Record<string, unknown>) => Record<string, unknown>,
+): boolean {
+	const path = join(copilotHome, COPILOT_CONFIG_FILE);
+	let header = "";
+	let previous: Record<string, unknown> = {};
+	if (existsSync(path)) {
+		try {
+			const split = splitConfigHeader(readFileSync(path, "utf-8").replace(/^﻿/, ""));
+			header = split.header;
+			previous = asRecord(JSON.parse(split.body));
+		} catch {
+			return false;
+		}
+	}
+	const updated = update(previous);
+	if (JSON.stringify(updated) === JSON.stringify(previous)) return false;
+	mkdirSync(copilotHome, { recursive: true });
+	writeFileSync(path, header + JSON.stringify(updated, null, 2) + "\n", "utf-8");
+	return true;
+}
+
+/** Read → merge → write one of Copilot's plain-JSON files, skipping an identical
+ *  write. `config.json` is not one of them — it has a comment header and the
+ *  login, so it goes through `updateCopilotConfig`. */
+function updateCopilotJsonFile(
+	copilotHome: string,
+	file: string,
+	update: (contents: Record<string, unknown>) => Record<string, unknown>,
+): boolean {
+	mkdirSync(copilotHome, { recursive: true });
+	const path = join(copilotHome, file);
+	const previous = readPreservedSettings(path, `Copilot ${file}`);
+	return writeIfChanged(path, update(previous), previous);
+}
+
+export function updateCopilotSettings(
+	copilotHome: string,
+	update: (settings: Record<string, unknown>) => Record<string, unknown>,
+): boolean {
+	return updateCopilotJsonFile(copilotHome, COPILOT_SETTINGS_FILE, update);
+}
+
+export function updateCopilotPermissions(
+	copilotHome: string,
+	update: (permissions: Record<string, unknown>) => Record<string, unknown>,
+): boolean {
+	return updateCopilotJsonFile(copilotHome, COPILOT_PERMISSIONS_FILE, update);
+}
+
+/** Install dev3's Copilot status hooks for this machine. */
+export function writeCopilotHooks(copilotHome: string): boolean {
+	return updateCopilotSettings(copilotHome, (settings) => mergeCopilotHooks(settings));
+}
 export const CLAUDE_STOP_FAILURE_HOOK_SUBCOMMAND = "hook claude-stop-failure";
 /**
  * Reads the submitted prompt off stdin so agent traffic can show the human who
@@ -71,18 +321,26 @@ export const CLAUDE_STOP_FAILURE_HOOK_SUBCOMMAND = "hook claude-stop-failure";
  * into it would put recording and status sync in one blast radius.
  */
 export const CLAUDE_PROMPT_HOOK_SUBCOMMAND = "hook claude-prompt";
-export const CODEX_STATUS_HOOK_EVENTS = [
+/**
+ * The lifecycle events dev3 turns into board status moves. Codex emits these
+ * names verbatim; Copilot's adapter maps its own camelCase names onto them and
+ * the omp status extension translates its events the same way
+ * (`src/shared/omp-status-extension.ts`), so one status machine serves all three.
+ */
+export const AGENT_STATUS_HOOK_EVENTS = [
 	"SessionStart",
 	"UserPromptSubmit",
 	"PreToolUse",
 	"PermissionRequest",
 	"PostToolUse",
 	"Stop",
+	"Interrupt",
+	"SessionEnd",
 ] as const;
-export type CodexStatusHookEvent = typeof CODEX_STATUS_HOOK_EVENTS[number];
+export type AgentStatusHookEvent = typeof AGENT_STATUS_HOOK_EVENTS[number];
 
-export function getCodexHookTargetStatus(
-	event: CodexStatusHookEvent,
+export function getAgentHookTargetStatus(
+	event: AgentStatusHookEvent,
 	currentStatus: TaskStatus,
 	autoReviewEnabled: boolean,
 	resumeStatus?: "in-progress" | "review-by-ai",
@@ -102,6 +360,9 @@ export function getCodexHookTargetStatus(
 			return currentStatus === "review-by-ai" ? null : "in-progress";
 		case "PermissionRequest":
 			return "user-questions";
+		case "Interrupt":
+		case "SessionEnd":
+			return null;
 		case "Stop":
 			if (currentStatus === "in-progress") {
 				return autoReviewEnabled ? "review-by-ai" : "review-by-user";
@@ -264,11 +525,6 @@ export function buildClaudeHooks(
 			{ hooks: [{ type: "command", command: `${dialect.cli} ${CLAUDE_STOP_FAILURE_HOOK_SUBCOMMAND}`, timeout: 5 }] },
 		],
 	};
-	for (const groups of Object.values(hooks)) {
-		for (const group of groups) {
-			for (const hook of group.hooks) hook.command = markClaudeHook(hook.command);
-		}
-	}
 	return hooks;
 }
 
@@ -289,7 +545,7 @@ export function buildCodexHooks(options?: { dialect?: HookCliDialect }): HookMap
 		command: codexHookCommand(dialect),
 		timeout: 5,
 	};
-	const toolMatcher = "Bash|Edit|Write|^apply_patch$|^mcp__.*";
+	const toolMatcher = "Bash|Edit|Write|^apply_patch$|^mcp__.*|^(functions\\.)?request_user_input(_async)?$";
 
 	return {
 		SessionStart: [
@@ -320,6 +576,8 @@ export function buildCodexHooks(options?: { dialect?: HookCliDialect }): HookMap
 			},
 		],
 		Stop: [{ hooks: [handler] }],
+		Interrupt: [{ hooks: [{ ...handler, timeout: 3 }] }],
+		SessionEnd: [{ hooks: [{ ...handler, timeout: 3 }] }],
 	};
 }
 
@@ -543,24 +801,6 @@ export function writeCodexHooks(worktreePath: string): void {
 	writeFileSync(hooksPath, JSON.stringify(updated, null, 2) + "\n", "utf-8");
 }
 
-export const COPILOT_STATUS_HOOK_EVENTS = ["userPromptSubmitted", "agentStop"] as const;
-export type CopilotStatusHookEvent = typeof COPILOT_STATUS_HOOK_EVENTS[number];
-
-export function buildCopilotHooks(cliPath?: string, dev3Home?: string): Record<string, unknown> {
-	const resolved = cliPath ?? resolveDev3CliPath();
-	const executable = resolved.startsWith("~/") ? join(homedir(), resolved.slice(2)) : resolved;
-	return {
-		version: 1,
-		hooks: Object.fromEntries(COPILOT_STATUS_HOOK_EVENTS.map((event) => [event, [{
-			type: "command",
-			exec: executable,
-			args: ["hook", "copilot", "--event", event],
-			...(dev3Home ? { env: { DEV3_HOME: dev3Home } } : {}),
-			timeoutSec: 5,
-		}]])),
-	};
-}
-
 export const ANTIGRAVITY_STATUS_HOOK_EVENTS = ["PreInvocation", "Stop"] as const;
 export type AntigravityStatusHookEvent = typeof ANTIGRAVITY_STATUS_HOOK_EVENTS[number];
 
@@ -622,57 +862,4 @@ function readPreservedSettings(path: string, label = "Copilot hooks"): Record<st
 		throw new Error(`Cannot install ${label}: expected an object in ${path}`);
 	}
 	return parsed as Record<string, unknown>;
-}
-
-/** Tag only dev3 commands: Copilot reads Claude settings too, including legacy hooks. */
-export function guardClaudeHooksFromCopilot(settings: Record<string, unknown>): Record<string, unknown> {
-	const tag = (entry: unknown): unknown => {
-		const record = asRecord(entry);
-		if (Array.isArray(record.hooks)) return { ...record, hooks: record.hooks.map(tag) };
-		if (!mentionsDev3Cli(record.command as string | undefined)
-			|| !/\b(?:task move --status|hook claude-stop-failure)\b/.test(record.command as string)) return entry;
-		return { ...record, command: markClaudeHook(record.command as string) };
-	};
-	if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) return settings;
-	return {
-		...settings,
-		hooks: Object.fromEntries(Object.entries(asRecord(settings.hooks)).map(([event, entries]) =>
-			[event, Array.isArray(entries) ? entries.map(tag) : entries])),
-	};
-}
-
-/** Preserve user entries and fail without overwriting malformed configuration. */
-export function writeCopilotHooks(worktreePath: string, options?: { cliPath: string; dev3Home: string }): boolean {
-	const hooksPath = join(worktreePath, ".github", "hooks", "dev3.json");
-	const previous = readPreservedSettings(hooksPath);
-	if (previous.version !== undefined && previous.version !== 1) {
-		throw new Error(`Cannot install Copilot hooks: unsupported version in ${hooksPath}`);
-	}
-	if (previous.hooks !== undefined && (!previous.hooks || typeof previous.hooks !== "object" || Array.isArray(previous.hooks))) {
-		throw new Error(`Cannot install Copilot hooks: invalid hooks in ${hooksPath}`);
-	}
-	const generated = buildCopilotHooks(options?.cliPath, options?.dev3Home);
-	const merged = { ...asRecord(previous.hooks) };
-	for (const [event, entries] of Object.entries(asRecord(generated.hooks))) {
-		const existing = merged[event];
-		if (existing !== undefined && !Array.isArray(existing)) {
-			throw new Error(`Cannot install Copilot hooks: invalid ${event} in ${hooksPath}`);
-		}
-		const preserved = ((existing as unknown[] | undefined) ?? []).filter((entry) => {
-			const hook = asRecord(entry);
-			return !(mentionsDev3Cli(hook.exec as string | undefined)
-				&& Array.isArray(hook.args) && hook.args[0] === "hook" && hook.args[1] === "copilot");
-		});
-		merged[event] = [...preserved, ...entries as unknown[]];
-	}
-	const claudePaths = ["settings.json", "settings.local.json"].map((name) => join(worktreePath, ".claude", name));
-	const claudeSettings = claudePaths.map((path) => readPreservedSettings(path));
-	let changed = false;
-	for (const [index, path] of claudePaths.entries()) {
-		if (existsSync(path)) {
-			changed = writeIfChanged(path, guardClaudeHooksFromCopilot(claudeSettings[index]), claudeSettings[index]) || changed;
-		}
-	}
-	mkdirSync(join(worktreePath, ".github", "hooks"), { recursive: true });
-	return writeIfChanged(hooksPath, { ...previous, version: 1, hooks: merged }, previous) || changed;
 }

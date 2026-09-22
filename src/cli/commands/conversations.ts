@@ -103,7 +103,7 @@ async function searchCmd(args: ParsedArgs, context: CliContext | null): Promise<
 
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (!projectId) {
-		exitError("Could not determine project. Run from inside a worktree or pass --project <id>.");
+		exitError("Could not determine project. Run from the project's worktree or checkout, or pass --project <id>.");
 	}
 	const project = readProjectDirect(projectId);
 	if (!project) {
@@ -309,7 +309,7 @@ async function importCmd(args: ParsedArgs, context: CliContext | null, socketPat
 
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (!projectId) {
-		exitError("Could not determine project. Run from inside a worktree or pass --project <id>.");
+		exitError("Could not determine project. Run from the project's worktree or checkout, or pass --project <id>.");
 	}
 	const project = readProjectDirect(projectId);
 	if (!project) {
@@ -456,12 +456,12 @@ export async function handleImportCurrentSession(
 			process.stdout.write(`This conversation is already on the board as seq ${alreadyImported.seq}.\n`);
 			return;
 		}
-		// Every other miss is the same answer: the transcript is not yet in a
-		// shape the importer accepts (no title until the agent writes one, or
-		// nothing on disk yet for a brand-new session).
+		// Every other miss is the same answer: the transcript is not yet in a shape
+		// the importer accepts — nothing on disk yet for a brand-new session, or
+		// nothing in it the human said.
 		exitError(
 			"This conversation is not importable yet.",
-			"It needs a title the agent has written and at least one exchange on disk. Try again after a reply.",
+			"It needs at least one message you sent, on disk. Try again after a reply.",
 		);
 	}
 

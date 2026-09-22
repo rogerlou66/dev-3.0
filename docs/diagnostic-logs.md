@@ -11,3 +11,31 @@ The logger keeps the current day's file and the previous 13 calendar days (14 da
 Log entries keep structural diagnostics such as event names, task and project IDs, counts, timings, exit codes, error messages, stacks, and command output. Prompt-bearing fields (`description`, `prompt`, `title`, and related nested values), URLs, credentials, environment values, and command arguments are replaced with redaction markers; recognized command fields retain only the executable name and argument count. New diagnostics should keep event messages static and put commands in `command`, `cmd`, or another recognized command field.
 
 File writes, serialization, and retention cleanup are best-effort. A diagnostic failure must never change the success or failure of the operation being diagnosed.
+
+## Local desktop freeze capture (macOS)
+
+Turn on **Settings → System → Advanced Experience → Record app freezes (macOS)**. The switch is stored in `~/.dev3.0/settings.json` as `freezeDiagnosticsEnabled`, so it survives a restart and behaves the same however the app was started — Finder, Dock, terminal or the in-app updater. No environment variable takes part: `DEV3_DEBUG` no longer activates this, and the `DEV3_*` shell-import block has no carve-out any more.
+
+The change applies immediately, in both directions: turning it on starts the collector in the running app, and turning it off stops it before the next second's heartbeat. Files already written are not deleted — they stay until the five-session rotation below drops them. Turning it off and on again starts a fresh session, which also resets the per-run sample budget.
+
+This switch is opt-in on every channel, including canary. It starts a macOS-only worker outside the host JavaScript loop; on Linux and Windows the row says so and the switch does nothing. In remote/browser mode the row still describes the **host** machine, because that is the one that freezes. The daily app log confirms activation with `[freeze-diagnostics] Local freeze diagnostics enabled`. Without the switch there is no worker, process inspection, or stack sampling. The switch does not enable general debug logging or send anything to a telemetry service.
+
+Records are under `~/.dev3.0/logs/freeze/` (or `DEV3_LOG_DIR/freeze`):
+
+- `freeze-<timestamp>-<host-pid>.jsonl`: snapshots every 30 seconds and immediate suspected-stall records. Includes host/renderer heartbeat age, last visibility, native focus, viewport, sparse animation-frame age, terminal counts, artifact presence, and a bounded event history. A `.previous.jsonl` holds the preceding journal chunk.
+- `freeze-<timestamp>-<host-pid>.<capture>-host.txt`: a three-second native host sample.
+- `freeze-<timestamp>-<host-pid>.<capture>-renderer-<pid>.txt`: samples of attributed live WebContent/GPU processes when native logs identify them. The journal reports failed/skipped samples; absence of a renderer sample is not evidence that it was healthy.
+
+The observer triggers on five seconds without host progress, ten seconds without a visible or natively focused window's heartbeat, or ten seconds without an animation-frame callback while visible. Its own scheduling gap gives a 20-second grace period and is explicitly recorded as **sleep or scheduling unknown**; the original timestamps are retained. Native focus can therefore expose a missing beat even when the renderer last reported hidden. A closed window is removed, and remote browser tabs are not registered.
+
+Sampling is capped at three incidents per collector run, at least five minutes apart. Each command has a deadline; each journal chunk/sample is limited to 2 MiB, and the collector retains five sessions (at most about 170 MiB). Turn the switch off to stop collection — that takes effect at once and needs no restart. Startup failure, missing assets, and unavailable OS tools leave the app running.
+
+These files stay local and may contain private paths from native stacks. They contain no intentionally collected terminal output, task text, document contents or environment dump. Review captures locally before choosing to share them. A suspected stall is not a causal verdict: a lost RPC channel, debugger pause or OS scheduling problem can trigger the same record. Native stacks may still contain unnamed JIT frames. No automatic restart or preference change is performed.
+
+Verification uses a disposable process, never the user's running app:
+
+```sh
+bun src/bun/__tests__/freeze-diagnostics.bun-e2e.ts
+```
+
+The fixture copies the packaged worker resources into a temporary directory, blocks its own host loop for nine seconds, and requires a detection timestamp inside that interval plus a real native stack sample.

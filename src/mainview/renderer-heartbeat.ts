@@ -1,4 +1,5 @@
-import { api } from "./rpc";
+import { api, isElectrobun } from "./rpc";
+import { artifactActivity, artifactIdleMs } from "./artifact-activity";
 import { session } from "./terminal-session-stats";
 
 /**
@@ -21,6 +22,8 @@ function newClientId(): string {
 
 export function startRendererHeartbeat(clientId = newClientId()): () => void {
 	let lastBeatAt = Date.now();
+	let lastFrameAt = lastBeatAt;
+	let frame: number | null = null;
 	// A hidden window has its timers throttled to about one tick a minute, so a gap
 	// spanning a hidden stretch is not a stall. Only this page can tell the two
 	// apart — the backend just sees a big number.
@@ -29,6 +32,9 @@ export function startRendererHeartbeat(clientId = newClientId()): () => void {
 	function beat() {
 		const at = Date.now();
 		const sinceLastBeatMs = at - lastBeatAt;
+		if (frame === null) {
+			frame = requestAnimationFrame(() => { lastFrameAt = Date.now(); frame = null; });
+		}
 		lastBeatAt = at;
 		const hidden = hiddenSinceLastBeat || document.visibilityState !== "visible";
 		hiddenSinceLastBeat = document.visibilityState !== "visible";
@@ -41,6 +47,12 @@ export function startRendererHeartbeat(clientId = newClientId()): () => void {
 					hiddenSinceLastBeat: hidden,
 					terminals: session.liveTerminals,
 					frameErrorPanes: session.frameErrorPanes,
+					desktop: isElectrobun,
+					artifactOpen: artifactActivity.open > 0,
+					artifactIdleMs: artifactIdleMs(at),
+					viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
+					focused: document.hasFocus(),
+					animationFrameAgeMs: at - lastFrameAt,
 				})
 				?.catch(() => {});
 		} catch {
@@ -49,6 +61,18 @@ export function startRendererHeartbeat(clientId = newClientId()): () => void {
 	}
 
 	const timer = setInterval(beat, INTERVAL_MS);
+	// Say goodbye on the way out. A closed or reloaded window falls silent exactly
+	// like a frozen one, and without this line every window close would read as the
+	// freeze the backend is watching for. `pagehide` fires where `unload` does not
+	// (bfcache, mobile Safari), and a missed one only costs a stale log line.
+	function onPageHide() {
+		try {
+			void api.request.rendererHeartbeatStop({ clientId })?.catch(() => {});
+		} catch {
+			/* diagnostics only */
+		}
+	}
+	window.addEventListener("pagehide", onPageHide);
 	// A window on its way to hidden beats once more, so the backend's last report
 	// says "hidden" and its silence is read as throttling instead of a freeze.
 	function onVisibilityChange() {
@@ -60,6 +84,8 @@ export function startRendererHeartbeat(clientId = newClientId()): () => void {
 
 	return () => {
 		clearInterval(timer);
+		if (frame !== null) cancelAnimationFrame(frame);
 		document.removeEventListener("visibilitychange", onVisibilityChange);
+		window.removeEventListener("pagehide", onPageHide);
 	};
 }

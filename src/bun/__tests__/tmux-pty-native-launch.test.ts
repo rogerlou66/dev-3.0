@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Project, Task } from "../../shared/types";
 
 // ---- Mocks ----
-vi.mock("../copilot-config", () => ({ applyCopilotLaunchEnv: vi.fn() }));
 
 
 vi.mock("../logger", () => ({
@@ -148,6 +147,7 @@ vi.mock("../port-pool", () => ({
 	getPortAssignments: vi.fn(() => []),
 	allocatePorts: vi.fn(async () => []),
 	buildPortEnv: vi.fn(() => ({})),
+	buildNamedPortEnv: vi.fn(() => ({})),
 }));
 
 vi.mock("../port-scanner", () => ({
@@ -208,6 +208,7 @@ vi.mock("../rpc-handlers/shared-pure", () => ({
 	portableReadKey: vi.fn(() => ""),
 	resolveBinaryPath: vi.fn(() => ({ resolvedPath: "/usr/local/bin/claude" })),
 	shellQuote: vi.fn((s: string) => s),
+	withResolvedCodexBinary: vi.fn((command: string) => command),
 	writeLaunchScript: vi.fn(async () => undefined),
 }));
 
@@ -229,9 +230,6 @@ import * as sharedPure from "../rpc-handlers/shared-pure";
 import * as settingsConfig from "../rpc-handlers/settings-config";
 import * as auxPanes from "../task-aux-panes";
 import { tmux } from "../tmux";
-import { applyCopilotLaunchEnv } from "../copilot-config";
-import { getAgentAdapter } from "../../shared/agent-adapters/registry";
-import { resolveProjectEnv } from "../repo-config";
 
 const { launchTaskPty, tmuxPtyHandlers } = await import("../rpc-handlers/tmux-pty");
 
@@ -303,7 +301,7 @@ describe("Codex model/CLI version notice (issue #1667)", () => {
 
 	it("wraps the launch in the notice when the installed Codex predates the model", async () => {
 		resolveAsCodex("gpt-6-astra");
-		vi.mocked(agents.getCodexVersionCached).mockReturnValue("codex-cli 0.144.4");
+		vi.mocked(agents.getCodexVersionCached).mockResolvedValue("codex-cli 0.144.4");
 
 		await launchTaskPty(makeProject(), makeTask(), WORKTREE);
 
@@ -320,7 +318,7 @@ describe("Codex model/CLI version notice (issue #1667)", () => {
 
 	it("says nothing on a Codex new enough to run the model", async () => {
 		resolveAsCodex("gpt-6-astra");
-		vi.mocked(agents.getCodexVersionCached).mockReturnValue("codex-cli 0.153.4");
+		vi.mocked(agents.getCodexVersionCached).mockResolvedValue("codex-cli 0.153.4");
 
 		await launchTaskPty(makeProject(), makeTask(), WORKTREE);
 
@@ -329,7 +327,7 @@ describe("Codex model/CLI version notice (issue #1667)", () => {
 
 	it("says nothing when the version could not be read", async () => {
 		resolveAsCodex("gpt-6-astra");
-		vi.mocked(agents.getCodexVersionCached).mockReturnValue(null);
+		vi.mocked(agents.getCodexVersionCached).mockResolvedValue(null);
 
 		await launchTaskPty(makeProject(), makeTask(), WORKTREE);
 
@@ -340,7 +338,7 @@ describe("Codex model/CLI version notice (issue #1667)", () => {
 		// `clearAllMocks` keeps implementations, so restore the Claude default the
 		// module factory installs before asserting the negative.
 		vi.mocked(agents.resolveCommandForProject).mockResolvedValue({ command: "claude", extraEnv: {} } as never);
-		vi.mocked(agents.getCodexVersionCached).mockReturnValue("codex-cli 0.144.4");
+		vi.mocked(agents.getCodexVersionCached).mockResolvedValue("codex-cli 0.144.4");
 
 		await launchTaskPty(makeProject(), makeTask(), WORKTREE);
 
@@ -639,20 +637,5 @@ describe("setup-script wrapper — one flavour per backend", () => {
 		expect(vi.mocked(sharedPure.buildSetupStartupWrapper)).toHaveBeenCalledWith(
 			expect.objectContaining({ nativeBackend: false, launchMode: "blocking" }),
 		);
-	});
-});
-
-
-describe("Copilot instruction environment", () => {
-	it.each(["native", "tmux"] as const)("retains project instruction sources before injection on %s", async terminalBackend => {
-		const adapter = vi.mocked(getAgentAdapter);
-		adapter.mockReturnValue({ command: "copilot", trustKinds: [] } as unknown as ReturnType<typeof getAgentAdapter>);
-		vi.mocked(resolveProjectEnv).mockResolvedValueOnce({ COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/project/instructions" });
-		try {
-			await launchTaskPty(makeProject(), makeTask({ terminalBackend }), WORKTREE);
-			expect(applyCopilotLaunchEnv).toHaveBeenCalledWith(expect.objectContaining({ COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/project/instructions" }));
-		} finally {
-			adapter.mockReturnValue({ trustKinds: [] } as unknown as ReturnType<typeof getAgentAdapter>);
-		}
 	});
 });

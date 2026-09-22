@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import type { SharedArtifact, TaskStatus } from "../../shared/types";
+import type { SharedArtifact, Task, TaskStatus } from "../../shared/types";
+import { reviewCommentsForArtifact, type ReviewComment } from "../../shared/review";
+import { ReviewAside } from "../review/ReviewAside";
+import { useReviewSend } from "../review/useReviewSend";
+import { useTaskReview } from "../review/useTaskReview";
+import type { ArtifactCommentPick, ArtifactCommentPin } from "../utils/artifactCommentScript";
 import { TERMINAL_STATUSES } from "../../shared/types";
 import { artifactAtVersion, latestArtifactVersion } from "../../shared/artifact-versions";
 import { api } from "../rpc";
@@ -10,13 +15,14 @@ import { toast } from "../toast";
 import { composeArtifactDocument } from "../utils/artifactDocument";
 import type { ArtifactDraft } from "../utils/artifactBridge";
 import { isMac, isRemote } from "../utils/platform";
-import ArtifactSearchBar, { type ArtifactSearchBarHandle } from "./ArtifactSearchBar";
+import FindBar, { type FindBarHandle } from "./FindBar";
 import ArtifactVersionPicker from "./ArtifactVersionPicker";
 import ArtifactFrame, { type ArtifactFrameHandle } from "./ArtifactFrame";
 import { registerOverlayLayer } from "../utils/overlay-layers";
 import { isAndroidAppHost, openAndroidHtml, saveAndroidBase64File, saveAndroidRemoteFile } from "../android-client-bridge";
 import { getArtifactDock, subscribeArtifactDock } from "../utils/artifact-dock";
-import { parseDataUrl } from "../utils/downloadBytes";
+import { artifactViewerClosed, artifactViewerOpened } from "../artifact-activity";
+import { downloadBase64, parseDataUrl } from "../utils/downloadBytes";
 
 interface TaskArtifactViewerProps {
 	artifacts: SharedArtifact[];
@@ -28,6 +34,10 @@ interface TaskArtifactViewerProps {
 	taskId: string;
 	/** Status of the owning task, when the host knows it. Terminal → no send channel. */
 	taskStatus?: TaskStatus;
+	/** The owning project; without it comments cannot be stored, so comment mode stays hidden. */
+	projectId?: string;
+	/** The live task record, when the host has it on screen — its `review` is what the pins are drawn from. */
+	task?: Pick<Task, "id" | "review">;
 }
 
 type ArtifactThemeMode = "follow" | "light" | "dark";
@@ -39,20 +49,12 @@ function currentTheme(): "dark" | "light" {
 	return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
-async function downloadBase64(base64: string, mime: string, fileName: string): Promise<void> {
+async function downloadArtifactBytes(base64: string, mime: string, fileName: string): Promise<void> {
 	if (isAndroidAppHost()) {
 		await saveAndroidBase64File(base64, mime, fileName);
 		return;
 	}
-	const binary = atob(base64);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-	const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-	const anchor = document.createElement("a");
-	anchor.href = url;
-	anchor.download = fileName;
-	anchor.click();
-	setTimeout(() => URL.revokeObjectURL(url), 0);
+	downloadBase64(base64, mime, fileName);
 }
 
 interface ArtifactAsset {
@@ -109,7 +111,7 @@ function imageFileName(src: string, alt: string, mime: string, assets: ArtifactA
  * terminal — never for the docked panel, where the terminal is legitimately
  * visible beside it.
  */
-export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen = false, onClose, taskId, taskStatus }: TaskArtifactViewerProps) {
+export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen = false, onClose, taskId, taskStatus, projectId, task }: TaskArtifactViewerProps) {
 	const t = useT();
 	const [index, setIndex] = useState(() => Math.max(0, Math.min(artifacts.length - 1, initialIndex)));
 	const [srcDoc, setSrcDoc] = useState<string | null>(null);
@@ -133,11 +135,27 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 	const frameRef = useRef<ArtifactFrameHandle>(null);
 	const viewerRef = useRef<HTMLElement>(null);
 	const assetsRef = useRef<ArtifactAsset[]>([]);
-	const searchBarRef = useRef<ArtifactSearchBarHandle | null>(null);
+	const searchBarRef = useRef<FindBarHandle | null>(null);
 	const searchToggleRef = useRef<HTMLButtonElement>(null);
 	// Guards against out-of-order replies from the document while typing fast.
 	const searchTokenRef = useRef(0);
 	const group = artifacts[index];
+
+	// Comment mode: pick an element inside the frame, comment on it beside the
+	// frame. The comments live on the task record like the diff viewer's, so the
+	// agent's `dev3 review` sees both.
+	const reviewTask = useMemo<Pick<Task, "id" | "review">>(() => task ?? { id: taskId }, [task, taskId]);
+	const review = useTaskReview(reviewTask, projectId ?? "");
+	const canComment = Boolean(projectId) && !(taskStatus && TERMINAL_STATUSES.includes(taskStatus));
+	const [commentMode, setCommentMode] = useState(false);
+	const [pendingPick, setPendingPick] = useState<ArtifactCommentPick | null>(null);
+	const [activeCommentId, setActiveCommentId] = useState<string | null>(null);
+	const [unmatchedIds, setUnmatchedIds] = useState<string[]>([]);
+	const send = useReviewSend(taskId, projectId, review);
+	const artifactComments = useMemo(
+		() => (group ? reviewCommentsForArtifact(review.comments, group.id) : []),
+		[group, review.comments],
+	);
 	// Keyed by artifact id rather than reset in an effect: an artifact the user
 	// just opened has no pick, so it renders its newest version on the first
 	// frame instead of flashing the previous artifact's version.
@@ -149,6 +167,14 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 		() => (group ? artifactAtVersion(group, selectedVersion) : undefined),
 		[group, selectedVersion],
 	);
+
+	// Tell the heartbeat this window is showing an artifact, so a freeze that
+	// happens here is distinguishable from an unrelated one. Presence only — the
+	// document, its task and its title stay in this component.
+	useEffect(() => {
+		artifactViewerOpened();
+		return artifactViewerClosed;
+	}, []);
 
 	// Keyed on the array identity, not its length: a republish hands over a fresh
 	// list of the same size whose last row is the artifact that was just published,
@@ -207,6 +233,38 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 	const postToFrame = useCallback((message: Record<string, unknown>) => {
 		frameRef.current?.post(message);
 	}, []);
+
+	useEffect(() => {
+		postToFrame({ type: "dev3-artifact-comment-mode", on: commentMode && canComment });
+	}, [commentMode, canComment, srcDoc, postToFrame]);
+
+	// Pins are drawn by the frame from this list; it answers with the ids it
+	// could not place, which the panel shows as outdated rather than dropping.
+	const pins = useMemo<ArtifactCommentPin[]>(() => artifactComments.map((comment, i) => {
+		const anchor = comment.anchor as Extract<ReviewComment["anchor"], { kind: "artifact-element" }>;
+		return {
+			id: comment.id,
+			n: i + 1,
+			selector: anchor.selector,
+			text: anchor.text,
+			heading: anchor.heading,
+			resolved: Boolean(comment.resolvedAt),
+			active: comment.id === activeCommentId,
+		};
+	}), [artifactComments, activeCommentId]);
+	const postPins = useCallback(() => {
+		postToFrame({ type: "dev3-artifact-comment-pins", pins });
+	}, [pins, postToFrame]);
+	useEffect(() => {
+		postPins();
+	}, [postPins, srcDoc]);
+
+	// Leaving the artifact (or the viewer) drops the half-made pick; the pins stay.
+	useEffect(() => {
+		setPendingPick(null);
+		setActiveCommentId(null);
+		setUnmatchedIds([]);
+	}, [group?.id, selectedVersion]);
 
 	// The frame keeps its own copy of the capability so it never has to be rebuilt
 	// to learn the answer changed.
@@ -278,6 +336,26 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 			// Keyboard events inside the sandboxed document never reach this window, so
 			// the artifact's own ⌘F handler asks us to open the bar.
 			if (data.type === "dev3-artifact-find-open") { openSearch(); return; }
+			if (data.type === "dev3-artifact-comment-pick") {
+				const pick = (data as { pick?: ArtifactCommentPick }).pick;
+				if (!pick || typeof pick.selector !== "string") return;
+				setPendingPick({ selector: pick.selector, text: String(pick.text ?? ""), heading: pick.heading ?? null });
+				setCommentMode(true);
+				return;
+			}
+			if (data.type === "dev3-artifact-comment-exit") { setCommentMode(false); setPendingPick(null); return; }
+			if (data.type === "dev3-artifact-comment-focus") {
+				const focusId = (data as unknown as { id?: unknown }).id;
+				if (typeof focusId !== "string") return;
+				setActiveCommentId(focusId);
+				setCommentMode(true);
+				return;
+			}
+			if (data.type === "dev3-artifact-comment-placed") {
+				const unmatched = (data as { unmatched?: unknown }).unmatched;
+				setUnmatchedIds(Array.isArray(unmatched) ? unmatched.filter((id): id is string => typeof id === "string") : []);
+				return;
+			}
 			// The frame reports its unsent form values whenever they stop matching
 			// their defaults. Empty and with nothing custom means the form went clean
 			// again, so the offer to restore goes away with it.
@@ -330,7 +408,7 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 			const parsed = parseDataUrl(data.src);
 			if (!parsed) { toast.error(t("artifactViewer.imageSaveFailed"), { taskId }); return; }
 			try {
-				await downloadBase64(parsed.base64, parsed.mime, imageFileName(data.src, data.alt ?? "", parsed.mime, assetsRef.current));
+				await downloadArtifactBytes(parsed.base64, parsed.mime, imageFileName(data.src, data.alt ?? "", parsed.mime, assetsRef.current));
 				toast.success(t("artifactViewer.imageSaved"), { taskId });
 			} catch {
 				toast.error(t("artifactViewer.imageSaveFailed"), { taskId });
@@ -399,6 +477,7 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 	const dismissRef = useRef<() => void>(() => {});
 	dismissRef.current = () => {
 		if (searchOpen) closeSearch();
+		else if (commentMode) { setCommentMode(false); setPendingPick(null); }
 		else if (fullscreen) setFullscreen(false);
 		else onClose();
 	};
@@ -442,6 +521,32 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 		return () => window.removeEventListener("keydown", onFindShortcut, { capture: true });
 	}, [openSearch, modal]);
 
+	const addPickedComment = (body: string, andSend: boolean) => {
+		if (!pendingPick || !group) return;
+		const comment: ReviewComment = {
+			id: crypto.randomUUID(),
+			body,
+			createdAt: new Date().toISOString(),
+			anchor: {
+				kind: "artifact-element",
+				artifactId: group.id,
+				version: selectedVersion,
+				title: current?.title ?? group.title,
+				selector: pendingPick.selector,
+				text: pendingPick.text,
+				heading: pendingPick.heading,
+			},
+		};
+		review.add(comment);
+		setPendingPick(null);
+		setActiveCommentId(comment.id);
+		if (andSend) send.sendOne(comment);
+	};
+	const unmatchedSet = useMemo(() => new Set(unmatchedIds), [unmatchedIds]);
+	const pickLabel = (pick: ArtifactCommentPick | null) => pick
+		? `${current?.title ?? ""} · ${pick.heading ? `${pick.heading} › ` : ""}${pick.text || pick.selector}`
+		: "";
+
 	if (!current) return null;
 
 	const download = async () => {
@@ -453,7 +558,7 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 				return;
 			}
 			const payload = await api.request.readArtifactDownload({ artifact: current });
-			await downloadBase64(payload.base64, payload.mime, payload.fileName);
+			await downloadArtifactBytes(payload.base64, payload.mime, payload.fileName);
 		} catch {
 			toast.error(t("artifactViewer.downloadFailed"), { taskId });
 		} finally {
@@ -547,6 +652,17 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 							<button type="button" className={iconButton} disabled={index === artifacts.length - 1} onClick={() => go(1)} aria-label={t("artifactViewer.next")}><span style={{ fontFamily: ICON }}></span></button>
 						</>
 					)}
+					{canComment && (
+						<button
+							type="button"
+							data-testid="artifact-viewer-comment"
+							className={`${iconButton} ${commentMode ? "bg-accent/10 text-accent" : ""}`}
+							onClick={() => { setCommentMode((on) => !on); setPendingPick(null); }}
+							aria-label={t("artifactViewer.commentMode")}
+							aria-pressed={commentMode}
+							title={t("artifactViewer.commentMode")}
+						><span style={{ fontFamily: ICON }}>{"\uf075"}</span></button>
+					)}
 					<button
 						type="button"
 						ref={searchToggleRef}
@@ -603,10 +719,12 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 						><span style={{ fontFamily: ICON }}></span></button>
 					</div>
 				)}
-				<div className="relative min-h-0 flex-1 bg-base">
+				<div className="flex min-h-0 flex-1 bg-base">
+				<div className="relative min-h-0 min-w-0 flex-1 bg-base">
 					{searchOpen && srcDoc && !error && (
-						<ArtifactSearchBar
+						<FindBar
 							ref={searchBarRef}
+							placeholder={t("artifactViewer.searchPlaceholder")}
 							query={query}
 							onQueryChange={setQuery}
 							matches={matches}
@@ -622,13 +740,37 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 							ref={frameRef}
 							title={current.title}
 							document={srcDoc}
-							onReady={() => { sendTheme(); restoreDraft(); }}
+							onReady={() => { sendTheme(); restoreDraft(); postPins(); }}
 							onMessage={onFrameMessage}
 							className="h-full w-full border-0 bg-base"
 						/>
 					) : (
 						<div className="flex h-full items-center justify-center text-sm text-fg-3">{t("artifactViewer.loading")}</div>
 					)}
+				</div>
+				{canComment && commentMode && (
+					<ReviewAside
+						testId="artifact-review"
+						comments={artifactComments}
+						review={review}
+						send={send}
+						outdatedIds={unmatchedSet}
+						activeCommentId={activeCommentId}
+						onActivate={(id) => {
+							setActiveCommentId(id);
+							postToFrame({ type: "dev3-artifact-comment-reveal", id });
+						}}
+						labelFor={(comment, i) => {
+							const anchor = comment.anchor as Extract<ReviewComment["anchor"], { kind: "artifact-element" }>;
+							return `${i + 1} · ${t("artifactViewer.reviewVersion", { version: anchor.version })} · ${anchor.heading ? `${anchor.heading} › ` : ""}${anchor.text || anchor.selector}`;
+						}}
+						pendingLabel={pendingPick ? pickLabel(pendingPick) : null}
+						onSubmitPick={addPickedComment}
+						onCancelPick={() => setPendingPick(null)}
+						hint={t("artifactViewer.commentModeHint")}
+						empty={t("artifactViewer.reviewEmpty")}
+					/>
+				)}
 				</div>
 			</section>
 	);

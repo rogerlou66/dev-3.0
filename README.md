@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/h0x91b/dev-3.0/releases"><img src="https://img.shields.io/github/v/release/h0x91b/dev-3.0?style=flat-square&color=4496ff" alt="Release"></a>
-  <a href="https://github.com/h0x91b/dev-3.0/stargazers"><img src="https://img.shields.io/github/stars/h0x91b/dev-3.0?style=flat-square&color=4496ff" alt="Stars"></a>
+  <a href="https://github.com/h0x91b/dev-3.0"><img src="https://img.shields.io/github/stars/h0x91b/dev-3.0?style=flat-square&color=4496ff" alt="Stars"></a>
   <a href="https://github.com/h0x91b/dev-3.0/commits/main"><img src="https://img.shields.io/github/commit-activity/m/h0x91b/dev-3.0?logo=github&style=flat-square&color=4496ff"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-4496ff?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-4496ff?style=flat-square" alt="Platform: macOS, Linux and Windows">
@@ -24,6 +24,17 @@
   <a href="https://github.com/h0x91b/dev-3.0/releases/latest">Download</a> ·
   <a href="#documentation">Docs</a> ·
   <a href="https://github.com/h0x91b/dev-3.0/issues">Issues</a>
+</p>
+
+<p align="center">
+  <a href="https://dev3.h0x91b.com/#watch">
+    <img src="docs/screenshots/promo-teaser.gif" width="820" alt="dev-3.0 in motion — one task becomes a branch, a worktree and a terminal">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://dev3.h0x91b.com/#watch"><strong>▶ Play in full quality</strong></a><br>
+  <sub>the whole 90 seconds, 1080p, with sound</sub>
 </p>
 
 <p align="center">

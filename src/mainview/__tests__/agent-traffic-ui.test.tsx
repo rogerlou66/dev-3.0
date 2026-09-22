@@ -61,6 +61,7 @@ vi.mock("../rpc", () => ({
 			getProjects: vi.fn(() =>
 				Promise.resolve(projectFixtures.value),
 			),
+			sendAgentMessageNow: vi.fn(() => Promise.resolve({ spilledPath: null })),
 			getTasks: vi.fn(({ projectId }: { projectId: string }) =>
 				Promise.resolve(
 					projectId !== "proj-1" ? additionalTasks.value.filter(task => task.projectId === projectId) : knownTaskIds.value.map((id, index) => ({
@@ -267,10 +268,14 @@ describe("AgentTrafficIndicator (kebab row)", () => {
 	});
 });
 
-function renderLog(onOpenTask = vi.fn(), projectId: string | null = "proj-1") {
+function renderLog(
+	onOpenTask = vi.fn(),
+	projectId: string | null = "proj-1",
+	focus: { taskId: string; projectId: string } | null = null,
+) {
 	return render(
 		<I18nProvider>
-			<AgentTrafficScreen projectId={projectId} onOpenTask={onOpenTask} />
+			<AgentTrafficScreen projectId={projectId} focus={focus} onOpenTask={onOpenTask} />
 		</I18nProvider>,
 	);
 }
@@ -454,7 +459,7 @@ describe("AgentTrafficScreen live orbit", () => {
 		await userEvent.click(
 			await screen.findByRole("button", { name: "Open task" }),
 		);
-		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1");
+		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1", { archived: false });
 	});
 
 	it("offers task inspection and navigation without WebGL", async () => {
@@ -471,7 +476,44 @@ describe("AgentTrafficScreen live orbit", () => {
 		expect(inspector.getByText("Current task overview")).toBeTruthy();
 		expect(onOpenTask).not.toHaveBeenCalled();
 		await userEvent.click(inspector.getByRole("button", { name: "Open task" }));
-		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1");
+		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1", { archived: false });
+	});
+
+	it("opens a task on double-click, from its stage card and its row alike", async () => {
+		setPage([row()]);
+		const onOpenTask = vi.fn();
+		renderLog(onOpenTask);
+		await messageRows(1);
+		const card = screen
+			.getAllByTestId("traffic-node-card")
+			.find((node) => node.getAttribute("aria-label")?.includes("Worker"))!;
+		await userEvent.dblClick(card);
+		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1", {
+			archived: false,
+		});
+		onOpenTask.mockClear();
+		await userEvent.click(screen.getByRole("button", { name: "Tasks" }));
+		const inspector = within(screen.getByRole("complementary"));
+		await userEvent.dblClick(
+			await inspector.findByRole("button", { name: /#22 Worker/ }),
+		);
+		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1", {
+			archived: false,
+		});
+	});
+
+	// A completed task has no terminal, so the Active Tasks pane it used to open
+	// was always empty. The flag is what sends it to its board's detail modal.
+	it("marks a completed task's navigation as archived", async () => {
+		taskExtras.value = { "task-b": { status: "completed" } };
+		setPage([row()]);
+		const onOpenTask = vi.fn();
+		renderLog(onOpenTask);
+		await userEvent.click((await messageRows(1))[0]);
+		await userEvent.click(
+			await screen.findByRole("button", { name: "Open task" }),
+		);
+		expect(onOpenTask).toHaveBeenCalledWith("task-b", "proj-1", { archived: true });
 	});
 
 	it("adds pushed durable traffic without reopening or losing the search", async () => {
@@ -1298,6 +1340,54 @@ it("Focus reveals a hibernated task selected from the task list without waking i
 	).toBe("false");
 });
 
+// The task list used to print the live column and nothing else, so a parked task
+// read as "Agent is Working" — the one state it provably is not in.
+it("names hibernation in the task list without dropping the column the task sits in", async () => {
+	taskExtras.value = { "task-c": { hibernated: true } };
+	setPage([row(), row({ toTaskId: "task-c", toSeq: 33 })]);
+	renderLog();
+	await messageRows(2);
+	await userEvent.click(
+		within(screen.getByRole("complementary")).getByRole("button", {
+			name: "Tasks",
+		}),
+	);
+	const rows = screen.getAllByTestId("traffic-task-row");
+	const parked = rows.find((el) => el.textContent?.includes("#33"));
+	const awake = rows.find((el) => el.textContent?.includes("#22"));
+	expect(parked).toHaveAttribute("data-parked", "true");
+	expect(parked?.className).toContain("is-parked");
+	expect(parked?.querySelector("small")?.textContent).toBe(
+		"Hibernated · Agent is Working",
+	);
+	// A live sibling in the same column is untouched, so the marker means
+	// hibernation and not "this row is grey".
+	expect(awake).not.toHaveAttribute("data-parked");
+	expect(awake?.className).not.toContain("is-parked");
+	expect(awake?.querySelector("small")?.textContent).toBe("Agent is Working");
+	// Inactive is a state to read, never a control taken away.
+	await userEvent.click(parked as HTMLElement);
+	expect(parked?.className).toContain("is-selected");
+});
+
+// Grey alone excludes anyone who cannot make that reading, and the cell tier
+// hides the "Hibernated" line entirely — the card itself has to say so.
+it("marks a hibernated node card for styling that does not depend on colour", async () => {
+	taskExtras.value = { "task-c": { hibernated: true } };
+	setPage([row(), row({ toTaskId: "task-c", toSeq: 33 })]);
+	renderLog();
+	await messageRows(2);
+	await userEvent.click(screen.getByTestId("traffic-nodes-parked-toggle"));
+	const cards = screen.getAllByTestId("traffic-node-card");
+	const parked = cards.filter((el) => el.dataset.parked === "true");
+	expect(parked).toHaveLength(1);
+	expect(parked[0].className).toContain("is-parked");
+	expect(parked[0].textContent).toContain("Hibernated");
+	expect(
+		cards.filter((el) => el.dataset.parked === undefined).length,
+	).toBeGreaterThan(0);
+});
+
 it("selects a full local calendar day, then Live restores 24h and Follow", async () => {
 	const today = new Date();
 	today.setHours(0, 0, 0, 0);
@@ -1938,5 +2028,176 @@ describe("AgentTrafficScreen project scope", () => {
 		renderLog(vi.fn(), "proj-2");
 		await waitFor(() => expect(scopeName()).toBe("Project Two"));
 		expect(taskStat()).toBe("1");
+	});
+});
+
+// A toast click is about ONE task, and the screen has to land the way clicking
+// that task's card lands: card highlighted, inspector open on its identity.
+// Opening the bare scene left the user hunting for the card the toast named.
+describe("AgentTrafficScreen arrival subject", () => {
+	const detail = () => document.querySelector(".traffic-task-detail");
+
+	it("opens with the named task selected and its inspector showing", async () => {
+		setPage([row()]);
+		renderLog(vi.fn(), null, { taskId: "task-b", projectId: "proj-1" });
+
+		await waitFor(() => expect(detail()?.textContent).toContain("#22"));
+		expect(detail()?.textContent).toContain("Worker");
+		expect(document.querySelector(".traffic-inspector")?.hasAttribute("hidden")).toBe(false);
+		await waitFor(() =>
+			expect(
+				screen.getAllByTestId("traffic-node-card").find((card) => card.className.includes("is-selected"))
+					?.textContent,
+			).toContain("22"),
+		);
+	});
+
+	// The route keeps carrying the same subject while the screen stays open, so a
+	// re-run would snap the selection back every time the user clicked elsewhere.
+	it("lets the user select somebody else afterwards", async () => {
+		setPage([row()]);
+		renderLog(vi.fn(), null, { taskId: "task-b", projectId: "proj-1" });
+		await waitFor(() => expect(detail()?.textContent).toContain("#22"));
+
+		await userEvent.click(screen.getByRole("button", { name: "Tasks" }));
+		const sender = await screen.findAllByRole("button", { name: /^#11\b/ });
+		await userEvent.click(sender[0]);
+
+		await waitFor(() => expect(detail()?.textContent).toContain("#11"));
+		expect(detail()?.textContent).not.toContain("#22");
+	});
+
+	it("opens on the whole scene when no task is named", async () => {
+		setPage([row()]);
+		renderLog(vi.fn(), null);
+		await waitFor(() => expect(screen.getAllByTestId("traffic-node-card").length).toBeGreaterThan(0));
+		expect(detail()).toBeNull();
+	});
+});
+
+describe("Agent traffic inspector composer", () => {
+	/** Open the Tasks tab and select one node by its seq label. */
+	async function selectTask(seq: string) {
+		const inspector = document.querySelector(".traffic-inspector");
+		if (inspector?.hasAttribute("hidden")) {
+			await userEvent.click(screen.getByRole("button", { name: "Messages" }));
+		}
+		await userEvent.click(screen.getByRole("button", { name: "Tasks" }));
+		const rows = await screen.findAllByRole("button", { name: new RegExp(`^${seq}\\b`) });
+		await userEvent.click(rows[0]);
+	}
+	const composer = () => screen.getByTestId("traffic-composer");
+	const box = () => within(composer()).getByRole("textbox");
+	const sendButton = () => screen.getByTestId("traffic-composer-send");
+	const statusLine = () => screen.getByTestId("traffic-composer-status").textContent;
+
+	it("sends the typed text to the selected task as a user message", async () => {
+		setPage([row()]);
+		renderLog();
+		await selectTask("#22");
+		await userEvent.type(box(), "rebase on main please");
+		await userEvent.click(sendButton());
+		await waitFor(() =>
+			expect(api.request.sendAgentMessageNow).toHaveBeenCalledWith({
+				taskId: "task-b",
+				projectId: "proj-1",
+				text: "rebase on main please",
+			}),
+		);
+		// The box empties and says what actually happened — typed into a pane, which
+		// is not a claim that the agent read it.
+		await waitFor(() => expect((box() as HTMLTextAreaElement).value).toBe(""));
+		expect(statusLine()).toContain("Typed into the agent's pane");
+	});
+
+	it("addresses the selected task's own project while the scope spans several", async () => {
+		projectFixtures.value = [
+			{ id: "proj-1", name: "Project One" },
+			{ id: "proj-2", name: "Project Two" },
+		];
+		additionalTasks.value = [{
+			id: "task-far", projectId: "proj-2", seq: 91, title: "Far worker",
+			status: "in-progress", taskType: null, overview: "Nothing recorded",
+		}];
+		projectPages.value = {
+			"proj-1": { rows: [row()], oldestDay: "2026-08-01", retentionDays: 30, hasMore: false },
+			"proj-2": {
+				rows: [row({ toTaskId: "task-far", toSeq: 91, toTitle: "Far worker", toProjectId: "proj-2" })],
+				oldestDay: "2026-08-01", retentionDays: 30, hasMore: false,
+			},
+		};
+		renderLog(vi.fn(), null);
+		await selectTask("#91");
+		await userEvent.type(box(), "ping");
+		await userEvent.click(sendButton());
+		await waitFor(() =>
+			expect(api.request.sendAgentMessageNow).toHaveBeenCalledWith({
+				taskId: "task-far",
+				projectId: "proj-2",
+				text: "ping",
+			}),
+		);
+	});
+
+	it("sends on the modifier and keeps plain Enter a newline", async () => {
+		setPage([row()]);
+		renderLog();
+		await selectTask("#22");
+		await userEvent.type(box(), "first{Enter}second");
+		expect(api.request.sendAgentMessageNow).not.toHaveBeenCalled();
+		expect((box() as HTMLTextAreaElement).value).toBe("first\nsecond");
+		fireEvent.keyDown(box(), { key: "Enter", metaKey: true });
+		await waitFor(() =>
+			expect(api.request.sendAgentMessageNow).toHaveBeenCalledWith(
+				expect.objectContaining({ text: "first\nsecond" }),
+			),
+		);
+	});
+
+	it("keeps the text and names the failure when nothing was delivered", async () => {
+		vi.mocked(api.request.sendAgentMessageNow).mockRejectedValueOnce(
+			new Error("Could not deliver the message — the task has no live agent session."),
+		);
+		setPage([row()]);
+		renderLog();
+		await selectTask("#22");
+		await userEvent.type(box(), "are you there");
+		await userEvent.click(sendButton());
+		await waitFor(() => expect(statusLine()).toContain("Not sent"));
+		expect(statusLine()).toContain("no live agent session");
+		expect((box() as HTMLTextAreaElement).value).toBe("are you there");
+	});
+
+	it("offers no composer for a finished task and says why", async () => {
+		taskExtras.value = { "task-b": { status: "completed" } };
+		setPage([row()]);
+		renderLog();
+		await selectTask("#22");
+		expect(screen.queryByTestId("traffic-composer")).toBeNull();
+		expect(screen.getByText(/no agent to message/)).toBeTruthy();
+	});
+
+	it("warns before you type when no session is running, and never starts one", async () => {
+		taskExtras.value = { "task-b": { runtimeState: { runtime: "idle", updatedAt: Date.now() } } };
+		setPage([row()]);
+		renderLog();
+		await selectTask("#22");
+		expect(statusLine()).toContain("No session running");
+		expect(statusLine()).toContain("Nothing is started for you");
+	});
+
+	it("keeps one draft per task across selection changes", async () => {
+		taskExtras.value = {
+			"task-b": { runtimeState: { runtime: "running", updatedAt: Date.now() } },
+			"task-c": { runtimeState: { runtime: "running", updatedAt: Date.now() } },
+		};
+		setPage([row(), row({ toTaskId: "task-c", toSeq: 33, toTitle: "Other worker" })]);
+		renderLog();
+		await selectTask("#22");
+		await userEvent.type(box(), "for the worker");
+		await selectTask("#33");
+		expect((box() as HTMLTextAreaElement).value).toBe("");
+		await selectTask("#22");
+		expect((box() as HTMLTextAreaElement).value).toBe("for the worker");
 	});
 });

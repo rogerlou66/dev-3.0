@@ -223,7 +223,7 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 	rejectUnknownFlags(args, ["project", "title", "description", "type", "scratch", "run", "pr", "branch", "handoff-file"]);
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (!projectId) {
-		exitUsage("--project <id> is required (or run from inside a worktree)");
+		exitUsage("--project <id> is required (or run from the project's worktree or checkout)");
 	}
 
 	const scratch = args.flags.scratch === "true";
@@ -316,7 +316,7 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 }
 
 async function updateTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
-	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "type", "force"]);
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "type", "force", "print-role"]);
 	const taskId = resolveTaskId(args, context);
 	if (!taskId) {
 		exitUsage("Usage: dev3 task update <id|--task id|--task-id id|--id id> [--title '...'] [--description '...'] [--priority P0..P4] [--manual-completion on|off] [--type coordinator|pr-review|standard]");
@@ -361,6 +361,17 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 	if (args.flags.force === "true") {
 		params.force = true;
 	}
+	// `--print-role` means "I am the agent of this task, hand me my new brief here".
+	// Only the task this worktree auto-detects can say that, so an explicit selector
+	// is a usage error rather than a silently skipped delivery to somebody else.
+	const printRole = args.flags["print-role"] === "true";
+	if (printRole) {
+		if (rawType === undefined) exitUsage("--print-role only applies together with --type");
+		if (args.positional[0] || args.flags.task || args.flags["task-id"] || args.flags.id) {
+			exitUsage("--print-role prints YOUR OWN task's role brief, so it cannot target another task");
+		}
+		params.printRole = true;
+	}
 
 	if (
 		params.title === undefined
@@ -375,7 +386,7 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 	const resp = await sendRequest(socketPath, "task.update", params);
 	if (!resp.ok) exitError(resp.error || "Failed to update task");
 
-	const result = resp.data as Task | { task: Task; titlePreserved?: boolean; roleDelivery?: string };
+	const result = resp.data as Task | { task: Task; titlePreserved?: boolean; roleDelivery?: string; rolePrompt?: string };
 	const task = "task" in result ? result.task : result;
 	const titlePreserved = "task" in result ? Boolean(result.titlePreserved) : false;
 	// A role change is only real once the agent behind the badge has been told, so
@@ -385,7 +396,9 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		const role = task.taskType ?? "standard";
 		const note = roleDelivery === "delivered"
 			? `told the running agent it is now ${role}`
-			: roleDelivery === "unconfirmed"
+			: roleDelivery === "printed"
+				? `printed below instead of typed into your own pane`
+				: roleDelivery === "unconfirmed"
 				? `sent the role change to the running agent, but the backend cannot confirm it landed — check the pane before relying on it`
 				: roleDelivery === "no-session"
 					? `no running agent to tell; it reads the new role from the description when it starts`
@@ -398,6 +411,18 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		);
 	}
 	process.stdout.write(`Updated task ${task.id.slice(0, 8)}: ${getTaskTitle(task)}\n`);
+	// The role brief goes to stdout as the command's payload: the agent that ran it
+	// reads it right here, and re-running prints the same text whether or not the
+	// type had to change.
+	const rolePrompt = "task" in result ? result.rolePrompt : undefined;
+	if (rolePrompt !== undefined) {
+		const role = task.taskType ?? "standard";
+		process.stdout.write(
+			rolePrompt
+				? `\nYour role is now ${role}. Everything below is your standing instruction from here on, and it replaces any earlier instruction about what this task is.\n\n${rolePrompt}\n`
+				: `\nThis task no longer carries a special role — you are an ordinary task agent again and may do the work yourself.\n`,
+		);
+	}
 	// The trap this exists for: a description is the agent's first prompt at
 	// launch and nothing re-delivers it, so rewriting a live task's brief reaches
 	// the board and not the agent. Docs are read once; the mistake happens here.
@@ -410,6 +435,23 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 	}
 }
 
+/**
+ * Does this approval target the task this session is running in?
+ *
+ * Only then does approving destroy THIS worktree — every other target belongs to
+ * another task (`--task seq:N`, `--project <other>`), and telling the agent its
+ * own session is about to die is simply false (h0x91b/dev-3.0#1669). Proof-based
+ * on purpose: an unresolvable reference (`seq:2`, a short id from another
+ * project) counts as "not proven", and the wording then says nothing about this
+ * session rather than guessing.
+ */
+function targetsOwnSession(taskId: string, args: ParsedArgs, context: CliContext | null): boolean {
+	if (!context?.taskId) return false;
+	const projectFlag = args.flags.project;
+	if (projectFlag && projectFlag !== context.projectId) return false;
+	return taskId === context.taskId;
+}
+
 async function requestCompletion(
 	taskId: string,
 	args: ParsedArgs,
@@ -420,6 +462,7 @@ async function requestCompletion(
 	const params: Record<string, unknown> = { taskId };
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (projectId) params.projectId = projectId;
+	const ownSession = targetsOwnSession(taskId, args, context);
 
 	process.stderr.write(
 		"Completing a task destroys its worktree and terminal session, so it requires user approval.\n" +
@@ -435,7 +478,9 @@ async function requestCompletion(
 		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
 			exitError(
 				"Timed out waiting for the user's decision",
-				"The approval dialog may still be open in the app — if the user approves later, the task will complete and this session will be destroyed.",
+				ownSession
+					? "The approval dialog may still be open in the app — if the user approves later, the task will complete and this session will be destroyed."
+					: "The approval dialog may still be open in the app — if the user approves later, that task completes and its worktree is destroyed. This session is not the target.",
 			);
 		}
 		throw err;
@@ -457,7 +502,9 @@ async function requestCompletion(
 	}
 	process.stdout.write(
 		`User approved — task ${(result.task?.id ?? taskId).slice(0, 8)} moved to Completed.\n` +
-		"This worktree and terminal session are being destroyed now.\n",
+		(result.task?.id === context?.taskId || (!result.task && ownSession)
+			? "This worktree and terminal session are being destroyed now.\n"
+			: "Its worktree and terminal session are being destroyed now; this session is unaffected.\n"),
 	);
 }
 
@@ -476,6 +523,7 @@ async function requestCancellation(
 	const params: Record<string, unknown> = { taskId };
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (projectId) params.projectId = projectId;
+	const ownSession = targetsOwnSession(taskId, args, context);
 
 	process.stderr.write(
 		"Cancelling a task throws its work away — branch, worktree and everything uncommitted in it — so it requires user approval.\n" +
@@ -491,7 +539,9 @@ async function requestCancellation(
 		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
 			exitError(
 				"Timed out waiting for the user's decision",
-				"The approval dialog may still be open in the app — if the user approves later, the task will be cancelled and this session will be destroyed.",
+				ownSession
+					? "The approval dialog may still be open in the app — if the user approves later, the task will be cancelled and this session will be destroyed."
+					: "The approval dialog may still be open in the app — if the user approves later, that task is cancelled and its worktree destroyed. This session is not the target.",
 			);
 		}
 		throw err;
@@ -509,7 +559,9 @@ async function requestCancellation(
 
 	process.stdout.write(
 		`User approved — task ${(result.task?.id ?? taskId).slice(0, 8)} moved to Cancelled.\n` +
-		"This worktree and terminal session are being destroyed now.\n",
+		(result.task?.id === context?.taskId || (!result.task && ownSession)
+			? "This worktree and terminal session are being destroyed now.\n"
+			: "Its worktree and terminal session are being destroyed now; this session is unaffected.\n"),
 	);
 }
 

@@ -1,14 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../rpc", () => ({
-	api: { request: { rendererHeartbeat: vi.fn(() => Promise.resolve()) } },
+	api: {
+		request: {
+			rendererHeartbeat: vi.fn(() => Promise.resolve()),
+			rendererHeartbeatStop: vi.fn(() => Promise.resolve()),
+		},
+	},
+	isElectrobun: true,
 }));
 
 import { api } from "../rpc";
 import { startRendererHeartbeat } from "../renderer-heartbeat";
+import { artifactViewerClosed, artifactViewerOpened, resetArtifactActivity } from "../artifact-activity";
 import { session } from "../terminal-session-stats";
 
 const heartbeat = api.request.rendererHeartbeat as unknown as ReturnType<typeof vi.fn>;
+const heartbeatStop = api.request.rendererHeartbeatStop as unknown as ReturnType<typeof vi.fn>;
 
 function setVisibility(state: "visible" | "hidden") {
 	Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
@@ -23,6 +31,8 @@ beforeEach(() => {
 	setVisibility("visible");
 	session.liveTerminals = 0;
 	session.frameErrorPanes = 0;
+	heartbeatStop.mockClear();
+	resetArtifactActivity();
 });
 
 afterEach(() => {
@@ -82,6 +92,44 @@ describe("startRendererHeartbeat", () => {
 		heartbeat.mockImplementation(() => Promise.reject(new Error("rpc down")));
 		stop = startRendererHeartbeat("win-a");
 		expect(() => vi.advanceTimersByTime(6_000)).not.toThrow();
+	});
+
+	it("carries coarse artifact presence, and nothing about the artifact itself", () => {
+		stop = startRendererHeartbeat("win-a");
+		expect(heartbeat.mock.calls[0][0]).toMatchObject({ desktop: true, artifactOpen: false, artifactIdleMs: null });
+
+		artifactViewerOpened();
+		vi.advanceTimersByTime(2_000);
+		const open = heartbeat.mock.calls[heartbeat.mock.calls.length - 1][0];
+		expect(open).toMatchObject({ artifactOpen: true });
+		expect(Object.keys(open).sort()).toEqual([
+			"animationFrameAgeMs", "artifactIdleMs", "artifactOpen", "clientId", "desktop", "focused", "frameErrorPanes",
+			"hiddenSinceLastBeat", "sinceLastBeatMs", "terminals", "viewport", "visible",
+		]);
+
+		artifactViewerClosed();
+		vi.advanceTimersByTime(2_000);
+		const closed = heartbeat.mock.calls[heartbeat.mock.calls.length - 1][0];
+		expect(closed).toMatchObject({ artifactOpen: false });
+		// Still recently an artifact window: the age is what says how recently.
+		expect(closed.artifactIdleMs).not.toBeNull();
+	});
+
+	it("reports stalled animation frames while JavaScript heartbeats continue", () => {
+		const raf = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(123);
+		try {
+			stop = startRendererHeartbeat("win-a");
+			vi.advanceTimersByTime(12_000);
+			expect(heartbeat.mock.calls[heartbeat.mock.calls.length - 1]?.[0]).toMatchObject({ animationFrameAgeMs: 12_000,
+				viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio } });
+			expect(raf).toHaveBeenCalledTimes(1);
+		} finally { raf.mockRestore(); }
+	});
+
+	it("says goodbye when the page goes away, so a close is not read as a freeze", () => {
+		stop = startRendererHeartbeat("win-a");
+		window.dispatchEvent(new Event("pagehide"));
+		expect(heartbeatStop).toHaveBeenCalledWith({ clientId: "win-a" });
 	});
 
 	it("stops beating once disposed", () => {

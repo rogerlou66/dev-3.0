@@ -16,6 +16,7 @@ import {
 	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
 } from "./agent-message-hold-timing";
 import { PANE_RUN_AUTO_CLOSE_SECONDS, PANE_RUN_FAILED_AUTO_CLOSE_SECONDS } from "./pane-runs";
+import { CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED } from "./cli-exit-codes";
 
 /** PR creation and auto-merge instructions shared by every harness. */
 export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
@@ -108,11 +109,11 @@ const SKILL_COMPLETION_REQUEST = `
 
 \`dev3 task move --status completed\` does NOT complete anything directly — it opens an approval dialog and **blocks for up to 10 minutes**:
 
-- **Approved** → the task completes; this worktree and terminal session are destroyed immediately.
+- **Approved** → your CLI is asked to quit first, so its exit hooks run (30 s bound), then this worktree and terminal session are destroyed.
 - **Declined** → exit code 6, session alive: keep working or ask what to change.
-- **Timeout** → the dialog may still be open; a later approval completes and destroys it.
+- **Timeout** → the dialog may still be open; a later approval completes it.
 
-**Preservation gate (mandatory):** never move a task to \`completed\` or request approval while its work exists only in a disposable worktree. Allowed only when the result is safely preserved in the destination the task requires — usually a PR merged into \`main\`, but possibly an external file, a task note, a shared artifact — or when the user explicitly asks to complete it. A local commit, passing tests, or an open unmerged PR is not enough. Unclear destination or unpreserved work → keep the task open and ask. \`cancelled\` asks the same way.
+**Preservation gate (mandatory):** never move a task to \`completed\` or request approval while its work exists only in a disposable worktree. Allowed only when the result is preserved in the destination the task requires — usually a PR merged into \`main\`, possibly an external file, a task note, a shared artifact — or when the user explicitly asks to complete it. A local commit, passing tests, or an open unmerged PR is not enough. Unclear destination or unpreserved work → keep the task open and ask. \`cancelled\` asks the same way.
 
 ${SKILL_PR_INSTRUCTION}
 `;
@@ -126,9 +127,9 @@ A plan spanning multiple PRs, or including post-deploy verification or productio
 const SKILL_NOTES = `
 ## Notes (per-task scratchpad) — your gift to future agents
 
-\`dev3 note add "..."\` records durable findings, decisions and hard-won context. Completing or cancelling a task destroys the worktree, but **notes survive** and reach future agents through \`dev3 conversations search\`, weighted above raw transcript chatter — the project's long-term memory.
+\`dev3 note add "..."\` records durable findings, decisions and hard-won context. Completing or cancelling a task destroys the worktree, but **notes survive** and reach future agents through \`dev3 conversations search\`, weighted above raw transcript chatter.
 
-Write one when you **dug up something non-obvious** (root cause, how subsystems really talk, why a thing is built that way), **learned an undocumented invariant or dependency gotcha**, **burned time on a wrong assumption** (spell out the correct path), or **made a real decision** (what you rejected and why). Lean toward writing when in doubt, but never log trivia derivable from the diff or git history. The bar: *"would this save a future agent real time?"* One insight per note, self-contained, readable months later.
+Write one when you **dug up something non-obvious** (root cause, how subsystems really talk, why a thing is built that way), **learned an undocumented invariant or dependency gotcha**, **burned time on a wrong assumption** (spell out the correct path), or **made a real decision** (what you rejected and why). Lean toward writing when in doubt; never log trivia derivable from the diff or git history. The bar: *"would this save a future agent real time?"* One insight per note, self-contained, readable months later.
 
 \`dev3 note list\` truncates to one line, \`dev3 note show <id>\` (8-char prefix) prints the full body, and \`dev3 task show --notes --history\` explains a *neighbouring* task without its worktree.
 
@@ -166,26 +167,29 @@ Set it within the first minute, in the **same pass as the title and labels**. Th
 const SKILL_DEV_SERVER_CONTROL = `
 ## Dev Server Control
 
-\`dev3 dev-server status\` is low-risk. \`start\`, \`restart\` and \`stop\` have visible side effects — do not use them by default. Only when the user asked for dev-server control, the task is about \`devScript\`/ports/dev-server behavior, or you need the server up to verify a change; say what you are about to do first, prefer \`status\` before \`start\`, and stop it again afterwards unless asked to keep it running.
+\`dev3 dev-server status\` and \`logs\` are low-risk. \`start\`, \`restart\` and \`stop\` have visible side effects — use them only when the user asked for dev-server control, the task is about \`devScript\`/ports, or you need the server up to verify a change; say what you are about to do first, and stop it again afterwards unless asked to keep it running.
 
-Need it actually serving (curl, browser QA)? \`dev3 dev-server start --wait\` / \`restart --wait\` blocks until it listens on one of the task's assigned \`DEV3_PORT*\` ports (\`--timeout <sec>\`, default 120), whether bound by its own process tree or published for it, so a containerised \`devScript\` counts as ready too. An auxiliary port (HMR socket, sidecar) does not end the wait alone: it grants 10s more for an assigned port, then reports ready on what it has and says the assigned one never came up — so a \`devScript\` binding a fixed port returns instead of hanging. Do NOT probe ports yourself after a plain restart. \`stop\`/\`restart\` verify teardown before returning; \`status\` reports \`Dev Ports\`, \`Published Ports\`, and WARNING lines only when a foreign process squatted an assigned port.
+Need it actually serving (curl, browser QA)? \`start --wait\` / \`restart --wait\` blocks until it listens on an assigned \`DEV3_PORT*\` (\`--timeout <sec>\`, default 120), bound by its own tree or published for it, so a containerised \`devScript\` counts as ready. Do NOT probe ports yourself after a plain restart. \`stop\`/\`restart\` verify teardown first; \`status\` reports \`Dev Ports\`, \`Published Ports\`, and a WARNING when a foreign process squatted an assigned port.
+
+A project can declare **several dev servers by name**: every subcommand takes one (\`dev3 dev-server start api\`, \`stop api\`, \`restart api\`, \`logs api\`) or \`--all\`. A bare one means the default (\`devScript\`) or the only declared server; several with no default exits ${CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED} naming them. \`status\` prints a block per server, \`--wait\` waits for that server's ports, and every server sees every named port as \`DEV3_PORT_<NAME>\`.
+
+Each server's output also lands as text in \`<taskDir>/logs/dev-server*.log\`, fresh per start: \`dev3 dev-server logs [--lines N]\` tails it, and it greps.
 `;
-
 const SKILL_ARTIFACTS = `
 ## dev3 HTML artifacts
 
-Inside a dev3 task, an unqualified "artifact", interactive report, dashboard or demo usually means a **dev3 HTML artifact** — not Claude Artifacts — whenever an interactive visual fits. Do not override explicit meanings: Claude Artifacts, CI/build artifacts, package outputs, files for another system.
+Inside a dev3 task, an unqualified "artifact", interactive report, dashboard or demo usually means a **dev3 HTML artifact** — not Claude Artifacts — whenever an interactive visual fits. Do not override explicit meanings: Claude Artifacts, CI/build artifacts, package outputs, files for other systems.
 
-\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is a pristine task-local starter (\`dev3 artifact-template\` copies it in if the variable is missing; never invent a different template). The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORING.md\` is the card, \`REFERENCE.md\` the depth behind it, \`index.html\` + \`report.js\` the edit surface, \`app.css\` + \`app.js\` the stable shell, \`dev3-icon.png\` the brand asset.
+\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is a pristine task-local starter (\`dev3 artifact-template\` copies it in if the variable is missing; never invent a different template). The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORING.md\` is the card, \`REFERENCE.md\` the depth behind it, \`index.html\` + \`report.js\` the edit surface, \`app.css\` + \`app.js\` the shell, \`dev3-icon.png\` the brand asset.
 
 1. \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\` — never edit the pristine source.
-2. Read the copied \`AUTHORING.md\` (the card), then edit only \`index.html\` and \`report.js\` unless the format itself must change. Open a \`REFERENCE.md\` section only when the report needs it. Do not read the shell files for ordinary reports.
-3. Keep content and data local; external chart/UI libraries and live \`fetch\`/WebSocket are allowed as \`REFERENCE.md\` documents.
-4. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` — the directory publishes as a unit: \`index.html\` plus every CSS, JS, image and MP4/WebM clip (16 MB each, 48 MB together) under it. Keep assets beside or below the HTML with relative paths; only a file outside the directory goes after \`--assets\`.
+2. Read the copied \`AUTHORING.md\` (the card), then edit only \`index.html\` and \`report.js\` unless the format itself must change. Open a \`REFERENCE.md\` section only when the report needs one. Do not read the shell files for ordinary reports.
+3. Keep content and data local; external chart/UI libraries and live \`fetch\`/WebSocket are allowed, as \`REFERENCE.md\` says.
+4. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` — the directory publishes as a unit: \`index.html\` plus every CSS, JS, image and MP4/WebM clip (16 MB each, 48 MB together) under it. Keep assets beside or below the HTML with relative paths; only a file outside it goes after \`--assets\`.
 
-Re-running \`show-artifact\` **updates** the report: the same \`--title\` (or an explicit \`--artifact-id <slug>\`, which survives re-wording) adds a VERSION to the row the user already has. Revise by publishing again, never by inventing \`report-v2.html\`; \`--new\` only for a genuinely different report that happens to share a title.
+Re-running \`show-artifact\` **updates** the report: the same \`--title\` (or an explicit \`--artifact-id <slug>\`, which survives rewording) adds a VERSION to the row the user already has. Revise by publishing again, never by inventing \`report-v2.html\`; \`--new\` only for a genuinely different report that happens to share a title.
 
-Sharing it **outside** the app (a link, a phone, a GitHub comment) is a different job: load \`/dev3-share-artifact\`, which folds the report into one self-contained HTML and publishes it as a gist with a verified preview URL.
+Sharing it **outside** the app (a link, a phone, a GitHub comment) is a different job: load \`/dev3-share-artifact\`, which folds the report into one self-contained HTML and publishes it as a gist with a checked preview URL.
 `;
 
 const SKILL_GET_ATTENTION = `
@@ -224,9 +228,9 @@ dev3 pane logs <run-id> [--lines 400]          # outcome + tail (1..2000, defaul
 dev3 pane close <run-id>                       # close that pane (kills the command)
 \`\`\`
 
-The outcome line distinguishes **still running** from **finished, exit code N** — never read a quiet tail as a finished command. Runs are non-interactive: stdin is closed. The canonical dev server is \`dev3 dev-server start\`, not a pane run.
+The outcome line distinguishes **still running** from **finished, exit code N** — never read a quiet tail as finished. Runs are non-interactive: stdin is closed. The canonical dev server is \`dev3 dev-server start\`, not a pane run.
 
-**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run as you go, and again before ending a turn, so \`dev3 pane list\` shows nothing of yours but work still needed. The auto-close timer is a backstop for abandoned panes, not a substitute: exit 0 closes itself after ${PANE_RUN_AUTO_CLOSE_SECONDS} seconds, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} minutes so the user still sees it. Closing destroys nothing — the output stays in the run's log.
+**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run as you go, and again before ending a turn, so \`dev3 pane list\` shows only work still needed. The auto-close timer is a backstop for abandoned panes, not a substitute: exit 0 closes itself after ${PANE_RUN_AUTO_CLOSE_SECONDS} seconds, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} minutes so the user still sees it. Closing destroys nothing — the output stays in the run's log.
 
 Reading the SCREEN of a pane you did not start ("look at the error on the right") is a different thing and **tmux-only today**: \`dev3 peek --pane <N>\` returns a tail on tmux, only the pane summary on native. On tmux you may also drive tmux directly for layout work the user asks for (rename / swap / move windows, resize) — load \`/dev3-tmux\`. On native those commands do not exist.
 `;
@@ -242,9 +246,9 @@ If a peer **agent** started you instead, your first message says so, names the t
 const SKILL_PEEK = `
 ## Checking on a peer task without interrupting it
 
-\`dev3 peek --task seq:<N> [--pane 2] [--lines 400] [--json]\` is a read-only glance at another task's terminal: a header, one line per pane (command, alive/dead, how long since output) and the focused pane's tail. It never focuses, sends input, or takes ownership — the peeked agent cannot tell, and need not cooperate. With no \`--task\` it shows your own panes.
+\`dev3 peek --task seq:<N> [--pane 2] [--lines 400] [--json]\` is a read-only glance at another task's terminal: a header, one line per pane (command, alive/dead, time since output) and the focused pane's tail. It never focuses, sends input, or takes ownership — the peeked agent cannot tell. With no \`--task\` it shows your own panes.
 
-Reach for it INSTEAD of messaging a quiet worker "are you alive?" — a message costs that agent a turn, a peek costs nothing.
+Reach for it INSTEAD of messaging a quiet worker "are you alive?" — a message costs that agent a turn, a peek none.
 
 Read the tail yourself; peek deliberately does not classify state. \`last output unknown\` means the backend cannot say — never assume silence. On tmux the ages are per WINDOW, not per pane. A task with no live terminal is a successful answer naming the reason (draft, hibernated, not running), while \`could not read the terminal\` means the read failed and tells you NOTHING about progress. Native-backend tasks answer exactly that today (\`not-enabled\`), so the tail is a tmux-task tool for now; the pane summary works everywhere.
 `;
@@ -291,17 +295,21 @@ Hooks automatically manage task status transitions (\`in-progress\`, \`user-ques
 Do NOT call \`dev3 task move\` for status changes — hooks handle it. On projects with Automatic AI Review enabled, completed work passes through \`review-by-ai\` before \`review-by-user\`. You can still use \`dev3 task move\` for custom columns.
 ${SKILL_CUSTOM_COLUMNS}${SKILL_COMPLETION_REQUEST}`;
 
-// Codex lifecycle is hook-owned. Keep manual moves limited to decisions that
-// cannot be inferred from native events (semantic questions/custom columns).
-const SKILL_STATUS_CODEX_HOOKS = `
+// A hook-owned lifecycle (Codex, omp). Keep manual moves limited to decisions
+// that cannot be inferred from native events (semantic questions/custom columns).
+function skillStatusNativeHooks(agent: string): string {
+	return `
 ## Task status management
 
-dev3 injects trusted native hooks into every Codex pane. They own normal lifecycle transitions: session/prompt/tool activity → \`in-progress\`, tool approval waits → \`user-questions\`, tool completion → active again, agent stop → \`review-by-ai\` or \`review-by-user\`.
+dev3 injects trusted native hooks into every ${agent} pane. They own normal lifecycle transitions: session/prompt/tool activity → \`in-progress\`, tool approval waits → \`user-questions\`, tool completion → active again, agent stop → \`review-by-ai\` or \`review-by-user\`.
 
-**Never call \`dev3 task move\` for normal lifecycle transitions** — not \`in-progress\` at turn start, not \`review-by-ai\`/\`review-by-user\` when finishing. A status that looks stale is not a licence to manage it manually: report it with \`dev3 notify "Codex status hooks did not update the task" --level error\` and leave the evidence intact.
+**Never call \`dev3 task move\` for normal lifecycle transitions** — not \`in-progress\` at turn start, not \`review-by-ai\`/\`review-by-user\` when finishing. A status that looks stale is not a licence to manage it manually: report it with \`dev3 notify "${agent} status hooks did not update the task" --level error\` and leave the evidence intact.
 
 The one exception is a semantic question that no native event can detect: needing user input or clarification (not a tool approval) → move to \`user-questions\` before your final response. Explicit custom-column moves and the user-approved \`completed\` flow below stay allowed.
 ${SKILL_CUSTOM_COLUMNS}${SKILL_COMPLETION_REQUEST}`;
+}
+const SKILL_STATUS_CODEX_HOOKS = skillStatusNativeHooks("Codex");
+const SKILL_STATUS_OMP_HOOKS = skillStatusNativeHooks("omp");
 
 const SKILL_CODEX_SHELL = `
 ## Codex shell note
@@ -348,4 +356,5 @@ Approved → actual vs expected behavior, minimal reproduction, dev3 version and
 // `agents.ts`.
 export const CLAUDE_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_MANUAL_COMPLETION;
 export const CODEX_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_CODEX_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_CODEX_SHELL + SKILL_MANUAL_COMPLETION;
+export const OMP_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_OMP_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_MANUAL_COMPLETION;
 export const GENERIC_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_MANUAL + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_CODEX_SHELL + SKILL_MANUAL_COMPLETION;

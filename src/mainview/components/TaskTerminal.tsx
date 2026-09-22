@@ -32,6 +32,7 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { isElectrobun } from "../rpc";
 import { appendAndroidDraft, bindAndroidTerminal, isAndroidAppHost } from "../android-client-bridge";
+import { isTouchPrimary } from "../utils/platform";
 import type { TaskPaneState } from "../../shared/task-panes";
 import { getPaneRects, restoreSplitTree, serializeSplitTree, setSplitRatio } from "../../shared/split-tree";
 import NativePaneDividers from "./NativePaneDividers";
@@ -60,8 +61,7 @@ type ErrorKind = "worktree-gone" | "session-ended";
 
 function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, hideInfoPanel }: TaskTerminalProps) {
 	const t = useT();
-	const isTouchDevice = navigator.maxTouchPoints > 0;
-	const touchInput = !isElectrobun && isTouchDevice;
+	const touchInput = !isElectrobun && isTouchPrimary();
 	const androidComposer = isAndroidAppHost();
 	// Which pane is scrolled into history, by pane id (the single tmux view uses
 	// TMUX_VIEW). Keyed rather than a boolean: focus can move in the tiled layout
@@ -494,6 +494,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 			setPtyUrl(url);
 		} catch (err) {
 			console.error("[TaskTerminal] Resume session failed:", err);
+			toast.error(err instanceof Error ? err.message : String(err));
 			await classifyAndSetError();
 		} finally {
 			setRestarting(false);
@@ -896,6 +897,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 						<TerminalView
 							ptyUrl={url}
 							taskId={taskId}
+							canComment
 							projectId={projectId}
 							onReady={(handle) => {
 								paneHandlesRef.current.set(paneId, handle);
@@ -930,6 +932,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 					key={focusPaneId}
 					ptyUrl={activePaneUrl}
 					taskId={taskId}
+					canComment
 					projectId={projectId}
 					onReady={(handle) => {
 						if (focusPaneId) paneHandlesRef.current.set(focusPaneId, handle);
@@ -1107,6 +1110,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		<TerminalView
 			ptyUrl={ptyUrl}
 			taskId={taskId}
+			canComment
 			projectId={projectId}
 			onReady={(handle) => {
 				setTermHandle(handle);

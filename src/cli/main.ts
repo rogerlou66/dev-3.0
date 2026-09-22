@@ -6,6 +6,7 @@ import { handleTasks } from "./commands/tasks";
 import { handleTask } from "./commands/task";
 import { handleCurrent } from "./commands/current";
 import { handleNote } from "./commands/note";
+import { handleReview } from "./commands/review";
 import { handleEvents } from "./commands/events";
 import { handleVents } from "./commands/vents";
 import { handleOverview } from "./commands/overview";
@@ -25,6 +26,8 @@ import { handlePr } from "./commands/pr";
 import { handlePane } from "./commands/pane";
 import { handlePaneExec } from "./commands/pane-exec";
 import { PANE_RUN_VERB } from "../bun/pane-run-store";
+import { DEV_SERVER_LOG_SINK_VERB } from "../shared/dev-server-log";
+import { handleDevServerLogSink } from "./commands/dev-server-log-sink";
 import { handleShowImage } from "./commands/show-image";
 import { handleShowArtifact } from "./commands/show-artifact";
 import { handleArtifactTemplate } from "./commands/artifact-template";
@@ -33,11 +36,12 @@ import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleCopilotHook } from "./commands/copilot-hook";
 import { handleAntigravityHook } from "./commands/antigravity-hook";
+import { handleOmpHook } from "./commands/omp-hook";
 import { handleClaudePrompt } from "./commands/claude-prompt";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
 import { handleUpdate } from "./commands/update";
-import { CLAUDE_HOOK_FLAG, shouldSkipClaudeHook, TOLERATE_APP_OFFLINE_FLAG } from "../shared/agent-hooks";
+import { TOLERATE_APP_OFFLINE_FLAG } from "../shared/agent-hooks";
 import { BUILD_TIME, BUILD_COMMIT, BUILD_VERSION } from "../shared/build-info.generated";
 import { CLI_EXIT_CODE_INSTANCE_NOT_FOUND, CLI_EXIT_CODE_SUCCESS } from "../shared/cli-exit-codes";
 import { INSTANCE_FLAG, INSTANCE_SELECTOR_SYNTAX, parseInstanceSelector } from "../shared/cli-instance";
@@ -61,6 +65,10 @@ Commands:
   dev3 note list [--task <id>]          List notes
   dev3 note show <id> [--task <task>]   Show one note's full body (8-char prefix works)
   dev3 note delete <id> [--task <task>] Delete note (8-char prefix works)
+  dev3 review list [--unresolved] [--json] [--task <id>]  The user's review comments on your diff and artifacts
+  dev3 review resolve <id> [--reply "..."] [--task <id>]  Close a comment you handled (8-char prefix works)
+  dev3 review reply <id> "..." [--task <id>]  Answer a comment without closing it
+  dev3 review reopen <id> [--task <id>]  Reopen a resolved comment
   dev3 vents "name" "markdown"          File anonymous dev3-platform feedback (opt-in)
   dev3 overview set "..." [--task <id>] Set task overview (one paragraph)
   dev3 overview show [--task <id>]      Show task overview (or description fallback)
@@ -111,7 +119,7 @@ Commands:
   dev3 config export                     Export settings to .dev3/config.json
   dev3 doctor [--json]                   Check install health (app bundle, tmux shim, brew state); works without the app running
   dev3 doctor --processes [--json]       Which task owns each native terminal host/shell (seq, pane, role, pid, liveness)
-  dev3 install-hooks                     Install Claude worktree hooks and stable Codex user hooks
+  dev3 install-hooks                     Install Claude worktree hooks, stable Codex user hooks and the omp status extension
   dev3 install-skills                    Install agent skills globally
   dev3 projects list                    List all projects
   dev3 remote [start|status|url|stop]    Run headless — serve the UI to a browser
@@ -157,10 +165,9 @@ function resolveRequestedInstance(value: string): string {
 
 async function main(): Promise<void> {
 	const inputArgs = process.argv.slice(2);
-	if (shouldSkipClaudeHook(inputArgs, process.env)) return;
 	// `--instance` targets the whole invocation, not one command, so it leaves
 	// argv before help routing and per-command flag validation ever see it.
-	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(inputArgs.filter((arg) => arg !== CLAUDE_HOOK_FLAG));
+	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(inputArgs);
 
 	// Every short print-and-exit command may have its stdout closed early by a
 	// downstream consumer (`dev3 … | head`, `| grep -m1`, quitting a pager).
@@ -229,12 +236,26 @@ async function main(): Promise<void> {
 		);
 	}
 	if (command === "hook" && subcommand === "copilot") {
-		return await handleCopilotHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
+		// Internal lifecycle adapter. Also answers sessionStart with the dev3
+		// protocol, and stays successful when the app is offline — a non-zero exit
+		// here is fail-closed on preToolUse and would block Copilot's tool call.
+		return await handleCopilotHook(
+			rawArgs[2] ?? "",
+			await Bun.stdin.text(),
+			socketPath || context?.socketPath || null,
+			context,
+		);
+	}
+	if (command === "hook" && subcommand === "omp") {
+		// Internal lifecycle adapter for the generated omp status extension. Same
+		// contract as the Codex one: silent, and successful whatever happens.
+		return await handleOmpHook(
+			await Bun.stdin.text(),
+			socketPath || context?.socketPath || null,
+			context,
+		);
 	}
 	if (command === "hook" && subcommand === "antigravity") {
-		// Internal lifecycle adapter for Antigravity's worktree-local hooks.json.
-		// agy blocks its agent loop on the hook and expects valid JSON back, so
-		// this always exits successfully regardless of app/socket state.
 		return await handleAntigravityHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
 	}
 	if (command === "hook" && subcommand === "claude-prompt") {
@@ -263,6 +284,11 @@ async function main(): Promise<void> {
 		// Pure git + gh against the checked-out branch: the app has nothing to say
 		// about it, and opening a pull request must work while dev3 is closed.
 		return await handlePr(subcommand, args, context);
+	}
+	if (command === DEV_SERVER_LOG_SINK_VERB) {
+		// Internal: the sink `tmux pipe-pane` writes the dev-server pane into. Needs
+		// no socket — the capture outlives the app, exactly like a pane run.
+		return await handleDevServerLogSink(rawArgs.slice(1));
 	}
 	if (command === PANE_RUN_VERB) {
 		// Internal: the process a `dev3 pane run` pane actually runs. It mirrors the
@@ -365,6 +391,8 @@ async function main(): Promise<void> {
 				return await handleTask(subcommand, args, socketPath, context);
 			case "note":
 				return await handleNote(subcommand, args, socketPath, context);
+			case "review":
+				return await handleReview(subcommand, args, socketPath, context);
 			case "events":
 				// `events` takes no subcommand — re-parse from the raw args so a
 				// stray positional is reported instead of silently swallowed.

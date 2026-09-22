@@ -43,7 +43,7 @@ export default {
 	app: {
 		name: "dev-3.0",
 		identifier: "dev3.electrobun.dev",
-		version: "1.53.0",
+		version: "1.54.1",
 	},
 	runtime: {
 		// Standard macOS behavior: closing the last window does NOT quit the app —
@@ -83,6 +83,7 @@ export default {
 			"changelog.json": "changelog.json",
 			[cliCopySource]: cliCopyDestination,
 			"src/assets/sounds": "sounds",
+			"src/bun/freeze-diagnostics": "freeze-diagnostics",
 			"src/assets/artifact-template": "artifact-template",
 			// macOS notification-click shim (empty dir on Linux) — see decisions/2026/07/05/native-notification-click-shim.md.
 			"dist/native": "native",

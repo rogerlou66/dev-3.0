@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getTaskOverview } from "../../../shared/types";
+import { ACTIVE_STATUSES, getTaskOverview } from "../../../shared/types";
 import { markTrafficSeen } from "../../agent-traffic";
 import { useLocale, useT, type TranslationKey } from "../../i18n";
 import { useGlobalShortcut } from "../../hooks/useGlobalShortcut";
@@ -13,12 +13,23 @@ import TrafficOrbit from "./TrafficOrbit";
 import TrafficNodes from "./TrafficNodes";
 import TrafficPlayback from "./TrafficPlayback";
 import TrafficPeriodPicker from "./TrafficPeriodPicker";
-import { isCalendarDay, trafficPeriodBounds } from "./traffic-period";
+import TrafficRangeRuler from "./TrafficRangeRuler";
+import {
+	MIN_RANGE_MS,
+	isCalendarDay,
+	isCustomRange,
+	rangePeriod,
+	trafficPeriodBounds,
+} from "./traffic-period";
+import { domainHolds, rulerDomain } from "./traffic-range";
 import TrafficIcon from "./TrafficIcon";
+import TrafficComposer, { type TrafficComposerState } from "./TrafficComposer";
+import TrafficTerminalPeek from "./TrafficTerminalPeek";
+import TrafficConversation from "./TrafficConversation";
 import { useTrafficPlayback } from "./useTrafficPlayback";
 import { useTrafficData } from "./useTrafficData";
 import { useTrafficExperiment } from "./useTrafficExperiment";
-import type { AgentTrafficExperiment } from "../../../shared/types";
+import type { AgentTrafficExperiment, TaskStatus } from "../../../shared/types";
 import {
 	endpointKey,
 	trafficNodes,
@@ -36,6 +47,7 @@ import {
 	type TrafficTimelineEventKind,
 } from "./traffic-timeline";
 import { useNotificationTraffic } from "./useNotificationTraffic";
+import type { AgentTrafficFocus } from "../../agent-traffic-events";
 import type { TrafficNotificationEvent } from "../../notification-event";
 import {
 	ACTIVE_PROJECTS,
@@ -50,8 +62,23 @@ import "./traffic-nodes.css";
 interface Props {
 	/** The project the user came from; seeds the scope filter, nothing else. */
 	projectId: string | null;
-	onOpenTask: (taskId: string, projectId: string) => void;
+	/**
+	 * One endpoint to open selected, as if its card had been clicked: highlighted
+	 * on the stage, inspector beside it, camera walked over to it. `null` for a
+	 * deliberate entry, which has no subject.
+	 */
+	focus?: AgentTrafficFocus | null;
+	onOpenTask: (taskId: string, projectId: string, opts?: { archived?: boolean }) => void;
 }
+/**
+ * A task with no live terminal (completed, cancelled, todo) opens its board's
+ * detail modal instead of the Active Tasks pane — the same surface its Kanban
+ * card opens on click. ACTIVE_STATUSES is the same predicate the card uses.
+ */
+function isArchivedTask(task?: { status?: TaskStatus } | null): boolean {
+	return !!task?.status && !ACTIVE_STATUSES.includes(task.status);
+}
+
 const runtimeKeys = {
 	idle: "traffic.orbit.runtimeIdle",
 	preparing: "traffic.orbit.runtimePreparing",
@@ -326,13 +353,16 @@ const ENTRY_WINDOW = "hour";
 /** What `Live` returns to — unchanged, and deliberately not {@link ENTRY_WINDOW}. */
 const LIVE_WINDOW = "day";
 
-function TrafficView({ projectId, onOpenTask }: Props) {
+function TrafficView({ projectId, focus, onOpenTask }: Props) {
 	const t = useT();
 	const [locale] = useLocale();
 	const [windowSize, setWindowSize] = useState(ENTRY_WINDOW);
 	const now = Date.now();
 	const { start, end } = trafficPeriodBounds(windowSize, now);
 	const calendarDay = isCalendarDay(windowSize);
+	// A dragged range never asks for another page: the ruler only draws history
+	// that is already loaded, so its band cannot point past it. A calendar day is
+	// the opposite — it names a day nobody has read yet — and keeps its cutoff.
 	const data = useTrafficData(calendarDay ? start : undefined);
 	// The archive is read for the projects the user can actually see, and not read
 	// at all until that list exists: `null` keeps the hook idle rather than asking
@@ -350,6 +380,11 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 	const [selected, setSelected] = useState<string | null>(null);
 	const [recordKey, setRecordKey] = useState<string | null>(null);
 	const [pair, setPair] = useState<string | null>(null);
+	// Composer drafts and send verdicts live here, one per node key, so switching
+	// selection neither loses what was typed nor hides how the last send ended.
+	// They are screen-local: leaving Agent traffic drops them.
+	const [drafts, setDrafts] = useState<Record<string, string>>({});
+	const [composerStates, setComposerStates] = useState<Record<string, TrafficComposerState>>({});
 	const [query, setQuery] = useState("");
 	const [filter, setFilter] = useState("all");
 	// `delivery` (above) governs messages only and `kinds` governs every event, so
@@ -658,6 +693,61 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 			? Date.parse(records[records.length - 1].row.at)
 			: now - 3600000,
 	);
+	/**
+	 * The oldest instant actually loaded — the left edge of the ruler.
+	 *
+	 * Messages and notifications only. A task's `movements[]` can reach back months
+	 * before any message was recorded, and stretching the drawn span to one ancient
+	 * board move would squeeze today's traffic into a few pixels of ruler.
+	 */
+	const loadedOldest = useMemo(() => {
+		let oldest = Infinity;
+		for (const row of data.rows) {
+			const at = Date.parse(row.at);
+			if (Number.isFinite(at)) oldest = Math.min(oldest, at);
+		}
+		for (const event of notifications.events)
+			oldest = Math.min(oldest, event.at);
+		return Number.isFinite(oldest) ? oldest : null;
+	}, [data.rows, notifications.events]);
+	const customRange = isCustomRange(windowSize);
+	/**
+	 * The window as an interval the ruler can draw.
+	 *
+	 * `all` starts at 0 and every rolling window ends at Infinity — neither is an
+	 * instant, so both are resolved here to what they actually mean on screen: the
+	 * oldest thing loaded, and now.
+	 */
+	const bandRange = useMemo(() => {
+		const windowEnd = Number.isFinite(end) ? end : now;
+		const windowStart =
+			Number.isFinite(start) && start > 0
+				? start
+				: (loadedOldest ?? windowEnd - 3600000);
+		return {
+			start: Math.min(windowStart, windowEnd - MIN_RANGE_MS),
+			end: windowEnd,
+		};
+	}, [start, end, now, loadedOldest]);
+	/**
+	 * The ruler's scale, held still while the reader works inside it.
+	 *
+	 * A rolling window is anchored to now and always redrawn — its band sits flush
+	 * against the right edge either way, so recomputing costs nothing visually. A
+	 * fixed window (a dragged range, a calendar day) keeps whatever scale was on
+	 * screen as long as that scale still holds it: otherwise every release of the
+	 * band would rescale the axis under the reader's hand.
+	 */
+	const heldDomain = useRef<{ start: number; end: number } | null>(null);
+	const historyDomain = useMemo(() => {
+		const held = heldDomain.current;
+		const next =
+			(calendarDay || customRange) && held && domainHolds(held, bandRange)
+				? held
+				: rulerDomain(bandRange, loadedOldest, now);
+		heldDomain.current = next;
+		return next;
+	}, [bandRange, loadedOldest, now, calendarDay, customRange]);
 	const format = (at: string | number) =>
 		new Date(at).toLocaleString(locale, {
 			month: "short",
@@ -715,6 +805,31 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 		setRecordKey(null);
 		setPair(null);
 	}
+	/** Double-click anywhere a task is drawn jumps to it, same as the Kanban card. */
+	function openNode(key: string) {
+		const node = nodeMap.get(key);
+		if (!node?.task) return;
+		onOpenTask(node.id, node.projectId, { archived: isArchivedTask(node.task) });
+	}
+	/**
+	 * An arrival that names one task selects it, once.
+	 *
+	 * Once, because the route keeps carrying the same endpoint for as long as the
+	 * screen stays open: re-running would snap the selection back every time the
+	 * user clicked another card. The focus bump walks the camera over to it — the
+	 * node may not be laid out yet, and the stage parks the request until it is.
+	 */
+	const focusKey = focus ? endpointKey(focus.projectId, focus.taskId) : null;
+	const focusedOn = useRef<string | null>(null);
+	useEffect(() => {
+		if (!focusKey || focusedOn.current === focusKey) return;
+		focusedOn.current = focusKey;
+		select(focusKey);
+		setFocusRequest((request) => request + 1);
+		// `select` is re-created every render and only calls setters; the key is what
+		// decides whether this runs.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [focusKey]);
 	function rowButton(item: TrafficRecord) {
 		const row = item.row;
 		return (
@@ -749,7 +864,11 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 	const liveLabel =
 		data.loading || data.historyLoading || notifications.status === "loading"
 			? t("traffic.loading")
-			: (experiment === "2" ? playback.index < 0 && !calendarDay : until === null)
+			: (
+						experiment === "2"
+							? playback.index < 0 && !calendarDay && !customRange
+							: until === null
+				  )
 				? t("traffic.orbit.live")
 				: t("traffic.orbit.history");
 	/** The notification the replay cursor is standing on, if it is on one at all. */
@@ -874,7 +993,11 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 					value={experiment}
 					onChange={(value) => {
 						choose(value);
-						if (value === "1" && calendarDay) setWindowSize(LIVE_WINDOW);
+						// Experiment 1's window control is a three-option Select: it can
+						// express neither a calendar day nor a dragged range, so a window
+						// it cannot name is replaced rather than left stranded on screen.
+						if (value === "1" && (calendarDay || customRange))
+							setWindowSize(LIVE_WINDOW);
 					}}
 				/>
 				{experiment === "2" && narrowControls ? (
@@ -994,6 +1117,7 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 							records={visible}
 							selected={selected}
 							onSelect={select}
+							onOpen={openNode}
 							paused={paused || until !== null}
 							ready={!data.loading}
 						/>
@@ -1006,6 +1130,7 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 							layoutRecords={timeRows}
 							selected={selected}
 							onSelect={select}
+							onOpen={openNode}
 							paused={false}
 							playback={playback}
 							focusRequest={focusRequest}
@@ -1022,7 +1147,20 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 								setRecordKey(key);
 								setShowInspector(true);
 							}}
-							historical={calendarDay}
+							historical={calendarDay || customRange}
+							range={
+								<TrafficRangeRuler
+									domain={historyDomain}
+									range={bandRange}
+									rolling={!calendarDay && !customRange}
+									cursorAt={playback.cursor.at}
+									onChange={(next) => {
+										setWindowSize(rangePeriod(next.start, next.end));
+										clearSelection();
+										setFollowRequest((request) => request + 1);
+									}}
+								/>
+							}
 							onLive={() => {
 								setWindowSize(LIVE_WINDOW);
 								setFollowRequest((value) => value + 1);
@@ -1194,7 +1332,9 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 										<button
 											className="traffic-primary"
 											onClick={() =>
-												onOpenTask(record.row.toTaskId, record.row.toProjectId)
+												onOpenTask(record.row.toTaskId, record.row.toProjectId, {
+												archived: isArchivedTask(nodeMap.get(toKey(record.row))?.task),
+											})
 											}
 										>
 											{t("traffic.orbit.openTask")}
@@ -1250,16 +1390,52 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 											<button
 												className="traffic-primary"
 												onClick={() =>
-													onOpenTask(selectedNode.id, selectedNode.projectId)
+													onOpenTask(selectedNode.id, selectedNode.projectId, {
+											archived: isArchivedTask(selectedNode.task),
+										})
 												}
 											>
 												{t("traffic.orbit.openTask")}
 											</button>
+											{/* Keyed on the node so a new selection remounts it: no
+											    snapshot may outlive the task it was read from. */}
+											<TrafficTerminalPeek
+												key={selectedNode.key}
+												taskId={selectedNode.id}
+												projectId={selectedNode.projectId}
+											/>
 										</>
 									) : (
 										<p>{t("traffic.taskGone")}</p>
 									)}
 								</div>
+							)}
+							{/* Its own row rather than the last thing inside the identity block:
+							    that block scrolls at 45% of the aside, and a composer parked
+							    below its fold is a control nobody finds. Keyed by the node, so a
+							    draft belongs to the task it was written for and switching
+							    selection never carries text across to somebody else's agent. */}
+							{selectedNode?.task && (
+								<TrafficComposer
+									key={selectedNode.key}
+									task={selectedNode.task}
+									projectId={selectedNode.projectId}
+									seqLabel={nodeSeq(selectedNode)}
+									draft={drafts[selectedNode.key] ?? ""}
+									onDraftChange={(next) =>
+										setDrafts((current) => ({
+											...current,
+											[selectedNode.key]: next,
+										}))
+									}
+									state={composerStates[selectedNode.key] ?? { phase: "idle" }}
+									onStateChange={(next) =>
+										setComposerStates((current) => ({
+											...current,
+											[selectedNode.key]: next,
+										}))
+									}
+								/>
 							)}
 							<div className="traffic-inspector-heading">
 								<div className="traffic-tabs">
@@ -1275,6 +1451,12 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 									>
 										{t("traffic.orbit.tasks")}
 									</button>
+									<button
+										aria-pressed={tab === "conversation"}
+										onClick={() => setTab("conversation")}
+									>
+										{t("traffic.conversation.tab")}
+									</button>
 								</div>
 								{pair && (
 									<button onClick={clearSelection}>
@@ -1283,7 +1465,14 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 								)}
 							</div>
 							<div className="traffic-list">
-								{tab === "messages" ? (
+								{tab === "conversation" ? (
+									<TrafficConversation
+										projectId={selectedNode?.projectId ?? null}
+										taskId={selectedNode?.task ? selectedNode.id : null}
+										taskGone={Boolean(selectedNode && !selectedNode.task)}
+										format={format}
+									/>
+								) : tab === "messages" ? (
 									listItems.length ? (
 										listItems.map((item) =>
 											item.kind === "message"
@@ -1301,25 +1490,36 @@ function TrafficView({ projectId, onOpenTask }: Props) {
 									taskList.map((node) => (
 										<button
 											key={node.key}
-											className={`traffic-task-row ${node.key === selected ? "is-selected" : ""}`}
+											data-testid="traffic-task-row"
+											data-parked={node.task?.hibernated ? "true" : undefined}
+											className={`traffic-task-row ${node.key === selected ? "is-selected" : ""} ${node.task?.hibernated ? "is-parked" : ""}`}
 											onClick={() => select(node.key)}
+											onDoubleClick={() => openNode(node.key)}
 										>
 											<b>{nodeSeq(node)}</b>
 											<span className="streamer-private">
 												{node.title || t("traffic.orbit.historical")}
 											</span>
 											<small>
-												{node.task?.taskType === "coordinator"
-													? t("traffic.orbit.coordinator")
-													: node.task
-														? getStatusLabel(
-																node.task.status,
-																t,
-																data.projects.find(
-																	(project) => project.id === node.projectId,
-																),
-															)
-														: t("traffic.orbit.historical")}
+												{/* Hibernation leads, because it outranks the column the
+												    task is parked in — but the column still shows, or the
+												    row would hide where the work actually stands. */}
+												{[
+													node.task?.hibernated ? t("task.hibernatedBadge") : null,
+													node.task?.taskType === "coordinator"
+														? t("traffic.orbit.coordinator")
+														: node.task
+															? getStatusLabel(
+																	node.task.status,
+																	t,
+																	data.projects.find(
+																		(project) => project.id === node.projectId,
+																	),
+																)
+															: t("traffic.orbit.historical"),
+												]
+													.filter(Boolean)
+													.join(" · ")}
 											</small>
 										</button>
 									))

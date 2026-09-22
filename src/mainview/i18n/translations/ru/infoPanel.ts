@@ -216,6 +216,10 @@ const infoPanel = {
 	"infoPanel.diffMdPreviewCommentCount_few": "{count} комментария к файлу",
 	"infoPanel.diffMdPreviewCommentCount_many": "{count} комментариев к файлу",
 	"infoPanel.diffMdPreviewCommentCount_other": "{count} комментариев к файлу",
+	"infoPanel.diffMdUnchangedLines_one": "Показать {count} неизменённую строку",
+	"infoPanel.diffMdUnchangedLines_few": "Показать {count} неизменённые строки",
+	"infoPanel.diffMdUnchangedLines_many": "Показать {count} неизменённых строк",
+	"infoPanel.diffMdUnchangedLines_other": "Показать {count} неизменённых строк",
 	"infoPanel.diffMdPreviewGithubThreads_one": "{count} ветка ревью GitHub → Исходный дифф",
 	"infoPanel.diffMdPreviewGithubThreads_few": "{count} ветки ревью GitHub → Исходный дифф",
 	"infoPanel.diffMdPreviewGithubThreads_many": "{count} веток ревью GitHub → Исходный дифф",
@@ -268,6 +272,10 @@ const infoPanel = {
 	"infoPanel.diffReviewJump": "Перейти к комментарию",
 	"infoPanel.diffReviewEdit": "Редактировать комментарий",
 	"infoPanel.diffReviewDelete": "Удалить комментарий",
+	"infoPanel.diffReviewReopen": "Открыть снова",
+	"infoPanel.diffReviewResolved": "Решено",
+	"infoPanel.diffReviewReplyAgent": "Агент",
+	"infoPanel.diffReviewReplyUser": "Вы",
 	"infoPanel.diffReviewSave": "Сохранить комментарий",
 	"infoPanel.diffReviewCommentItemOf": "Комментарий {number}/{total}",
 	"infoPanel.diffReviewSendComment": "Отправить агенту",
@@ -335,6 +343,16 @@ const infoPanel = {
 	"infoPanel.sharedItemsUnread": "Есть новые непросмотренные элементы",
 	"infoPanel.openSharedImage": "Открыть картинку {name}",
 	"infoPanel.openSharedArtifact": "Открыть артефакт {name}",
+
+	"infoPanel.restoreHidden": "Показать скрытые элементы",
+	"infoPanel.restoreOne": "Вернуть {name}",
+	"infoPanel.showAllHidden": "Показать все",
+	"infoPanel.barContext": "Контекст",
+	"infoPanel.barSessionAgent": "Сессия и агент",
+	"infoPanel.barRuntime": "Среда выполнения",
+	"infoPanel.paneControlsLabel": "Раскладка панелей",
+	"infoPanel.scriptsRunnerLabel": "Скрипты",
+	"infoPanel.includeTestsLabel": "Включать тесты в диф",
 };
 
 export default infoPanel;

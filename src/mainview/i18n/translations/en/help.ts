@@ -128,7 +128,7 @@ const help = {
 	"help.settings.agents.body":
 		"The coding agents you launch and their presets. Each configuration is a complete launch recipe — model, mode, flags; every task picks one at start. Drag to reorder the picker.",
 	"help.settings.appearance.title": "Appearance",
-	"help.settings.appearance.body": "Theme, language, zoom and scrolling — how the app looks and feels.",
+	"help.settings.appearance.body": "Simplified Mode, theme, language and zoom — how the app looks and feels.",
 	"help.settings.tasks.title": "Tasks & Board",
 	"help.settings.tasks.body":
 		"Board and task behavior defaults: where a dropped card lands in its column, how tasks open, review prompts, and feature tips.",
@@ -160,7 +160,7 @@ const help = {
 		"An experimental local proxy (pxpipe) that renders bulky context as images to cut input tokens — often ~2× cheaper, a little slower. Off by default; enabling it unlocks the \"Fable 5 (cost trick)\" preset.",
 	"help.settings.advancedExperience.title": "Advanced Experience",
 	"help.settings.advancedExperience.body":
-		"Beta behaviour that earns its keep but is not finished, so it ships off and you opt in per feature. Right-to-left reordering is the first one: terminal panes paint Hebrew and Arabic in reading order instead of reversed. It is a display-only layer on top of a terminal engine that has no right-to-left support of its own yet, so mouse selection and link hover on those lines still follow the underlying order.",
+		"Beta behaviour that earns its keep but is not finished, so each entry says whether it is on by default and you can turn it off per feature. Right-to-left reordering is the first one and ships on: terminal panes paint Hebrew and Arabic in reading order instead of reversed. It is a display-only layer on top of a terminal engine that has no right-to-left support of its own yet, so mouse selection and link hover on those lines still follow the underlying order.",
 
 	// ── Project settings (tabs) ──
 	"help.projectSettings.board.title": "Board configuration",
@@ -253,7 +253,7 @@ const help = {
 	"help.header.agentTraffic.title": "Agent traffic: see your agents communicate",
 	"help.header.agentTraffic.body": "Select the purple message icon to open live traffic, or press ⇧⌘M. It starts with the last 24 hours; the badge counts unread messages.",
 	"help.traffic.log.title": "Explore live agent traffic",
-	"help.traffic.log.body": "Pick a presentation on the left: Experiment 2 draws task cards wired to whoever they messaged, Experiment 1 flies you around a 3D orbit. Select a task or message to inspect its delivery status. The timeline filters messages; task columns remain current.",
+	"help.traffic.log.body": "Pick a presentation on the left: Experiment 2 draws task cards wired to whoever they messaged, Experiment 1 flies you around a 3D orbit. Select a task or message to inspect its delivery status; double-click a task to open it. The timeline filters messages; task columns remain current.",
 	"help.header.memory.title": "The memory pill shows what is LEFT",
 	"help.header.memory.body": "The number is free memory, not used — hover it to see who actually took the rest. dev-3.0 itself holds a few hundred megabytes; the gigabytes belong to the agents you launched, and to whatever else is running.",
 	"help.header.connectionQuality.title": "How slow this connection is",

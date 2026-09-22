@@ -1,4 +1,4 @@
-import { reducer, initialState, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskClosedHomeRoute, getTaskOpenMode, HISTORY_LIMIT, canGoBack, canGoForward, routeDiffRequest, routeWithDiff, routeWithoutDiff } from "../state";
+import { reducer, initialState, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskOpenRoute, taskClosedHomeRoute, getTaskOpenMode, HISTORY_LIMIT, canGoBack, canGoForward, routeDiffRequest, routeWithDiff, routeWithoutDiff } from "../state";
 import type { Route } from "../state";
 import type { TaskInlineDiffRequest } from "../components/task-inline-diff";
 import type { AppState, AppAction } from "../state";
@@ -31,6 +31,12 @@ const mockTask: Task = {
 	configId: null,
 	createdAt: "2025-01-01T00:00:00Z",
 	updatedAt: "2025-01-01T00:00:00Z",
+};
+
+/** `initialState` with p1's board on screen — the store only takes tasks of the board in view. */
+const boardState: AppState = {
+	...initialState,
+	route: { screen: "project", projectId: "p1" },
 };
 
 describe("initialState", () => {
@@ -440,7 +446,7 @@ describe("reducer", () => {
 	});
 
 	it("addTask: appends to currentProjectTasks", () => {
-		const next = reducer(initialState, {
+		const next = reducer(boardState, {
 			type: "addTask",
 			task: mockTask,
 		});
@@ -458,6 +464,60 @@ describe("reducer", () => {
 		});
 		expect(next).toBe(state);
 		expect(next.currentProjectTasks).toHaveLength(1);
+	});
+
+	// ---- cross-project leak: the store holds ONE board's tasks ----
+	// Cmd+N on A's board, pick project B in the modal, Launch: B's card used to
+	// land on A's board until the next fetch. Every appending branch must refuse
+	// a task from a project this board does not show.
+
+	it("addTask: drops a task created into another project", () => {
+		const foreign: Task = { ...mockTask, id: "t-b", projectId: "p2" };
+		const state: AppState = { ...boardState, currentProjectTasks: [mockTask] };
+		const next = reducer(state, { type: "addTask", task: foreign });
+		expect(next).toBe(state);
+	});
+
+	it("addTask: drops a late response for the board the user just left", () => {
+		// createTask resolves after the user switched from p1 to p2.
+		const state: AppState = { ...initialState, route: { screen: "project", projectId: "p2" } };
+		const next = reducer(state, { type: "addTask", task: mockTask });
+		expect(next.currentProjectTasks).toHaveLength(0);
+	});
+
+	it("addTask: keeps a task of a member project on a space board", () => {
+		const state: AppState = {
+			...initialState,
+			route: { screen: "project", projectId: "p1", spaceId: "s1" },
+		};
+		const next = reducer(state, { type: "addTask", task: { ...mockTask, id: "t-b", projectId: "p2" } });
+		expect(next.currentProjectTasks).toHaveLength(1);
+	});
+
+	it("spawnVariants: drops variants of a task belonging to another project", () => {
+		const state: AppState = { ...boardState, currentProjectTasks: [mockTask] };
+		const foreignSource: Task = { ...mockTask, id: "t-b", projectId: "p2" };
+		const variant: Task = { ...foreignSource, id: "v-b", status: "in-progress", groupId: "g1", variantIndex: 1 };
+		const next = reducer(state, {
+			type: "spawnVariants",
+			sourceTaskId: foreignSource.id,
+			variants: [variant],
+		});
+		expect(next).toBe(state);
+		expect(next.currentProjectTasks).toEqual([mockTask]);
+	});
+
+	it("addAttempts: drops attempts of a task belonging to another project", () => {
+		const state: AppState = { ...boardState, currentProjectTasks: [mockTask] };
+		const foreignSource: Task = { ...mockTask, id: "t-b", projectId: "p2", status: "in-progress" };
+		const attempt: Task = { ...foreignSource, id: "a-b", groupId: "g1", variantIndex: 2 };
+		const next = reducer(state, {
+			type: "addAttempts",
+			sourceTaskId: foreignSource.id,
+			newAttempts: [attempt],
+			updatedSource: { ...foreignSource, groupId: "g1", variantIndex: 1 },
+		});
+		expect(next).toBe(state);
 	});
 
 	it("removeTask: removes by id", () => {
@@ -565,7 +625,7 @@ describe("reducer", () => {
 
 	it("spawnVariants: removes source task and adds variants", () => {
 		const state: AppState = {
-			...initialState,
+			...boardState,
 			currentProjectTasks: [mockTask],
 		};
 		const variant1: Task = {
@@ -610,7 +670,7 @@ describe("reducer", () => {
 			configId: "claude-default",
 		};
 		const state: AppState = {
-			...initialState,
+			...boardState,
 			// Source task + variant already added by updateTask push
 			currentProjectTasks: [mockTask, variant1],
 		};
@@ -626,7 +686,7 @@ describe("reducer", () => {
 	it("spawnVariants: preserves other tasks", () => {
 		const otherTask: Task = { ...mockTask, id: "t2", title: "Other" };
 		const state: AppState = {
-			...initialState,
+			...boardState,
 			currentProjectTasks: [mockTask, otherTask],
 		};
 		const variant1: Task = {
@@ -656,7 +716,7 @@ describe("reducer", () => {
 			branchName: "feat/test",
 		};
 		const state: AppState = {
-			...initialState,
+			...boardState,
 			currentProjectTasks: [sourceTask],
 		};
 		const updatedSource: Task = {
@@ -699,7 +759,7 @@ describe("reducer", () => {
 			variantIndex: 2,
 		};
 		const state: AppState = {
-			...initialState,
+			...boardState,
 			currentProjectTasks: [sourceTask, attempt],
 		};
 		const next = reducer(state, {
@@ -1340,5 +1400,35 @@ describe("reducer — the space a task was opened through", () => {
 			historyIndex: 2,
 		};
 		expect(reducer(state, { type: "goBack" }).route).toEqual(taskRoute);
+	});
+});
+
+// The navigation boundary Agent traffic's "Open task" goes through: an archived
+// task has no terminal, so it must not land on the Active Tasks pane.
+describe("taskOpenRoute", () => {
+	it("sends an archived task to its project board with the detail request", () => {
+		expect(taskOpenRoute("t1", "p1", "split", true)).toEqual({
+			screen: "project",
+			projectId: "p1",
+			taskDetailId: "t1",
+		});
+		expect(taskOpenRoute("t1", "p1", "fullscreen", true)).toEqual({
+			screen: "project",
+			projectId: "p1",
+			taskDetailId: "t1",
+		});
+	});
+
+	it("keeps an active task on its workspace in either open mode", () => {
+		expect(taskOpenRoute("t1", "p1", "split", false)).toEqual({
+			screen: "project",
+			projectId: "p1",
+			activeTaskId: "t1",
+		});
+		expect(taskOpenRoute("t1", "p1", "fullscreen", false)).toEqual({
+			screen: "task",
+			projectId: "p1",
+			taskId: "t1",
+		});
 	});
 });

@@ -104,6 +104,19 @@ function opencodeSignedIn(p: ProbeEnv): boolean {
 	return roots.some((root) => !!root && hasJsonKeys(p, join(root, "opencode", "auth.json")));
 }
 
+/**
+ * Copilot keeps the credential itself out of its config dir (a fresh
+ * `COPILOT_HOME` is still authenticated), so the only readable evidence is the
+ * account list the CLI writes after a successful `/login`. Read-only: dev3 never
+ * writes this file, and never touches the account it names.
+ */
+function copilotSignedIn(p: ProbeEnv): boolean {
+	if (anyEnv(p, ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"])) return true;
+	const home = (p.env.COPILOT_HOME ?? "").trim() || join(p.home, ".copilot");
+	const config = p.readJson(join(home, "config.json")) as { loggedInUsers?: unknown } | null;
+	return Array.isArray(config?.loggedInUsers) && config.loggedInUsers.length > 0;
+}
+
 /** Probes keyed by the agent's `baseCommand`. Missing key ⇒ `unknown`. */
 const SIGN_IN_PROBES: Record<string, (p: ProbeEnv) => boolean> = {
 	claude: claudeSignedIn,
@@ -112,6 +125,11 @@ const SIGN_IN_PROBES: Record<string, (p: ProbeEnv) => boolean> = {
 	// Cursor Agent's binary is `agent`.
 	agent: cursorSignedIn,
 	opencode: opencodeSignedIn,
+	copilot: copilotSignedIn,
+	// No `omp` probe on purpose: omp keeps credentials in SQLite
+	// (`~/.omp/agent/agent.db`, table `auth_credentials`), not a JSON file this
+	// seam can read. Guessing would report a signed-in install as logged out and
+	// block the sandbox; `unknown` is the honest answer this module is built for.
 };
 
 export function harnessSignIn(baseCommand: string, p: ProbeEnv): HarnessSignIn {

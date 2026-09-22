@@ -39,7 +39,13 @@ export type OpenSettingsSectionDetail =
  */
 export type Route =
 	| { screen: "dashboard" }
-	| { screen: "project"; projectId: string; spaceId?: string; activeTaskId?: string; taskView?: boolean; openUnresolvedComments?: boolean; diff?: TaskInlineDiffRequest }
+	/**
+	 * `taskDetailId` opens the board's own task-detail modal on arrival — the
+	 * surface a completed/cancelled/todo card opens when clicked. It rides the
+	 * board route (no `activeTaskId`) because such a task has no terminal to
+	 * select, so the Active Tasks pane would land on nothing.
+	 */
+	| { screen: "project"; projectId: string; spaceId?: string; activeTaskId?: string; taskView?: boolean; taskDetailId?: string; openUnresolvedComments?: boolean; diff?: TaskInlineDiffRequest }
 	| { screen: "project-terminal"; projectId: string }
 	| { screen: "task"; projectId: string; spaceId?: string; taskId: string; openUnresolvedComments?: boolean; diff?: TaskInlineDiffRequest }
 	| { screen: "project-settings"; projectId: string; tab?: "global" | "project" | "worktree" | "automations"; worktreeTaskId?: string }
@@ -53,8 +59,13 @@ export type Route =
 	 * and several call sites read a bare `"projectId" in route` as "the user is
 	 * inside this project", which here would put a project in the breadcrumb and
 	 * in the task switcher's scope.
+	 *
+	 * `focusTaskId`/`focusProjectId` name one endpoint the screen must open with
+	 * selected — an arrival from a notification click, which is about one task, not
+	 * about the screen. Both halves travel together: an endpoint is a task inside a
+	 * project, and the same task id can exist on two boards.
 	 */
-	| { screen: "agent-traffic"; scopeProjectId?: string }
+	| { screen: "agent-traffic"; scopeProjectId?: string; focusTaskId?: string; focusProjectId?: string }
 	| { screen: "gauge-demo" }
 	| { screen: "viewport-lab" }
 	| { screen: "native-pane-layout-lab" };
@@ -182,6 +193,25 @@ export function taskClosedHomeRoute(projectId: string, openMode: TaskOpenMode): 
 }
 
 /**
+ * Where a "open this task" click lands. An ACTIVE task goes to its workspace in
+ * the user's open mode. An ARCHIVED one (completed, cancelled, todo — anything
+ * with no terminal) goes to its project's Kanban with the board's detail modal
+ * open: the Active Tasks pane has nothing to show for it, which is what made
+ * such clicks look like they did nothing.
+ */
+export function taskOpenRoute(
+	taskId: string,
+	projectId: string,
+	openMode: TaskOpenMode,
+	archived: boolean,
+): Route {
+	if (archived) return { screen: "project", projectId, taskDetailId: taskId };
+	return openMode === "fullscreen"
+		? { screen: "task", projectId, taskId }
+		: { screen: "project", projectId, activeTaskId: taskId };
+}
+
+/**
  * Where to land after `taskId` is completed/cancelled and its worktree is
  * destroyed. The destination is driven by the user's *configured* open-mode,
  * not the transient route, so each user lands back on the surface they live in:
@@ -234,6 +264,27 @@ export function routeSpaceId(route: Route): string | null {
  */
 function boardSpaceId(route: Route): string | null {
 	return route.screen === "project" ? route.spaceId ?? null : null;
+}
+
+/**
+ * May a task from `projectId` enter the task store as it stands right now?
+ *
+ * The store holds exactly one board's tasks, so every branch that APPENDS one
+ * has to ask — a task created into another project from the picker, the
+ * variants a launch spawns for it, a response arriving after the user switched
+ * boards. Without this the card lands on the board the user is looking at until
+ * the next fetch replaces it.
+ *
+ * A space board holds several projects and filters its own cards by membership
+ * (ProjectView), so there the board decides and the store only has to keep them.
+ */
+function acceptsTaskFrom(state: AppState, projectId: string): boolean {
+	if (boardSpaceId(state.route) !== null) return true;
+	const viewingProjectId =
+		state.route.screen === "project" || state.route.screen === "task" || state.route.screen === "project-settings"
+			? state.route.projectId
+			: null;
+	return viewingProjectId !== null && projectId === viewingProjectId;
 }
 
 /**
@@ -461,27 +512,17 @@ export function reducer(state: AppState, action: AppAction): AppState {
 					),
 				};
 			}
-			// New task (e.g. created via CLI) — add if we're viewing the same project.
-			// On a space board every member project is on screen, so the board itself
-			// decides which cards belong; the store only has to keep them.
-			const viewingProjectId =
-				state.route.screen === "project" || state.route.screen === "task" || state.route.screen === "project-settings"
-					? state.route.projectId
-					: null;
-			if (boardSpaceId(state.route) !== null) {
-				return { ...state, currentProjectTasks: [...state.currentProjectTasks, action.task] };
-			}
-			if (viewingProjectId && action.task.projectId === viewingProjectId) {
-				return {
-					...state,
-					currentProjectTasks: [...state.currentProjectTasks, action.task],
-				};
-			}
-			return state;
+			// New task (e.g. created via CLI) — add only if this board holds it.
+			if (!acceptsTaskFrom(state, action.task.projectId)) return state;
+			return {
+				...state,
+				currentProjectTasks: [...state.currentProjectTasks, action.task],
+			};
 		}
 		case "addTask":
 			if (state.currentProjectTasks.some((t) => t.id === action.task.id))
 				return state;
+			if (!acceptsTaskFrom(state, action.task.projectId)) return state;
 			return {
 				...state,
 				currentProjectTasks: [...state.currentProjectTasks, action.task],
@@ -503,27 +544,24 @@ export function reducer(state: AppState, action: AppAction): AppState {
 			// Collect variant IDs to filter out any duplicates already added
 			// by a concurrent pushMessage("taskUpdated") race
 			const variantIds = new Set(action.variants.map((v) => v.id));
-			return {
-				...state,
-				currentProjectTasks: [
-					...state.currentProjectTasks.filter(
-						(t) => t.id !== action.sourceTaskId && !variantIds.has(t.id),
-					),
-					...action.variants,
-				],
-			};
+			// Launching a task that belongs to another project must not put its
+			// variants on the board in view (create-in-B-then-Launch-from-A).
+			const variants = action.variants.filter((v) => acceptsTaskFrom(state, v.projectId));
+			const kept = state.currentProjectTasks.filter(
+				(t) => t.id !== action.sourceTaskId && !variantIds.has(t.id),
+			);
+			if (variants.length === 0 && kept.length === state.currentProjectTasks.length) return state;
+			return { ...state, currentProjectTasks: [...kept, ...variants] };
 		}
 		case "addAttempts": {
 			const attemptIds = new Set(action.newAttempts.map((v) => v.id));
-			return {
-				...state,
-				currentProjectTasks: [
-					...state.currentProjectTasks
-						.filter((t) => !attemptIds.has(t.id))
-						.map((t) => t.id === action.sourceTaskId ? action.updatedSource : t),
-					...action.newAttempts,
-				],
-			};
+			const attempts = action.newAttempts.filter((v) => acceptsTaskFrom(state, v.projectId));
+			const onBoard = state.currentProjectTasks.some((t) => t.id === action.sourceTaskId || attemptIds.has(t.id));
+			if (attempts.length === 0 && !onBoard) return state;
+			const kept = state.currentProjectTasks
+				.filter((t) => !attemptIds.has(t.id))
+				.map((t) => t.id === action.sourceTaskId ? action.updatedSource : t);
+			return { ...state, currentProjectTasks: [...kept, ...attempts] };
 		}
 		case "addProject": {
 			const normalizedPath = normalizeProjectPath(action.project.path);

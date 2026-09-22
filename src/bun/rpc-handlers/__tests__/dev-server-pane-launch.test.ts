@@ -60,6 +60,8 @@ vi.mock("../../tmux", async (importOriginal) => {
 			...actual.tmux,
 			binaryPath: () => "/opt/homebrew/bin/tmux",
 			hasSession: vi.fn(async () => false),
+			// Live dev servers of a task are enumerated from its sessions.
+			listSessions: vi.fn(async () => []),
 			newSessionDetached: mocks.newSessionDetached,
 			splitWindow: vi.fn(async () => ({ paneId: "%3" })),
 			selectPane: vi.fn(async () => {}),
@@ -180,6 +182,31 @@ describe(`dev-server pane launch on ${process.platform}`, () => {
 		await expect(asWindows(() => runDevServer({ taskId: TMUX_TASK.id, projectId: PROJECT.id })))
 			.rejects.toThrow(/tmux backend, which is POSIX-only/);
 		expect(mocks.newSessionDetached).not.toHaveBeenCalled();
+	});
+
+	// The dev server's output is mirrored to a file an agent greps. Each backend
+	// captures it its own way, and neither may touch how the pane itself runs.
+	it("hands the native pane the log path, so its session host mirrors the output", async () => {
+		await runDevServer({ taskId: NATIVE_TASK.id, projectId: PROJECT.id });
+		const spec = mocks.openAuxPane.mock.calls[0][0];
+		expect(String(spec.outputLogPath)).toMatch(/[/\\]abcdef12[/\\]logs[/\\]dev-server\.log$/);
+	});
+
+	// POSIX-only by construction: the tmux backend does not exist on Windows, where
+	// `runDevServer` refuses a tmux task before it reaches the capture. Running it
+	// there asserted nothing and failed the packaged Windows job outright (Seq 1917).
+	it.skipIf(isWindows)("chains the tmux capture onto new-session itself, not as a later command", async () => {
+		mocks.getTask.mockResolvedValue(TMUX_TASK);
+		await runDevServer({ taskId: TMUX_TASK.id, projectId: PROJECT.id });
+		const calls = mocks.newSessionDetached.mock.calls as unknown as Array<[{ pipeTo?: string; command?: string }]>;
+		const opts = calls[0]![0];
+		// A pipe-pane issued afterwards attaches too late and loses the pane's first
+		// lines — exactly the output that says why a dev server failed to boot.
+		expect(String(opts.pipeTo)).toContain("__dev-server-log");
+		expect(String(opts.pipeTo)).toMatch(/logs[/\\]dev-server\.log/);
+		// The pane still runs the devScript wrapper directly: capture happens beside
+		// the process, never by wrapping it in a pipeline that would cost it its tty.
+		expect(String(opts.command)).toMatch(/^bash "/);
 	});
 
 	// The marker re-finds the pane later (is it running, replace it, stop it) by

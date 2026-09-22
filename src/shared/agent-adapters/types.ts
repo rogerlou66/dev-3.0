@@ -10,6 +10,7 @@
  * (which must not import src/bun), so each adapter is unit-testable without a PTY.
  */
 
+import type { PaneInputStage } from "../pane-input";
 import type { AgentConfiguration, PermissionMode, TaskStatus } from "../types";
 import type { TemplateContext } from "./template";
 
@@ -18,7 +19,7 @@ export type { TemplateContext } from "./template";
 /** Agent-native trust routine a launch needs, in apply order (executor maps each
  *  to its ensure* function). Current dev3 applies Claude trust to *every* agent
  *  (harmless superset + MCP pre-approval), so most adapters include "claude". */
-export type TrustKind = "claude" | "codex" | "gemini" | "antigravity";
+export type TrustKind = "claude" | "codex" | "gemini" | "antigravity" | "copilot";
 
 /** Declarative description of the agent-native lifecycle hooks to install. The
  *  backend executor dispatches on `kind`; the hook *content* is the pure
@@ -27,7 +28,8 @@ export type HooksSpec =
 	| { kind: "claude"; stopTarget?: TaskStatus; permissionMode?: PermissionMode }
 	| { kind: "codex" }
 	| { kind: "copilot" }
-	| { kind: "antigravity" };
+	| { kind: "antigravity" }
+	| { kind: "omp" };
 
 /** Codex-only launch runtime resolved by the backend (theme state + a
  *  `codex --help` probe are impure) and threaded into the pure CodexAdapter. */
@@ -114,4 +116,11 @@ export interface AgentAdapter {
 
 	/** Agent-native lifecycle hooks to install, or null when the agent has none. */
 	hooksSpec(options?: { stopTarget?: TaskStatus; permissionMode?: PermissionMode }): HooksSpec | null;
+
+	/**
+	 * The keystrokes that ask this CLI to quit on its own terms — typed into its pane
+	 * before dev3 tears the terminal down, so the agent's own session-end hooks get to
+	 * run. Null when the CLI has no known quit command and only the kill remains.
+	 */
+	exitProgram(): readonly PaneInputStage[] | null;
 }

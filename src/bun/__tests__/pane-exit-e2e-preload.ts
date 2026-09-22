@@ -81,6 +81,7 @@ mock.module("../port-pool", () => ({
 	allocatePorts: async () => [],
 	getPortAssignments: () => [],
 	buildPortEnv: () => ({}),
+	buildNamedPortEnv: () => ({}),
 }));
 
 const realPortScanner = await import("../port-scanner");

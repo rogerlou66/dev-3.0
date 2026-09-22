@@ -30,6 +30,8 @@ interface Props {
 	records: TrafficRecord[];
 	selected: string | null;
 	onSelect: (key: string) => void;
+	/** Double-click on a node or its label, same jump the Kanban card makes. */
+	onOpen: (key: string) => void;
 	paused: boolean;
 	ready: boolean;
 }
@@ -103,6 +105,10 @@ export default function TrafficOrbit(props: Props) {
 			accent = token("accent"),
 			border = token("border-active"),
 			success = token("success");
+		// Hibernated bodies drop their status colour for one neutral grey, so a
+		// parked task never wears the same hue as a running one. The word on its
+		// label carries the meaning — the grey alone never has to.
+		const parkedInk = token("text-tertiary");
 		const warning = token("warning"),
 			danger = token("danger");
 		let nodes: SceneNode[] = [],
@@ -282,6 +288,10 @@ export default function TrafficOrbit(props: Props) {
 				)) {
 					const seed = positionSeed(node.key),
 						coordinator = node.task?.taskType === "coordinator";
+					// Current, never reconstructed: hibernation is not recorded per
+					// message, so replay keeps showing today's value — the same rule the
+					// footer already states for project and variant.
+					const hibernated = node.task?.hibernated === true;
 					const angle = ((seed % 65536) / 65536) * Math.PI * 2;
 					const radius = coordinator
 						? 4 + (seed % 400) / 100
@@ -299,8 +309,8 @@ export default function TrafficOrbit(props: Props) {
 						point[2],
 						coordinator ? 4 : 1.7,
 						0.035,
-						agent,
-						0.45,
+						hibernated ? parkedInk : agent,
+						hibernated ? 0.22 : 0.45,
 					);
 					const size =
 						Math.max(0.85, scale) *
@@ -311,9 +321,11 @@ export default function TrafficOrbit(props: Props) {
 						0,
 						0,
 						size,
-						node.task && colors[node.task.status]
-							? hex(colors[node.task.status])
-							: border,
+						hibernated
+							? parkedInk
+							: node.task && colors[node.task.status]
+								? hex(colors[node.task.status])
+								: border,
 						24,
 						16,
 					);
@@ -325,8 +337,8 @@ export default function TrafficOrbit(props: Props) {
 								0,
 								size * 1.6,
 								0.035,
-								success,
-								0.6,
+								hibernated ? parkedInk : success,
+								hibernated ? 0.3 : 0.6,
 								"xz",
 								0.35,
 								(k * Math.PI) / 5,
@@ -337,7 +349,7 @@ export default function TrafficOrbit(props: Props) {
 					label.hidden = true;
 					label.tabIndex = -1;
 					label.type = "button";
-					label.className = `traffic-node-label ${coordinator ? "is-coordinator" : ""} ${node.user ? "is-user" : ""} ${node.key === selected ? "is-selected" : ""}`;
+					label.className = `traffic-node-label ${coordinator ? "is-coordinator" : ""} ${node.user ? "is-user" : ""} ${hibernated ? "is-parked" : ""} ${node.key === selected ? "is-selected" : ""}`;
 					// The user has no seq and no title, and the task fallbacks would print
 					// "#—" and "historical" about a person. One honest label instead.
 					const seq = document.createElement("b");
@@ -354,7 +366,14 @@ export default function TrafficOrbit(props: Props) {
 						role.textContent = t("traffic.orbit.coordinator");
 						label.append(role);
 					}
+					if (hibernated) {
+						const state = document.createElement("small");
+						state.className = "is-parked-state";
+						state.textContent = t("task.hibernatedBadge");
+						label.append(state);
+					}
 					label.onclick = () => latest.current.onSelect(node.key);
+					label.ondblclick = () => latest.current.onOpen(node.key);
 					label.onpointerenter = () => {
 						hovered = node.key;
 						dirty = true;
@@ -473,7 +492,7 @@ export default function TrafficOrbit(props: Props) {
 			startX: number;
 			startY: number;
 		} | null = null;
-		const hitAt = (event: PointerEvent) => {
+		const hitAt = (event: { clientX: number; clientY: number }) => {
 			const bounds = el.getBoundingClientRect();
 			return nodes
 				.map((node) => ({ node, p: gl.project(node.point) }))
@@ -553,6 +572,14 @@ export default function TrafficOrbit(props: Props) {
 					if (hit) latest.current.onSelect(hit.node.key);
 				}
 				drag = null;
+			},
+			{ signal: sig.signal },
+		);
+		el.addEventListener(
+			"dblclick",
+			(event) => {
+				const hit = hitAt(event);
+				if (hit) latest.current.onOpen(hit.node.key);
 			},
 			{ signal: sig.signal },
 		);

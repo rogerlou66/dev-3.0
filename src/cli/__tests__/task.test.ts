@@ -690,6 +690,56 @@ describe("task update", () => {
 		});
 	});
 
+	// What /dev3-coordinator runs: promote the task this worktree is already in and
+	// read the brief here, rather than have it typed back into this same pane.
+	it("prints the role brief on --print-role for the auto-detected task", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, taskType: "coordinator" },
+			titlePreserved: false,
+			roleDelivery: "printed",
+			rolePrompt: "You are the COORDINATOR of this board.",
+		}));
+
+		await handleTask("update", args([], { type: "coordinator", "print-role": "true" }), SOCKET, CTX);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.update", {
+			taskId: CTX.taskId,
+			projectId: CTX.projectId,
+			taskType: "coordinator",
+			printRole: true,
+		});
+		expect(stdoutOutput).toContain("Your role is now coordinator");
+		expect(stdoutOutput).toContain("You are the COORDINATOR of this board.");
+		expect(stderrOutput).toContain("printed below instead of typed into your own pane");
+	});
+
+	it("prints the brief again when a repeat changed nothing", async () => {
+		mockSend.mockResolvedValue(okResp({
+			task: { ...FAKE_TASK, taskType: "coordinator" },
+			titlePreserved: false,
+			rolePrompt: "You are the COORDINATOR of this board.",
+		}));
+
+		await handleTask("update", args([], { type: "coordinator", "print-role": "true" }), SOCKET, CTX);
+
+		expect(stdoutOutput).toContain("You are the COORDINATOR of this board.");
+		expect(stderrOutput).not.toContain("Role:");
+	});
+
+	it("refuses --print-role against a task other than the caller's own", async () => {
+		await expect(
+			handleTask("update", args(["bbbbbbbb"], { type: "coordinator", "print-role": "true" }), SOCKET, CTX),
+		).rejects.toThrow("EXIT_3");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
+	it("refuses --print-role without --type", async () => {
+		await expect(
+			handleTask("update", args([], { title: "new", "print-role": "true" }), SOCKET, CTX),
+		).rejects.toThrow("EXIT_3");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
 	it("rejects an unknown --type before sending", async () => {
 		await expect(
 			handleTask("update", args(["aaaaaaaa"], { type: "overlord" }), SOCKET, null),
@@ -1069,6 +1119,40 @@ describe("task move --status cancelled", () => {
 			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
 		).rejects.toThrow("EXIT_1");
 		expect(stderrOutput).toContain("Timed out waiting for the user's decision");
+	});
+
+	// The dialog is about the TARGET task, so for `--task`/`--project` the old
+	// "this session will be destroyed" was simply false, and it read as if the
+	// prompt were scoped to the requester (h0x91b/dev-3.0#1669).
+	it("does not claim this session dies when the timeout was for another task", async () => {
+		mockSend.mockRejectedValue(new Error("Socket timeout (600s)"));
+
+		await expect(
+			handleTask("move", args([], { task: "seq:7", project: "proj-002", status: "cancelled" }), SOCKET, CTX),
+		).rejects.toThrow("EXIT_1");
+		expect(stderrOutput).toContain("This session is not the target");
+		expect(stderrOutput).not.toContain("this session will be destroyed");
+	});
+
+	it("still warns that this session dies when the timeout was for its own task", async () => {
+		mockSend.mockRejectedValue(new Error("Socket timeout (600s)"));
+
+		await expect(
+			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, CTX),
+		).rejects.toThrow("EXIT_1");
+		expect(stderrOutput).toContain("this session will be destroyed");
+	});
+
+	it("says whose worktree died when another task was cancelled", async () => {
+		mockSend.mockResolvedValue(okResp({
+			approved: true,
+			task: { ...FAKE_TASK, id: "bbbbbbbb-1111-2222-3333-444444444444", status: "cancelled" },
+		}));
+
+		await handleTask("move", args([], { task: "seq:7", project: "proj-002", status: "cancelled" }), SOCKET, CTX);
+
+		expect(stdoutOutput).toContain("this session is unaffected");
+		expect(stdoutOutput).not.toContain("This worktree and terminal session are being destroyed");
 	});
 
 	it("exits on server error", async () => {

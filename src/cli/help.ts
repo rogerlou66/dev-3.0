@@ -121,6 +121,9 @@ const COMMANDS: CommandHelp[] = [
 					"--type coordinator|pr-review|standard  Set the task's type, or clear it with standard.",
 					"                      Rewrites the description's role preamble and tells a running agent,",
 					"                      so the badge never claims a role the agent was not given.",
+					"--print-role          With --type, on YOUR OWN task only: print the role brief to stdout",
+					"                      instead of typing it into your own pane, and print it again on a",
+					"                      repeat that changes nothing. This is what /dev3-coordinator runs.",
 					"--force               Overwrite a user-edited title (diagnostics only — avoid).",
 				],
 			},
@@ -204,6 +207,38 @@ const COMMANDS: CommandHelp[] = [
 				name: "delete",
 				usage: "dev3 note delete <id> [--task <id>]",
 				summary: "Delete a note (8-char prefix works).",
+			},
+		],
+	},
+	{
+		name: "review",
+		summary: "The user's review comments on your work — diff lines and artifact elements — and how to close them.",
+		subcommands: [
+			{
+				name: "list",
+				usage: "dev3 review list [--unresolved] [--json] [--task <id>]",
+				summary: "List the task's review comments: id, status (open / sent / resolved), anchor, text, and any replies.",
+				details: [
+					"--unresolved  Only comments nobody has resolved yet — your to-do list.",
+					"--json        The raw comment records, anchors included.",
+					"A diff-line anchor names a file and line range; an artifact-element anchor names the artifact, its version, the heading and the element text — fix the report and republish under the same title.",
+				],
+			},
+			{
+				name: "resolve",
+				usage: 'dev3 review resolve <id> [--reply "..."] [--task <id>]',
+				summary: "Close a comment you handled (8-char prefix works); the reply shows on the thread in the viewer.",
+				details: ["--reply <text>  What you did; use - to read it from stdin."],
+			},
+			{
+				name: "reply",
+				usage: 'dev3 review reply <id> "..." [--task <id>]',
+				summary: "Answer a comment without closing it — ask for clarification or explain a disagreement.",
+			},
+			{
+				name: "reopen",
+				usage: "dev3 review reopen <id> [--task <id>]",
+				summary: "Reopen a resolved comment.",
 			},
 		],
 	},
@@ -418,32 +453,42 @@ const COMMANDS: CommandHelp[] = [
 	},
 	{
 		name: "dev-server",
-		summary: "Control a task's dev server (runs in a tmux window).",
+		summary: "Control a task's dev servers (each runs in its own tmux window).",
 		subcommands: [
 			{
 				name: "start",
-				usage: "dev3 dev-server start [task-id] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
+				usage: "dev3 dev-server start [task-id] [server] [--all] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
 				summary:
-					"Start a task's dev server. --wait blocks until it is listening on an assigned DEV3_PORT* (default timeout 120s)."
-					+ " --env passes extra variables to the devScript (repeatable); it overrides the project's own env but never"
+					"Start a dev server. Name one of the project's declared servers, or --all for every one; with neither it starts"
+					+ " the default server (the project's devScript), or the only declared server when there is no default."
+					+ " --wait blocks until it is listening on a port assigned to it (default timeout 120s)."
+					+ " --env passes extra variables to the script (repeatable); it overrides the project's own env but never"
 					+ " DEV3_TASK_ID, DEV3_WORKTREE_ROOT or DEV3_PORT*.",
 			},
 			{
 				name: "stop",
-				usage: "dev3 dev-server stop [task-id]",
-				summary: "Stop a task's dev server (verified: waits until its processes are dead and ports released).",
+				usage: "dev3 dev-server stop [task-id] [server] [--all]",
+				summary: "Stop one dev server, or --all of them (verified: waits until its processes are dead and ports released).",
 			},
 			{
 				name: "restart",
-				usage: "dev3 dev-server restart [task-id] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
+				usage: "dev3 dev-server restart [task-id] [server] [--all] [--wait] [--timeout <sec>] [--env KEY=VALUE ...]",
 				summary:
-					"Restart a task's dev server. --wait blocks until the NEW server is listening on an assigned DEV3_PORT*."
+					"Restart one dev server, or --all of them. --wait blocks until the NEW server is listening on a port assigned to it."
 					+ " Without --env it reuses the env of the last start; with --env it replaces it. A stop clears it.",
 			},
 			{
 				name: "status",
 				usage: "dev3 dev-server status [task-id]",
-				summary: "Show a task's dev server status, including dev-owned ports and port conflicts (default subcommand).",
+				summary: "Show every declared dev server of a task with its state, ports and conflicts (default subcommand).",
+			},
+			{
+				name: "logs",
+				usage: "dev3 dev-server logs [task-id] [--lines N]",
+				summary:
+					"Print the tail of the dev server's own output. It is mirrored as plain text to"
+					+ " <taskDir>/logs/dev-server.log (the path is in `status`), so you can grep it instead of"
+					+ " watching the pane. Each start begins a fresh log.",
 			},
 		],
 	},
@@ -620,11 +665,13 @@ const COMMANDS: CommandHelp[] = [
 		name: "peek",
 		summary: "Read-only glance at a task's terminal — what it was doing and how fresh that is.",
 		subcommands: [],
-		usage: "dev3 peek [--task <id|seq:N>] [--pane <N|paneId>] [--lines <N>] [--json]",
+		usage: "dev3 peek [--task <id|seq:N>] [--project <id>] [--pane <N|paneId>] [--lines <N>] [--json]",
 		details: [
 			"Prints a header, one line per pane (command, alive/dead, age of last output) and the tail of the focused pane.",
-			"--task <id>      Any task in any project; defaults to the current worktree's task.",
-			"--project <id>   Narrow the search when a seq: ref matches tasks on several boards.",
+			"--task <id>      Any task on this project's board; defaults to the current worktree's task.",
+			"--project <id>   Look on ANOTHER board. Without it the lookup stays in the project the shell",
+			"                 sits in (its worktree, or the checkout the cwd belongs to), because every",
+			"                 board counts seq from 1. A ref this board lacks names the boards that have it.",
 			"--pane <N|id>    Tail another pane: the number from the summary, or its raw pane id.",
 			"--lines <N>      Tail budget, 1..1000 (default 120).",
 			"--json           Emit the raw snapshot object.",
@@ -639,17 +686,18 @@ const COMMANDS: CommandHelp[] = [
 		subcommands: [
 			{
 				name: "list",
-				usage: "dev3 pane list [--task <id>] [--json]",
+				usage: "dev3 pane list [--task <id>] [--project <id>] [--json]",
 				summary: "Which terminal backend this task is on, which panes exist, which one is yours.",
 				details: [
 					"Read the backend from here rather than guessing it from the platform — the native",
 					"backend is not Windows-only, and tmux is not guaranteed to exist.",
 					"Also states whether a pane's SCREEN text can be read here at all (see `dev3 peek`).",
+					"--task is looked up on this project's board; --project <id> aims at another one.",
 				],
 			},
 			{
 				name: "run",
-				usage: 'dev3 pane run "<command>" [--below] [--label <name>] [--task <id>]',
+				usage: 'dev3 pane run "<command>" [--below] [--label <name>] [--task <id>] [--project <id>]',
 				summary: "Open a pane next to yours, run the command there, and mirror its output to a log.",
 				details: [
 					"Put flags AFTER the command so the command is not read as a flag value.",
@@ -663,7 +711,7 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "logs",
-				usage: "dev3 pane logs <run-id> [--lines <N>] [--task <id>] [--json]",
+				usage: "dev3 pane logs <run-id> [--lines <N>] [--task <id>] [--project <id>] [--json]",
 				summary: "The run's outcome (still running / exit code) plus a bounded tail of its output.",
 				details: [
 					"--lines <N>   Tail budget, 1..2000 (default 200). A dev server writes forever, so a read",
@@ -674,7 +722,7 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "close",
-				usage: "dev3 pane close <run-id> [--task <id>]",
+				usage: "dev3 pane close <run-id> [--task <id>] [--project <id>]",
 				summary: "Close the pane a run is executing in, which kills the command.",
 				details: ["The run's log stays readable with `dev3 pane logs` after the pane is gone."],
 			},

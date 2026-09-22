@@ -122,7 +122,7 @@ const help = {
 	"help.settings.agents.body":
 		"Los agentes de código que lanzas y sus presets. Cada configuración es una receta de lanzamiento completa — modelo, modo, flags; cada tarea elige una al empezar. Arrastra para reordenar.",
 	"help.settings.appearance.title": "Apariencia",
-	"help.settings.appearance.body": "Tema, idioma, zoom y desplazamiento — cómo se ve y se siente la aplicación.",
+	"help.settings.appearance.body": "Modo simplificado, tema, idioma y zoom: cómo se ve y se siente la aplicación.",
 	"help.settings.tasks.title": "Tareas y tablero",
 	"help.settings.tasks.body":
 		"Comportamiento por defecto del tablero y las tareas: dónde cae una tarjeta, cómo se abren las tareas, los prompts de revisión y los consejos.",
@@ -154,7 +154,7 @@ const help = {
 		"Un proxy local experimental (pxpipe) que renderiza el contexto voluminoso como imágenes para recortar tokens de entrada — a menudo ~2× más barato, algo más lento. Desactivado por defecto; activarlo desbloquea el preset «Fable 5 (cost trick)».",
 	"help.settings.advancedExperience.title": "Experiencia avanzada",
 	"help.settings.advancedExperience.body":
-		"Comportamiento en beta: vale la pena, pero no está terminado, así que se entrega desactivado y se activa función por función. La primera es el reordenado de derecha a izquierda: los paneles de terminal pintan hebreo y árabe en orden de lectura en lugar de invertidos. Es una capa solo de visualización sobre un motor de terminal que aún no tiene soporte propio de derecha a izquierda, por lo que la selección con el ratón y el paso del cursor por los enlaces en esas líneas siguen el orden subyacente.",
+		"Comportamiento en beta: vale la pena, pero no está terminado, así que cada entrada indica si viene activada y puedes desactivarla función por función. La primera es el reordenado de derecha a izquierda, que viene activado: los paneles de terminal pintan hebreo y árabe en orden de lectura en lugar de invertidos. Es una capa solo de visualización sobre un motor de terminal que aún no tiene soporte propio de derecha a izquierda, por lo que la selección con el ratón y el paso del cursor por los enlaces en esas líneas siguen el orden subyacente.",
 
 	// ── Project settings (tabs) ──
 	"help.projectSettings.board.title": "Configuración del tablero",
@@ -247,7 +247,7 @@ const help = {
 	"help.header.agentTraffic.title": "Tráfico de agentes: sigue sus conversaciones",
 	"help.header.agentTraffic.body": "Selecciona el icono morado de mensajes o pulsa ⇧⌘M para abrir el tráfico en vivo. Empieza con las últimas 24 horas; el contador muestra los mensajes sin leer.",
 	"help.traffic.log.title": "Explora el tráfico de agentes en vivo",
-	"help.traffic.log.body": "Elige la presentación a la izquierda: el Experimento 2 dibuja tarjetas de tareas unidas a quienes escribieron, el Experimento 1 te deja volar por una órbita 3D. Selecciona una tarea o un mensaje para consultar su estado de entrega. La línea temporal filtra mensajes; las columnas de tareas siguen mostrando el estado actual.",
+	"help.traffic.log.body": "Elige la presentación a la izquierda: el Experimento 2 dibuja tarjetas de tareas unidas a quienes escribieron, el Experimento 1 te deja volar por una órbita 3D. Selecciona una tarea o un mensaje para consultar su estado de entrega; haz doble clic en una tarea para abrirla. La línea temporal filtra mensajes; las columnas de tareas siguen mostrando el estado actual.",
 	"help.header.memory.title": "La píldora de memoria muestra lo que QUEDA",
 	"help.header.connectionQuality.title": "Qué tan lenta es esta conexión",
 	"help.header.connectionQuality.body":

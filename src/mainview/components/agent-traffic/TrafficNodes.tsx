@@ -18,6 +18,8 @@ import {
 import { useReducedMotion } from "../../utils/useReducedMotion";
 import PipelineRing from "../PipelineRing";
 import { kanbanOrder } from "./kanban-order";
+import { useSceneShift } from "./scene-shift";
+import { useCardTravel } from "./card-travel";
 import {
 	layoutTraffic,
 	pointAt,
@@ -59,9 +61,10 @@ import type { useTrafficPlayback } from "./useTrafficPlayback";
 import TrafficIcon from "./TrafficIcon";
 import TrafficMinimap from "./TrafficMinimap";
 import TrafficMessageBubble from "./TrafficMessageBubble";
+import TrafficStatusLine from "./TrafficStatusLine";
 import TrafficNotificationCloud from "./TrafficNotificationCloud";
 import { cellSeqFontSize, cellSeqInk } from "./cell-seq";
-import { headingTop, headingWidth } from "./group-heading";
+import { headingRoom, headingTop, headingWidth } from "./group-heading";
 import { IDENTITY_SCALE, MAX_SCALE, SCENE_PAD_Y, detailTier, frameExchange, overviewScale } from "./traffic-camera";
 
 interface Props {
@@ -76,6 +79,8 @@ interface Props {
 	layoutRecords: TrafficRecord[];
 	selected: string | null;
 	onSelect: (key: string) => void;
+	/** Double-click on a card. Centring it lives on the inspector's Focus button. */
+	onOpen: (key: string) => void;
 	paused: boolean;
 	ready: boolean;
 	playback?: ReturnType<typeof useTrafficPlayback>;
@@ -136,6 +141,7 @@ export default function TrafficNodes({
 	layoutRecords,
 	selected,
 	onSelect,
+	onOpen,
 	paused,
 	ready,
 	scope,
@@ -217,6 +223,7 @@ export default function TrafficNodes({
 			}),
 		[nodes, layoutRecords, showQuiet, showParked, replayParked, board],
 	);
+	const sliding = useSceneShift(scene);
 	const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
 	const viewRef = useRef(view);
 	viewRef.current = view;
@@ -244,6 +251,17 @@ export default function TrafficNodes({
 	placedRef.current = scene.placed;
 	/** Where the person stands right now, or null when nobody is speaking. */
 	const speakerRef = useRef<SpeakerPlacement | null>(null);
+	/** Scene room each project name has before the next one starts. */
+	const headingRooms = useMemo(
+		() =>
+			new Map(
+				scene.groups.map((group) => [
+					group.projectId,
+					headingRoom(group, scene.groups),
+				]),
+			),
+		[scene.groups],
+	);
 	const projectById = useMemo(
 		() => new Map((projects ?? []).map((project) => [project.id, project])),
 		[projects],
@@ -846,7 +864,7 @@ export default function TrafficNodes({
 			>
 				{scene.groups.map(group => (
 					<div key={group.projectId} className="traffic-project-group" style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
-						<div className="traffic-project-heading" style={{ top: headingTop(view.scale), transform: `scale(${1 / view.scale})`, width: headingWidth(group.width, view.scale) }}>
+						<div className="traffic-project-heading" style={{ top: headingTop(view.scale), transform: `scale(${1 / view.scale})`, width: headingWidth(group.width, view.scale, headingRooms.get(group.projectId)) }}>
 							{projectById.get(group.projectId)?.name ?? t("traffic.orbit.project")}
 						</div>
 					</div>
@@ -934,7 +952,7 @@ export default function TrafficNodes({
 						});
 					})}
 				</svg>
-				<div className="traffic-nodes-cards">
+				<div className="traffic-nodes-cards" data-shift={sliding ? "on" : undefined}>
 					{speaker && <UserSpeaker at={speaker.at} text={speaker.text} failed={speaker.failed} />}
 					{scene.placed.map((placed) => {
 						const projection =
@@ -973,11 +991,13 @@ export default function TrafficNodes({
 								project={projectById.get(placed.node.projectId)}
 								latest={latest.get(placed.node.key)}
 								celebrating={celebration?.nodeKey === placed.node.key}
+								reduced={reduced}
+								sliding={sliding}
 								onSelect={(key) => {
 									manual();
 									onSelect(key);
 								}}
-								onFocus={focus}
+								onOpen={onOpen}
 							/>
 						);
 					})}
@@ -1259,8 +1279,10 @@ function Card({
 	project,
 	latest,
 	celebrating,
+	reduced,
+	sliding,
 	onSelect,
-	onFocus,
+	onOpen,
 }: {
 	placed: PlacedNode;
 	selected: boolean;
@@ -1278,8 +1300,11 @@ function Card({
 	};
 	latest?: TrafficRecord;
 	celebrating: boolean;
+	reduced: boolean;
+	/** The scene is the same scene, so a card that changed slot may travel to it. */
+	sliding: boolean;
 	onSelect: (key: string) => void;
-	onFocus: (key: string) => void;
+	onOpen: (key: string) => void;
 }) {
 	const t = useT();
 	const { node } = placed;
@@ -1314,13 +1339,16 @@ function Card({
 	// No `#` at the cell tier: the glyph costs a fifth of the width and the
 	// number is already unmistakable.
 	const cellLabel = nodeSeq(node).replace(/^#/, "");
+	const travel = useCardTravel(placed.x, placed.y, sliding && !reduced && !unborn);
 	return (
 		<button
 			type="button"
 			data-testid="traffic-node-card"
 			data-history={limited ?? undefined}
 			data-unborn={unborn ? "true" : undefined}
+			data-parked={placed.parked ? "true" : undefined}
 			className={`traffic-node-card ${node.task?.taskType === "coordinator" ? "is-coordinator" : ""} ${selected ? "is-selected" : ""} ${dim ? "is-dim" : ""} ${active ? "is-lit" : ""} ${placed.parked ? "is-parked" : ""} ${finished ? `is-${finished}` : ""} ${unborn ? "is-unborn" : ""} ${celebrating ? "is-celebrating" : ""}`}
+			data-travel={travel?.slot}
 			style={{
 				left: placed.x,
 				top: placed.y,
@@ -1329,13 +1357,14 @@ function Card({
 				["--node-status" as string]: statusColor ?? "rgb(var(--text-tertiary))",
 				["--node-ink" as string]: inkColor ?? "rgb(var(--text-tertiary))",
 				["--node-inverse" as string]: 1 / scale,
+				...travel?.style,
 			}}
 			aria-hidden={unborn || undefined}
 			tabIndex={unborn ? -1 : undefined}
 			aria-label={`${nodeSeq(node)} ${node.title || t("traffic.orbit.historical")} · ${state}`}
 			aria-pressed={selected}
 			onClick={() => !unborn && onSelect(node.key)}
-			onDoubleClick={() => !unborn && onFocus(node.key)}
+			onDoubleClick={() => !unborn && onOpen(node.key)}
 		>
 			{/* Hidden from assistive tech: the card's own aria-label already says the
 			    status, and the ring would only repeat the stage as a second voice. */}
@@ -1354,14 +1383,7 @@ function Card({
 				<strong className="streamer-private">
 					{node.title || t("traffic.orbit.historical")}
 				</strong>
-				{finished ? (
-					<span className={`traffic-node-stamp is-${finished}`}>
-						<TrafficIcon name={finished === "completed" ? "check" : "cross"} />
-						{state}
-					</span>
-				) : (
-					<span className="traffic-node-state">{state}</span>
-				)}
+				<TrafficStatusLine label={state} finished={finished} reduced={reduced} />
 				<span className="traffic-node-overview streamer-private">
 					{(node.task && getTaskOverview(node.task)) ||
 						t("traffic.orbit.noOverview")}
@@ -1392,14 +1414,7 @@ function Card({
 				<strong className="streamer-private">
 					{node.title || t("traffic.orbit.historical")}
 				</strong>
-				{finished ? (
-					<span className={`traffic-node-stamp is-${finished}`}>
-						<TrafficIcon name={finished === "completed" ? "check" : "cross"} />
-						{state}
-					</span>
-				) : (
-					<span className="traffic-node-state">{state}</span>
-				)}
+				<TrafficStatusLine label={state} finished={finished} reduced={reduced} />
 			</span>
 		</button>
 	);

@@ -13,6 +13,7 @@ import { api } from "../rpc";
 import KanbanColumn from "./KanbanColumn";
 import LaunchVariantsModal from "./LaunchVariantsModal";
 import CreateTaskModal from "./CreateTaskModal";
+import TaskDetailModal from "./TaskDetailModal";
 import { sortTasksForColumn } from "./sortTasks";
 import { partitionTasksByStatus } from "./partitionTasks";
 import { canBlockTask, effectiveTaskColumn, isTaskBlocked } from "../../shared/task-blocking";
@@ -24,6 +25,7 @@ import { useTaskPrBadges } from "../hooks/useTaskPrBadges";
 import { useTipRotation } from "../hooks/useTipRotation";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useIsControlHidden } from "../hooks/useIsControlHidden";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { useAgents } from "../hooks/useAgents";
 import MobileBoardCarousel, { CAROUSEL_MAX_WIDTH, type CarouselColumn } from "./MobileBoardCarousel";
@@ -55,6 +57,14 @@ interface KanbanBoardProps {
 	activeTaskId?: string;
 	disableGlobalFindShortcut?: boolean;
 	onOpenUnresolvedComments?: (task: Task) => void;
+	/**
+	 * Open the task-detail modal for this task — the same surface a completed,
+	 * cancelled or todo card opens on click. Asked for by id so a caller from
+	 * off-board (Agent traffic, a notification) does not need the card to be
+	 * rendered: a column shows only its first cards until it is expanded.
+	 */
+	detailTaskId?: string;
+	onCloseTaskDetail?: () => void;
 }
 
 function KanbanBoard({
@@ -72,6 +82,8 @@ function KanbanBoard({
 	activeTaskId,
 	disableGlobalFindShortcut = false,
 	onOpenUnresolvedComments,
+	detailTaskId,
+	onCloseTaskDetail,
 }: KanbanBoardProps) {
 	const t = useT();
 	// A space is the subject; without one everything below collapses to the single
@@ -86,6 +98,8 @@ function KanbanBoard({
 	// on a space board act on the right repository.
 	const projectOfTask = useCallback((task: Task) => projectById.get(task.projectId) ?? project, [projectById, project]);
 	const isCarousel = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	// The "custom-column-creation" control (§5.10) hides only creation; existing columns still render.
+	const columnCreationHidden = useIsControlHidden("custom-column-creation");
 	const statusColors = useStatusColors();
 	const agents = useAgents();
 	const [globalSettings, setGlobalSettings] = useState<GlobalSettings>({
@@ -547,6 +561,10 @@ function KanbanBoard({
 		return null;
 	}, [currentTip, displayTasks]);
 
+	// Resolved from the full board set, not the filtered one: a label filter or a
+	// search query must not decide whether an explicitly requested task opens.
+	const detailTask = detailTaskId ? tasks.find((task) => task.id === detailTaskId) ?? null : null;
+
 	// Resolved from the live task list, so the popup closes by itself if the draft
 	// is promoted or deleted from somewhere else.
 	const editDraftTask = editDraftTaskId
@@ -558,7 +576,7 @@ function KanbanBoard({
 
 	// Add-column affordance for the desktop board (issue #222). Rendered just before
 	// the Completed column so it stays in the active-lifecycle region of the board.
-	const addColumnButton = (
+	const addColumnButton = columnCreationHidden ? null : (
 		<button
 			key="add-column"
 			type="button"
@@ -745,6 +763,25 @@ function KanbanBoard({
 					onCreateAndRun={(task) => {
 						setEditDraftTaskId(null);
 						setLaunchModal({ task, targetStatus: "in-progress" });
+					}}
+				/>
+			)}
+			{detailTask && (
+				<TaskDetailModal
+					task={detailTask}
+					project={projectOfTask(detailTask)}
+					dispatch={dispatch}
+					onClose={() => onCloseTaskDetail?.()}
+					onOpenTask={() => {
+						const taskProject = projectOfTask(detailTask);
+						onCloseTaskDetail?.();
+						navigate(getTaskOpenMode() === "fullscreen"
+							? { screen: "task", projectId: taskProject.id, taskId: detailTask.id }
+							: { screen: "project", projectId: taskProject.id, activeTaskId: detailTask.id });
+					}}
+					onLaunchVariants={(task, targetStatus) => {
+						onCloseTaskDetail?.();
+						setLaunchModal({ task, targetStatus });
 					}}
 				/>
 			)}

@@ -214,7 +214,20 @@ describe("TaskTerminal (native multi-pane)", () => {
 	// put the button on the FOCUSED pane, so a tap scrolled a pane already live.
 	it("shows scroll-to-latest only for the focused pane that is scrolled up", async () => {
 		const originalTouch = Object.getOwnPropertyDescriptor(Navigator.prototype, "maxTouchPoints");
+		const originalMatchMedia = window.matchMedia;
 		Object.defineProperty(navigator, "maxTouchPoints", { value: 5, configurable: true });
+		// A phone: touch points plus a coarse primary pointer. The global stub
+		// answers every query false, which reads as a touchscreen laptop.
+		window.matchMedia = ((query: string) => ({
+			matches: query.includes("pointer: coarse"),
+			media: query,
+			onchange: null,
+			addEventListener: () => {},
+			removeEventListener: () => {},
+			addListener: () => {},
+			removeListener: () => {},
+			dispatchEvent: () => false,
+		})) as typeof window.matchMedia;
 		try {
 			vi.mocked(api.request.taskPaneState).mockResolvedValue(makeNativePaneState(["pane-1", "pane-2"]));
 			renderTaskTerminal(NATIVE_TASK);
@@ -231,11 +244,16 @@ describe("TaskTerminal (native multi-pane)", () => {
 			expect(paneScrollToBottom.get(url("pane-1"))).toHaveBeenCalledTimes(1);
 			expect(paneScrollToBottom.get(url("pane-2"))).not.toHaveBeenCalled();
 
+			// Another pane reporting "live" must not clear this pane's key.
+			act(() => { paneScrollSignals.get(url("pane-2"))?.(false); });
+			expect(screen.getByTestId("scroll-to-latest")).toBeInTheDocument();
+
 			act(() => { paneScrollSignals.get(url("pane-1"))?.(false); });
 			expect(screen.queryByTestId("scroll-to-latest")).not.toBeInTheDocument();
 		} finally {
 			if (originalTouch) Object.defineProperty(Navigator.prototype, "maxTouchPoints", originalTouch);
 			else Object.defineProperty(navigator, "maxTouchPoints", { value: 0, configurable: true });
+			window.matchMedia = originalMatchMedia;
 		}
 	});
 

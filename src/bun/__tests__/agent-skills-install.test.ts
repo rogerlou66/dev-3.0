@@ -54,7 +54,7 @@ describe("installAgentSkills", () => {
 		);
 
 		const { installAgentSkills, ensureCodexConfigFile } = await loadModule();
-		installAgentSkills();
+		await installAgentSkills();
 
 		expect(existsSync(join(tempHome, ".agents/skills/dev3/SKILL.md"))).toBe(true);
 		expect(existsSync(join(tempHome, ".agents/skills/dev3-project-config/SKILL.md"))).toBe(true);
@@ -83,20 +83,25 @@ describe("installAgentSkills", () => {
 		expect(existsSync(join(tempHome, ".agents/skills/ask-dev3/agents/openai.yaml"))).toBe(true);
 		expect(existsSync(join(tempHome, ".gemini/skills/dev3"))).toBe(false);
 		expect(existsSync(join(tempHome, ".gemini/skills/dev3-project-config"))).toBe(false);
+		// omp's own dir carries the hook-aware body, not the manual-status generic one.
+		const ompSkill = readFileSync(join(tempHome, ".omp/agent/skills/dev3/SKILL.md"), "utf-8");
+		expect(ompSkill).toContain("dev3 injects trusted native hooks into every omp pane");
+		expect(ompSkill).toContain("the dev3 status extension loaded into this session already owns that transition");
+		expect(ompSkill).not.toContain("Start of every turn");
 		expect(existsSync(join(tempHome, ".gemini/skills/dev3-tmux"))).toBe(false);
 		expect(ensureCodexConfigFile).toHaveBeenCalledWith(tempHome);
 	});
 
 	it("can defer Codex config patching until the shell PATH is resolved", async () => {
 		const { installAgentSkills, ensureCodexConfigFile } = await loadModule();
-		installAgentSkills({ configureCodex: false });
+		await installAgentSkills({ configureCodex: false });
 
 		expect(ensureCodexConfigFile).not.toHaveBeenCalled();
 	});
 
 	it("writes the full-protocol PROTOCOL.md fallback next to the short Claude SKILL.md", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills();
+		await installAgentSkills();
 
 		expect(existsSync(join(tempHome, ".claude/skills/dev3/SKILL.md"))).toBe(true);
 		expect(existsSync(join(tempHome, ".claude/skills/dev3/PROTOCOL.md"))).toBe(true);
@@ -104,7 +109,7 @@ describe("installAgentSkills", () => {
 
 	it("keeps shared AGENTS.md neutral about hook-owned versus manual lifecycle", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills();
+		await installAgentSkills();
 
 		const agentsMd = readFileSync(join(tempHome, ".agents/AGENTS.md"), "utf-8");
 		expect(agentsMd).toContain("Follow the agent-specific status section in the loaded dev3 skill");
@@ -122,7 +127,7 @@ describe("installAgentSkills", () => {
 		writeFileSync(join(tempHome, ".agents/AGENTS.md"), "# My own notes\n\nKeep these.\n", "utf-8");
 
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
 
 		const agentsMd = readFileSync(join(tempHome, ".agents/AGENTS.md"), "utf-8");
 		expect(agentsMd).toContain("# My own notes");
@@ -135,9 +140,9 @@ describe("installAgentSkills", () => {
 
 	it("stays a single managed block across repeated installs", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills({ lowBattery: true });
-		installAgentSkills({ lowBattery: true });
-		installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
 
 		const agentsMd = readFileSync(join(tempHome, ".agents/AGENTS.md"), "utf-8");
 		expect(agentsMd.match(/<!-- dev3:start -->/g)).toHaveLength(1);
@@ -147,10 +152,10 @@ describe("installAgentSkills", () => {
 
 	it("takes the always-on line back out when low-battery is switched off", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
 		expect(readFileSync(join(tempHome, ".agents/AGENTS.md"), "utf-8")).toContain("low-battery");
 
-		installAgentSkills({ lowBattery: false });
+		await installAgentSkills({ lowBattery: false });
 
 		const agentsMd = readFileSync(join(tempHome, ".agents/AGENTS.md"), "utf-8");
 		expect(agentsMd).not.toContain("low-battery");
@@ -162,11 +167,11 @@ describe("installAgentSkills", () => {
 
 	it("installs low-battery on an explicit opt-in and removes it on an explicit opt-out", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills({ lowBattery: true });
+		await installAgentSkills({ lowBattery: true });
 		expect(existsSync(join(tempHome, ".agents/skills/low-battery/SKILL.md"))).toBe(true);
 		expect(existsSync(join(tempHome, ".claude/output-styles/low-battery.md"))).toBe(true);
 
-		installAgentSkills({ lowBattery: false });
+		await installAgentSkills({ lowBattery: false });
 		expect(existsSync(join(tempHome, ".agents/skills/low-battery/SKILL.md"))).toBe(false);
 		expect(existsSync(join(tempHome, ".claude/output-styles/low-battery.md"))).toBe(false);
 		// dev3's own skills are untouched by the low-battery toggle.
@@ -178,7 +183,7 @@ describe("installAgentSkills", () => {
 	 */
 	it("installs nothing when no choice is stored", async () => {
 		const { installAgentSkills } = await loadModule();
-		installAgentSkills();
+		await installAgentSkills();
 
 		expect(existsSync(join(tempHome, ".agents/skills/low-battery"))).toBe(false);
 		expect(existsSync(join(tempHome, ".claude/output-styles/low-battery.md"))).toBe(false);
@@ -197,7 +202,7 @@ describe("installAgentSkills", () => {
 		mkdirSync(ownSkill, { recursive: true });
 		writeFileSync(join(ownSkill, "SKILL.md"), "my own copy", "utf-8");
 
-		installAgentSkills();
+		await installAgentSkills();
 
 		expect(readFileSync(join(ownSkill, "SKILL.md"), "utf-8")).toBe("my own copy");
 	});

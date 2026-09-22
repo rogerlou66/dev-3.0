@@ -4,7 +4,7 @@ import {
 	AGENT_SKILL_BODY_LIMIT,
 	WINDOWS_COMMAND_LINE_LIMIT,
 } from "../../shared/agent-command-line-budget";
-import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../../shared/agent-skill-content";
+import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY } from "../../shared/agent-skill-content";
 import { COORDINATOR_PROMPT } from "../../shared/types";
 import { __setCodexProfileV2Override, resolveAgentCommand, type TemplateContext } from "../agents";
 import type { CodingAgent } from "../../shared/types";
@@ -36,6 +36,7 @@ afterEach(() => {
 const BODIES: Array<[name: string, body: string]> = [
 	["claude", CLAUDE_SKILL_BODY],
 	["codex", CODEX_SKILL_BODY],
+	["omp", OMP_SKILL_BODY],
 	["generic", GENERIC_SKILL_BODY],
 ];
 
@@ -45,7 +46,7 @@ const BODIES: Array<[name: string, body: string]> = [
  * A new adapter belongs on this list — an agent nobody measures is an agent that
  * breaks on Windows silently.
  */
-const AGENT_COMMANDS = ["claude", "codex", "gemini", "agent", "opencode", "some-custom-agent"];
+const AGENT_COMMANDS = ["claude", "codex", "gemini", "agent", "opencode", "copilot", "omp", "some-custom-agent"];
 
 const agent = (baseCommand: string): CodingAgent => ({
 	id: "a",
@@ -102,11 +103,11 @@ vi.mock("../agent-system-prompt-file", async () => {
 
 describe("the whole Windows command line fits", () => {
 	for (const command of AGENT_COMMANDS) {
-		it(`${command} launches inside the ceiling with a full-size task`, () => {
+		it(`${command} launches inside the ceiling with a full-size task`, async () => {
 			asPlatform("win32");
 			__setCodexProfileV2Override(false);
 			try {
-				const cmd = resolveAgentCommand(agent(command), undefined, fullSizeContext());
+				const cmd = await resolveAgentCommand(agent(command), undefined, fullSizeContext());
 				expect(cmd.length).toBeLessThan(WINDOWS_COMMAND_LINE_LIMIT);
 			} finally {
 				__setCodexProfileV2Override(null);
@@ -125,16 +126,20 @@ describe("the whole Windows command line fits", () => {
 	// 26 536 characters is that measured baseline (gemini; the custom-agent adapter
 	// measured 26 525). Raw prompt length is only a proxy for it, because the launch
 	// dialect escapes quotes and backticks — measure the serialized line instead.
-	it("a coordinator task keeps the launch room it had before the events block", () => {
+	//
+	// The create-and-launch default (2026-09-12) was folded into the rules it
+	// belongs to and paid for out of illustrations and justifications, so these two
+	// numbers did not move.
+	it("a coordinator task keeps the launch room it had before the events block", async () => {
 		asPlatform("win32");
 		const coordinator = (brief: number) => ({
 			...fullSizeContext(),
 			taskDescription: `${COORDINATOR_PROMPT}\n\n${"x".repeat(brief)}`,
 		});
-		const fits = (command: string, brief: number) =>
-			resolveAgentCommand(agent(command), undefined, coordinator(brief)).length < WINDOWS_COMMAND_LINE_LIMIT;
-		expect(fits("gemini", 26536)).toBe(true);
-		expect(fits("some-custom-agent", 26525)).toBe(true);
+		const fits = async (command: string, brief: number) =>
+			(await resolveAgentCommand(agent(command), undefined, coordinator(brief))).length < WINDOWS_COMMAND_LINE_LIMIT;
+		expect(await fits("gemini", 26536)).toBe(true);
+		expect(await fits("some-custom-agent", 26525)).toBe(true);
 	});
 
 	it("the reserve is real: a task text this long is what the budget is for", () => {

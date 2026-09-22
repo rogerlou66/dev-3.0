@@ -198,6 +198,8 @@ const infoPanel = {
 	"infoPanel.diffMdPreviewRevealAt": "Show {location} in the preview",
 	"infoPanel.diffMdPreviewCommentCount_one": "{count} comment on this file",
 	"infoPanel.diffMdPreviewCommentCount_other": "{count} comments on this file",
+	"infoPanel.diffMdUnchangedLines_one": "Show {count} unchanged line",
+	"infoPanel.diffMdUnchangedLines_other": "Show {count} unchanged lines",
 	"infoPanel.diffMdPreviewGithubThreads_one": "{count} GitHub review thread \u2192 Source diff",
 	"infoPanel.diffMdPreviewGithubThreads_other": "{count} GitHub review threads \u2192 Source diff",
 	"infoPanel.diffExpandAll": "Expand all",
@@ -246,6 +248,10 @@ const infoPanel = {
 	"infoPanel.diffReviewJump": "Jump to comment",
 	"infoPanel.diffReviewEdit": "Edit comment",
 	"infoPanel.diffReviewDelete": "Delete comment",
+	"infoPanel.diffReviewReopen": "Reopen comment",
+	"infoPanel.diffReviewResolved": "Resolved",
+	"infoPanel.diffReviewReplyAgent": "Agent",
+	"infoPanel.diffReviewReplyUser": "You",
 	"infoPanel.diffReviewSave": "Save comment",
 	"infoPanel.diffReviewCommentItemOf": "Comment {number}/{total}",
 	"infoPanel.diffReviewSendComment": "Send to agent",
@@ -301,6 +307,16 @@ const infoPanel = {
 	"infoPanel.sharedItemsUnread": "New items not viewed yet",
 	"infoPanel.openSharedImage": "Open image {name}",
 	"infoPanel.openSharedArtifact": "Open artifact {name}",
+
+	"infoPanel.restoreHidden": "Show hidden controls",
+	"infoPanel.restoreOne": "Restore {name}",
+	"infoPanel.showAllHidden": "Show all",
+	"infoPanel.barContext": "Context",
+	"infoPanel.barSessionAgent": "Session & agent",
+	"infoPanel.barRuntime": "Runtime & access",
+	"infoPanel.paneControlsLabel": "Pane layout",
+	"infoPanel.scriptsRunnerLabel": "Scripts",
+	"infoPanel.includeTestsLabel": "Include tests in diff",
 } as const;
 
 export default infoPanel;

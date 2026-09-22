@@ -506,6 +506,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "simplify-mode",
+		category: "appearance",
+		titleKey: "settings.simplifyMode",
+		descriptionKey: "settings.simplifyModeDesc",
+		anchor: "simplify-mode",
+		globalField: "simplifiedMode",
+		storage: "global",
+	},
+	{
 		id: "experimental-terminal-bidi",
 		category: "system",
 		titleKey: "settings.terminalBidi",
@@ -521,6 +530,15 @@ export const SETTINGS_ENTRIES = [
 		descriptionKey: "settings.agentTrafficDesc",
 		anchor: "experimental-agent-traffic",
 		globalField: "experimentalAgentTraffic",
+		storage: "global",
+	},
+	{
+		id: "freeze-diagnostics",
+		category: "system",
+		titleKey: "settings.freezeDiagnostics",
+		descriptionKey: "settings.freezeDiagnosticsDesc",
+		anchor: "freeze-diagnostics",
+		globalField: "freezeDiagnosticsEnabled",
 		storage: "global",
 	},
 	{
@@ -542,6 +560,9 @@ export type SettingsEntryAnchor = (typeof SETTINGS_ENTRIES)[number] extends infe
 
 /** GlobalSettings fields intentionally kept outside the visible settings registry. */
 export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
+	"hiddenControls",
+	"personalHiddenControls",
+	"simplifiedModeSource",
 	"resolvedTheme",
 	// Retired fields preserved for older versions sharing settings.json.
 	"analyticsDistinctId",
@@ -583,7 +604,12 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"agentBinaryPaths",
 	"agentCustomBinaryPaths",
 	"experimentalTerminalBidi",
+	"hiddenControls",
+	"personalHiddenControls",
+	"simplifiedModeSource",
+	"simplifiedMode",
 	"experimentalAgentTraffic",
+	"freezeDiagnosticsEnabled",
 	"agentTrafficExperiment",
 	"playSoundOnTaskComplete",
 	"externalApps",

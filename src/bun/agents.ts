@@ -7,16 +7,23 @@ import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types
 export { skillInvocationPrefix } from "../shared/types";
 import { buildProviderEnv, getProviderDefinition, providerOmitsModelFlag, providerPinnedModel } from "../shared/llm-provider";
 import { createLogger } from "./logger";
-import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, ensureCodexConfig, ensureCodexProfileFiles, getCodexSyntaxForVersion, type CodexProfileLaunchFlag } from "./codex-config";
+import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, resetCodexVersionProbe, resetCodexHelpProbe, ensureCodexConfig, ensureCodexProfileFiles, getCodexSyntaxForVersion, type CodexProfileLaunchFlag } from "./codex-config";
 import { agentBinaryPathOverride } from "./executable";
 import { DEV3_HOME } from "./paths";
 // Writer and pruner share one path constant: whatever registers an entry must
 // agree with whatever removes it.
 import { ANTIGRAVITY_TRUST_SETTINGS, GEMINI_TRUSTED_FOLDERS } from "./worktree-trust";
+import {
+	ensureCopilotCommandApproval,
+	ensureCopilotTrustedFolder,
+	updateCopilotConfig,
+	updateCopilotPermissions,
+} from "../shared/agent-hooks";
+import { resolveCopilotHome } from "./copilot-config";
 import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
-import { ensureAgentSystemPromptFile, systemPromptNeedsFile } from "./agent-system-prompt-file";
+import { ensureAgentSystemPromptFile } from "./agent-system-prompt-file";
 import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
 import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
 export { claudeModelFamily } from "../shared/agent-accounts";
@@ -108,6 +115,41 @@ const DEPRECATED_CONFIG_IDS = new Set([
 	"codex-5.6-luna-low",
 ]);
 
+/** A model slug dev3 once shipped on a built-in Cursor preset, which the Cursor
+ *  CLI has since retired — a launch on one dies with `Cannot use this model`.
+ *
+ *  A version bump is the blunt instrument for this and it throws away whatever
+ *  the user chose themselves, so Cursor presets carry no version. Instead a
+ *  stored value is replaced only when it still equals, byte for byte, the value
+ *  dev3 put there. `name` is matched separately from `model`: a preset the user
+ *  renamed keeps its name even while its dead model is refreshed. */
+interface RetiredPresetDefault {
+	agentId: string;
+	configId: string;
+	model: string;
+	name: string;
+}
+
+const RETIRED_CURSOR_PRESET_DEFAULTS: RetiredPresetDefault[] = [
+	{ agentId: "builtin-cursor", configId: "cursor-default", model: "opus-4.6-thinking", name: "Default (Opus 4.6)" },
+	{ agentId: "builtin-cursor", configId: "cursor-plan", model: "opus-4.6-thinking", name: "Plan (Opus 4.6)" },
+	{ agentId: "builtin-cursor", configId: "cursor-plan-then-bypass", model: "opus-4.6-thinking", name: "Plan then Bypass (Opus 4.6)" },
+	{ agentId: "builtin-cursor", configId: "cursor-yolo", model: "opus-4.6-thinking", name: "YOLO (Opus 4.6)" },
+	{ agentId: "builtin-cursor", configId: "cursor-gpt", model: "gpt-5.3-codex-high", name: "GPT-5.3 Codex High" },
+	{ agentId: "builtin-cursor", configId: "cursor-yolo-gpt", model: "gpt-5.3-codex-high", name: "YOLO GPT-5.3 Codex" },
+	{ agentId: "builtin-cursor", configId: "cursor-gemini", model: "gemini-3.1-pro", name: "Gemini 3.1 Pro" },
+];
+
+const retiredByKey = new Map(
+	RETIRED_CURSOR_PRESET_DEFAULTS.map((r) => [`${r.agentId}::${r.configId}`, r]),
+);
+
+/** The retired default for this exact agent + preset pair, or undefined. A
+ *  user-created configuration never matches: its id is absent from the map. */
+function retiredDefaultFor(agentId: string, configId: string): RetiredPresetDefault | undefined {
+	return retiredByKey.get(`${agentId}::${configId}`);
+}
+
 /** Merge stored agents with defaults. Missing defaults are added; stored versions win.
  *  Stored order is preserved (user can drag-reorder agents and configs).
  *  Newly added defaults (agents or configs) are appended at the end so they
@@ -166,6 +208,14 @@ function mergeAgentWithDefault(
 			delete userOverrides.modeLabel;
 			delete userOverrides.name;
 			delete userOverrides.version;
+		} else {
+			// Drop a retired shipped value so the refreshed default shows through.
+			// Anything the user typed themselves fails the equality check and stays.
+			const retired = retiredDefaultFor(def.id, storedCfg.id);
+			if (retired) {
+				if (storedCfg.model === retired.model) delete userOverrides.model;
+				if (storedCfg.name === retired.name) delete userOverrides.name;
+			}
 		}
 
 		return { ...defCfg, ...userOverrides };
@@ -357,7 +407,7 @@ export function isClaudeCommand(baseCmd: string, family?: AgentFamily): boolean 
 }
 
 let codexProfileLaunchFlagOverride: CodexProfileLaunchFlag | null = null;
-let cachedCodexProfileLaunchFlag: CodexProfileLaunchFlag | undefined;
+let cachedCodexProfileLaunchFlag: Promise<CodexProfileLaunchFlag> | undefined;
 
 /**
  * Test-only override for codex profile launch-flag detection.
@@ -366,6 +416,7 @@ let cachedCodexProfileLaunchFlag: CodexProfileLaunchFlag | undefined;
 export function __setCodexProfileV2Override(value: boolean | null): void {
 	codexProfileLaunchFlagOverride = value === null ? null : value ? "--profile-v2" : "--profile";
 	cachedCodexProfileLaunchFlag = undefined;
+	resetCodexHelpProbe();
 }
 
 /**
@@ -375,7 +426,7 @@ export function __setCodexProfileV2Override(value: boolean | null): void {
  * Feature-detected from `codex --help` and cached for the process lifetime —
  * version numbers do not map reliably to the rename. See issue #611.
  */
-function getCodexProfileLaunchFlag(): CodexProfileLaunchFlag {
+async function getCodexProfileLaunchFlag(): Promise<CodexProfileLaunchFlag> {
 	if (codexProfileLaunchFlagOverride !== null) return codexProfileLaunchFlagOverride;
 	if (cachedCodexProfileLaunchFlag === undefined) {
 		cachedCodexProfileLaunchFlag = detectCodexProfileLaunchFlag();
@@ -383,33 +434,25 @@ function getCodexProfileLaunchFlag(): CodexProfileLaunchFlag {
 	return cachedCodexProfileLaunchFlag;
 }
 
-/**
- * `codex --version`, cached for the process lifetime. The probe is a
- * synchronous child spawn — uncached it ran on EVERY task launch inside
- * ensureCodexTrust, blocking the main loop each time.
- */
-let cachedCodexVersion: string | null | undefined;
-export function getCodexVersionCached(): string | null {
-	if (cachedCodexVersion === undefined) {
-		cachedCodexVersion = detectCodexVersion();
-	}
-	return cachedCodexVersion;
+/** Startup and task restoration share one bounded, asynchronous version probe. */
+export function getCodexVersionCached(): Promise<string | null> {
+	return detectCodexVersion();
 }
 
-/** Reset the cached codex version. Exposed for test isolation. */
+/** Reset the shared probe for test isolation. */
 export function __resetCodexVersionCache(): void {
-	cachedCodexVersion = undefined;
+	resetCodexVersionProbe();
 }
 
 /** Resolve the impure Codex launch runtime (active UI theme → profile/theme,
  *  and the feature-detected profile launch flag) into pure data the CodexAdapter
  *  consumes. Only called for Codex launches so non-Codex agents never trigger the
  *  `codex --help` probe. */
-function codexLaunchRuntime(): CodexLaunchRuntime {
+async function codexLaunchRuntime(): Promise<CodexLaunchRuntime> {
 	return {
 		themedProfile: getCodexProfileForCurrentUiTheme(),
 		theme: getCodexThemeForCurrentUiTheme(),
-		profileLaunchFlag: getCodexProfileLaunchFlag(),
+		profileLaunchFlag: await getCodexProfileLaunchFlag(),
 	};
 }
 
@@ -478,12 +521,12 @@ export function supportsPreAssignedSessionId(baseCmd: string, family?: AgentFami
  * impure inputs the pure adapter needs — the third-party-provider skip-model
  * rule and the Codex theme/profile runtime — and threads them in.
  */
-export function resolveAgentCommand(
+export async function resolveAgentCommand(
 	agent: CodingAgent,
 	config: AgentConfiguration | undefined,
 	ctx: TemplateContext,
 	options?: CommandOptions,
-): string {
+): Promise<string> {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
 	const adapter = getAgentAdapter(baseCmd, agent.agentFamily);
 
@@ -500,10 +543,10 @@ export function resolveAgentCommand(
 		providerArgs: launchExtraArgs(options),
 		// Codex-only: resolve the theme/profile runtime (impure) here so the pure
 		// adapter stays pure. Non-Codex agents skip it (avoids the codex --help probe).
-		codex: adapter.command === "codex" ? codexLaunchRuntime() : undefined,
-		// Windows caps a command line at 32 767 characters and the protocol is
-		// ~34 000, so there it has to reach the agent as a file. Resolved here
-		// because writing one is impure and the adapters are not.
+		codex: adapter.command === "codex" ? await codexLaunchRuntime() : undefined,
+		// The protocol reaches Claude as a file on every platform: Windows cannot
+		// carry it on the command line, and POSIX argv is what `pkill -f` matches
+		// against. Resolved here because writing one is impure and adapters are not.
 		systemPromptFile: options?.skipSystemPrompt ? undefined : systemPromptFileFor(adapter),
 	};
 
@@ -516,17 +559,29 @@ export function resolveAgentCommand(
 
 /**
  * The file this adapter's protocol body was written to, or undefined when the
- * platform can carry it inline (every POSIX platform) or the adapter has no
- * flag that takes a file.
+ * adapter has no flag that takes one.
  *
- * Only Claude has one (`--append-system-prompt-file`). Codex delivers the body
- * through `-c developer_instructions=…` and the rest concatenate it onto the
- * prompt, so on Windows those launches are still over the ceiling — a separate
- * per-agent channel, not something this function can paper over.
+ * The file is used on every platform, not only where the command line is too
+ * short to carry the body. Inline, the ~29 KB of protocol prose sits in the
+ * agent's argv, where `pkill -f` / `pgrep -f` and `ps` see it: any pattern that
+ * appears as an ordinary word in that prose matches every running agent, so one
+ * agent's routine cleanup SIGTERMed all of its siblings (#1734).
+ *
+ * Claude (`--append-system-prompt-file`) and omp (`--append-system-prompt`,
+ * which reads a file when the value names one) have such a flag. Codex delivers
+ * the body through `-c developer_instructions=…` and the rest concatenate it
+ * onto the prompt, so on Windows those launches are still over the ceiling — a
+ * separate per-agent channel, not something this function can paper over.
+ *
+ * A failed write throws rather than falling back to the inline body: that
+ * fallback is the argv exposure being closed.
  */
+const SYSTEM_PROMPT_FILE_COMMANDS = new Set(["claude", "omp"]);
+
 function systemPromptFileFor(adapter: { command: string; skillBody?: string }): string | undefined {
-	if (!systemPromptNeedsFile() || adapter.command !== "claude" || !adapter.skillBody) return undefined;
-	return ensureAgentSystemPromptFile("claude", adapter.skillBody) ?? undefined;
+	if (!SYSTEM_PROMPT_FILE_COMMANDS.has(adapter.command) || !adapter.skillBody) return undefined;
+	// Named per agent so two bodies never share a file. Claude keeps its own name.
+	return ensureAgentSystemPromptFile(adapter.command, adapter.skillBody);
 }
 
 /** Every raw arg a launch adds beyond the preset's own: the selected backend's
@@ -646,13 +701,26 @@ export function claudeDefaultEnv(
 	return { ...CLAUDE_DEFAULT_ENV, ...sandbox };
 }
 
+/**
+ * omp rings a terminal bell when a turn completes (`completion.notify`, on by
+ * default). dev3 reads a bare BEL as "the agent needs the user" and parks the
+ * task in user-questions before the status extension's Stop arrives, which then
+ * refuses to move it — so every omp turn ended in the wrong column. This env
+ * is omp's own kill switch for all terminal notifications.
+ */
+export const OMP_DEFAULT_ENV: Record<string, string> = {
+	PI_NOTIFICATIONS: "off",
+};
+
 /** Build default env vars for an agent based on which CLI it is. */
 export function getDefaultEnvForAgent(agent: CodingAgent, config?: AgentConfiguration): Record<string, string> {
 	const baseCmd = config?.baseCommandOverride || agent.baseCommand;
 	if (isClaudeCommand(baseCmd, agent.agentFamily)) {
-		return { ...claudeDefaultEnv(), DEV3_COPILOT_SESSION: "0" };
+		return claudeDefaultEnv();
 	}
-	if (agentKey(baseCmd, agent.agentFamily) === "copilot") return { DEV3_COPILOT_SESSION: "1" };
+	if (agentKey(baseCmd, agent.agentFamily) === "omp") {
+		return { ...OMP_DEFAULT_ENV };
+	}
 	return {};
 }
 
@@ -818,7 +886,7 @@ export async function resolveCommandForAgent(
 	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 	const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
 	const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
-	const command = resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
+	const command = await resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
 	// `agent` stays the stored record — callers derive the base command from it,
 	// and swapping in the override path there would change what they persist.
 	// The family rides alongside instead: a path override can pin one the stored
@@ -949,7 +1017,7 @@ export async function resolveCommandForProject(
 		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
 		const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
 		const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
-		const command = resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
+		const command = await resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
 		return {
 			command,
 			agent,
@@ -995,6 +1063,40 @@ export function buildTaskEnv(
 	}
 
 	return env;
+}
+
+// ---- Copilot Trust ----
+
+/**
+ * Ensure a worktree is listed in `trustedFolders` in Copilot's `config.json`, so
+ * `copilot` skips the "Confirm folder trust" dialog. Without it the agent opens
+ * on a question in a pane nobody is watching, and the task never starts.
+ *
+ * Resolves symlinks first — the dialog names the real path. Non-fatal: the worst
+ * case is the dialog the user saw before.
+ */
+export async function ensureCopilotTrust(dirPath: string, projectPath?: string): Promise<void> {
+	try {
+		const resolved = await realpath(dirPath);
+		const home = resolveCopilotHome();
+		const written = updateCopilotConfig(home, (config) =>
+			ensureCopilotTrustedFolder(config, resolved));
+		if (written) log.info("Registered worktree in Copilot trustedFolders", { path: resolved });
+	} catch (err) {
+		log.warn("Failed to register Copilot worktree trust", { error: String(err) });
+	}
+
+	// Copilot keys command approvals by the repository's main working tree, not
+	// by the worktree, so every task of this project is covered by one entry.
+	if (!projectPath) return;
+	try {
+		const home = resolveCopilotHome();
+		const written = updateCopilotPermissions(home, (permissions) =>
+			ensureCopilotCommandApproval(permissions, projectPath));
+		if (written) log.info("Pre-approved the dev3 CLI for Copilot", { projectPath });
+	} catch (err) {
+		log.warn("Failed to pre-approve the dev3 CLI for Copilot", { error: String(err) });
+	}
 }
 
 // ---- Gemini Trust ----
@@ -1082,6 +1184,9 @@ export async function ensureCodexTrust(dirPath: string): Promise<void> {
 		const worktreesPath = joinLikeHome(home, ".dev3.0", "worktrees");
 		const socketsPath = joinLikeHome(home, ".dev3.0", "sockets");
 
+		const codexVersion = await getCodexVersionCached();
+		if (codexVersion === null) return;
+
 		let content: string | null = null;
 		try {
 			content = readFileSync(CODEX_CONFIG, "utf-8");
@@ -1091,7 +1196,6 @@ export async function ensureCodexTrust(dirPath: string): Promise<void> {
 
 		if (content != null) backupUnparsableCodexConfig(CODEX_CONFIG, content);
 
-		const codexVersion = getCodexVersionCached();
 		const updated = ensureCodexConfig(content, worktreesPath, socketsPath, [worktreesPath, resolved], {
 			codexVersion,
 		});

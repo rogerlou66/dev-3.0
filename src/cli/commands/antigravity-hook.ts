@@ -1,4 +1,4 @@
-import { ANTIGRAVITY_STATUS_HOOK_EVENTS, type AntigravityStatusHookEvent, type CodexStatusHookEvent } from "../../shared/agent-hooks";
+import { ANTIGRAVITY_STATUS_HOOK_EVENTS, type AntigravityStatusHookEvent, type AgentStatusHookEvent } from "../../shared/agent-hooks";
 import type { CliContext } from "../context";
 import { sendRequest } from "../socket-client";
 
@@ -15,7 +15,7 @@ function isSupportedEvent(event: string | undefined): event is AntigravityStatus
  * invocation starting work looks exactly like a submitted prompt, and a
  * finished turn looks exactly like Codex's `Stop`.
  */
-function toCodexEvent(event: AntigravityStatusHookEvent): CodexStatusHookEvent {
+function toAgentEvent(event: AntigravityStatusHookEvent): AgentStatusHookEvent {
 	return event === "PreInvocation" ? "UserPromptSubmit" : "Stop";
 }
 
@@ -65,7 +65,7 @@ export async function handleAntigravityHook(
 			const result = await sendRequest(socketPath, "task.agentHook", {
 				taskId: context.taskId,
 				projectId: context.projectId,
-				event: toCodexEvent(event),
+				event: toAgentEvent(event),
 			}, { timeoutMs: 3_000, connectAttempts: 2, retryDelayMs: 50 });
 			if (!result.ok) process.stderr.write(`dev3 Antigravity hook: ${result.error || "status update failed"}\n`);
 		} catch (error) {

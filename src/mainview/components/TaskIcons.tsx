@@ -11,7 +11,9 @@ import type { SVGProps } from "react";
  * Every header-row icon carries `th-*` animation hooks: when a `.task-anim`
  * ancestor (the hosting button) is hovered, pure-CSS keyframes in index.css act out the
  * operation the icon triggers — the watch bell rings with sound waves, the
- * bug squirms under a focusing lens, the agent robot tilts hello and pings, the
+ * bug thrashes under a focusing lens, the agent robot tilts hello and pings, the
+ * send-later clock runs a turn ahead before its bells ring, the hibernating
+ * skull sinks and dims, the artifact brackets open around a self-drawing slash, the
  * open-in arrow launches out of its box, the file / port trees wire themselves
  * up, the scripts ƒ writes itself, the images sun rises at golden hour, the
  * settings gear ratchets, the fullscreen arrows burst out (or dive back in),
@@ -63,8 +65,10 @@ export function WatchIcon({ className }: TaskIconProps) {
 	);
 }
 
-// Completion owner: a person claims the final decision; the check appears on
-// hover and remains visible while completion prompts are disabled.
+// Completion owner: a person claims the final decision. Idle is a bare person —
+// the whole badge only appears on hover, as a preview of what the click does.
+// Active keeps the badge drawn and fills it, so on and off differ by a shape and
+// not by a 4px tick (outline idle / filled active, the house icon-state rule).
 export function CompletionOwnerIcon({ className, active = false }: TaskIconProps & { active?: boolean }) {
 	return (
 		<svg {...svgBase(className)}>
@@ -72,8 +76,14 @@ export function CompletionOwnerIcon({ className, active = false }: TaskIconProps
 				<circle cx="9" cy="7" r="2.8" />
 				<path d="M3.8 19c.5-4 2.2-6 5.2-6 2.2 0 3.8 1.1 4.7 3.2" />
 			</g>
-			<g className="th-owner-badge">
-				<circle cx="17.2" cy="16.8" r="4" />
+			<g className={`th-owner-badge${active ? "" : " th-owner-badge-idle"}`}>
+				<circle
+					cx="17.2"
+					cy="16.8"
+					r="4"
+					fill={active ? "currentColor" : "none"}
+					fillOpacity={active ? 0.2 : undefined}
+				/>
 				<path
 					d="m15.3 16.8 1.25 1.25 2.45-2.7"
 					pathLength={1}
@@ -185,16 +195,47 @@ export function ImagesIcon({ className }: TaskIconProps) {
 	);
 }
 
-// HTML artifact: a browser canvas with code brackets inside.
+// HTML artifact: a browser canvas with code brackets inside. On hover the
+// brackets open up and the slash between them writes itself — the page renders.
 export function ArtifactsIcon({ className }: TaskIconProps) {
 	return (
 		<svg {...svgBase(className)}>
 			<rect x="3" y="3.5" width="18" height="17" rx="2.5" />
 			<path d="M3 8h18" />
-			<circle cx="6.2" cy="5.8" r=".6" fill="currentColor" stroke="none" />
-			<path d="m9.5 12-2.5 2 2.5 2" />
-			<path d="m14.5 12 2.5 2-2.5 2" />
-			<path d="m13 10.8-2 6.4" />
+			<circle cx="6.2" cy="5.8" r=".6" fill="currentColor" stroke="none" className="th-ar-dot" />
+			<path d="m9.5 12-2.5 2 2.5 2" className="th-ar-lt" />
+			<path d="m14.5 12 2.5 2-2.5 2" className="th-ar-rt" />
+			<path d="m13 10.8-2 6.4" pathLength={1} className="th-draw th-ar-slash" />
+		</svg>
+	);
+}
+
+// Send later: the hands sweep a whole turn ahead, then the alarm bells ring.
+export function SendLaterIcon({ className }: TaskIconProps) {
+	return (
+		<svg {...svgBase(className, 2)}>
+			<circle cx="12" cy="13" r="8" />
+			<path d="M12 9v4l2.5 1.5" className="th-sl-hands" />
+			<path d="M5 3 2 6" className="th-sl-bell-l" />
+			<path d="M19 3l3 3" className="th-sl-bell-r" />
+		</svg>
+	);
+}
+
+// Hibernate: the skull sinks and dims as the session powers down, the
+// crossbones fold in after it. Filled glyph — it has to stop the eye.
+export function HibernateIcon({ className }: TaskIconProps) {
+	return (
+		<svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+			<path d="M3 13.6 21 20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="th-hb-bone-a" />
+			<path d="M21 13.6 3 20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="th-hb-bone-b" />
+			<path
+				fill="currentColor"
+				fillRule="evenodd"
+				clipRule="evenodd"
+				className="th-hb-skull"
+				d="M12 2.2c-3.3 0-5.8 2.4-5.8 5.7 0 1.8.8 3.3 2.1 4.4v1.5c0 .7.6 1.3 1.3 1.3h4.8c.7 0 1.3-.6 1.3-1.3v-1.5c1.3-1.1 2.1-2.6 2.1-4.4 0-3.3-2.5-5.7-5.8-5.7ZM9.4 5.8a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm5.2 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM12 10.6l1.4 2.4h-2.8l1.4-2.4Z"
+			/>
 		</svg>
 	);
 }

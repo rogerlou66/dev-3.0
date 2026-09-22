@@ -25,6 +25,17 @@ describe("composeArtifactDocument", () => {
 		expect(output).not.toContain("base-uri 'none'");
 	});
 
+	it("leaves JavaScript identifiers ending in URL( alone and keeps unresolved url() text byte-exact", () => {
+		const html = "<script>const u = URL.createObjectURL(new Blob([js], { type: 'text/javascript' }));</script><style>.a{background:URL( 'hero.png' )}.b{background:url(  \"https://cdn.example/x.png\"  )}</style>";
+		const output = composeArtifactDocument(html, [
+			{ name: "hero.png", mime: "image/png", dataUrl: "data:image/png;base64,HERO" },
+		]);
+		expect(output).toContain("URL.createObjectURL(new Blob([js], { type: 'text/javascript' }))");
+		expect(output).not.toContain("createObjecturl");
+		expect(output).toContain("URL('data:image/png;base64,HERO')");
+		expect(output).toContain("url(  \"https://cdn.example/x.png\"  )");
+	});
+
 	it("rewrites nested relative image paths without flattening them", () => {
 		const output = composeArtifactDocument('<img src="assets/charts/q1.png">', [
 			{ name: "assets/charts/q1.png", mime: "image/png", dataUrl: "data:image/png;base64,NESTED" },

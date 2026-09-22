@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { GlobalSettings, ShortcutOverride } from "../shared/types";
 import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
 import { recordFavoriteUsage, sanitizeFavorites } from "../shared/favorites";
@@ -12,6 +13,7 @@ import { canaryPublishesFor, hostOsName } from "../shared/canary-publish";
 export function hostPublishesCanary(): boolean {
 	return canaryPublishesFor(hostOsName(process.platform), process.arch);
 }
+import { normalizeSimplifiedInterface, SIMPLIFY_VIEW_PRESET_IDS } from "../shared/simplified-interface";
 import { withFileLock } from "./file-lock";
 import { createLogger } from "./logger";
 import { DEV3_HOME } from "./paths";
@@ -55,6 +57,13 @@ function sanitizeShortcutOverrides(raw: unknown): GlobalSettings["keyboardShortc
 		if (Object.keys(kept).length > 0) out[id] = kept;
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Dedupe, drop non-strings and blanks; empty result collapses to undefined like every other unset field. */
+function sanitizeHiddenControls(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const ids = [...new Set(raw.filter((v): v is string => typeof v === "string" && v.length > 0))];
+	return ids.length > 0 ? ids : undefined;
 }
 
 /**
@@ -203,12 +212,23 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			typeof d.remotePort === "number" && Number.isInteger(d.remotePort) && d.remotePort >= 1 && d.remotePort <= 65535
 				? d.remotePort
 				: undefined,
-		// Default-off beta toggle — only an explicit true is a stored opt-in.
-		experimentalTerminalBidi: d.experimentalTerminalBidi === true ? true : undefined,
+		// Default-on beta toggle — an explicit false is the opt-out and must survive.
+		experimentalTerminalBidi:
+			typeof d.experimentalTerminalBidi === "boolean" ? d.experimentalTerminalBidi : undefined,
+		// Preserve unknown personal ids and keep the effective union readable
+		// by older installed versions that only understand hiddenControls.
+		...normalizeSimplifiedInterface({
+			hiddenControls: sanitizeHiddenControls(d.hiddenControls),
+			personalHiddenControls: Array.isArray(d.personalHiddenControls) ? sanitizeHiddenControls(d.personalHiddenControls) ?? [] : undefined,
+			simplifiedMode: typeof d.simplifiedMode === "boolean" ? d.simplifiedMode : undefined,
+		}),
+		simplifiedModeSource: d.simplifiedModeSource === "fresh" ? "fresh" : "existing",
 		// Default-on beta toggle — both booleans are stored, because an explicit
 		// false is the user opting out and must not collapse into "never chose".
 		experimentalAgentTraffic:
 			typeof d.experimentalAgentTraffic === "boolean" ? d.experimentalAgentTraffic : undefined,
+		// Default-off local diagnostics — only an explicit true is a stored opt-in.
+		freezeDiagnosticsEnabled: d.freezeDiagnosticsEnabled === true ? true : undefined,
 		// Only a recorded pick survives; anything else falls back to the default view.
 		agentTrafficExperiment: d.agentTrafficExperiment === "1" || d.agentTrafficExperiment === "2"
 			? d.agentTrafficExperiment
@@ -228,10 +248,35 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 	};
 }
 
+function missingSettingsDefaults(): GlobalSettings {
+	const fresh = !existsSync(`${DEV3_HOME}/projects.json`) && !existsSync(`${DEV3_HOME}/data`);
+	const settings: GlobalSettings = {
+		...DEFAULT_SETTINGS,
+		simplifiedMode: fresh,
+		simplifiedModeSource: fresh ? "fresh" : "existing",
+		personalHiddenControls: [],
+		hiddenControls: fresh ? [...SIMPLIFY_VIEW_PRESET_IDS] : [],
+	};
+	mkdirSync(DEV3_HOME, { recursive: true });
+	const temporary = `${SETTINGS_FILE}.initial-${randomUUID()}`;
+	writeFileSync(temporary, JSON.stringify(settings, null, 2), { flag: "wx" });
+	try {
+		// Publish complete defaults once before bootstrap creates project data.
+		// Linking refuses to replace settings another process created first.
+		linkSync(temporary, SETTINGS_FILE);
+		return settings;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		return normalizeSettings(JSON.parse(readFileSync(SETTINGS_FILE, "utf-8")));
+	} finally {
+		unlinkSync(temporary);
+	}
+}
+
 export async function loadSettings(): Promise<GlobalSettings> {
 	try {
 		const file = Bun.file(SETTINGS_FILE);
-		if (!(await file.exists())) return { ...DEFAULT_SETTINGS };
+		if (!(await file.exists())) return missingSettingsDefaults();
 		return normalizeSettings(await file.json());
 	} catch (err) {
 		log.error("Failed to load settings", { error: String(err) });
@@ -287,7 +332,7 @@ export async function recordFavoriteUsages(
 
 export function loadSettingsSync(): GlobalSettings {
 	try {
-		if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
+		if (!existsSync(SETTINGS_FILE)) return missingSettingsDefaults();
 		return normalizeSettings(JSON.parse(readFileSync(SETTINGS_FILE, "utf-8")));
 	} catch (err) {
 		log.error("Failed to load settings (sync)", { error: String(err) });

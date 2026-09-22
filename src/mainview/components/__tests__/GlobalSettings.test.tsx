@@ -1,3 +1,5 @@
+import { syncGlobalSettingsCache } from "../../global-settings-cache";
+import { setHiddenControlsForTests } from "../../hidden-controls";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import GlobalSettings from "../GlobalSettings";
@@ -41,6 +43,9 @@ vi.mock("../../rpc", () => ({
 			setTmuxTheme: vi.fn().mockResolvedValue(undefined),
 			checkCaffeinateAvailable: vi.fn().mockResolvedValue({ available: true }),
 			checkCanaryChannelAvailable: vi.fn().mockResolvedValue({ available: true }),
+			getFreezeDiagnosticsStatus: vi
+				.fn()
+				.mockResolvedValue({ supported: true, running: false, directory: "/logs/freeze" }),
 			getNativeTerminalAvailability: vi
 				.fn()
 				.mockResolvedValue({ available: true, tmuxSupported: true, diagnostics: [] }),
@@ -257,6 +262,24 @@ describe("GlobalSettings", () => {
 		});
 	});
 
+	describe("Simplified Mode placement", () => {
+		it("belongs to Appearance and can be enabled there", async () => {
+			setupMocks();
+			syncGlobalSettingsCache(mockGlobalSettings);
+			setHiddenControlsForTests([]);
+			renderGlobalSettings("appearance");
+			await waitForLoad();
+			await userEvent.click(screen.getByRole("switch", { name: "Simplified Mode" }));
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenCalledWith(expect.objectContaining({ simplifiedMode: true }));
+		});
+		it("is absent from System", async () => {
+			setupMocks();
+			renderGlobalSettings("system");
+			await waitForLoad();
+			expect(screen.queryByRole("switch", { name: "Simplified Mode" })).toBeNull();
+		});
+	});
+
 	describe("theme switching", () => {
 		it("preserves a pushed cmux preset when saving another setting and restores the pushed theme", async () => {
 			setupMocks(mockAgents, { ...mockGlobalSettings, appearancePreset: "default", theme: "dark" });
@@ -361,6 +384,35 @@ describe("GlobalSettings", () => {
 
 			expect(mockedApi.request.saveGlobalSettings).toHaveBeenCalledWith(
 				expect.objectContaining({ taskSortOrder: "newest-first" }),
+			);
+		});
+
+		/**
+		 * Every save from this screen sends the WHOLE settings object, so a snapshot
+		 * taken at mount reverts anything written from outside it since. That is not
+		 * hypothetical: hiding a control (right-click "Hide", or the Simplify View
+		 * preset) writes `hiddenControls` from elsewhere, and one unrelated toggle
+		 * here used to wipe the whole set off disk.
+		 */
+		it("keeps a setting written from outside the screen after a push", async () => {
+			setupMocks();
+			const user = userEvent.setup();
+			renderGlobalSettings("tasks");
+			await waitForLoad();
+
+			window.dispatchEvent(
+				new CustomEvent("rpc:globalSettingsUpdated", {
+					detail: { ...mockGlobalSettings, hiddenControls: ["bug-hunters"] },
+				}),
+			);
+
+			await user.click(screen.getByText("Newest first"));
+
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenCalledWith(
+				expect.objectContaining({
+					taskSortOrder: "newest-first",
+					hiddenControls: ["bug-hunters"],
+				}),
 			);
 		});
 	});
@@ -973,6 +1025,13 @@ describe("GlobalSettings", () => {
 	});
 
 	describe("system settings", () => {
+		it("persists false when switching off default-on terminal BiDi", async () => {
+			const user = userEvent.setup();
+			renderGlobalSettings("system");
+			const toggle = await screen.findByRole("switch", { name: "Right-to-left text in terminals (BiDi)" });
+			await user.click(toggle);
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenLastCalledWith(expect.objectContaining({ experimentalTerminalBidi: false }));
+		});
 		it("round-trips the confirm-before-quit toggle through skipQuitDialog", async () => {
 			setupMocks(mockAgents, { ...mockGlobalSettings, skipQuitDialog: true });
 			const user = userEvent.setup();

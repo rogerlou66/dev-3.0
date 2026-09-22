@@ -1,4 +1,5 @@
 import { artifactBridgeScript } from "./artifactBridge";
+import { artifactCommentScript } from "./artifactCommentScript";
 import { artifactChannelScript } from "./artifactChannel";
 import { artifactLinksScript } from "./artifactLinks";
 
@@ -130,9 +131,15 @@ export function composeArtifactDocument(
 				return [resolve(parts[0]), ...parts.slice(1)].join(" ");
 			}).join(", "),
 	);
+	// A `url(` that starts its own token, so the tail of `createObjectURL(` never matches.
+	// Casing is kept and a value that is not a copied asset stays byte-exact; a bare
+	// `url(` written inside a script still matches, which only bites on an asset name.
 	html = html.replace(
-		/url\(\s*(["']?)(.*?)\1\s*\)/gi,
-		(_match, quote: string, value: string) => `url(${quote}${resolve(value)}${quote})`,
+		/(?<![\w$-])(url)\(\s*(["']?)(.*?)\2\s*\)/gi,
+		(match, token: string, quote: string, value: string) => {
+			const resolved = resolve(value);
+			return resolved === value ? match : `${token}(${quote}${resolved}${quote})`;
+		},
 	);
 
 	// The channel goes first: every other injected script reaches for it by name.
@@ -140,7 +147,7 @@ export function composeArtifactDocument(
 	// `allow-popups` for it); it carries no href, so a report's own `<base href>`
 	// still sets the document base URL. `artifactLinksScript` takes the in-page
 	// anchors back off that default.
-	const injected = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><base target="_blank">${artifactChannelScript()}${assetRuntimeScript(assets)}${findScript()}${artifactLinksScript()}${artifactBridgeScript(canSendToAgent)}${saveImageLabel ? saveImageMenuScript(saveImageLabel) : ""}`;
+	const injected = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><base target="_blank">${artifactChannelScript()}${assetRuntimeScript(assets)}${findScript()}${artifactLinksScript()}${artifactBridgeScript(canSendToAgent)}${artifactCommentScript()}${saveImageLabel ? saveImageMenuScript(saveImageLabel) : ""}`;
 	if (/<head(?:\s|>)/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>${injected}`);
 	if (/<html(?:\s|>)/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1><head>${injected}</head>`);
 	const body = html.replace(/<!doctype[^>]*>/i, "");

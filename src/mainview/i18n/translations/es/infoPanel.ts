@@ -198,6 +198,8 @@ const infoPanel = {
 	"infoPanel.diffMdPreviewRevealAt": "Mostrar {location} en la previsualización",
 	"infoPanel.diffMdPreviewCommentCount_one": "{count} comentario en este archivo",
 	"infoPanel.diffMdPreviewCommentCount_other": "{count} comentarios en este archivo",
+	"infoPanel.diffMdUnchangedLines_one": "Mostrar {count} línea sin cambios",
+	"infoPanel.diffMdUnchangedLines_other": "Mostrar {count} líneas sin cambios",
 	"infoPanel.diffMdPreviewGithubThreads_one": "{count} hilo de revisión de GitHub → Diff de origen",
 	"infoPanel.diffMdPreviewGithubThreads_other": "{count} hilos de revisión de GitHub → Diff de origen",
 	"infoPanel.diffExpandAll": "Expandir todo",
@@ -246,6 +248,10 @@ const infoPanel = {
 	"infoPanel.diffReviewJump": "Ir al comentario",
 	"infoPanel.diffReviewEdit": "Editar comentario",
 	"infoPanel.diffReviewDelete": "Eliminar comentario",
+	"infoPanel.diffReviewReopen": "Reabrir comentario",
+	"infoPanel.diffReviewResolved": "Resuelto",
+	"infoPanel.diffReviewReplyAgent": "Agente",
+	"infoPanel.diffReviewReplyUser": "Tú",
 	"infoPanel.diffReviewSave": "Guardar comentario",
 	"infoPanel.diffReviewCommentItemOf": "Comentario {number}/{total}",
 	"infoPanel.diffReviewSendComment": "Enviar al agente",
@@ -301,6 +307,16 @@ const infoPanel = {
 	"infoPanel.sharedItemsUnread": "Hay elementos nuevos sin ver",
 	"infoPanel.openSharedImage": "Abrir la imagen {name}",
 	"infoPanel.openSharedArtifact": "Abrir el artefacto {name}",
+
+	"infoPanel.restoreHidden": "Mostrar controles ocultos",
+	"infoPanel.restoreOne": "Restaurar {name}",
+	"infoPanel.showAllHidden": "Mostrar todo",
+	"infoPanel.barContext": "Contexto",
+	"infoPanel.barSessionAgent": "Sesión y agente",
+	"infoPanel.barRuntime": "Entorno de ejecución",
+	"infoPanel.paneControlsLabel": "Disposición de paneles",
+	"infoPanel.scriptsRunnerLabel": "Scripts",
+	"infoPanel.includeTestsLabel": "Incluir tests en el diff",
 };
 
 export default infoPanel;

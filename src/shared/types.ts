@@ -1,17 +1,21 @@
+import type { InterfaceOnboardingRequest, InterfaceOnboardingResponse } from "./interface-onboarding";
 import type { RPCSchema } from "electrobun/bun";
 import type { ConversationMatch } from "./conversation-search-core";
 import type { ImportConversationsResult, ImportableConversationView } from "./conversation-import-model";
 import type { HandoffPreview, SpawnAgentResult } from "./conversation-handoff-model";
+import type { TaskConversationView } from "./task-conversation-model";
 import type { AgentRateLimitsReport } from "./rate-limits";
 import type { AgentAccount, AgentAccountKind, AgentAccountsState, ClaudeSlotModels } from "./agent-accounts";
 import type { TerminalBackendIdentity } from "./terminal-backend-identity";
 import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind } from "./task-panes";
+import type { ReviewComment, ReviewReplyAuthor } from "./review";
 import type { UpdateChannel } from "./update-channel";
 import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
 import type { AgentPromptDelivery } from "./agent-prompt-delivery";
 import type { AgentMessageLogPage, AgentMessageOrigin } from "./agent-message-log";
 import type { NotificationLogPage } from "./notification-log";
 import type { LowBatteryStatus } from "./low-battery";
+import type { TaskPeekSnapshot } from "./task-peek";
 export type { LowBatteryStatus, OutputStyleOutcome } from "./low-battery";
 
 export interface TaskNavigationTarget {
@@ -531,16 +535,17 @@ export const COORDINATOR_PROMPT = `You are the COORDINATOR of this board. You ma
 Deliver each task's agreed goal with the smallest sufficient change. Stop at that goal; put extra work in a separate task before implementing it.
 
 == YOUR ROLE ==
-- Create, brief, sequence and unblock other dev3 tasks (\`dev3 task create\`, \`dev3 message\`, \`dev3 peek\`), and resolve overlaps: file contention, duplicated scope. Leave routine engineering to the child; intervene only for blockers, unmet requirements, material risks or scope growth.
-- NO CODE, and both halves matter. Allowed: a commit SHA, pull-request and CI state, run logs, machine and process state, what a child reported. Not allowed: forming an engineering judgement by reading source — the children's job. A sub-agent may establish a fact, never judge a design. Repo work gets a dev3 task.
-- THE BRIEF IS YOURS ALONE, so every child gets a complete one: the goal in one sentence; done as an artefact (a merged PR, a note, a file); the boundaries (what not to touch, which tasks work nearby); how to report back (\`dev3 message --task seq:<your seq>\`); and which permissions it does NOT have. SIZE IT TO ONE SMALL, INDEPENDENTLY REVIEWABLE OUTCOME. A description edit never reaches a running child: \`--description\` for the record AND a \`dev3 message\`.
+- Create, brief, sequence and unblock other dev3 tasks (\`dev3 message\`, \`dev3 peek\`), and resolve overlaps: file contention, duplicated scope. Leave routine engineering to the child; intervene only for blockers, unmet requirements, material risks or scope growth.
+- CREATING A TASK MEANS STARTING IT: create it and request its launch in the same step, never a "shall I start it?" first — the dialog IS that question — and never a launch that skips it. To Do only when the user says park; never start unrelated backlog or re-create a running task. Exit 10 is them parking it: keep it, stop, no retry, no asking why or what to change, one line that it stays in To Do. An unanswered dialog self-approves, so a timeout is NOT a decline — wait; asked later, same flow.
+- NO CODE, and both halves matter. Allowed: a commit SHA, pull-request and CI state, run logs, machine and process state, what a child reported. Not allowed: forming an engineering judgement by reading source — the children's job. A sub-agent may establish a fact, never judge a design. Repo work is a dev3 task.
+- THE BRIEF IS YOURS ALONE: the goal in one sentence; done as an artefact (a merged PR, a note, a file); boundaries (what not to touch, which tasks work nearby); how to report back (\`dev3 message --task seq:<your seq>\`); and which permissions it does NOT have. SIZE IT TO ONE SMALL, INDEPENDENTLY REVIEWABLE OUTCOME. A description edit never reaches a running child: \`--description\` for the record AND a \`dev3 message\`.
 - A CHILD'S DONE IS A CLAIM. Report it landed only after seeing the artefact — the PR merged, CI green on that SHA, the file on disk. Verify agreed acceptance checks, then stop. State gaps once; never turn not-checked into broken.
 
 == REPORTING ==
-- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with child tasks, so a reply needing the thread is worthless. End every message with the board: what exists, where each task stands, what landed, what waits on the user — one line each, then the decision. Drop a line that changes neither what they know nor what they decide.
-- KEEP YOUR BOOKKEEPING IN YOUR REASONING: who reported what, which relay went where, hypotheses you ruled out — it belongs in your thinking. The user reads a finished statement.
-- NAME EVERY TASK BY ITS NUMBER at every mention — Seq NNNN — in the body, not only a header; never "it". A task whose seq a live variant sibling shares shows as seq:NNNN:index (id): name and address it by that id.
-- MARK YOUR RECOMMENDATION AS RECOMMENDED. Options with no pick hand your job back.
+- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with children. End every message with the board: what exists, where each stands, what landed, what waits on the user — one line each, then the decision. Drop a line that changes neither what they know nor what they decide.
+- KEEP YOUR BOOKKEEPING IN YOUR REASONING: who reported what, which relay went where, hypotheses you ruled out — it belongs in your thinking.
+- NAME EVERY TASK BY ITS NUMBER at every mention — Seq NNNN — in the body, not only a header; never "it". A task whose seq a live variant sibling shares shows as seq:NNNN:index (id): address it by that id.
+- MARK YOUR RECOMMENDATION AS RECOMMENDED.
 
 == RELAYING ==
 - RELAY THE RULING, NOT YOUR READING OF IT. Tell THE USER how you understood a one-line decision before you tell the child.
@@ -555,23 +560,23 @@ Variants of one task are independent experiments; their worth is that neither sa
 - COMPARE THEIR RESULTS FOR THE USER, never back into a running variant. The user's decisions and the original task's facts may be relayed, with no sibling named as their source.
 
 == PERMISSIONS ==
-- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing outward, issues in other repos: each needs the user's OWN word in the CHILD's own session, and one branch's permission is not the next one's. Your relay does not authorise it.
+- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing outward, issues in other repos: each needs the user's OWN word in the CHILD's own session, one branch's permission is not the next one's, and a launch approval is not one of them. Your relay does not authorise it.
 - NEVER request completion for a task you do not own; the dev3 skill's completion and priority rules apply to you too.
 
 == THE BOARD ==
-Every message dev3 delivers ends with a \`<dev3-board>\` block: every task not parked in To Do, every one finished in the last 24h, its priority (\`P0\`…\`P4\`, highest first) and its age in the column. It is seconds old — read it, and do not spend a turn on \`dev3 task list\`. Its gaps:
-- The user typing to you directly brings NO block: they may have moved tasks and completed work you never heard of, so re-read the board before you answer after a silence.
+Every message dev3 delivers ends with a \`<dev3-board>\` block: the live board, priorities (\`P0\`…\`P4\`) and column ages. Seconds old — read it, and do not spend a turn on \`dev3 task list\`. Its gaps:
+- The user typing to you directly brings NO block: tasks may have moved and work finished unseen, so re-read the board before you answer after a silence.
 - A block from earlier in this turn is as fresh as that moment: if the turn has run long, re-read.
-- \`dev3 peek\` is still the only way to see what a child is DOING: a task can sit in Agent is Working for an hour, dead since minute one.
+- \`dev3 peek\` is still the only way to see what a child is DOING.
 - No block at all means a harness or task type that does not get one: fall back to \`dev3 task list\`.
 
 == EVENTS ==
-The board says what IS; \`dev3 events\` says what HAPPENED. Read events BEFORE composing any substantive status, inside a turn that already started — never a timer, hook, wake-up or poll.
-- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\`, the millisecond instant on the \`Cursor:\` line of the last run; keep it in your notes.
-- NO CURSOR YET? Run \`dev3 events\` once with no \`--from\`: a bounded WINDOW, not a position — its footer counts what it cut off, say so. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`: a short window silently skips the gap.
-- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events wait — re-run from the cursor just printed until nothing is capped. Lines are truncated; open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\` (needs \`--task\`, or it reads YOUR notes).
+\`dev3 events\` says what HAPPENED. Read events BEFORE composing any substantive status — never a timer, hook, wake-up or poll.
+- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\`, the instant on the \`Cursor:\` line of the last run; keep it in your notes.
+- NO CURSOR YET? Run \`dev3 events\` once with no \`--from\`: a bounded WINDOW, not a position — its footer counts what it cut off, say so. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`.
+- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events wait — re-run from the cursor just printed until nothing is capped. Lines truncate; open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\` (needs \`--task\`, or it reads YOUR notes).
 - ADVANCE THE CURSOR ONLY AFTER CONSUMING WHAT CAME BACK, and store the one the run returned, not one you composed.
-- A FAILED READ IS NOT A QUIET BOARD: an error, an unresolvable \`--from\`, no answer — say the read failed and keep the old cursor.
+- A FAILED READ IS NOT A QUIET BOARD: say the read failed and keep the old cursor.
 - NEVER REPEAT A STATUS THE USER ALREADY HAS, a short acknowledgement included; nothing changed is one line. Cursors, page counts and opened notes stay in your reasoning.`;
 
 export function getPrimaryStopTarget(autoReviewEnabled?: boolean): TaskStatus {
@@ -692,16 +697,17 @@ export interface CodingAgent {
  * resume, transcripts, trust, lifecycle hooks, skill prefix — so a differently
  * named binary runs through exactly the same code as the CLI it wraps.
  */
-export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "copilot" | "none";
+export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "copilot" | "omp" | "none";
 
 /**
  * Prefix used to invoke an installed skill from an agent prompt. Codex reserves
- * `/` for built-in commands, while the other supported agent CLIs use `/` for
- * skills. Unknown commands keep the broadly compatible slash default.
+ * `/` for built-in commands; omp registers one slash command per skill under a
+ * `skill:` namespace. Unknown commands keep the compatible slash default.
  */
-export function skillInvocationPrefix(baseCommand: string, family?: AgentFamily): "$" | "/" {
+export function skillInvocationPrefix(baseCommand: string, family?: AgentFamily): "$" | "/" | "/skill:" {
 	const key = family ? family : (baseCommand.split("/").pop() ?? "");
-	return key === "codex" ? "$" : "/";
+	if (key === "codex") return "$";
+	return key === "omp" ? "/skill:" : "/";
 }
 
 /** Fixed port of the optional local `pxpipe-proxy` (token-saving image proxy).
@@ -749,6 +755,32 @@ function createCodexReasoningPresets(
 		additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "-c", 'default_permissions="dev3"', "-c", `model_reasoning_effort="${effort}"`],
 	}));
 	return [...bypass, ...standard];
+}
+
+type OmpThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh" | "max";
+
+const OMP_THINKING_LABELS: Record<OmpThinkingLevel, string> = {
+	off: "Off",
+	low: "Low",
+	medium: "Medium",
+	high: "High",
+	xhigh: "X-High",
+	max: "Max",
+};
+
+/** omp's unattended mode at each thinking level — Claude's shape, where Auto and
+ *  Bypass carry the effort range and the stricter modes appear once. The level
+ *  rides `additionalArgs` because `EffortLevel` has no `off` or `max`, the route
+ *  the Codex presets take for `max` and `ultra`. */
+function createOmpBypassPresets(levels: readonly OmpThinkingLevel[]): AgentConfiguration[] {
+	return levels.map((level): AgentConfiguration => ({
+		id: `omp-yolo-${level}`,
+		name: `Bypass (${OMP_THINKING_LABELS[level]})`,
+		modeLabel: `Bypass · ${OMP_THINKING_LABELS[level]}`,
+		permissionMode: "bypassPermissions",
+		additionalArgs: ["--thinking", level],
+		version: 1,
+	}));
 }
 
 export const DEFAULT_AGENTS: CodingAgent[] = [
@@ -942,20 +974,6 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 		defaultConfigId: "codex-default",
 	},
 	{
-		id: "builtin-copilot",
-		name: "GitHub Copilot",
-		baseCommand: "copilot",
-		isDefault: true,
-		installCommand: "npm install -g @github/copilot",
-		installUrl: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
-		configurations: [
-			{ id: "copilot-bypass", name: "Bypass", permissionMode: "bypassPermissions", version: 1 },
-			{ id: "copilot-default", name: "Default", permissionMode: "default", version: 1 },
-			{ id: "copilot-plan", name: "Plan", permissionMode: "plan", version: 1 },
-		],
-		defaultConfigId: "copilot-bypass",
-	},
-	{
 		id: "builtin-gemini",
 		name: "Gemini",
 		baseCommand: "gemini",
@@ -1000,14 +1018,28 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 		isDefault: true,
 		installCommand: "npm install -g cursor-agent",
 		installUrl: "https://github.com/nicepkg/cursor-agent",
+		// Cursor bakes effort/thinking/fast into the model id itself, so every id
+		// below is a whole catalog slug. Only ids observed in a real
+		// `cursor-agent models` run are listed — never a slug built by combining
+		// a family with an effort suffix.
+		// These presets deliberately carry no `version`: a version bump discards a
+		// user's own model and name, and stale Cursor ids are refreshed instead by
+		// RETIRED_CURSOR_PRESET_DEFAULTS (src/bun/agents.ts), which only replaces a
+		// value dev3 itself shipped.
 		configurations: [
-			{ id: "cursor-default", name: "Default (Opus 4.6)", model: "opus-4.6-thinking" },
-			{ id: "cursor-plan", name: "Plan (Opus 4.6)", model: "opus-4.6-thinking", permissionMode: "plan" },
-			{ id: "cursor-plan-then-bypass", name: "Plan then Bypass (Opus 4.6)", model: "opus-4.6-thinking", permissionMode: "plan", additionalArgs: ["--force"] },
-			{ id: "cursor-yolo", name: "YOLO (Opus 4.6)", model: "opus-4.6-thinking", permissionMode: "bypassPermissions" },
-			{ id: "cursor-gpt", name: "GPT-5.3 Codex High", model: "gpt-5.3-codex-high" },
-			{ id: "cursor-yolo-gpt", name: "YOLO GPT-5.3 Codex", model: "gpt-5.3-codex-high", permissionMode: "bypassPermissions" },
-			{ id: "cursor-gemini", name: "Gemini 3.1 Pro", model: "gemini-3.1-pro" },
+			{ id: "cursor-default", name: "Default (Opus 5)", model: "claude-opus-5-thinking-high" },
+			{ id: "cursor-plan", name: "Plan (Opus 5)", model: "claude-opus-5-thinking-high", permissionMode: "plan" },
+			{ id: "cursor-plan-then-bypass", name: "Plan then Bypass (Opus 5)", model: "claude-opus-5-thinking-high", permissionMode: "plan", additionalArgs: ["--force"] },
+			{ id: "cursor-yolo", name: "YOLO (Opus 5)", model: "claude-opus-5-thinking-high", permissionMode: "bypassPermissions" },
+			{ id: "cursor-sonnet-5", name: "Sonnet 5", model: "claude-sonnet-5-thinking-high" },
+			{ id: "cursor-gpt", name: "GPT-5.6 Sol X-High", model: "gpt-5.6-sol-xhigh" },
+			{ id: "cursor-yolo-gpt", name: "YOLO GPT-5.6 Sol", model: "gpt-5.6-sol-xhigh", permissionMode: "bypassPermissions" },
+			{ id: "cursor-grok-4-6", name: "Grok 4.6 Fast", model: "cursor-grok-4.6-high-fast" },
+			{ id: "cursor-gemini", name: "Gemini 3.7 Flash", model: "gemini-3.7-flash-high" },
+			// Cursor docs list Gemini 3.8 Flash, but no `cursor-agent models` dump
+			// we can attribute spells its slug out — this one follows the verified
+			// 3.7 shape. Requested explicitly; treat as unverified.
+			{ id: "cursor-gemini-3-8", name: "Gemini 3.8 Flash", model: "gemini-3.8-flash-high" },
 			{ id: "cursor-composer-2-5", name: "Composer 2.5", model: "composer-2.5" },
 		],
 		defaultConfigId: "cursor-default",
@@ -1039,6 +1071,59 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "opencode-big-pickle", name: "Big Pickle (Free)", model: "opencode/big-pickle", version: 1 },
 		],
 		defaultConfigId: "opencode-default",
+	},
+	{
+		id: "builtin-copilot",
+		name: "GitHub Copilot",
+		baseCommand: "copilot",
+		isDefault: true,
+		installCommand: "brew install --cask copilot-cli",
+		installUrl: "https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
+		// The model names come from the installed CLI's own shell-completion
+		// catalog, but WHICH of them an account may use is decided by its Copilot
+		// plan and org policy — a blocked one fails the launch with
+		// `Model "…" is not available`, and `auto` is the one that always works.
+		// So `auto` leads, and every named model is an opt-in below it.
+		configurations: [
+			// --- Auto (Copilot picks the model) ---
+			{ id: "copilot-default", name: "Default (Auto)", model: "auto", groupLabel: "Auto", modeLabel: "Default", version: 1 },
+			{ id: "copilot-bypass", name: "Bypass (Auto)", model: "auto", groupLabel: "Auto", modeLabel: "Bypass", permissionMode: "bypassPermissions", version: 1 },
+			{ id: "copilot-accept-edits", name: "Accept Edits (Auto)", model: "auto", groupLabel: "Auto", modeLabel: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
+			{ id: "copilot-plan", name: "Plan (Auto)", model: "auto", groupLabel: "Auto", modeLabel: "Plan", permissionMode: "plan", version: 1 },
+			// --- Named models (subject to your Copilot plan) ---
+			{ id: "copilot-opus5", name: "Claude Opus 5", model: "claude-opus-5", groupLabel: "Claude Opus 5", modeLabel: "Default", version: 1 },
+			{ id: "copilot-opus5-bypass", name: "Claude Opus 5 (Bypass)", model: "claude-opus-5", groupLabel: "Claude Opus 5", modeLabel: "Bypass", permissionMode: "bypassPermissions", version: 1 },
+			{ id: "copilot-sonnet5", name: "Claude Sonnet 5", model: "claude-sonnet-5", groupLabel: "Claude Sonnet 5", modeLabel: "Default", version: 1 },
+			{ id: "copilot-sonnet5-bypass", name: "Claude Sonnet 5 (Bypass)", model: "claude-sonnet-5", groupLabel: "Claude Sonnet 5", modeLabel: "Bypass", permissionMode: "bypassPermissions", version: 1 },
+			{ id: "copilot-gpt56-sol", name: "GPT-5.6 Sol", model: "gpt-5.6-sol", groupLabel: "GPT-5.6 Sol", modeLabel: "Default", version: 1 },
+			{ id: "copilot-gpt56-sol-bypass", name: "GPT-5.6 Sol (Bypass)", model: "gpt-5.6-sol", groupLabel: "GPT-5.6 Sol", modeLabel: "Bypass", permissionMode: "bypassPermissions", version: 1 },
+			// Effort rides a NAMED reasoning model only: `auto` rejects the flag and
+			// refuses to launch at all.
+			{ id: "copilot-gpt56-sol-bypass-xhigh", name: "GPT-5.6 Sol (Bypass, X-High)", model: "gpt-5.6-sol", groupLabel: "GPT-5.6 Sol", modeLabel: "Bypass · X-High", permissionMode: "bypassPermissions", effort: "xhigh", version: 1 },
+			{ id: "copilot-gpt56-luna", name: "GPT-5.6 Luna", model: "gpt-5.6-luna", groupLabel: "GPT-5.6 Luna", modeLabel: "Default", version: 1 },
+			{ id: "copilot-gpt53-codex", name: "GPT-5.3-Codex", model: "gpt-5.3-codex", groupLabel: "GPT-5.3-Codex", modeLabel: "Default", version: 1 },
+			{ id: "copilot-gemini37", name: "Gemini 3.7 Flash", model: "gemini-3.7-flash", groupLabel: "Gemini 3.7 Flash", modeLabel: "Default", version: 1 },
+		],
+		defaultConfigId: "copilot-default",
+	},
+	{
+		id: "builtin-omp",
+		name: "Oh My Pi",
+		baseCommand: "omp",
+		isDefault: true,
+		installCommand: "curl -fsSL https://omp.sh/install | sh",
+		installUrl: "https://github.com/can1357/oh-my-pi",
+		// omp reaches 60+ providers and picks its own startup model, so pinning one
+		// here would launch against credentials the user may not hold; the presets
+		// leave the model to omp. "Default" asks first like every other agent's:
+		// the adapter passes `--approval-mode always-ask` for it, because omp's
+		// own default with no flag is `yolo` (see omp-flags.ts).
+		configurations: [
+			{ id: "omp-default", name: "Default", version: 1 },
+			{ id: "omp-write", name: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
+			...createOmpBypassPresets(["off", "low", "medium", "high", "xhigh", "max"]),
+		],
+		defaultConfigId: "omp-default",
 	},
 ];
 
@@ -1225,7 +1310,9 @@ export interface GlobalSettings {
 	/**
 	 * Beta: reorder right-to-left text (Hebrew, Arabic) for display in terminal
 	 * panes. Display-only — copied text keeps its logical order, while mouse
-	 * selection and link hover on those lines stay logical too. Default off.
+	 * selection and link hover on those lines stay logical too. On by default —
+	 * absent means "never chose", and an explicit `false` is the user's opt-out,
+	 * which must survive a restart.
 	 */
 	experimentalTerminalBidi?: boolean;
 	/**
@@ -1235,6 +1322,21 @@ export interface GlobalSettings {
 	 * trace — no header control, no ⇧⌘M, no menu item, no palette command, no tip.
 	 */
 	experimentalAgentTraffic?: boolean;
+	/**
+	 * Record local macOS freeze diagnostics (host/renderer liveness journals plus
+	 * bounded native stack samples under `~/.dev3.0/logs/freeze`). Off unless the
+	 * key is an explicit `true`, and nothing is ever uploaded. The host applies a
+	 * change straight away: turning it off stops the collector for this session
+	 * too, not only for the next launch.
+	 */
+	freezeDiagnosticsEnabled?: boolean;
+	/** Effective hidden ids, retained for older installed versions. */
+	hiddenControls?: string[];
+	/** Personal choices survive applying and removing the Simplified Mode preset. */
+	personalHiddenControls?: string[];
+	simplifiedMode?: boolean;
+	/** Original installation cohort; manual transitions are tracked by the host. */
+	simplifiedModeSource?: "fresh" | "existing";
 	/**
 	 * Which agent-traffic presentation the surface renders: `"1"` is the 3D orbit
 	 * of planets, `"2"` the flat animated node graph. Absent means Experiment 2 —
@@ -1288,11 +1390,12 @@ export interface GlobalSettings {
 	 */
 	openArtifactsInPopup?: boolean;
 	/**
-	 * Let a headless `dev3 remote` box install updates on its own once it is quiet
-	 * (no task in progress, no terminal output, no browser connected). Default ON —
-	 * the whole point is that nobody ever goes back to a terminal to type
-	 * `brew upgrade`. Turn it off to hold a box on one build while investigating.
-	 * Has no effect on the desktop app, which has its own updater.
+	 * Let a headless `dev3 remote` box install updates on its own once browser and
+	 * terminal activity are quiet. Default ON — the whole point is that nobody
+	 * ever goes back to a terminal to type `brew upgrade`. Helper restarts preserve
+	 * running agents; supervisor-owned restarts wait until no agent is at risk.
+	 * Turn it off to hold a box on one build while investigating. Has no effect on
+	 * the desktop app, which has its own updater.
 	 */
 	remoteSilentUpdate?: boolean;
 	preventSleepWhileRunning?: boolean; // spawn caffeinate when agents are active
@@ -1672,11 +1775,38 @@ export interface ShellAvailability {
 	installed: Partial<Record<ShellFlavor, string>>;
 }
 
+/**
+ * One dev server a project declares by name. `devScript` declares the server
+ * named `dev` and is NOT written here — see `src/shared/dev-servers.ts`.
+ */
+export interface DevServerConfig {
+	/** The command to run, verbatim, exactly like `devScript`. */
+	script: string;
+	/**
+	 * Ports this server listens on, by name. Each becomes one pool port of the
+	 * task, delivered to EVERY server of that task as `DEV3_PORT_<NAME>` so the
+	 * front end knows where the API is.
+	 */
+	ports?: string[];
+	/** Extra environment for this server only. Layers between the project env and the caller's. */
+	env?: Record<string, string>;
+	/** Worktree-relative working directory (a monorepo package). Absent = the worktree root. */
+	cwd?: string;
+	/** Display label for the pane and the UI. Absent = the server's name. */
+	title?: string;
+}
+
 /** Fields that can be stored in .dev3/config.json (repo-level, shareable). */
 export interface Dev3RepoConfig {
 	setupScript?: string;
 	setupScriptLaunchMode?: SetupScriptLaunchMode;
 	devScript?: string;
+	/**
+	 * Additional dev servers, by name. Independent of `devScript`, which keeps
+	 * declaring the server named `dev` — declaring `dev` here while `devScript`
+	 * is set is a config error, not a merge.
+	 */
+	devServers?: Record<string, DevServerConfig>;
 	cleanupScript?: string;
 	clonePaths?: string[];
 	defaultBaseBranch?: string;
@@ -1699,6 +1829,7 @@ export const DEV3_REPO_CONFIG_KEYS: (keyof Dev3RepoConfig)[] = [
 	"setupScript",
 	"setupScriptLaunchMode",
 	"devScript",
+	"devServers",
 	"cleanupScript",
 	"clonePaths",
 	"defaultBaseBranch",
@@ -1754,6 +1885,8 @@ export interface Project {
 	setupScript: string;
 	setupScriptLaunchMode?: SetupScriptLaunchMode;
 	devScript: string;
+	/** Dev servers beyond the one `devScript` declares, by name. Additive: absent = just `devScript`. */
+	devServers?: Record<string, DevServerConfig>;
 	cleanupScript: string;
 	defaultBaseBranch: string;
 	defaultCompareRef?: string;
@@ -2373,6 +2506,13 @@ export interface Task {
 	labelIds?: string[];
 	existingBranch?: string | null;
 	notes?: TaskNote[];
+	/**
+	 * The user's review of what the agent produced: comments anchored to diff
+	 * lines or artifact elements, with the agent's replies. Shared by every viewer
+	 * and by `dev3 review`; capped by {@link MAX_REVIEW_COMMENTS_KEPT}. See
+	 * `src/shared/review.ts`.
+	 */
+	review?: ReviewComment[];
 	customColumnId?: string | null;
 	/**
 	 * Append-only log of the task's title/overview as they changed over time.
@@ -3005,8 +3145,9 @@ export interface PaneSessionEntry {
 	/** Resumable agent session ID for this pane. For agents that pre-assign at
 	 *  launch (Claude/Cursor `--session-id`/`--resume`, Gemini `--session-id`) this
 	 *  is set immediately; for Codex — which has no launch-time flag — it is filled
-	 *  in post-hoc from the lifecycle hook once the session exists (see
-	 *  cli-socket-server `captureCodexPaneSession`). Null until known / for agents
+	 *  in post-hoc from the lifecycle hook once the session exists, and omp the
+	 *  same way from its status extension (see cli-socket-server
+	 *  `capturePaneSession`). Null until known / for agents
 	 *  that support neither (OpenCode), which fall back to resume-last. */
 	sessionId: string | null;
 	/** Agent ID used at launch time. */
@@ -3617,6 +3758,12 @@ export interface BranchStatus {
 	// anywhere, 0 = everything is on a remote (under this branch's name or any
 	// other), N = N commits missing from `origin/<branch>`. See `getUnpreservedCount`.
 	unpushed: number;
+	// Whether a ref other than this task's own branch still reaches HEAD — a local
+	// branch, a tag or a remote-tracking ref. Deleting the branch cannot destroy
+	// commits another ref holds, so this separates "preserved nowhere" from "not
+	// pushed, but kept in this repository". False whenever it could not be proven,
+	// including on a timeout. See `isPreservedOutsideBranch`.
+	preservedOutsideBranch: boolean;
 	mergedByContent: boolean; // true if git diff base HEAD is empty (squash/rebase merge)
 	diffFiles: number; // total files changed in branch vs base
 	diffInsertions: number; // total lines added in branch vs base
@@ -3655,6 +3802,9 @@ export interface UnsavedWork {
 	// anywhere, 0 = everything is on a remote (under this branch's name or any
 	// other), N = N commits missing from `origin/<branch>`. See `getUnpreservedCount`.
 	unpushed: number;
+	// See BranchStatus.preservedOutsideBranch — another ref still reaches HEAD, so
+	// deleting this branch destroys nothing. False whenever it could not be proven.
+	preservedOutsideBranch: boolean;
 	ahead: number; // commits ahead of the base branch, per the last known origin ref
 	baseUnreachable: boolean; // see BranchStatus.baseUnreachable — `ahead` is 0 and unknown
 }
@@ -4031,23 +4181,24 @@ export interface TmuxLayout {
 
 // ---- Task dev server ----
 
-export interface DevServerStatus {
-	projectId: string;
-	taskId: string;
+/**
+ * One declared dev server of a task: its identity, whether it is up, and the
+ * ports and processes that belong to IT rather than to the task as a whole.
+ */
+export interface DevServerEntry {
+	/** `dev` for the server `devScript` declares, else its key in `devServers`. */
+	name: string;
+	/** Display label for panes and the UI. */
+	title: string;
+	/** True for the server backed by `devScript` — the one an unnamed command means. */
+	isDefault: boolean;
 	running: boolean;
-	hasDevScript: boolean;
-	worktreePath: string | null;
-	tmuxSocket: string;
-	/** tmux only — empty on a native task, which has no tmux session of any kind. */
-	taskSessionName: string;
 	/** tmux only — empty on a native task, whose dev server runs in its pane. */
 	devSessionName: string;
-	/** Which terminal backend hosts this dev server. */
-	backend: TaskPaneBackendKind;
 	viewerPaneId: string | null;
 	panePids: number[];
-	assignedPorts: number[];
-	ports: PortInfo[];
+	/** This server's named ports and the pool port each resolved to. */
+	namedPorts: Record<string, number>;
 	/**
 	 * Listening ports bound by processes inside the dev-server tmux session's
 	 * own process tree (empty when stopped). Unlike `ports` (whole task session,
@@ -4079,7 +4230,45 @@ export interface DevServerStatus {
 	 * pushed to the renderer and written to logs. Empty for an ordinary start.
 	 */
 	extraEnvKeys: string[];
+	/**
+	 * Where THIS server's output is mirrored as plain text
+	 * (`<taskDir>/logs/dev-server.log`, or `dev-server-<name>.log`) — the file
+	 * `dev3 dev-server logs` reads and an agent greps instead of attaching to a
+	 * pane. Null when the task has no worktree to hang it off. The file itself may
+	 * not exist yet: capture starts with the server.
+	 */
+	logPath: string | null;
 	resourceUsage?: ResourceUsage;
+}
+
+/**
+ * Every dev server of one task. A task can declare several, so this is an
+ * envelope: the facts that belong to the task live here, and the per-server
+ * facts live in {@link DevServerEntry}.
+ */
+export interface DevServerStatus {
+	projectId: string;
+	taskId: string;
+	/** True when at least one declared server is up. */
+	running: boolean;
+	/** True when the task declares any dev server at all. */
+	hasDevScript: boolean;
+	worktreePath: string | null;
+	tmuxSocket: string;
+	/** tmux only — empty on a native task, which has no tmux session of any kind. */
+	taskSessionName: string;
+	/** Which terminal backend hosts these dev servers. */
+	backend: TaskPaneBackendKind;
+	/** Every pool port of the task: the positional block first, then the named ones. */
+	assignedPorts: number[];
+	/** The task's named ports and the pool port each resolved to — every server gets all of them. */
+	namedPorts: Record<string, number>;
+	/** Ports detected across the whole task session, ascending by port. */
+	ports: PortInfo[];
+	/** One entry per declared server, in declaration order (`dev` first). */
+	servers: DevServerEntry[];
+	/** Config mistakes in the declaration (duplicate port, `dev` declared twice). */
+	configErrors: string[];
 	/**
 	 * Set only when the live state could not be read because tmux itself failed
 	 * to launch (e.g. macOS Full Disk Access lost). When present, `running` and
@@ -4101,14 +4290,30 @@ export interface DevServerSummary {
 	taskId: string;
 	/** No dev script resolved for this task's branch → the card shows no control. */
 	hasDevScript: boolean;
+	/** True when at least one declared server is up. */
 	running: boolean;
-	/** Ports the dev server itself is serving on, ascending. Empty while it boots. */
+	/** Ports the dev servers are serving on, ascending. Empty while they boot. */
 	ports: number[];
 	/**
 	 * Assigned pool ports held by a foreign process while the dev server is down
 	 * — the devScript will crash-loop on bind if started. Ascending.
 	 */
 	conflictPorts: number[];
+	/** How many dev servers this task declares. */
+	declaredCount: number;
+	/** How many of them are up. */
+	runningCount: number;
+	/** Per-server state, in declaration order — what the card's pill counts and opens. */
+	servers: DevServerSummaryEntry[];
+}
+
+/** One server's line in a board summary: enough to show a dot and open a port. */
+export interface DevServerSummaryEntry {
+	name: string;
+	isDefault: boolean;
+	running: boolean;
+	/** Ports this server is serving on, ascending. */
+	ports: number[];
 }
 
 // ---- Remote (headless `dev3 remote`) lifecycle ----
@@ -4875,6 +5080,23 @@ export type AppRPCSchema = {
 				response: ConversationMatch[];
 			};
 			/**
+			 * One task's own agent conversation, newest session first and one page of
+			 * turns at a time. Reads the live transcript while the worktree exists and
+			 * dev3's archived dump afterwards; an empty `sessions` list means nothing
+			 * readable was found, never that the task was silent.
+			 */
+			readTaskConversation: {
+				params: {
+					projectId: string;
+					taskId: string;
+					sessionKey?: string | null;
+					/** Page backwards: the turns immediately before this turn index. */
+					before?: number | null;
+					limit?: number;
+				};
+				response: TaskConversationView;
+			};
+			/**
 			 * Claude Code and Codex conversations that ran in this project's directory
 			 * and belong to no dev3 task. Read-only: nothing is created and a decline
 			 * is not recorded, so the same list comes back next time.
@@ -4961,9 +5183,9 @@ export type AppRPCSchema = {
 			moveTask: {
 				// `clientPlayedSound`: the UI already played the completion/cancel sound
 				// optimistically in the initiating renderer, so the backend must NOT
-				// also push `taskSound` (that push fans out to every connected renderer
-				// — a desktop window AND a remote browser on the same machine — and
-				// would play a second time). Unset for CLI / branch-merge / agent
+				// also push `taskSound` (that push still reaches a window and every
+				// attached remote browser, so the chime would play a second time on
+				// the same machine). Unset for CLI / branch-merge / agent
 				// approval, where no renderer played locally and the push is the sound.
 				params: { taskId: string; projectId: string; newStatus: TaskStatus; force?: boolean; clientPlayedSound?: boolean; clearBlocked?: boolean };
 				response: Task;
@@ -5112,22 +5334,25 @@ export type AppRPCSchema = {
 			// to the lifecycle DEV3_* vars and the assigned ports, and dev3-owned
 			// names are dropped outright (see `sanitizeDevServerEnv`). Omitting it on
 			// a start clears whatever the previous run was given.
+			// `server` names ONE declared dev server; absent means the default
+			// (`devScript`), or the only declared server when there is no default.
+			// `all` fans the action out over every declared server instead.
 			runDevServer: {
-				params: { taskId: string; projectId: string; opId?: string; env?: Record<string, string> };
+				params: { taskId: string; projectId: string; opId?: string; env?: Record<string, string>; server?: string; all?: boolean };
 				response: DevServerStatus;
 			};
 			checkDevServer: {
-				params: { taskId: string; projectId: string; opId?: string };
+				params: { taskId: string; projectId: string; opId?: string; server?: string };
 				response: { running: boolean };
 			};
 			stopDevServer: {
-				params: { taskId: string; projectId: string; opId?: string };
+				params: { taskId: string; projectId: string; opId?: string; server?: string; all?: boolean };
 				response: DevServerStatus;
 			};
 			// Omitting `env` REUSES the extra env of the run being restarted, which is
 			// what keeps the UI's Restart button on the same configuration.
 			restartDevServer: {
-				params: { taskId: string; projectId: string; env?: Record<string, string> };
+				params: { taskId: string; projectId: string; env?: Record<string, string>; server?: string; all?: boolean };
 				response: DevServerStatus;
 			};
 			getDevServerStatus: {
@@ -5447,6 +5672,45 @@ export type AppRPCSchema = {
 				params: { taskId: string; text: string; artifactTitle: string; version: number; versionCount: number };
 				response: { spilledPath: string | null };
 			};
+			/** Review comments (`Task.review`): one RPC per mutation so an agent resolving through the CLI never races a whole-array write. */
+			addReviewComment: {
+				params: { taskId: string; projectId: string; comment: ReviewComment };
+				response: Task;
+			};
+			updateReviewComment: {
+				params: { taskId: string; projectId: string; commentId: string; body: string };
+				response: Task;
+			};
+			deleteReviewComment: {
+				params: { taskId: string; projectId: string; commentId: string };
+				response: Task;
+			};
+			markReviewCommentsSent: {
+				params: { taskId: string; projectId: string; commentIds: string[] };
+				response: Task;
+			};
+			resolveReviewComment: {
+				params: { taskId: string; projectId: string; commentId: string; by: ReviewReplyAuthor; reply?: string };
+				response: Task;
+			};
+			reopenReviewComment: {
+				params: { taskId: string; projectId: string; commentId: string };
+				response: Task;
+			};
+			replyReviewComment: {
+				params: { taskId: string; projectId: string; commentId: string; body: string; author: ReviewReplyAuthor };
+				response: Task;
+			};
+			/** Drop every review comment of the task — the confirmed "Reset review". */
+			clearTaskReview: {
+				params: { taskId: string; projectId: string };
+				response: Task;
+			};
+			/** One-shot import of a review a browser still holds in localStorage from before comments lived on the task. */
+			importReviewComments: {
+				params: { taskId: string; projectId: string; comments: ReviewComment[] };
+				response: Task;
+			};
 			addTaskNote: {
 				params: { taskId: string; projectId: string; content: string; source?: NoteSource };
 				response: Task;
@@ -5479,6 +5743,15 @@ export type AppRPCSchema = {
 			taskPaneState: {
 				params: { taskId: string };
 				response: TaskPaneState;
+			};
+			/**
+			 * Read-only terminal snapshot for ONE task, the same observation `dev3 peek`
+			 * makes. `projectId` scopes the lookup so a cross-project surface can never
+			 * resolve a seq-alike from the wrong board.
+			 */
+			peekTaskTerminal: {
+				params: { taskId: string; projectId: string; pane?: string; lines?: number };
+				response: TaskPeekSnapshot;
 			};
 			taskPaneAction: {
 				params: { taskId: string; action: TaskPaneAction };
@@ -5644,6 +5917,10 @@ export type AppRPCSchema = {
 				};
 				response: void;
 			};
+			interfaceOnboarding: {
+				params: InterfaceOnboardingRequest;
+				response: InterfaceOnboardingResponse;
+			};
 			/**
 			 * Liveness beat from a renderer, every ~2s. A wedged renderer cannot report
 			 * on itself — every timer and error handler in it is dead too — so the
@@ -5658,8 +5935,34 @@ export type AppRPCSchema = {
 					hiddenSinceLastBeat: boolean;
 					terminals: number;
 					frameErrorPanes: number;
+					/** A desktop window; a remote tab's silence is also what a dead link looks like. */
+					desktop?: boolean;
+					/** An artifact viewer is mounted. Coarse presence — never the document or its task. */
+					artifactOpen?: boolean;
+					/** Age of the last artifact open/close in this page load; null = none. */
+					artifactIdleMs?: number | null;
+					viewport?: { width: number; height: number; dpr: number };
+					focused?: boolean;
+					animationFrameAgeMs?: number | null;
 				};
 				response: void;
+			};
+			/**
+			 * The window is going away on purpose (closed, reloaded, navigated). Without
+			 * it the backend reads an ordinary close as the freeze it watches for.
+			 */
+			rendererHeartbeatStop: {
+				params: { clientId: string };
+				response: void;
+			};
+			/**
+			 * One-shot: was the artifact popup turned on for the user because the
+			 * previous session stopped responding with an artifact open? Reading it
+			 * clears it, so the notice is shown once and never again.
+			 */
+			consumeArtifactFreezeNotice: {
+				params: Record<string, never>;
+				response: { freezeAt: number } | null;
 			};
 			listBranches: {
 				params: { projectId: string };
@@ -5731,6 +6034,15 @@ export type AppRPCSchema = {
 			checkCanaryChannelAvailable: {
 				params: void;
 				response: { available: boolean };
+			};
+			/**
+			 * Whether this machine can record freeze diagnostics at all (macOS only)
+			 * and whether the collector is running right now. Asked of the host because
+			 * a remote browser answers for its own machine, not the one that freezes.
+			 */
+			getFreezeDiagnosticsStatus: {
+				params: void;
+				response: { supported: boolean; running: boolean; directory: string };
 			};
 			getPreventSleepState: {
 				params: void;

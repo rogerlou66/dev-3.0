@@ -33,6 +33,7 @@ vi.mock("../rpc", () => ({
 			openNewWindow: vi.fn().mockResolvedValue(undefined),
 			hideApp: vi.fn().mockResolvedValue(undefined),
 			setWindowTitleContext: vi.fn().mockResolvedValue(undefined),
+			setActiveContext: vi.fn().mockResolvedValue(undefined),
 			listTmuxSessions: vi.fn().mockResolvedValue([]),
 			getProjectCurrentBranch: vi.fn().mockResolvedValue({ branch: "main", isBaseBranch: true, isDirty: false }),
 			pullProjectMain: vi.fn(),
@@ -90,6 +91,7 @@ vi.mock("../rpc", () => ({
 			}),
 			stopTunnel: vi.fn().mockResolvedValue(undefined),
 			readArtifactContent: vi.fn().mockResolvedValue({ html: "<p>artifact</p>", assets: [] }),
+			readFilePreview: vi.fn().mockResolvedValue({ kind: "text", content: "Overlay file", truncated: false, size: 12 }),
 		},
 	},
 }));
@@ -200,9 +202,23 @@ vi.mock("../components/ProjectTerminal", () => ({
 	default: () => <div data-testid="project-terminal-screen" />,
 }));
 // The screen's own data loading lives in agent-traffic-ui.test.tsx; here only
-// its routing matters.
+// its routing matters — including the scope it is handed, since the real screen
+// seeds its project filter from this prop and `null` means "all active projects".
 vi.mock("../components/agent-traffic/AgentTrafficScreen", () => ({
-	default: () => <div data-testid="agent-traffic-screen" />,
+	default: ({
+		projectId,
+		focus,
+	}: {
+		projectId: string | null;
+		focus?: { taskId: string; projectId: string } | null;
+	}) => (
+		<div
+			data-testid="agent-traffic-screen"
+			data-scope-project-id={projectId ?? ""}
+			data-focus-task-id={focus?.taskId ?? ""}
+			data-focus-project-id={focus?.projectId ?? ""}
+		/>
+	),
 }));
 vi.mock("../components/TaskImageViewer", () => ({
 	default: ({ initialIndex, newIds }: { initialIndex: number; newIds?: string[] }) => (
@@ -224,7 +240,8 @@ import { initTaskSoundPlayback, playTaskSoundFromPush, setTaskCompletionSoundEna
 import { adjustZoom, applyZoom, ZOOM_STEP, DEFAULT_ZOOM } from "../zoom";
 import { setStreamerMode } from "../streamer-mode";
 import { setAgentTrafficEnabledForTests, syncAgentTrafficFromGlobalSettings } from "../agent-traffic-flag";
-import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "../agent-traffic-events";
+import { OPEN_AGENT_TRAFFIC_LOG_EVENT, openAgentTrafficLog } from "../agent-traffic-events";
+import { RPC_STATUS_EVENT } from "../diagnostics";
 
 const mockedAdjustZoom = vi.mocked(adjustZoom);
 
@@ -595,6 +612,7 @@ describe("App keyboard shortcuts", () => {
 			const trigger = screen.getByRole("button", { name: "Open workspace overlay" });
 			await userEvent.click(trigger);
 			expect(screen.getByTestId("workspace-task-overlay")).toHaveAttribute("data-task-id", "overlay-task");
+			expect(api.request.setActiveContext).toHaveBeenLastCalledWith({ projectId: project.id, taskId: "overlay-task" });
 			expect(screen.getByTestId("dashboard-screen")).toBeInTheDocument();
 			expect(screen.getByRole("main")).toHaveAttribute("inert");
 
@@ -615,6 +633,35 @@ describe("App keyboard shortcuts", () => {
 			expect(screen.getByTestId("artifact-viewer")).not.toHaveAttribute("data-presentation", "offscreen");
 			await userEvent.click(screen.getByRole("button", { name: "Close task workspace" }));
 			expect(screen.getByTestId("artifact-viewer-offscreen")).toBeInTheDocument();
+		});
+
+		it("keeps persisted artifact comments attached to the overlay task", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			act(() => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", { detail: { task: {
+				id: "overlay-task", projectId: project.id, status: "in-progress",
+				review: [{ id: "overlay-comment", body: "Keep overlay review context", createdAt: "2026-09-22T00:00:00Z",
+					anchor: { kind: "artifact-element", artifactId: "overlay-report", version: 1, title: "Report", selector: "p", text: "artifact", heading: null } }],
+			} } })));
+			act(() => window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", { detail: {
+				taskId: "overlay-task", projectId: project.id, artifacts: [{ id: "overlay-report", name: "Report", storedPath: "/tmp/report.html", createdAt: "2026-09-22T00:00:00Z" }], index: 0,
+			} })));
+			await userEvent.click(await screen.findByTestId("artifact-viewer-comment"));
+			expect(screen.getByTestId("artifact-review-thread")).toHaveTextContent("Keep overlay review context");
+		});
+
+		it("keeps file preview comments attached to the overlay project and task", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue([project]);
+			await renderApp();
+			await userEvent.click(screen.getByRole("button", { name: "Open workspace overlay" }));
+			act(() => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", { detail: { task: {
+				id: "overlay-task", projectId: project.id, status: "in-progress",
+				review: [{ id: "overlay-file-comment", body: "Persisted file review", createdAt: "2026-09-22T00:00:00Z",
+					anchor: { kind: "file-range", path: "/tmp/overlay.txt", startLine: 1, endLine: 1, excerpt: "Overlay file" } }],
+			} } })));
+			act(() => window.dispatchEvent(new CustomEvent("dev3:openFilePreview", { detail: { path: "/tmp/overlay.txt", taskId: "overlay-task" } })));
+			expect(await screen.findByTestId("file-review-thread")).toHaveTextContent("Persisted file review");
 		});
 
 		it("hands off to the existing full-page task route", async () => {
@@ -1200,6 +1247,25 @@ describe("App keyboard shortcuts", () => {
 				expect(await screen.findByTestId("agent-traffic-screen")).toBeInTheDocument();
 			});
 		});
+
+		// A deliberate entry keeps seeding the board in view — only a notification
+		// click overrides that, and it does so by asking for all projects.
+		it("seeds the board in view for a deliberate entry, and all projects when asked", async () => {
+			await withTrafficBeta(async () => {
+				await renderApp();
+				await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+				expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute(
+					"data-scope-project-id",
+					"p1",
+				);
+
+				await userEvent.keyboard("{Escape}");
+				await act(async () => {
+					openAgentTrafficLog("all-projects");
+				});
+				expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute("data-scope-project-id", "");
+			});
+		});
 	});
 
 	// Quick shell (⇧⌘`) spawns a scratch op in the built-in Operations board and
@@ -1724,6 +1790,58 @@ describe("App keyboard shortcuts", () => {
 			await userEvent.click(screen.getByRole("button", { name: /^Back/ }));
 			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
 			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+		});
+
+		// The reported bug: standing on one board, a toast about traffic on ANOTHER
+		// board opened the screen scoped to the board in view, so the message that
+		// raised the toast was filtered out of its own destination. A notification
+		// click always lands on all active projects (no seeded project id).
+		it("opens at all active projects when the traffic belongs to another board", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage({ projectId: "p2", fromProjectId: "p2" });
+
+			await userEvent.click(await toastButton());
+
+			expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute("data-scope-project-id", "");
+		});
+
+		// Same rule when both ends sit on the board in view: the destination does not
+		// depend on where the message came from, only on how the screen was opened.
+		it("opens at all active projects for same-board traffic too", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+
+			await userEvent.click(await toastButton());
+
+			expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute("data-scope-project-id", "");
+		});
+
+		// Opening the screen was only half of it: the click is about ONE task, so the
+		// receiver arrives as the screen's subject and opens selected. Without it the
+		// user landed on the whole scene and had to hunt for the card the toast named.
+		it("hands the receiving task to the screen as its subject", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage({ projectId: "p2", fromProjectId: "p2", taskId: "t-receiver" });
+
+			await userEvent.click(await toastButton());
+
+			const view = await screen.findByTestId("agent-traffic-screen");
+			expect(view).toHaveAttribute("data-focus-task-id", "t-receiver");
+			expect(view).toHaveAttribute("data-focus-project-id", "p2");
+		});
+
+		// A deliberate entry has no subject: the shortcut must not arrive carrying
+		// whichever task a toast happened to name earlier.
+		it("carries no subject when the screen is opened by the shortcut", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+
+			await userEvent.keyboard("{Shift>}{Meta>}m{/Meta}{/Shift}");
+
+			expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute("data-focus-task-id", "");
 		});
 
 		// The toast outlives the toggle, so the destination cannot be captured when
@@ -3778,6 +3896,51 @@ describe("App keyboard shortcuts", () => {
 			});
 			expect(screen.getByTestId("task-screen")).toBeInTheDocument();
 			expect(api.request.moveTask).not.toHaveBeenCalled();
+		});
+
+		// The push is one-shot and fire-and-forget: a transport that was down when
+		// the agent asked drops it silently, and the client that comes back has no
+		// reason to know it missed anything. It re-asks on every reconnect — the
+		// other half of h0x91b/dev-3.0#1669.
+		it("draws a cancellation that arrived while the transport was down, on reconnect", async () => {
+			vi.mocked(api.request.listPendingCancellationRequests).mockResolvedValue([]);
+			vi.mocked(confirm).mockResolvedValue(false);
+
+			await renderApp();
+			expect(api.request.respondToAgentCancellationRequest).not.toHaveBeenCalled();
+
+			vi.mocked(api.request.listPendingCancellationRequests).mockResolvedValue([
+				{ requestId: "req-c-dropped", taskId: "t1", projectId: "p1", taskTitle: "Missed junk", subject: undefined },
+			] as never);
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent(RPC_STATUS_EVENT, { detail: { state: "connected" } }));
+			});
+
+			await waitFor(() => {
+				expect(api.request.respondToAgentCancellationRequest).toHaveBeenCalledWith({
+					requestId: "req-c-dropped",
+					approved: false,
+				});
+			});
+		});
+
+		it("does not ask twice when a reconnect replays the dialog already on screen", async () => {
+			vi.mocked(api.request.listPendingCancellationRequests).mockResolvedValue([
+				{ requestId: "req-c-open", taskId: "t1", projectId: "p1", taskTitle: "Junk task", subject: undefined },
+			] as never);
+			// The user is still reading it — the promise never settles.
+			vi.mocked(confirm).mockReturnValue(new Promise<boolean>(() => {}));
+
+			await renderApp();
+			await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent(RPC_STATUS_EVENT, { detail: { state: "connected" } }));
+			});
+			await act(async () => { await Promise.resolve(); });
+
+			expect(confirm).toHaveBeenCalledTimes(1);
+			expect(api.request.respondToAgentCancellationRequest).not.toHaveBeenCalled();
 		});
 
 		it("draws a dialog for a cancellation pushed before this window existed", async () => {

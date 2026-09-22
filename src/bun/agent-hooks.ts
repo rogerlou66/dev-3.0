@@ -5,7 +5,7 @@
  * so that task status transitions happen automatically via the agent's built-in
  * event system, rather than relying solely on SKILL.md instructions.
  *
- * Currently supports Claude Code, Codex, GitHub Copilot CLI, and Antigravity CLI.
+ * Currently supports Claude Code, Codex, GitHub Copilot CLI, omp, and Antigravity CLI.
  * Extensible for Gemini, Cursor, etc.
  */
 
@@ -13,26 +13,30 @@ import type { AgentFamily, PermissionMode, TaskStatus } from "../shared/types";
 import { createLogger } from "./logger";
 import { getAgentAdapter } from "../shared/agent-adapters/registry";
 import { writeAntigravityHooks, writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
-import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass } from "./codex-config";
+import { quoteIfUnsafe } from "../shared/agent-adapters/shell";
+import { writeOmpStatusExtension } from "../shared/omp-status-extension";
+import { resolveCopilotHome } from "./copilot-config";
+import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass, resetCodexHelpProbe } from "./codex-config";
 import { join } from "node:path";
 import { resolveHookCliPath } from "../shared/dev3-cli-path";
-import { DEV3_HOME } from "./paths";
 
 export {
 	buildClaudeHooks,
 	buildCodexHooks,
+	buildCopilotHooks,
 	mergeClaudeHooks,
 	mergeCodexHooks,
 	writeAntigravityHooks,
 	writeClaudeHooks,
 	writeCodexHooks,
+	writeCopilotHooks,
 } from "../shared/agent-hooks";
 
 const log = createLogger("agent-hooks");
 
-/** `codex --help` is a synchronous child spawn, and this runs on every launch. */
-let cachedHookTrustBypass: boolean | undefined;
-function getCodexHookTrustBypassCached(): boolean {
+/** Concurrent launches share the same asynchronous capability probe. */
+let cachedHookTrustBypass: Promise<boolean> | undefined;
+function getCodexHookTrustBypassCached(): Promise<boolean> {
 	if (cachedHookTrustBypass === undefined) cachedHookTrustBypass = detectCodexHookTrustBypass();
 	return cachedHookTrustBypass;
 }
@@ -40,6 +44,7 @@ function getCodexHookTrustBypassCached(): boolean {
 /** Reset the cached probe. Exposed for test isolation. */
 export function __resetCodexHookTrustBypassCache(): void {
 	cachedHookTrustBypass = undefined;
+	resetCodexHelpProbe();
 }
 
 /**
@@ -51,7 +56,7 @@ export function __resetCodexHookTrustBypassCache(): void {
  * `options.family` is which CLI this command actually is, which beats the
  * command-name guess — without it a wrapper script silently got no hooks.
  */
-export function setupAgentHooks(
+export async function setupAgentHooks(
 	worktreePath: string,
 	baseCommand: string,
 	options?: {
@@ -69,7 +74,7 @@ export function setupAgentHooks(
 			baseCommand,
 			family: options?.family ?? "auto",
 		});
-		return Promise.resolve(null);
+		return null;
 	}
 
 	if (spec.kind === "claude") {
@@ -78,15 +83,31 @@ export function setupAgentHooks(
 			worktreePath,
 			permissionMode: spec.permissionMode,
 		});
-		return Promise.resolve(null);
+		return null;
 	}
+
 	if (spec.kind === "copilot") {
-		const cliPath = resolveHookCliPath({
-			sourceCliPath: join(import.meta.dir, "..", "cli", process.platform === "win32" ? "dev3.exe" : "dev3"),
-		});
-		writeCopilotHooks(worktreePath, { cliPath, dev3Home: DEV3_HOME });
-		log.info("Copilot lifecycle hooks installed", { worktreePath });
-		return Promise.resolve(null);
+		// Copilot's hooks are user-level, not worktree-level (see writeCopilotHooks);
+		// the DEV3_TASK_ID guard in each command is what keeps them inert elsewhere.
+		const copilotHome = resolveCopilotHome();
+		try {
+			writeCopilotHooks(copilotHome);
+			log.info("Copilot status hooks installed", { copilotHome });
+		} catch (err) {
+			// Same silent-failure class as a missing hooksSpec: without these the
+			// task never leaves its column and nothing else would say why.
+			log.warn("Could not write Copilot hooks", { copilotHome, error: String(err) });
+		}
+		return null;
+	}
+	if (spec.kind === "omp") {
+		// One generated module under the dev3 home, loaded by absolute path. omp
+		// applies no trust gate to an explicitly passed `--hook`, so unlike Codex
+		// there is no bypass to probe for; a failed write throws to the caller,
+		// which launches without the flag and logs it.
+		const path = writeOmpStatusExtension();
+		log.info("omp status extension active", { worktreePath, path });
+		return `--hook ${quoteIfUnsafe(path)}`;
 	}
 	if (spec.kind === "antigravity") {
 		const cliPath = resolveHookCliPath({
@@ -105,13 +126,13 @@ export function setupAgentHooks(
 
 	// spec.kind === "codex"
 	writeCodexHooks(worktreePath);
-	if (!getCodexHookTrustBypassCached()) {
+	if (!(await getCodexHookTrustBypassCached())) {
 		// Worth a line: the definitions are in place, Codex reports them untrusted,
 		// and an untrusted hook is skipped in silence — so the board simply stops
 		// following this task and nothing else would say why.
 		log.warn("Codex cannot bypass hook trust; status hooks will not fire", { worktreePath });
-		return Promise.resolve(null);
+		return null;
 	}
-	log.info("Codex status hooks active (declared in config.toml)", { worktreePath });
-	return Promise.resolve(CODEX_HOOK_TRUST_BYPASS_FLAG);
+	log.info("Codex hook files prepared; a fresh Codex process is required to load changes", { worktreePath });
+	return CODEX_HOOK_TRUST_BYPASS_FLAG;
 }

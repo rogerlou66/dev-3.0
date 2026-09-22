@@ -48,6 +48,8 @@ import {
 	PanelLeftIcon,
 	ImagesIcon,
 	ArtifactsIcon,
+	SendLaterIcon,
+	HibernateIcon,
 } from "./TaskIcons";
 import TaskNotes from "./task-info-panel/TaskNotes";
 import TaskNotesOverlay from "./TaskNotesOverlay";
@@ -61,6 +63,10 @@ import { useIncludeTestsInDiff } from "../utils/includeTestsInDiff";
 import { useCompact } from "../utils/useCompact";
 import { useContainerWidth } from "../hooks/useContainerWidth";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useIsControlHidden } from "../hooks/useIsControlHidden";
+import { restoreControl } from "../hidden-controls";
+import HideableControl, { HideRowButton } from "./HideableControl";
+import PanelRestoreControl, { type PanelHideableEntry } from "./task-info-panel/PanelRestoreControl";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import BottomSheet from "./BottomSheet";
 import HelpSpot from "./HelpSpot";
@@ -153,6 +159,15 @@ function TaskInfoPanel({
 	const t = useT();
 	const compact = useCompact();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	// Per-control hiding (§5.10) — each of these can be individually hidden
+	// (right-click "Hide") and restored from the panel's one restore control.
+	const spawnAgentHidden = useIsControlHidden("spawn-agent");
+	const bugHuntersHidden = useIsControlHidden("bug-hunters");
+	const hibernateHidden = useIsControlHidden("hibernate");
+	const scheduledMessageHidden = useIsControlHidden("scheduled-message");
+	const tmuxPaneControlsHidden = useIsControlHidden("tmux-pane-controls");
+	const scriptsRunnerHidden = useIsControlHidden("scripts-runner");
+	const diffIncludeTestsHidden = useIsControlHidden("diff-include-tests");
 	const [actionsSheetOpen, setActionsSheetOpen] = useState(false);
 	const [collapsed, setCollapsed] = useState(() => readBool(LS_COLLAPSED, true));
 	const [panelHeight, setPanelHeight] = useState(() => readNumber(LS_HEIGHT, DEFAULT_HEIGHT));
@@ -653,7 +668,7 @@ function TaskInfoPanel({
 	// only ever modifies these very numbers, and as a neighbour it read as a
 	// second, unrelated action. Same segmented idiom as the status control —
 	// the border owns the group, a hairline splits the two click targets.
-	const showTestsSegment = project.kind !== "virtual" && !narrow && metadataBranchStatus != null && metadataBranchStatus.diffFiles > 0;
+	const showTestsSegment = !diffIncludeTestsHidden && project.kind !== "virtual" && !narrow && metadataBranchStatus != null && metadataBranchStatus.diffFiles > 0;
 	const diffSummaryBadge = project.kind !== "virtual" && metadataBranchStatus && metadataBranchStatus.diffFiles > 0 ? (
 		<div className="inline-flex items-center rounded-lg bg-elevated border border-edge hover:border-edge-active transition-colors flex-shrink-0">
 		<button
@@ -672,7 +687,7 @@ function TaskInfoPanel({
 			<span className="text-danger">−{visibleDiffDeletions}</span>
 		</button>
 		{showTestsSegment && (
-			<>
+			<HideableControl id="diff-include-tests">
 				<span className="h-4 w-px flex-shrink-0 bg-edge" aria-hidden="true" />
 				<Tooltip content={t("infoPanel.diffIncludeTestsTooltip")} detail={t("ttip.infoPanel.includeTests")}>
 					<button
@@ -689,7 +704,7 @@ function TaskInfoPanel({
 						<IncludeTestsIcon className="w-[0.95rem] h-[0.95rem]" off={!includeTests} />
 					</button>
 				</Tooltip>
-			</>
+			</HideableControl>
 		)}
 		</div>
 	) : null;
@@ -816,30 +831,38 @@ function TaskInfoPanel({
 	// that the lifecycle would ignore.
 	const completionIsForced = isCoordinatorTask(task);
 	const completionIsManual = taskCompletesManually(task);
+	const completionOwnerName = completionIsForced
+		? t("task.manualCompletionCoordinatorTooltip")
+		: completionIsManual ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip");
 	const manualCompletionToggleButton = (
-		<Tooltip
-			content={completionIsForced
-				? t("task.manualCompletionCoordinatorTooltip")
-				: completionIsManual ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
-			detail={t("ttip.task.manualCompletion")}
-		>
+		<Tooltip content={completionOwnerName} detail={t("ttip.task.manualCompletion")}>
 			<button
 				onClick={handleToggleManualCompletion}
 				disabled={completionIsForced}
-				aria-label={completionIsForced
-					? t("task.manualCompletionCoordinatorTooltip")
-					: completionIsManual ? t("task.manualCompletionEnabledTooltip") : t("task.manualCompletionTooltip")}
+				aria-label={completionOwnerName}
 				aria-pressed={completionIsManual}
+				data-testid="task-completion-owner"
 				className={`task-anim flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors flex-shrink-0 ${
 					completionIsManual
-						? "text-accent bg-accent/10 border border-accent/25"
+						? "warning-paper text-warning-strong hover:text-warning-strong hover:bg-warning/15 border border-warning/30"
 						: "text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
 				} ${completionIsForced ? "cursor-not-allowed" : ""}`}
 			>
-				{/* Icon only. Even the short "I decide" label cost bar width for a state
-				    the accent icon already carries; the full sentence lives in the
-				    tooltip and in the mobile sheet row. */}
+				{/* Amber, not accent: blue here is "a toggle is on", the same blue the
+				    watch bell two slots away wears, and the state was read as a bug
+				    rather than as a choice. Yellow is this bar's "deliberate hold"
+				    (same role as hibernate), and it is never the colour of an error or
+				    of a finished task. Off stays grey and wordless — the state that
+				    needs no explanation. */}
 				<CompletionOwnerIcon className="h-[0.95rem] w-[0.95rem]" active={completionIsManual} />
+				{/* Colour never carries the state alone: on a roomy bar the chip spells
+				    the mode out, in the same words as the merge dialog's third button —
+				    that dialog is where most people turn this on, and a shortened echo
+				    of it ("I decide") did not read as the same thing. Tight folds it
+				    back to the icon, where shape and hue still separate it. */}
+				{completionIsManual && !tight && (
+					<span className="text-micro font-semibold whitespace-nowrap">{t("task.manualCompletionEnabled")}</span>
+				)}
 			</button>
 		</Tooltip>
 	);
@@ -948,17 +971,19 @@ function TaskInfoPanel({
 		</BottomSheet>
 	);
 
-	const spawnAgentButton = isTaskActive && task.worktreePath ? (
-		<Tooltip content={t("tmux.spawnExtraAgentDesc")} detail={t("ttip.infoPanel.spawnAgent")}>
-			<button
-				onClick={() => setSpawnModalOpen(true)}
-				className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
-				aria-label={t("tmux.spawnExtraAgentDesc")}
-			>
-				<AddAgentIcon className="w-[1.05rem] h-[1.05rem]" />
-				{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("tmux.spawnExtraAgent")}</span>}
-			</button>
-	</Tooltip>
+	const spawnAgentButton = isTaskActive && task.worktreePath && !spawnAgentHidden ? (
+		<HideableControl id="spawn-agent">
+			<Tooltip content={t("tmux.spawnExtraAgentDesc")} detail={t("ttip.infoPanel.spawnAgent")}>
+				<button
+					onClick={() => setSpawnModalOpen(true)}
+					className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
+					aria-label={t("tmux.spawnExtraAgentDesc")}
+				>
+					<AddAgentIcon className="w-[1.05rem] h-[1.05rem]" />
+					{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("tmux.spawnExtraAgent")}</span>}
+				</button>
+			</Tooltip>
+		</HideableControl>
 	) : null;
 
 	// "Send later" — queue a message to this task's live agent (session action).
@@ -1018,21 +1043,19 @@ function TaskInfoPanel({
 		}
 	}
 
-	const sendLaterButton = isTaskActive && task.worktreePath ? (
-		<Tooltip content={t("task.sendLater")} detail={t("task.sendLaterHint")}>
-			<button
-				onClick={() => setScheduleMsgOpen(true)}
-				className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
-				aria-label={t("task.sendLater")}
-			>
-				<svg className="w-[1.05rem] h-[1.05rem]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-					<circle cx="12" cy="13" r="8" />
-					<path d="M12 9v4l2.5 1.5" />
-					<path d="M5 3 2 6M19 3l3 3" />
-				</svg>
-				{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("task.sendLaterShort")}</span>}
-			</button>
-		</Tooltip>
+	const sendLaterButton = isTaskActive && task.worktreePath && !scheduledMessageHidden ? (
+		<HideableControl id="scheduled-message">
+			<Tooltip content={t("task.sendLater")} detail={t("task.sendLaterHint")}>
+				<button
+					onClick={() => setScheduleMsgOpen(true)}
+					className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
+					aria-label={t("task.sendLater")}
+				>
+					<SendLaterIcon className="w-[1.05rem] h-[1.05rem]" />
+					{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("task.sendLaterShort")}</span>}
+				</button>
+			</Tooltip>
+		</HideableControl>
 	) : null;
 
 	// Park the task: kill the agent, its tmux session and the dev server, keep the
@@ -1043,31 +1066,25 @@ function TaskInfoPanel({
 	// back". It is the only coloured button left in this bar, and the skull is its
 	// one filled glyph on purpose — it has to stop the eye before the tooltip
 	// explains that the worktree survives.
-	const hibernateButton = isTaskActive && task.worktreePath && !task.hibernated && !task.preparing && !task.shuttingDown ? (
-		<Tooltip content={t("task.hibernate")} detail={t("task.hibernateHint")}>
-			<button
-				data-testid="task-hibernate-button"
-				onClick={handleHibernate}
-				disabled={hibernating}
-				className="task-anim warning-paper flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-warning-strong hover:text-warning-strong hover:bg-warning/15 border border-warning/30 disabled:opacity-50"
-				aria-label={t("task.hibernate")}
-			>
-				{hibernating ? (
-					<span className="w-[1.05rem] h-[1.05rem] animate-spin rounded-full border-2 border-warning/30 border-t-warning" />
-				) : (
-					<svg className="w-[1.05rem] h-[1.05rem]" viewBox="0 0 24 24" fill="none">
-						<path d="M3 13.6 21 20M21 13.6 3 20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-						<path
-							fill="currentColor"
-							fillRule="evenodd"
-							clipRule="evenodd"
-							d="M12 2.2c-3.3 0-5.8 2.4-5.8 5.7 0 1.8.8 3.3 2.1 4.4v1.5c0 .7.6 1.3 1.3 1.3h4.8c.7 0 1.3-.6 1.3-1.3v-1.5c1.3-1.1 2.1-2.6 2.1-4.4 0-3.3-2.5-5.7-5.8-5.7ZM9.4 5.8a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm5.2 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM12 10.6l1.4 2.4h-2.8l1.4-2.4Z"
-						/>
-					</svg>
-				)}
-				{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("task.hibernateShort")}</span>}
-			</button>
-		</Tooltip>
+	const hibernateButton = isTaskActive && task.worktreePath && !task.hibernated && !task.preparing && !task.shuttingDown && !hibernateHidden ? (
+		<HideableControl id="hibernate">
+			<Tooltip content={t("task.hibernate")} detail={t("task.hibernateHint")}>
+				<button
+					data-testid="task-hibernate-button"
+					onClick={handleHibernate}
+					disabled={hibernating}
+					className="task-anim warning-paper flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-warning-strong hover:text-warning-strong hover:bg-warning/15 border border-warning/30 disabled:opacity-50"
+					aria-label={t("task.hibernate")}
+				>
+					{hibernating ? (
+						<span className="w-[1.05rem] h-[1.05rem] animate-spin rounded-full border-2 border-warning/30 border-t-warning" />
+					) : (
+						<HibernateIcon className="w-[1.05rem] h-[1.05rem]" />
+					)}
+					{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("task.hibernateShort")}</span>}
+				</button>
+			</Tooltip>
+		</HideableControl>
 	) : null;
 
 	// Pending scheduled-message queue for this task's session (open-task view of
@@ -1076,18 +1093,36 @@ function TaskInfoPanel({
 		<ScheduledMessagesChip task={task} project={project} dispatch={dispatch} placement="down" />
 	) : null;
 
-	const bugHuntersButton = project.kind !== "virtual" && isTaskActive && task.worktreePath ? (
-		<Tooltip content={t("bugHunters.buttonTooltip")} detail={t("ttip.infoPanel.bugHunters")}>
-		<button
-			onClick={() => setBugHuntersOpen(true)}
-			className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
-			aria-label={t("bugHunters.buttonTooltip")}
-		>
-			<FindBugsIcon className="w-[1.05rem] h-[1.05rem]" />
-			{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("bugHunters.buttonLabel")}</span>}
-		</button>
-		</Tooltip>
+	const bugHuntersButton = project.kind !== "virtual" && isTaskActive && task.worktreePath && !bugHuntersHidden ? (
+		<HideableControl id="bug-hunters">
+			<Tooltip content={t("bugHunters.buttonTooltip")} detail={t("ttip.infoPanel.bugHunters")}>
+				<button
+					onClick={() => setBugHuntersOpen(true)}
+					className="task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
+					aria-label={t("bugHunters.buttonTooltip")}
+				>
+					<FindBugsIcon className="w-[1.05rem] h-[1.05rem]" />
+					{!compact && <span className="text-micro font-semibold whitespace-nowrap">{t("bugHunters.buttonLabel")}</span>}
+				</button>
+			</Tooltip>
+		</HideableControl>
 	) : null;
+
+	// Entries for the panel's one restore control (PanelRestoreControl filters
+	// to whichever of these are actually hidden right now, and groups them by
+	// bar). Row click runs the same action the visible control would; the
+	// three multi-action surfaces (pane layout, scripts, dev-server setup)
+	// have no single atomic action, so their row restores instead.
+	const panelHideableEntries: PanelHideableEntry[] = [
+		{ id: "spawn-agent", label: t("tmux.spawnExtraAgent"), onRun: () => setSpawnModalOpen(true) },
+		{ id: "bug-hunters", label: t("bugHunters.buttonLabel"), onRun: () => setBugHuntersOpen(true) },
+		{ id: "hibernate", label: t("task.hibernateShort"), onRun: () => { void handleHibernate(); } },
+		{ id: "scheduled-message", label: t("task.sendLaterShort"), onRun: () => setScheduleMsgOpen(true) },
+		{ id: "tmux-pane-controls", label: t("infoPanel.paneControlsLabel"), onRun: () => restoreControl("tmux-pane-controls") },
+		{ id: "scripts-runner", label: t("infoPanel.scriptsRunnerLabel"), onRun: () => restoreControl("scripts-runner") },
+		{ id: "setup-dev-server", label: t("header.setupDevServer"), onRun: () => restoreControl("setup-dev-server") },
+		{ id: "diff-include-tests", label: t("infoPanel.includeTestsLabel"), onRun: () => restoreControl("diff-include-tests") },
+	];
 
 	const worktreeSettingsButton = task.worktreePath ? (
 		<Tooltip content={t("projectSettings.tabWorktree")} detail={t("ttip.infoPanel.worktreeConfig")}>
@@ -1425,12 +1460,23 @@ function TaskInfoPanel({
 								onClick={handleToggleManualCompletion}
 								disabled={completionIsForced}
 								aria-pressed={completionIsManual}
-								className={`${SHEET_ROW_CLASS} ${completionIsManual ? "border-accent/30 bg-accent/10" : ""} ${completionIsForced ? "cursor-not-allowed opacity-60" : ""}`}
+								className={`${SHEET_ROW_CLASS} ${completionIsManual ? "warning-paper border-warning/30 bg-warning/10 text-warning-strong" : ""} ${completionIsForced ? "cursor-not-allowed opacity-60" : ""}`}
 							>
-								<CompletionOwnerIcon className={`h-5 w-5 shrink-0 ${completionIsManual ? "text-accent" : "text-fg-3"}`} active={completionIsManual} />
-								<span className="flex-1 text-sm font-medium">{completionIsForced
-									? t("task.manualCompletionCoordinatorTooltip")
-									: completionIsManual ? t("task.manualCompletionEnabled") : t("task.manualCompletion")}</span>
+								<CompletionOwnerIcon className={`h-5 w-5 shrink-0 ${completionIsManual ? "text-warning-strong" : "text-fg-3"}`} active={completionIsManual} />
+								<span className="flex-1 min-w-0">
+									<span className="block text-sm font-medium">{completionIsManual
+										? t("task.manualCompletionEnabled")
+										: t("task.manualCompletion")}</span>
+									{/* A phone has no tooltip, so the row itself carries the
+									    consequence — the thing that reads as a bug when unsaid. */}
+									{completionIsManual && (
+										<span className="block text-micro font-normal leading-snug opacity-80">
+											{completionIsForced
+												? t("task.manualCompletionCoordinatorTooltip")
+												: t("task.manualCompletionConsequence")}
+										</span>
+									)}
+								</span>
 							</button>
 
 							{/* The bar may shed the diff badge on a narrow screen, so the diff
@@ -1454,20 +1500,26 @@ function TaskInfoPanel({
 								</button>
 							)}
 
-							{isTaskActive && task.worktreePath && (
-								<button type="button" onClick={() => setSpawnModalOpen(true)} className={SHEET_ROW_CLASS}>
-									<AddAgentIcon className="h-5 w-5 shrink-0 text-success" />
-									<span className="flex-1 text-sm font-medium">{t("tmux.spawnExtraAgent")}</span>
-									<ChevronRightIcon />
-								</button>
+							{isTaskActive && task.worktreePath && !spawnAgentHidden && (
+								<div className={`${SHEET_ROW_CLASS} !pr-2`}>
+									<button type="button" onClick={() => setSpawnModalOpen(true)} className="flex flex-1 min-w-0 items-center gap-3">
+										<AddAgentIcon className="h-5 w-5 shrink-0 text-success" />
+										<span className="flex-1 text-sm font-medium">{t("tmux.spawnExtraAgent")}</span>
+										<ChevronRightIcon />
+									</button>
+									<HideRowButton id="spawn-agent" />
+								</div>
 							)}
 
-							{project.kind !== "virtual" && isTaskActive && task.worktreePath && (
-								<button type="button" onClick={() => setBugHuntersOpen(true)} className={SHEET_ROW_CLASS}>
-									<FindBugsIcon className="h-5 w-5 shrink-0 text-danger" />
-									<span className="flex-1 text-sm font-medium">{t("bugHunters.buttonLabel")}</span>
-									<ChevronRightIcon />
-								</button>
+							{project.kind !== "virtual" && isTaskActive && task.worktreePath && !bugHuntersHidden && (
+								<div className={`${SHEET_ROW_CLASS} !pr-2`}>
+									<button type="button" onClick={() => setBugHuntersOpen(true)} className="flex flex-1 min-w-0 items-center gap-3">
+										<FindBugsIcon className="h-5 w-5 shrink-0 text-danger" />
+										<span className="flex-1 text-sm font-medium">{t("bugHunters.buttonLabel")}</span>
+										<ChevronRightIcon />
+									</button>
+									<HideRowButton id="bug-hunters" />
+								</div>
 							)}
 
 							<TaskExposedPorts task={task} rowClassName={SHEET_ROW_CLASS} />
@@ -1579,10 +1631,15 @@ function TaskInfoPanel({
 							{sendLaterButton}
 							{hibernateButton}
 							{scheduledMessagesChip}
-							<div className="w-px h-6 self-center bg-edge flex-shrink-0 mx-1" aria-hidden="true" />
-							<TaskPaneControls taskId={task.id} compact={tight} />
+							{!tmuxPaneControlsHidden && (
+								<HideableControl id="tmux-pane-controls">
+									<div className="w-px h-6 self-center bg-edge flex-shrink-0 mx-1" aria-hidden="true" />
+									<TaskPaneControls taskId={task.id} compact={tight} />
+								</HideableControl>
+							)}
 						</div>
 						{worktreeSettingsButton}
+						<PanelRestoreControl entries={panelHideableEntries} />
 						<HelpSpot topicId="inspector.panel" className="ml-0.5" />
 						<TerminalShortcutsButton taskId={task.id} />
 						{showPanelButton}
@@ -1611,7 +1668,11 @@ function TaskInfoPanel({
 							<TaskOpenIn task={task} project={project} isTaskActive={isTaskActive} showFileBrowser compact={tight} />
 							{project.kind !== "virtual" && (
 								<>
-									<TaskScripts task={task} project={project} isTaskActive={isTaskActive} />
+									{!scriptsRunnerHidden && (
+										<HideableControl id="scripts-runner">
+											<TaskScripts task={task} project={project} isTaskActive={isTaskActive} />
+										</HideableControl>
+									)}
 									<TaskDevServer task={task} project={project} isTaskActive={isTaskActive} compact={tight} />
 								</>
 							)}
@@ -1648,9 +1709,14 @@ function TaskInfoPanel({
 								{sendLaterButton}
 								{hibernateButton}
 								{scheduledMessagesChip}
-								<div className="w-px h-6 self-center bg-edge flex-shrink-0 mx-1" aria-hidden="true" />
-								<TaskPaneControls taskId={task.id} compact={tight} />
+								{!tmuxPaneControlsHidden && (
+									<HideableControl id="tmux-pane-controls">
+										<div className="w-px h-6 self-center bg-edge flex-shrink-0 mx-1" aria-hidden="true" />
+										<TaskPaneControls taskId={task.id} compact={tight} />
+									</HideableControl>
+								)}
 							</div>
+							<PanelRestoreControl entries={panelHideableEntries} />
 							<HelpSpot topicId="inspector.panel" className="ml-0.5" />
 							<TerminalShortcutsButton taskId={task.id} />
 							{showPanelButton}
@@ -1678,7 +1744,11 @@ function TaskInfoPanel({
 								<TaskOpenIn task={task} project={project} isTaskActive={isTaskActive} showFileBrowser={false} compact={tight} />
 								{project.kind !== "virtual" && (
 									<>
-										<TaskScripts task={task} project={project} isTaskActive={isTaskActive} />
+										{!scriptsRunnerHidden && (
+											<HideableControl id="scripts-runner">
+												<TaskScripts task={task} project={project} isTaskActive={isTaskActive} />
+											</HideableControl>
+										)}
 										<TaskDevServer task={task} project={project} isTaskActive={isTaskActive} compact={tight} />
 									</>
 								)}

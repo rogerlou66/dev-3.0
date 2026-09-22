@@ -4,24 +4,29 @@ import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
 import SettingsToggle from "./SettingsToggle";
 
-/**
- * Home for beta behaviour that is still labelled experimental and states its own
- * limitations. Most entries ship off; agent traffic ships on and can be turned off.
- */
 export default function AdvancedExperienceSection({
 	t,
 	globalSettings,
+	freezeDiagnostics,
 	onTerminalBidiToggle,
 	onAgentTrafficToggle,
+	onFreezeDiagnosticsToggle,
 }: {
 	t: TFunction;
 	globalSettings: GlobalSettings;
+	/** Null until the host answers — the row stays inert rather than guessing
+	 *  that the machine running the app can be sampled. */
+	freezeDiagnostics: { supported: boolean; running: boolean; directory: string } | null;
 	onTerminalBidiToggle: (enabled: boolean) => void;
 	onAgentTrafficToggle: (enabled: boolean) => void;
+	onFreezeDiagnosticsToggle: (enabled: boolean) => void;
 }) {
-	const bidiEnabled = globalSettings.experimentalTerminalBidi === true;
-	// Default-on, unlike its neighbours: absent is "never chose", not "off".
+	// Default-on: absent is "never chose", not "off".
+	const bidiEnabled = globalSettings.experimentalTerminalBidi !== false;
 	const trafficEnabled = globalSettings.experimentalAgentTraffic !== false;
+	// Default-off: only an explicit true opts in.
+	const freezeEnabled = globalSettings.freezeDiagnosticsEnabled === true;
+	const freezeSupported = freezeDiagnostics?.supported === true;
 
 	return (
 		<SettingsSection
@@ -65,6 +70,38 @@ export default function AdvancedExperienceSection({
 					/>
 					<p className="text-fg-muted text-xs mt-2">
 						{t("settings.agentTrafficCaveat")}
+					</p>
+				</div>
+			</SettingsEntry>
+
+			<SettingsEntry anchor="freeze-diagnostics">
+				<div>
+					<p className="block text-fg text-sm font-semibold mb-2">
+						{t("settings.freezeDiagnostics")}
+					</p>
+					<p className="text-fg-3 text-sm mb-3">{t("settings.freezeDiagnosticsDesc")}</p>
+					{freezeDiagnostics && !freezeSupported ? (
+						<p className="text-fg-muted text-sm mb-3">
+							{t("settings.freezeDiagnosticsUnsupported")}
+						</p>
+					) : null}
+					<SettingsToggle
+						checked={freezeSupported && freezeEnabled}
+						disabled={!freezeSupported}
+						ariaLabel={t("settings.freezeDiagnostics")}
+						onLabel={t("settings.on")}
+						offLabel={t("settings.off")}
+						onToggle={() => onFreezeDiagnosticsToggle(!freezeEnabled)}
+					/>
+					{freezeSupported ? (
+						<p className="text-fg-muted text-xs mt-2 break-all">
+							{t("settings.freezeDiagnosticsPath", {
+								directory: freezeDiagnostics?.directory ?? "",
+							})}
+						</p>
+					) : null}
+					<p className="text-fg-muted text-xs mt-2">
+						{t("settings.freezeDiagnosticsCaveat")}
 					</p>
 				</div>
 			</SettingsEntry>

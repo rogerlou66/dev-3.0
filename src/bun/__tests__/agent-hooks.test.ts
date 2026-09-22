@@ -17,7 +17,7 @@ import {
 	dev3BashPermissions,
 	ensureDefaultMode,
 	ensureDevPermission,
-	getCodexHookTargetStatus,
+	getAgentHookTargetStatus,
 	TOLERATE_APP_OFFLINE_FLAG,
 } from "../../shared/agent-hooks";
 import { hookCliDialect } from "../../shared/dev3-cli-path";
@@ -59,7 +59,7 @@ describe("buildClaudeHooks", () => {
 		// The status move is what every task's board position depends on, so the
 		// recorder is added beside it rather than folded into it.
 		expect(move!.hooks[0]!.command).toContain("task move --status in-progress");
-		expect(record!.hooks[0]!.command).toBe(`${DEV3_CLI} hook claude-prompt --claude-hook`);
+		expect(record!.hooks[0]!.command).toBe(`${DEV3_CLI} hook claude-prompt`);
 		expect(record!.hooks[0]!.timeout).toBe(5);
 	});
 
@@ -222,7 +222,7 @@ describe("buildClaudeHooks", () => {
 
 		for (const event of ["PreToolUse", "PostToolUse", "UserPromptSubmit"] as const) {
 			const cmd = hooks[event][0].hooks[0].command;
-			expect(cmd).toContain("--status in-progress --if-status-not review-by-ai --claude-hook || [ $? -eq 2 ]");
+			expect(cmd).toContain("--status in-progress --if-status-not review-by-ai || [ $? -eq 2 ]");
 		}
 	});
 
@@ -346,20 +346,29 @@ describe("buildCodexHooks", () => {
 
 	it("tool hooks cover Bash, apply_patch aliases, and MCP tools", () => {
 		const hooks = buildCodexHooks();
-		const matcher = "Bash|Edit|Write|^apply_patch$|^mcp__.*";
+		const matcher = "Bash|Edit|Write|^apply_patch$|^mcp__.*|^(functions\\.)?request_user_input(_async)?$";
 
 		expect(hooks.PreToolUse[0].matcher).toBe(matcher);
 		expect(hooks.PermissionRequest[0].matcher).toBe(matcher);
 		expect(hooks.PostToolUse[0].matcher).toBe(matcher);
 	});
 
+	it.each(["request_user_input", "request_user_input_async", "functions.request_user_input_async"])(
+		"subscribes to question tool %s", (tool) => {
+			const hooks = buildCodexHooks();
+			for (const event of ["PreToolUse", "PostToolUse"]) {
+				expect(hooks[event].some(group => new RegExp(group.matcher!).test(tool))).toBe(true);
+			}
+		},
+	);
+
 	it("every event calls one stable worktree-local handler", () => {
 		const hooks = buildCodexHooks();
 
-		for (const groups of Object.values(hooks)) {
+		for (const [event, groups] of Object.entries(hooks)) {
 			for (const group of groups) {
 				expect(group.hooks).toEqual([
-					{ type: "command", command: CODEX_DEV3_HOOK_COMMAND, timeout: 5 },
+					{ type: "command", command: CODEX_DEV3_HOOK_COMMAND, timeout: event === "Interrupt" || event === "SessionEnd" ? 3 : 5 },
 				]);
 			}
 		}
@@ -377,7 +386,7 @@ describe("buildCodexHooks", () => {
 	});
 });
 
-describe("getCodexHookTargetStatus", () => {
+describe("getAgentHookTargetStatus", () => {
 	it.each([
 		["SessionStart", "review-by-user", true, "in-progress"],
 		["UserPromptSubmit", "in-progress", false, "in-progress"],
@@ -388,34 +397,34 @@ describe("getCodexHookTargetStatus", () => {
 		["Stop", "in-progress", true, "review-by-ai"],
 		["Stop", "review-by-ai", true, "review-by-user"],
 	] as const)("maps %s from %s (auto-review=%s)", (event, current, autoReview, expected) => {
-		expect(getCodexHookTargetStatus(event, current, autoReview)).toBe(expected);
+		expect(getAgentHookTargetStatus(event, current, autoReview)).toBe(expected);
 	});
 
 	it("preserves AI review while its agent is working", () => {
-		expect(getCodexHookTargetStatus("PreToolUse", "review-by-ai", true)).toBeNull();
+		expect(getAgentHookTargetStatus("PreToolUse", "review-by-ai", true)).toBeNull();
 	});
 
 	// A scratch task launches parked in user-questions with no prompt. Codex
 	// fires SessionStart at startup, which must not claim the task is working —
 	// only a real prompt may.
 	it("leaves a task parked in user-questions when the session starts", () => {
-		expect(getCodexHookTargetStatus("SessionStart", "user-questions", false)).toBeNull();
+		expect(getAgentHookTargetStatus("SessionStart", "user-questions", false)).toBeNull();
 	});
 
 	it("resumes the remembered status when the session starts after an approval", () => {
-		expect(getCodexHookTargetStatus("SessionStart", "user-questions", false, "in-progress"))
+		expect(getAgentHookTargetStatus("SessionStart", "user-questions", false, "in-progress"))
 			.toBe("in-progress");
 	});
 
 	it.each(["todo", "user-questions", "review-by-user"] as const)(
 		"does not overwrite %s when a turn stops",
 		(status) => {
-			expect(getCodexHookTargetStatus("Stop", status, true)).toBeNull();
+			expect(getAgentHookTargetStatus("Stop", status, true)).toBeNull();
 		},
 	);
 
 	it.each(["completed", "cancelled"] as const)("never reopens terminal status %s", (status) => {
-		expect(getCodexHookTargetStatus("UserPromptSubmit", status, true)).toBeNull();
+		expect(getAgentHookTargetStatus("UserPromptSubmit", status, true)).toBeNull();
 	});
 });
 
@@ -869,19 +878,19 @@ describe("POSIX hook output (byte-identical contract)", () => {
 
 	it("renders the exact Claude command strings", () => {
 		const hooks = buildClaudeHooks({ stopTarget: "review-by-ai", dialect: posix });
-		const working = `${DEV3_CLI} task move --status in-progress --if-status-not review-by-ai --claude-hook || [ $? -eq 2 ]`;
+		const working = `${DEV3_CLI} task move --status in-progress --if-status-not review-by-ai || [ $? -eq 2 ]`;
 
 		expect(hooks.UserPromptSubmit[0].hooks[0].command).toBe(working);
 		expect(hooks.PreToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PostToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PermissionRequest[0].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status user-questions --claude-hook || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status user-questions || [ $? -eq 2 ]`,
 		);
 		expect(hooks.Stop[0].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status review-by-ai --if-status in-progress --claude-hook || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status review-by-ai --if-status in-progress || [ $? -eq 2 ]`,
 		);
 		expect(hooks.Stop[1].hooks[0].command).toBe(
-			`${DEV3_CLI} task move --status review-by-user --if-status review-by-ai --claude-hook || [ $? -eq 2 ]`,
+			`${DEV3_CLI} task move --status review-by-user --if-status review-by-ai || [ $? -eq 2 ]`,
 		);
 	});
 
@@ -910,19 +919,19 @@ describe("Windows hook output", () => {
 		const hooks = buildClaudeHooks({ stopTarget: "review-by-ai", dialect: WIN_SPACES });
 		const cli = WIN_SPACES.cli;
 		expect(cli).toBe('"C:/Users/John Doe/.dev3.0/bin/dev3.exe"');
-		const working = `${cli} task move --status in-progress --if-status-not review-by-ai --tolerate-app-offline --claude-hook`;
+		const working = `${cli} task move --status in-progress --if-status-not review-by-ai --tolerate-app-offline`;
 
 		expect(hooks.UserPromptSubmit[0].hooks[0].command).toBe(working);
 		expect(hooks.PreToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PostToolUse[0].hooks[0].command).toBe(working);
 		expect(hooks.PermissionRequest[0].hooks[0].command).toBe(
-			`${cli} task move --status user-questions --tolerate-app-offline --claude-hook`,
+			`${cli} task move --status user-questions --tolerate-app-offline`,
 		);
 		expect(hooks.Stop[0].hooks[0].command).toBe(
-			`${cli} task move --status review-by-ai --if-status in-progress --tolerate-app-offline --claude-hook`,
+			`${cli} task move --status review-by-ai --if-status in-progress --tolerate-app-offline`,
 		);
 		expect(hooks.Stop[1].hooks[0].command).toBe(
-			`${cli} task move --status review-by-user --if-status review-by-ai --tolerate-app-offline --claude-hook`,
+			`${cli} task move --status review-by-user --if-status review-by-ai --tolerate-app-offline`,
 		);
 	});
 

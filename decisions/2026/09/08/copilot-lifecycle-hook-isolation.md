@@ -1,5 +1,7 @@
 # Copilot lifecycle hook isolation
 
+Superseded on 2026-09-22 by `decisions/2026/09/22/upstream-v1-54-integration-preserves-fork.md`: Copilot now uses upstream's lifecycle hooks and session-start protocol injection; the fork-only environment and worktree hook path are removed.
+
 ## Context
 
 GitHub Copilot CLI reads native hooks and repository Claude settings together. Unmodified dev3 Claude hooks would therefore also run in Copilot, duplicating status changes and treating Copilot permission-service events as user attention even when permission is already granted.

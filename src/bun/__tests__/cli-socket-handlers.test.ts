@@ -1,3 +1,4 @@
+import codexQuestionHookTrace from "./fixtures/codex-0.154-question-hooks.json";
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, TASK_REF_UNRESOLVED_PREFIX, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type TaskMovement, type SharedArtifact, type SharedImage } from "../../shared/types";
 
@@ -118,10 +119,12 @@ vi.mock("../task-start-ref", () => ({
 	resolveTaskStartRef: vi.fn(async () => undefined),
 }));
 
+const hookInfo = vi.hoisted(() => vi.fn());
+
 vi.mock("../logger", () => ({
 	createLogger: () => ({
 		debug: vi.fn(),
-		info: vi.fn(),
+		info: hookInfo,
 		warn: vi.fn(),
 		error: vi.fn(),
 	}),
@@ -486,6 +489,103 @@ describe("task.agentHook", () => {
 		});
 	}
 
+	it.each([
+		["request_user_input", "in-progress"], ["request_user_input_async", "in-progress"],
+		["request_user_input", "review-by-ai"], ["request_user_input_async", "review-by-ai"],
+	] as const)(
+		"keeps %s questions visible from %s across unrelated tools and Stop", async (toolName, initialStatus) => {
+			const project = makeProject({ autoReviewEnabled: true });
+			let storedTask = makeTask({ status: initialStatus });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockImplementation(async () => [storedTask]);
+			vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator: any) => {
+				const { updates, result } = await mutator(storedTask);
+				storedTask = { ...storedTask, ...updates };
+				return { task: storedTask, result };
+			});
+			const hook = async (event: string, name?: string) => {
+				const response = await handleRequest(makeRequest("task.agentHook", {
+					taskId: storedTask.id, projectId: project.id, sessionId: `questions-${toolName}-${initialStatus}`,
+					event, toolName: name, toolUseId: "question-1",
+				}));
+				expect(response.ok).toBe(true);
+				storedTask = response.data as Task;
+			};
+			await hook(toolName === "request_user_input" ? "PreToolUse" : "PostToolUse", toolName);
+			expect(storedTask.status).toBe("user-questions");
+			await hook("PreToolUse", "Bash");
+			await hook("PostToolUse", "Bash");
+			expect(storedTask.status).toBe("user-questions");
+			if (toolName === "request_user_input_async") {
+				await hook("Stop");
+				expect(storedTask.status).toBe("user-questions");
+				await hook("UserPromptSubmit");
+			} else {
+				await hook("PostToolUse", toolName);
+			}
+			expect(storedTask.status).toBe(initialStatus);
+			await hook("Stop");
+			expect(storedTask.status).toBe(initialStatus === "review-by-ai" ? "review-by-user" : "review-by-ai");
+		},
+	);
+
+	it.each(["Interrupt", "SessionEnd"])("releases a blocking question on %s", async event => {
+		const project = makeProject();
+		let task = makeTask({ status: "in-progress" });
+		mockAtomicHookUpdate(project, task);
+		const params = { taskId: task.id, projectId: project.id, sessionId: `cancel-${event}` };
+		const question = await handleRequest(makeRequest("task.agentHook", {
+			...params, event: "PreToolUse", toolName: "request_user_input", toolUseId: "q",
+		}));
+		task = question.data as Task;
+		expect(task.status).toBe("user-questions");
+		mockAtomicHookUpdate(project, task);
+		const cancelled = await handleRequest(makeRequest("task.agentHook", { ...params, event }));
+		expect((cancelled.data as Task).status).toBe("review-by-user");
+	});
+
+	it("logs hook order and status decisions without question or answer content", async () => {
+		const project = makeProject();
+		const task = makeTask({ status: "in-progress" });
+		mockAtomicHookUpdate(project, task);
+		await handleRequest(makeRequest("task.agentHook", {
+			taskId: task.id, projectId: project.id, sessionId: "log-test",
+			event: "PostToolUse", toolName: "request_user_input_async", toolUseId: "q",
+			questionIds: ["fingerprint"], prompt: "private answer", toolInput: "private question",
+		}));
+		expect(hookInfo).toHaveBeenCalledWith("Codex lifecycle hook", {
+			taskId: task.id, harness: "codex", sessionId: "log-test", event: "PostToolUse",
+			toolName: "request_user_input_async", toolUseId: "q", pendingQuestions: true,
+			previousStatus: "in-progress", targetStatus: "user-questions",
+			actualStatus: "user-questions", moveAccepted: true,
+		});
+		expect(JSON.stringify(hookInfo.mock.calls)).not.toContain("private");
+		mockAtomicHookUpdate(project, makeTask({ status: "user-questions" }));
+		await handleRequest(makeRequest("task.agentHook", {
+			taskId: task.id, projectId: project.id, sessionId: "log-test", event: "SessionEnd",
+		}));
+	});
+
+	it("replays installed Codex 0.154 hooks and preserves Has Questions at Stop", async () => {
+		const project = makeProject({ autoReviewEnabled: true });
+		let task = makeTask({ status: "in-progress" });
+		const observed: string[] = [];
+		for (const event of codexQuestionHookTrace) {
+			mockAtomicHookUpdate(project, task);
+			const response = await handleRequest(makeRequest("task.agentHook", {
+				...event, taskId: task.id, projectId: project.id, sessionId: "codex-live-trace",
+			}));
+			expect(response.ok).toBe(true);
+			task = response.data as Task;
+			observed.push(task.status);
+		}
+		expect(observed).toEqual(["in-progress", "in-progress", "in-progress", "user-questions", "user-questions"]);
+		mockAtomicHookUpdate(project, task);
+		await handleRequest(makeRequest("task.agentHook", {
+			taskId: task.id, projectId: project.id, sessionId: "codex-live-trace", event: "SessionEnd",
+		}));
+	});
+
 	it("moves a resumed turn to in-progress", async () => {
 		const project = makeProject();
 		const task = makeTask({ status: "review-by-user" });
@@ -643,7 +743,7 @@ describe("task.agentHook", () => {
 			event: "FutureEvent",
 		}));
 
-		expect(response.error).toContain("Unsupported Codex hook event");
+		expect(response.error).toContain("Unsupported status hook event");
 	});
 
 	function mockStatefulHookUpdate(project: Project, initial: Task): { get: () => Task } {
@@ -1047,6 +1147,61 @@ describe("task.show", () => {
 		expect(resp.ok).toBe(false);
 		expect(resp.error).toContain("across projects");
 		expect(resp.error).toContain("--project");
+	});
+
+	it("keeps a scoped lookup inside its project and names the board that does carry the ref", async () => {
+		// The whole point of scoping: a seq the caller's own board does not have
+		// must NOT come back as the stranger's task that happens to share the
+		// number. The answer still has to be actionable, so it names the board.
+		const projectA = makeProject({ id: "proj-a", name: "Alpha", path: "/tmp/a" });
+		const projectB = makeProject({ id: "proj-b", name: "Beta", path: "/tmp/b" });
+		vi.mocked(data.getProject).mockResolvedValue(projectA);
+		vi.mocked(data.loadProjects).mockResolvedValue([projectA, projectB]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockImplementation(async (p) =>
+			p.id === "proj-b" ? [makeTask({ id: "bbbbbbbb-1111-2222-3333-444444444444", seq: 130, projectId: "proj-b" })] : [],
+		);
+
+		const resp = await handleRequest(makeRequest("task.show", { taskId: "seq:130", projectId: "proj-a" }));
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain('Task not found in project "Alpha"');
+		expect(resp.error).toContain("does resolve on");
+		expect(resp.error).toContain("Beta");
+		expect(resp.error).toContain("--project proj-b");
+		// The stranger's task must not leak out as a result.
+		expect(resp.data).toBeUndefined();
+	});
+
+	it("stays quiet about other boards when no board carries the ref", async () => {
+		const projectA = makeProject({ id: "proj-a", name: "Alpha", path: "/tmp/a" });
+		const projectB = makeProject({ id: "proj-b", name: "Beta", path: "/tmp/b" });
+		vi.mocked(data.getProject).mockResolvedValue(projectA);
+		vi.mocked(data.loadProjects).mockResolvedValue([projectA, projectB]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockResolvedValue([]);
+
+		const resp = await handleRequest(makeRequest("task.show", { taskId: "seq:130", projectId: "proj-a" }));
+
+		expect(resp.ok).toBe(false);
+		expect(resp.error).not.toContain("does resolve on");
+	});
+
+	it("resolves the caller's own task when two boards share the seq", async () => {
+		const projectA = makeProject({ id: "proj-a", name: "Alpha", path: "/tmp/a" });
+		const projectB = makeProject({ id: "proj-b", name: "Beta", path: "/tmp/b" });
+		const mine = makeTask({ id: "aaaaaaaa-1111-2222-3333-444444444444", seq: 130, projectId: "proj-a" });
+		vi.mocked(data.getProject).mockResolvedValue(projectA);
+		vi.mocked(data.loadProjects).mockResolvedValue([projectA, projectB]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.loadTasks).mockImplementation(async (p) =>
+			p.id === "proj-a" ? [mine] : [makeTask({ id: "bbbbbbbb-1111-2222-3333-444444444444", seq: 130, projectId: "proj-b" })],
+		);
+
+		const resp = await handleRequest(makeRequest("task.show", { taskId: "seq:130", projectId: "proj-a" }));
+
+		expect(resp.ok).toBe(true);
+		expect((resp.data as Task).id).toBe(mine.id);
 	});
 
 	it("suggests the stable seq handle when a task id does not resolve", async () => {
@@ -2387,6 +2542,80 @@ describe("task.update", () => {
 
 			expect(resp.ok).toBe(true);
 			expect((resp.data as { roleDelivery?: string }).roleDelivery).toBe("no-session");
+			expect(deliverAgentPrompt).not.toHaveBeenCalled();
+		});
+
+		// /dev3-coordinator promotes the task its own agent is running in, so the
+		// brief travels back in the response instead of into that agent's pane.
+		it("prints the brief instead of typing it into the caller's own pane", async () => {
+			const project = makeProject();
+			const task = makeTask({ description: "coordinate my board" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+				printRole: true,
+			}));
+
+			expect(resp.ok).toBe(true);
+			const body = resp.data as { roleDelivery?: string; rolePrompt?: string };
+			expect(body.roleDelivery).toBe("printed");
+			expect(body.rolePrompt).toBe(COORDINATOR_PROMPT);
+			// The mid-conversation channel carries the same defaults as a coordinator
+			// that started as one — including create-and-launch.
+			expect(body.rolePrompt).toContain("CREATING A TASK MEANS STARTING IT");
+			expect(body.rolePrompt).toContain("a timeout is NOT a decline");
+			expect(deliverAgentPrompt).not.toHaveBeenCalled();
+			const updates = vi.mocked(data.updateTask).mock.calls[0]![2] as Partial<Task>;
+			expect(updates.taskType).toBe("coordinator");
+			expect(updates.description!.startsWith(COORDINATOR_PROMPT)).toBe(true);
+		});
+
+		// The whole reason the skill prints instead of carrying its own copy: a
+		// project that rewrote the brief must get ITS brief, not the built-in one.
+		it("prints the project's own brief when one overrides the built-in", async () => {
+			const project = { ...makeProject(), coordinatorPrompt: "You coordinate MY board, my way." };
+			const task = makeTask({ description: "coordinate my board" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+				printRole: true,
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect((resp.data as { rolePrompt?: string }).rolePrompt).toBe("You coordinate MY board, my way.");
+		});
+
+		it("re-prints the brief on a repeat that changes nothing on the board", async () => {
+			const project = makeProject();
+			const task = makeTask({
+				taskType: "coordinator",
+				description: withPresetPrompt("coordinate my board", COORDINATOR_PROMPT),
+			});
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+
+			const resp = await handleRequest(makeRequest("task.update", {
+				taskId: task.id,
+				projectId: project.id,
+				taskType: "coordinator",
+				printRole: true,
+			}));
+
+			expect(resp.ok).toBe(true);
+			const body = resp.data as { roleDelivery?: string; rolePrompt?: string };
+			expect(body.rolePrompt).toBe(COORDINATOR_PROMPT);
+			expect(body.roleDelivery).toBeUndefined();
+			expect(data.updateTask).not.toHaveBeenCalled();
 			expect(deliverAgentPrompt).not.toHaveBeenCalled();
 		});
 
@@ -4637,5 +4866,58 @@ describe("events.list — the board's memory channel", () => {
 
 			expect((resp.data as { events: unknown[] }).events).toEqual([]);
 		});
+	});
+});
+
+describe("review.*", () => {
+	function wireReviewTask(task: Task): void {
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await (mutator as (t: Task) => Promise<{ updates: Partial<Task>; result: unknown }>)(task);
+			return { task: { ...task, ...updates }, result } as never;
+		});
+	}
+	const comment = {
+		id: "c1234567-0000",
+		body: "Wrong number",
+		createdAt: "2026-09-15T10:00:00.000Z",
+		anchor: { kind: "diff-line", fileId: "f", filePath: "src/a.ts", side: "newFile", startLine: 1, endLine: 1 },
+	};
+
+	it("review.list returns the task's comments", async () => {
+		const project = makeProject();
+		const task = makeTask({ review: [comment] } as Partial<Task>);
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const resp = await handleRequest(makeRequest("review.list", { taskId: task.id, projectId: "proj-1" }));
+		expect(resp.ok).toBe(true);
+		expect(resp.data).toEqual([comment]);
+	});
+
+	it("review.resolve accepts an id prefix, stamps the agent and appends the reply", async () => {
+		const project = makeProject();
+		const task = makeTask({ review: [comment] } as Partial<Task>);
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		wireReviewTask(task);
+		vi.mocked(getPushMessage).mockReturnValue(null);
+		const resp = await handleRequest(makeRequest("review.resolve", { taskId: task.id, projectId: "proj-1", commentId: "c1234567", reply: "Fixed it" }));
+		expect(resp.ok).toBe(true);
+		const { commentId, task: updated } = resp.data as { commentId: string; task: Task };
+		expect(commentId).toBe("c1234567-0000");
+		expect(updated.review?.[0]).toMatchObject({ resolvedBy: "agent" });
+		expect(updated.review?.[0].replies?.[0]).toMatchObject({ author: "agent", body: "Fixed it" });
+	});
+
+	it("review.reply fails on an unknown id and on an empty body", async () => {
+		const project = makeProject();
+		const task = makeTask({ review: [comment] } as Partial<Task>);
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		let resp = await handleRequest(makeRequest("review.reply", { taskId: task.id, projectId: "proj-1", commentId: "zzz", body: "hi" }));
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("not found");
+		resp = await handleRequest(makeRequest("review.reply", { taskId: task.id, projectId: "proj-1", commentId: "c1234567", body: "  " }));
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("body is required");
 	});
 });

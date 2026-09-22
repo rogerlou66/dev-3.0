@@ -119,12 +119,15 @@ describe("shell environment bootstrap", () => {
 			TERM: "xterm-256color",
 			TMPDIR: "/var/folders/xx/T/",
 			DEV3_TASK_ID: "abc123",
+			DEV3_DEBUG: "1",
 			BUN_INSTALL: "/Users/tester/.bun",
 		})));
 
 		const { resolveShellEnv } = await import("../shell-env");
 		const result = await resolveShellEnv();
 
+		// Every DEV3_* variable is internal wiring, with no carve-out: the freeze
+		// collector is a saved setting now, not a shell-profile export.
 		expect(result.fullEnv).toEqual({ MY_TOKEN: "keep-me" });
 	});
 

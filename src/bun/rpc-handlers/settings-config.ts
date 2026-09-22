@@ -1,3 +1,5 @@
+import { normalizeSimplifiedInterface } from "../../shared/simplified-interface";
+import { noteInterfaceModeChange } from "../interface-onboarding";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +31,7 @@ import { validateEnvMap } from "../../shared/env-text";
 import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH, repoConfigEnabled } from "../../shared/types";
 import type { LowBatteryStatus } from "../../shared/low-battery";
 import { installAgentSkills } from "../agent-skills";
+
 import { forceSelectLowBatteryStyle, lowBatteryStatus } from "../low-battery";
 
 /** Reject malformed env maps at the RPC boundary — the UI validates too, but
@@ -260,14 +263,28 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	const stored = await loadSettings();
 	const next: GlobalSettings = {
 		...params,
-		appearancePreset: params.appearancePreset ?? stored.appearancePreset,
-		...(stored.appearancePreset === "cmux" && params.appearancePreset === undefined
-			? { theme: stored.theme, resolvedTheme: "dark" as const }
-			: {}),
+		...normalizeSimplifiedInterface({
+			...params,
+			simplifiedMode: params.simplifiedMode ?? stored.simplifiedMode,
+			personalHiddenControls: params.personalHiddenControls ?? stored.personalHiddenControls,
+		}),
+		simplifiedModeSource: stored.simplifiedModeSource,
+		// Theme changes belong to setTmuxTheme; a stale full-form save cannot undo them.
+		appearancePreset: stored.appearancePreset,
+		theme: stored.theme,
+		resolvedTheme: stored.resolvedTheme,
 		analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId,
 	};
 	if (next.appearancePreset === "cmux") next.resolvedTheme = "dark";
 	await saveSettings(next);
+	await noteInterfaceModeChange(stored.simplifiedMode === true, next.simplifiedMode === true, stored.simplifiedModeSource === "fresh");
+	// Turning the artifact popup off after a freeze recovery turned it on is the
+	// user overruling us; the recovery stands down for good rather than switching
+	// it back on at the next freeze. See artifact-freeze-recovery.ts.
+	if (stored.openArtifactsInPopup !== next.openArtifactsInPopup) {
+		const { noteArtifactPopupPreference } = await import("../artifact-freeze-recovery");
+		noteArtifactPopupPreference(next.openArtifactsInPopup);
+	}
 	// Apply the low-battery toggle straight away — a switch that only takes effect
 	// after an app restart does not mean what its label says. Flipping it off is a
 	// real uninstall of what dev3 wrote, so it must not wait either.
@@ -277,9 +294,20 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 			// line inside dev3's managed block in ~/.agents/AGENTS.md. An explicit
 			// false here is a real uninstall, which is why the flag is passed, not
 			// left undefined.
-			installAgentSkills({ lowBattery: next.lowBatteryEnabled === true });
+			await installAgentSkills({ lowBattery: next.lowBatteryEnabled === true });
 		} catch (err) {
 			log.warn("Failed to apply the low-battery toggle (non-fatal)", { error: String(err) });
+		}
+	}
+	// Start or stop the freeze collector with the switch, not at the next launch:
+	// a diagnostic you turn on while the app misbehaves is worth nothing tomorrow,
+	// and turning it off must stop collection now.
+	if ((stored.freezeDiagnosticsEnabled === true) !== (next.freezeDiagnosticsEnabled === true)) {
+		try {
+			const { applyFreezeDiagnosticsSetting } = await import("../freeze-diagnostics");
+			applyFreezeDiagnosticsSetting(next.freezeDiagnosticsEnabled === true);
+		} catch (err) {
+			log.warn("Failed to apply the freeze-diagnostics toggle (non-fatal)", { error: String(err) });
 		}
 	}
 	// `resolvedTheme` may be absent (nothing has called setTmuxTheme yet); the
@@ -431,9 +459,9 @@ async function applyUpdate(): Promise<{ restarting: boolean; message?: string }>
  * headless box at all, whether the app is being reached remotely, and how many
  * tasks are mid-flight right now.
  *
- * The task count is a WARNING, not a gate. A restart does not kill an agent — tmux
- * sessions are detached and lifecycles are rehydrated at boot — so the button stays
- * enabled; the count just lets someone on a phone decide to wait a minute.
+ * The task count is a WARNING, not a gate because this is an explicit manual
+ * action. Helper restarts preserve detached tmux agents, but a process supervisor
+ * may terminate them, so the warning states that risk while leaving the choice live.
  *
  * `remoteActive` IS a gate, but only over the unattended countdown: nobody in a
  * browser can see a timer running on the desktop, so it must not fire under them.
@@ -672,10 +700,10 @@ async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dar
 	};
 	await saveSettings(next);
 	setCurrentUiTheme(resolvedTheme);
-	await pty.applyTmuxTheme(resolvedTheme, appearancePreset);
 	if (settings.appearancePreset !== appearancePreset || settings.theme !== next.theme || settings.resolvedTheme !== resolvedTheme) {
 		getPushMessage()?.("globalSettingsUpdated", next);
 	}
+	await pty.applyTmuxTheme(resolvedTheme, appearancePreset);
 }
 
 async function getLowBatteryStatus(): Promise<LowBatteryStatus> {

@@ -1,23 +1,21 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
-import { DEV3_HOME } from "./paths";
+/**
+ * Where the GitHub Copilot CLI keeps this machine's configuration.
+ *
+ * dev3 only ever ADDS a file under `hooks/` here. It never reads, rewrites or
+ * removes the credential state, never changes the logged-in account, and never
+ * points Copilot at a different home — `COPILOT_HOME` is honoured, not set, so
+ * a user who relocated their Copilot config keeps their sessions and settings.
+ */
 
-/** A launch-only instruction source; user and repository configuration stay intact. */
-export function applyCopilotLaunchEnv(
-	env: Record<string, string>,
-	skipSystemPrompt = false,
-	root = DEV3_HOME,
-	inheritedDirs = process.env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS,
-): void {
-	env.DEV3_COPILOT_SESSION = "1";
-	if (skipSystemPrompt) return;
-	const dir = join(root, "data", "agent-prompts", "copilot");
-	const path = join(dir, "AGENTS.md");
-	mkdirSync(dir, { recursive: true });
-	let current: string | undefined;
-	try { current = readFileSync(path, "utf-8"); } catch { /* First launch. */ }
-	if (current !== GENERIC_SKILL_BODY) writeFileSync(path, GENERIC_SKILL_BODY, "utf-8");
-	const existing = env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS ?? inheritedDirs ?? "";
-	env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS = [...new Set([...existing.split(",").filter(Boolean), dir])].join(",");
+import { join } from "node:path";
+import { resolveUserHome } from "../shared/user-home";
+
+export const COPILOT_HOME_ENV = "COPILOT_HOME";
+export const COPILOT_DEFAULT_DIR = ".copilot";
+
+/** `$COPILOT_HOME` when the user set one, else `~/.copilot` — the CLI's own rule. */
+export function resolveCopilotHome(env: Record<string, string | undefined> = process.env): string {
+	const override = (env[COPILOT_HOME_ENV] ?? "").trim();
+	if (override) return override;
+	return join(resolveUserHome(), COPILOT_DEFAULT_DIR);
 }

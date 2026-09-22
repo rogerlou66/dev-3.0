@@ -5,8 +5,9 @@ import { agentReplyCommand, seqIsShared } from "../shared/agent-message-envelope
 import { requireMessageSubject } from "../shared/agent-message-subject";
 import { socketMetaPathFor } from "../shared/socket-meta";
 import { isCliEndpointHandle } from "../shared/cli-endpoint";
+import { replyToReviewComment, resolveReviewComment, resolveReviewCommentId, reopenReviewComment, type ReviewReplyAuthor } from "../shared/review";
 import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, repoConfigEnabled, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
-import { CODEX_STATUS_HOOK_EVENTS, getCodexHookTargetStatus, type CodexStatusHookEvent } from "../shared/agent-hooks";
+import { AGENT_STATUS_HOOK_EVENTS, getAgentHookTargetStatus, type AgentStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
 import { DEFAULT_EVENT_LIMIT, DEFAULT_EVENT_WINDOW_MS, MAX_EVENT_LIMIT, formatMovementText, normalizeEventInstant, resolveEventIdPrefix, selectEvents, type BoardEvent, type BoardEventKind } from "../shared/board-events";
 import type { TaskNavigationTarget } from "../shared/types";
@@ -30,6 +31,7 @@ import { scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "
 import { NATIVE_PROMPT_DELIVERY_METHOD, deliverNativePromptAsOwner } from "./agent-prompt-native";
 import { deliverAgentPrompt } from "./agent-prompt-delivery";
 import { recordTerminalPromptSubmission } from "./agent-terminal-prompt-log";
+import type { PromptSubmitHarness } from "../shared/agent-terminal-prompt";
 import type { AgentPromptDeliveryStatus } from "../shared/agent-prompt-delivery";
 import { NATIVE_PANE_INPUT_METHOD, runNativePaneInputAsOwner } from "./pane-input-native";
 import type { PaneInputProgram } from "../shared/pane-input";
@@ -46,8 +48,10 @@ import { buildTaskLifecycleEnv } from "./rpc-handlers/shared-pure";
 import { readTaskTerminalBackendState, switchTaskTerminalBackend } from "./task-terminal-backend-switch";
 import { DEV3_HOME } from "./paths";
 import { cliTransportFor, startCliListener } from "./cli-listener";
+import { CodexQuestionState } from "./codex-question-state";
 
 const log = createLogger("cli-socket");
+const codexQuestions = new CodexQuestionState();
 
 const MIN_PREFIX_LENGTH = ID_PREFIX_MIN_LENGTH;
 
@@ -186,9 +190,46 @@ function taskNotFoundError(ref: string, scopedProject?: Project): Error {
 }
 
 /**
- * Put the task's archived title/overview history back on the record, leaving a
- * task with no history at all untouched rather than stamping an empty array on
- * it — the CLI's task shape stays exactly what it was before the sidecar.
+ * The same not-found error, plus the boards the ref DOES resolve on.
+ *
+ * A scoped lookup must never answer with a stranger's task, but "not found in
+ * project X" alone strands a caller whose peer lives on another board — they
+ * cannot pass `--project` without knowing which one. Naming the boards keeps the
+ * scope strict and the next command obvious. A scan failure degrades to the
+ * plain message rather than swallowing the real error.
+ */
+async function scopedTaskNotFoundError(ref: string, scopedProject: Project): Promise<Error> {
+	const base = taskNotFoundError(ref, scopedProject);
+	try {
+		const elsewhere: string[] = [];
+		for (const project of [...await data.loadProjects(), ...await data.loadVirtualProjects()]) {
+			if (project.id === scopedProject.id) continue;
+			try {
+				// A ref that is ambiguous ON that board still answers the question
+				// being asked here — the board carries it. Ambiguity is that board's
+				// problem once the caller aims at it.
+				if (findTaskByRef(await data.loadTasks(project), ref)) {
+					elsewhere.push(`"${project.name}" (--project ${project.id.slice(0, 8)})`);
+				}
+			} catch (err) {
+				// "Task ref … matches N variant tasks" means that board does carry it;
+				// an unreadable tasks.json means nothing and is skipped.
+				if (err instanceof Error && err.message.startsWith("Task ref")) {
+					elsewhere.push(`"${project.name}" (--project ${project.id.slice(0, 8)})`);
+				}
+			}
+		}
+		if (elsewhere.length === 0) return base;
+		return new Error(`${base.message}\n${ref} does resolve on: ${elsewhere.join(", ")}.`);
+	} catch {
+		return base;
+	}
+}
+
+/**
+ * Put the task's archived history back on the record, leaving a task with no
+ * history at all untouched rather than stamping an empty array on it — the CLI's
+ * task shape stays exactly what it was before the sidecar.
  */
 async function withArchivedHistory(project: Project, task: Task): Promise<Task> {
 	const history = await loadEffectiveTaskHistory(project, task);
@@ -206,8 +247,22 @@ async function requirePaneTask(params: Record<string, unknown>): Promise<{ proje
 	if (params.projectId) {
 		const project = await data.getProject(params.projectId as string);
 		const task = findTaskByRef(await data.loadTasks(project), taskId);
-		if (!task) throw taskNotFoundError(taskId, project);
+		if (!task) throw await scopedTaskNotFoundError(taskId, project);
 		return { project, task };
+	}
+	const found = await resolveTaskAcrossProjects(taskId);
+	if (!found) throw taskNotFoundError(taskId);
+	return found;
+}
+
+/** A task for `dev3 review`: scoped to a project when the CLI knows it, else found across projects. */
+async function resolveReviewTask(taskId: string, projectId: string | undefined): Promise<{ project: Project; task: Task }> {
+	if (projectId) {
+		const project = await data.getProject(projectId);
+		const tasks = await data.loadTasks(project);
+		const found = findTaskByRef(tasks, taskId);
+		if (!found) throw taskNotFoundError(taskId, project);
+		return { project, task: found };
 	}
 	const found = await resolveTaskAcrossProjects(taskId);
 	if (!found) throw taskNotFoundError(taskId);
@@ -280,6 +335,12 @@ function readEnvParam(params: Record<string, unknown>): Record<string, string> |
 	return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
 }
 
+/** Which dev server a `devServer.*` call names, and whether it means all of them. */
+function readServerParams(params: Record<string, unknown>): { server?: string; all?: boolean } {
+	const server = typeof params.server === "string" && params.server ? params.server : undefined;
+	return { ...(server ? { server } : {}), ...(params.all === true ? { all: true } : {}) };
+}
+
 /**
  * `opts.variantIndex` is `dev3 message --variant <i>` and only that: no other
  * command accepts the flag, so every other caller resolves exactly as before.
@@ -296,7 +357,7 @@ async function resolveTaskFromParams(
 		const project = await data.getProject(params.projectId as string);
 		const tasks = await data.loadTasks(project);
 		const task = findTaskByRef(tasks, taskId, variantIndex);
-		if (!task) throw taskNotFoundError(taskId, project);
+		if (!task) throw await scopedTaskNotFoundError(taskId, project);
 		return { project, task };
 	}
 
@@ -506,30 +567,31 @@ async function requestAgentLaunchApproval(opts: {
 	// deliberately does not do this — it destroys a worktree.
 	const defaultPriority = await resolveLaunchPriority(task, requester);
 	const autoApproveAfterMs = agentLaunchAutoApproveMs(await loadSettings());
-	const { requestId, decision, isNew, autoApproveAt } = createAgentRequest(
+	const { requestId, decision, autoApproveAt } = createAgentRequest(
 		"launch",
 		task.id,
 		project.id,
 		{ autoApproveAfterMs },
 	);
-	if (isNew) {
-		push("agentLaunchRequested", {
-			requestId,
-			taskId: task.id,
-			projectId: project.id,
-			taskTitle: getTaskTitle(task),
-			targetStatus,
-			scratch: task.scratch === true,
-			requesterSeq: requester.seq,
-			requesterTitle: requester.title,
-			// Same read-only context card as the completion dialog, so the user
-			// recognizes which task an agent wants to set running.
-			subject: buildTaskDialogSubject(task, project),
-			defaultPriority,
-			canAddVariants: canSpawnAsVariants(task),
-			autoApproveAt,
-		});
-	}
+	// Pushed on EVERY attempt, joined retries included — see the note on
+	// `task.requestCancellation`. Clients dedup by `requestId`, so a dialog that
+	// is already on screen is untouched and nothing here re-arms the countdown.
+	push("agentLaunchRequested", {
+		requestId,
+		taskId: task.id,
+		projectId: project.id,
+		taskTitle: getTaskTitle(task),
+		targetStatus,
+		scratch: task.scratch === true,
+		requesterSeq: requester.seq,
+		requesterTitle: requester.title,
+		// Same read-only context card as the completion dialog, so the user
+		// recognizes which task an agent wants to set running.
+		subject: buildTaskDialogSubject(task, project),
+		defaultPriority,
+		canAddVariants: canSpawnAsVariants(task),
+		autoApproveAt,
+	});
 
 	const answer = await decision;
 	if (!answer.approved) return { approved: false };
@@ -618,34 +680,34 @@ async function conversationImport() {
 type Handler = (params: Record<string, unknown>) => Promise<unknown>;
 
 // An approval temporarily moves a task to user-questions. Remember which
-// active lane that Codex session came from so PostToolUse can restore a review
-// agent to review-by-ai instead of misclassifying it as the primary agent.
-const CODEX_APPROVAL_RESUME_TTL_MS = 24 * 60 * 60 * 1000;
-const codexApprovalResumeStatuses = new Map<
+// active lane that Codex/omp session came from so PostToolUse can restore a
+// review agent to review-by-ai instead of misclassifying it as the primary agent.
+const APPROVAL_RESUME_TTL_MS = 24 * 60 * 60 * 1000;
+const approvalResumeStatuses = new Map<
 	string,
 	{ status: "in-progress" | "review-by-ai"; expiresAt: number }
 >();
 
-function getCodexApprovalResumeStatus(
+function getApprovalResumeStatus(
 	key: string | null,
 ): "in-progress" | "review-by-ai" | undefined {
 	if (!key) return undefined;
-	const entry = codexApprovalResumeStatuses.get(key);
+	const entry = approvalResumeStatuses.get(key);
 	if (!entry) return undefined;
 	if (entry.expiresAt <= Date.now()) {
-		codexApprovalResumeStatuses.delete(key);
+		approvalResumeStatuses.delete(key);
 		return undefined;
 	}
 	return entry.status;
 }
 
 /**
- * Cheap pre-check for {@link captureCodexPaneSession}: is this exact pane already
+ * Cheap pre-check for {@link capturePaneSession}: is this exact pane already
  * carrying this exact session id? Reads through the cache (no lock, no strict
  * re-parse) and answers false on any doubt — a stale or unreadable read only costs
  * one trip through the real locked path, which is idempotent anyway.
  */
-async function codexPaneSessionAlreadyRecorded(
+async function paneSessionAlreadyRecorded(
 	project: Project,
 	taskId: string,
 	paneId: string,
@@ -661,12 +723,12 @@ async function codexPaneSessionAlreadyRecorded(
 }
 
 /**
- * Persist a Codex session id onto the sessionState pane it belongs to, so
- * resumeTask can `codex resume <id>` the exact session per pane — targeted
- * recovery for multi-session worktrees (e.g. reviving several bug hunters).
- * Codex has no launch-time --session-id, so the id is only knowable post-hoc:
- * its lifecycle hook reports the resumable session_id together with $TMUX_PANE
- * (see src/cli/commands/codex-hook.ts).
+ * Persist a hook-reported session id onto the sessionState pane it belongs to,
+ * so resumeTask can `codex resume <id>` / `omp --resume <id>` the exact session
+ * per pane — targeted recovery for multi-session worktrees (e.g. reviving
+ * several bug hunters). Neither Codex nor omp takes a session id at launch, so
+ * the id is only knowable post-hoc: the lifecycle hook reports the resumable id
+ * together with $TMUX_PANE (see src/cli/commands/status-hook-request.ts).
  *
  * Matching: extra panes store their tmux paneId at spawn, so match by paneId.
  * The main pane (panes[0]) is persisted without a paneId (assigned lazily by
@@ -675,19 +737,19 @@ async function codexPaneSessionAlreadyRecorded(
  * session id. Ambiguous cases (no match, ≠1 null-paneId entries) are skipped; a
  * later hook fires once ids settle. A no-op once the id is already recorded.
  *
- * The steady state is exactly that no-op — codex fires this hook continuously for
+ * The steady state is exactly that no-op — Codex fires this hook continuously for
  * the whole life of a session — so it is answered from the cached read BEFORE
  * taking the file lock. Going through the lock for it made every hook re-parse the
  * board strictly (14 MB on the largest measured board); see the 2026-08-16 freeze record.
  */
-async function captureCodexPaneSession(
+async function capturePaneSession(
 	project: Project,
 	taskId: string,
 	paneId: string,
 	sessionId: string,
 ): Promise<void> {
 	try {
-		if (await codexPaneSessionAlreadyRecorded(project, taskId, paneId, sessionId)) return;
+		if (await paneSessionAlreadyRecorded(project, taskId, paneId, sessionId)) return;
 		const { task: updated, result } = await data.updateTaskWith(project, taskId, (current) => {
 			const panes = current.sessionState?.panes;
 			if (!panes?.length) return { updates: {}, result: { changed: false } };
@@ -709,10 +771,10 @@ async function captureCodexPaneSession(
 		});
 		if (result.changed) {
 			getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-			log.info("Captured Codex pane session id", { taskId: taskId.slice(0, 8), paneId });
+			log.info("Captured agent pane session id", { taskId: taskId.slice(0, 8), paneId });
 		}
 	} catch (err) {
-		log.warn("Failed to capture Codex pane session id (non-fatal)", { error: String(err) });
+		log.warn("Failed to capture agent pane session id (non-fatal)", { error: String(err) });
 	}
 }
 
@@ -790,7 +852,7 @@ const handlers: Record<string, Handler> = {
 			const project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const task = findTaskByRef(tasks, taskId);
-			if (!task) throw taskNotFoundError(taskId, project);
+			if (!task) throw await scopedTaskNotFoundError(taskId, project);
 			return await withArchivedHistory(project, await syncTaskBranchName(project, task));
 		}
 
@@ -816,7 +878,7 @@ const handlers: Record<string, Handler> = {
 		} else {
 			task = (await resolveTaskAcrossProjects(taskId))?.task ?? null;
 		}
-		if (!task) throw taskNotFoundError(taskId, scopedProject);
+		if (!task) throw scopedProject ? await scopedTaskNotFoundError(taskId, scopedProject) : taskNotFoundError(taskId);
 
 		return await taskPeek({
 			task,
@@ -964,7 +1026,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId, project);
+			if (!found) throw await scopedTaskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1024,11 +1086,20 @@ const handlers: Record<string, Handler> = {
 		// field alone would produce a task the data calls a coordinator while its
 		// agent was never told it is one — a badge nobody behind it honours.
 		let taskTypeChange: { next: TaskType | null; agentPrompt: string } | undefined;
+		// `--print-role`: the caller IS the agent behind this task and reads the role
+		// brief in the command output, so the brief is returned rather than typed into
+		// its own pane. Set for any resulting type, changed or not, so re-running the
+		// promotion is idempotent instead of silent.
+		const printRole = params.printRole === true;
+		let rolePrompt: string | undefined;
 		if (params.taskType !== undefined) {
 			const raw = params.taskType;
 			const next = raw === null || raw === "standard" ? null : normalizeTaskType(String(raw));
 			if (raw !== null && raw !== "standard" && !next) {
 				throw new Error(`Invalid task type "${raw}". Use ${TASK_TYPES.join(", ")} or standard.`);
+			}
+			if (printRole) {
+				rolePrompt = next ? presetPromptForTaskType(next, project, await loadSettings()) : "";
 			}
 			if ((task.taskType ?? null) !== next) {
 				const settings = await loadSettings();
@@ -1099,9 +1170,14 @@ const handlers: Record<string, Handler> = {
 		// Tell the agent that has to honour the new role. A task with no worktree has
 		// no session to tell — it reads the rewritten description at launch instead,
 		// which is why the description is rewritten above rather than only here.
-		let roleDelivery: AgentPromptDeliveryStatus | "no-session" | undefined;
+		let roleDelivery: AgentPromptDeliveryStatus | "no-session" | "printed" | undefined;
 		if (taskTypeChange) {
-			if (!updated.worktreePath) {
+			if (printRole) {
+				// Delivering here would type the brief into the pane of the very agent
+				// that is already reading it in this command's output: a second copy, a
+				// second turn, and a role change that looks like it fired twice.
+				roleDelivery = "printed";
+			} else if (!updated.worktreePath) {
 				roleDelivery = "no-session";
 			} else {
 				try {
@@ -1111,7 +1187,12 @@ const handlers: Record<string, Handler> = {
 				}
 			}
 		}
-		return { task: updated, titlePreserved, ...(roleDelivery ? { roleDelivery } : {}) };
+		return {
+			task: updated,
+			titlePreserved,
+			...(roleDelivery ? { roleDelivery } : {}),
+			...(rolePrompt === undefined ? {} : { rolePrompt }),
+		};
 	},
 
 	"overview.set": async (params) => {
@@ -1154,7 +1235,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId, project);
+			if (!found) throw await scopedTaskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1193,7 +1274,7 @@ const handlers: Record<string, Handler> = {
 			const project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId, project);
+			if (!found) throw await scopedTaskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1202,6 +1283,71 @@ const handlers: Record<string, Handler> = {
 		}
 
 		return task.notes ?? [];
+	},
+
+	/**
+	 * `dev3 review` — the agent's side of the review loop. Reads and writes the
+	 * same `Task.review` the viewers use; every write recomputes from the CURRENT
+	 * task inside the per-task lock (the same lost-update rule as notes).
+	 */
+	"review.list": async (params) => {
+		const taskId = params.taskId as string;
+		if (!taskId) throw new Error("taskId is required");
+		const { task } = await resolveReviewTask(taskId, params.projectId as string | undefined);
+		return task.review ?? [];
+	},
+
+	"review.resolve": async (params) => {
+		const taskId = params.taskId as string;
+		const ref = params.commentId as string;
+		if (!taskId) throw new Error("taskId is required");
+		if (!ref) throw new Error("commentId is required");
+		const by = (params.by as ReviewReplyAuthor) ?? "agent";
+		const reply = typeof params.reply === "string" && params.reply.trim() ? params.reply.trim() : undefined;
+		const { project, task } = await resolveReviewTask(taskId, params.projectId as string | undefined);
+		const resolved = resolveReviewCommentId(task.review, ref);
+		if ("error" in resolved) throw new Error(resolved.error);
+		const { task: updated } = await data.updateTaskWith(project, task.id, async (current) => ({
+			updates: { review: resolveReviewComment(current.review, resolved.id, by, reply) },
+			result: undefined,
+		}));
+		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		return { commentId: resolved.id, task: updated };
+	},
+
+	"review.reopen": async (params) => {
+		const taskId = params.taskId as string;
+		const ref = params.commentId as string;
+		if (!taskId) throw new Error("taskId is required");
+		if (!ref) throw new Error("commentId is required");
+		const { project, task } = await resolveReviewTask(taskId, params.projectId as string | undefined);
+		const resolved = resolveReviewCommentId(task.review, ref);
+		if ("error" in resolved) throw new Error(resolved.error);
+		const { task: updated } = await data.updateTaskWith(project, task.id, async (current) => ({
+			updates: { review: reopenReviewComment(current.review, resolved.id) },
+			result: undefined,
+		}));
+		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		return { commentId: resolved.id, task: updated };
+	},
+
+	"review.reply": async (params) => {
+		const taskId = params.taskId as string;
+		const ref = params.commentId as string;
+		const body = typeof params.body === "string" ? params.body.trim() : "";
+		if (!taskId) throw new Error("taskId is required");
+		if (!ref) throw new Error("commentId is required");
+		if (!body) throw new Error("body is required");
+		const author = (params.author as ReviewReplyAuthor) ?? "agent";
+		const { project, task } = await resolveReviewTask(taskId, params.projectId as string | undefined);
+		const resolved = resolveReviewCommentId(task.review, ref);
+		if ("error" in resolved) throw new Error(resolved.error);
+		const { task: updated } = await data.updateTaskWith(project, task.id, async (current) => ({
+			updates: { review: replyToReviewComment(current.review, resolved.id, { body, author }) },
+			result: undefined,
+		}));
+		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		return { commentId: resolved.id, task: updated };
 	},
 
 	"note.delete": async (params) => {
@@ -1217,7 +1363,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId, project);
+			if (!found) throw await scopedTaskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1616,22 +1762,38 @@ const handlers: Record<string, Handler> = {
 		return updated;
 	},
 
-	"task.agentHook": async (params) => {
+	"task.agentHook": (params) => codexQuestions.run(String(params.taskId), async () => {
 		const { project, task } = await resolveTaskFromParams(params);
-		const event = params.event as CodexStatusHookEvent;
-		if (!CODEX_STATUS_HOOK_EVENTS.includes(event)) {
-			throw new Error(`Unsupported Codex hook event: ${String(params.event)}`);
+		const event = params.event as AgentStatusHookEvent;
+		if (!AGENT_STATUS_HOOK_EVENTS.includes(event)) {
+			throw new Error(`Unsupported status hook event: ${String(params.event)}`);
 		}
+		// The CLI that reports is the managed copy under ~/.dev3.0/bin, which a
+		// worktree build does not replace; one from before Copilot names no harness.
+		const harness: PromptSubmitHarness = params.harness === "omp" || params.harness === "copilot"
+			? params.harness
+			: "codex";
 		const sessionId = typeof params.sessionId === "string" ? params.sessionId : null;
 		const resumeKey = sessionId ? `${task.id}:${sessionId}` : null;
-		const rememberedResumeStatus = getCodexApprovalResumeStatus(resumeKey);
+		const rememberedResumeStatus = getApprovalResumeStatus(resumeKey);
 
-		const target = getCodexHookTargetStatus(
+		const questionState = codexQuestions.apply(
+			task.id,
+			sessionId ?? "unknown",
 			event,
-			task.status,
-			project.autoReviewEnabled === true,
-			rememberedResumeStatus,
+			task.status === "user-questions" ? rememberedResumeStatus ?? task.status : task.status,
+			typeof params.toolName === "string" ? params.toolName : undefined,
+			typeof params.toolUseId === "string" ? params.toolUseId : undefined,
+			Array.isArray(params.questionIds) ? params.questionIds.filter((id): id is string => typeof id === "string") : undefined,
+			typeof params.answeredQuestionId === "string" ? params.answeredQuestionId : undefined,
 		);
+		const currentStatus = questionState.resumeStatus && task.status === "user-questions"
+			? questionState.resumeStatus : task.status;
+		let target = getAgentHookTargetStatus(event, currentStatus, project.autoReviewEnabled === true, rememberedResumeStatus);
+		if (questionState.pending) target = "user-questions";
+		else if (questionState.resumeStatus && task.status === "user-questions" && event !== "Stop") {
+			target = event === "Interrupt" || event === "SessionEnd" ? "review-by-user" : questionState.resumeStatus;
+		}
 		const resumeStatus = event === "PermissionRequest"
 			&& (task.status === "in-progress" || task.status === "review-by-ai")
 			? task.status
@@ -1653,35 +1815,54 @@ const handlers: Record<string, Handler> = {
 			moveAccepted = updated.status === target && updated.customColumnId == null;
 		}
 		if (resumeKey && resumeStatus && moveAccepted) {
-			codexApprovalResumeStatuses.set(resumeKey, {
+			approvalResumeStatuses.set(resumeKey, {
 				status: resumeStatus,
-				expiresAt: Date.now() + CODEX_APPROVAL_RESUME_TTL_MS,
+				expiresAt: Date.now() + APPROVAL_RESUME_TTL_MS,
 			});
 		} else if (resumeKey && clearResumeStatus && moveAccepted) {
-			codexApprovalResumeStatuses.delete(resumeKey);
+			approvalResumeStatuses.delete(resumeKey);
 		}
 
-		// Record the Codex session id for this pane (targeted per-pane recovery).
+		// Record the session id for this pane (targeted per-pane recovery).
 		const paneId = typeof params.paneId === "string" ? params.paneId : null;
 		if (sessionId && paneId) {
-			await captureCodexPaneSession(project, task.id, paneId, sessionId);
+			await capturePaneSession(project, task.id, paneId, sessionId);
 		}
 
-		// Codex carries the submitted text on the same payload, so recording rides
-		// on the status hook rather than costing the pane a second dev3 process.
+		// The submitted text rides on the same payload, so recording costs the
+		// pane no second dev3 process.
 		if (event === "UserPromptSubmit" && typeof params.prompt === "string") {
 			recordTerminalPromptSubmission({
 				project,
 				task: updated,
-				harness: "codex",
+				harness,
 				prompt: params.prompt,
 				sessionId,
 				submissionId: typeof params.turnId === "string" ? params.turnId : null,
 			});
 		}
 
+		const hookTrace = {
+			taskId: task.id,
+			harness,
+			sessionId,
+			event,
+			toolName: typeof params.toolName === "string" ? params.toolName : null,
+			toolUseId: typeof params.toolUseId === "string" ? params.toolUseId : null,
+			pendingQuestions: questionState.pending,
+			previousStatus: task.status,
+			targetStatus: target,
+			actualStatus: updated.status,
+			moveAccepted,
+		};
+		if (questionState.pending || questionState.resumeStatus || event === "SessionStart" || event === "Stop") {
+			log.info("Codex lifecycle hook", hookTrace);
+		} else {
+			log.debug("Codex lifecycle hook", hookTrace);
+		}
+
 		return updated;
-	},
+	}),
 
 	/**
 	 * A harness reported that a prompt was submitted in a task's pane. Whether
@@ -1693,7 +1874,9 @@ const handlers: Record<string, Handler> = {
 	 */
 	"task.promptSubmitted": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		const harness = params.harness === "codex" ? "codex" : "claude";
+		const harness: PromptSubmitHarness = params.harness === "codex" || params.harness === "copilot"
+			? params.harness
+			: "claude";
 		const outcome = recordTerminalPromptSubmission({
 			project,
 			task,
@@ -1760,7 +1943,7 @@ const handlers: Record<string, Handler> = {
 			project = await data.getProject(params.projectId as string);
 			const tasks = await data.loadTasks(project);
 			const found = findTaskByRef(tasks, taskId);
-			if (!found) throw taskNotFoundError(taskId, project);
+			if (!found) throw await scopedTaskNotFoundError(taskId, project);
 			task = found;
 		} else {
 			const found = await resolveTaskAcrossProjects(taskId);
@@ -1843,10 +2026,9 @@ const handlers: Record<string, Handler> = {
 			// so the user recognizes which task the prompt destroys.
 			subject: buildTaskDialogSubject(task, project),
 		};
-		const { requestId, decision, isNew } = createAgentRequest("complete", task.id, project.id, { dialog });
-		if (isNew) {
-			push("agentCompletionRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
-		}
+		const { requestId, decision } = createAgentRequest("complete", task.id, project.id, { dialog });
+		// Pushed on EVERY attempt — see the note on `task.requestCancellation`.
+		push("agentCompletionRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
 
 		const { approved } = await decision;
 		if (!approved) {
@@ -1876,10 +2058,15 @@ const handlers: Record<string, Handler> = {
 			taskTitle: getTaskTitle(task),
 			subject: buildTaskDialogSubject(task, project),
 		};
-		const { requestId, decision, isNew } = createAgentRequest("cancel", task.id, project.id, { dialog });
-		if (isNew) {
-			push("agentCancellationRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
-		}
+		const { requestId, decision } = createAgentRequest("cancel", task.id, project.id, { dialog });
+		// Pushed on EVERY attempt, joined retries included. A retry used to push
+		// nothing, so once a client lost the original dialog — it was never
+		// connected, its transport dropped, the window reloaded mid-flight — the
+		// request became unreachable from the CLI side: every further attempt
+		// blocked the full ten minutes with nothing on screen, and only a NEW
+		// client connecting replayed it (h0x91b/dev-3.0#1669). Clients dedup by
+		// `requestId`, so a dialog already on screen is untouched.
+		push("agentCancellationRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
 
 		const { approved } = await decision;
 		if (!approved) {
@@ -2205,17 +2392,27 @@ const handlers: Record<string, Handler> = {
 
 	"devServer.start": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		return runDevServer({ taskId: task.id, projectId: project.id, env: readEnvParam(params) });
+		return runDevServer({
+			taskId: task.id,
+			projectId: project.id,
+			env: readEnvParam(params),
+			...readServerParams(params),
+		});
 	},
 
 	"devServer.stop": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		return stopDevServer({ taskId: task.id, projectId: project.id });
+		return stopDevServer({ taskId: task.id, projectId: project.id, ...readServerParams(params) });
 	},
 
 	"devServer.restart": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		return restartDevServer({ taskId: task.id, projectId: project.id, env: readEnvParam(params) });
+		return restartDevServer({
+			taskId: task.id,
+			projectId: project.id,
+			env: readEnvParam(params),
+			...readServerParams(params),
+		});
 	},
 
 	"devServer.status": async (params) => {

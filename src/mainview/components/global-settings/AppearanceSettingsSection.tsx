@@ -2,6 +2,7 @@ import { useState } from "react";
 import { setAppearancePreset, useAppearancePreset } from "../../appearance-preset";
 import { isTerminalFontAvailable } from "../../terminal-font";
 import { toast } from "../../toast";
+import { useIsSimplifyViewApplied } from "../../hooks/useIsControlHidden";
 import type { Locale } from "../../i18n";
 import {
 	ALL_LOCALES,
@@ -30,6 +31,7 @@ interface AppearanceSettingsSectionProps {
 	zoomLevel: number;
 	onThemeChange: (theme: Theme) => void;
 	onLocaleChange: (locale: Locale) => void;
+	onSimplifyModeToggle: (enabled: boolean) => void;
 }
 
 export default function AppearanceSettingsSection({
@@ -39,7 +41,9 @@ export default function AppearanceSettingsSection({
 	zoomLevel,
 	onThemeChange,
 	onLocaleChange,
+	onSimplifyModeToggle,
 }: AppearanceSettingsSectionProps) {
+	const simplifyEnabled = useIsSimplifyViewApplied();
 	const streamerMode = useStreamerMode();
 	const preset = useAppearancePreset();
 	const managed = preset === "cmux";
@@ -71,6 +75,24 @@ export default function AppearanceSettingsSection({
 					{managed && !isTerminalFontAvailable("SF Mono") && (
 						<p className="text-warning-strong text-sm mt-3">{t("settings.appearancePresetFontMissing")}</p>
 					)}
+				</div>
+			</SettingsEntry>
+			<SettingsEntry anchor="simplify-mode">
+				<div>
+					<p className="block text-fg text-sm font-semibold mb-2">
+						{t("settings.simplifyMode")}
+					</p>
+					<p className="text-fg-3 text-sm mb-3">{t("settings.simplifyModeDesc")}</p>
+					<SettingsToggle
+						checked={simplifyEnabled}
+						ariaLabel={t("settings.simplifyMode")}
+						onLabel={t("settings.on")}
+						offLabel={t("settings.off")}
+						onToggle={() => onSimplifyModeToggle(!simplifyEnabled)}
+					/>
+					<p className="text-fg-muted text-xs mt-2">
+						{t("settings.simplifyModeCaveat")}
+					</p>
 				</div>
 			</SettingsEntry>
 			<SettingsEntry anchor="theme">

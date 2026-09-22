@@ -21,7 +21,7 @@ vi.mock("../SettingsEntry", () => ({ default: ({ children }: { children: ReactNo
 const t = ((key: string) => key) as TFunction;
 function section(onThemeChange = vi.fn()) {
 	return <AppearanceSettingsSection t={t} locale="en" theme="light" zoomLevel={1}
-		onThemeChange={onThemeChange} onLocaleChange={vi.fn()} />;
+		onThemeChange={onThemeChange} onLocaleChange={vi.fn()} onSimplifyModeToggle={vi.fn()} />;
 }
 
 beforeEach(() => {

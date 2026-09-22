@@ -1,8 +1,8 @@
 # UX Decisions
 
-Compact index of UX architecture decisions — the *why* behind rules that live in
-`PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines per entry; details live in
-git history, PRs, and the records in `decisions/`. Newest first.
+Index of UX architecture decisions — the *why* behind rules in
+`PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines each; detail lives in git
+history, PRs and `decisions/`. Newest first.
 
 **2026-09-05 — Dashboard shares its header:** Move view/search controls into a Dashboard-only header slot to reclaim the separate row; project/task titles stay unchanged. See `decisions/2026/09/05/dashboard-controls-use-header-slot.md`.
 
@@ -11,6 +11,39 @@ git history, PRs, and the records in `decisions/`. Newest first.
 **Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
 
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
+**Once a decision has a record under `decisions/`, its entry folds to a pointer:** the rule
+in one clause, where it lives, and the record for the why. Two files carried the same
+reasoning (48 of 50 dates), so the record wins and this file stays an index. Write an entry
+in full only while no record exists — the case for 84 below, whose reasoning lives nowhere
+else, so never compact them by deleting it.
+
+## 2026-09-20 — Simplified Mode leads toward the Full interface
+
+Bible §5.10 / yaml `simplify_mode`: fresh-only onboarding, calm persisted invitations, Appearance ownership and separate personal hiding. Repeated invitations encourage discovery without forced switching; merging preset and personal ids cannot preserve personal choices when leaving the preset. Supersedes the September 15 single-set rule; no new permanent chrome.
+
+2026-09-15 — Per-control hiding replaces a hardcoded mode. Preset ownership superseded 2026-09-20; in-place Hide and per-container restore remain — bible §5.10.
+
+## 2026-09-12 — Traffic terminal is an observation
+
+Bible 5.9 + yaml; `decisions/2026/09/12/traffic-terminal-snapshot-is-text.md`.
+
+2026-09-14 — Add-agent/Setup-Dev-Server hide-list corrections. Superseded 2026-09-15 by the per-control rework — bible §5.10.
+
+2026-09-14 — Simplify mode's hide-list widened to inspector power tools. Superseded 2026-09-15 — bible §5.10.
+
+2026-09-14 — Simplify mode subsumes Advanced Experience (single-boolean design). Superseded 2026-09-15 by the per-control preset rework — bible §5.10.
+
+## 2026-09-12 — The traffic inspector may send one short message
+
+Reverses "no composer" — bible §5.9, yaml `agent_traffic_screen`. Why: `decisions/2026/09/12/agent-traffic-inspector-sends-one-short-message.md`.
+
+## 2026-09-12 — The selected task's conversation is a third inspector tab
+
+Bounded reader beside Messages and Tasks, labelled `Live` or `Archived` — bible §5.9, yaml `agent_traffic_screen`. Why: `decisions/2026/09/12/task-conversation-in-the-traffic-inspector.md`.
+
+## 2026-09-12 — A notification into agent traffic opens all projects
+
+An agent-message toast opens the traffic screen unscoped ("All active projects"); deliberate entries still seed the board in view — bible §5.7. Why: `decisions/2026/09/12/notification-entry-to-traffic-opens-all-projects.md`.
 
 ## 2026-09-08 — Agent traffic becomes the ninth destination, not an overlay
 
@@ -100,8 +133,7 @@ One round floating button over the canvas, only while that pane is scrolled up, 
 
 ## 2026-08-19 — A data-bearing menu row opens on hover, its flyout beside the menu — rule now lives in bible §12.6.
 ## 2026-08-17 — A Space filters the dashboard; it never becomes a place
-- **Rule:** Spaces group projects on the dashboard — a rail that FILTERS the overview, collapsible group headers, row membership chips + a `Spaces…` action, every space action behind one `…`; no space route, no colour, no stored `Home` (computed from zero-membership projects). The merged-board half was superseded 2026-08-28 — bible §10 grouping row owns it now.
-- **Why:** `decisions/2026/08/17/spaces-dashboard-follows-the-proposal-mock.md`.
+- **Rule:** a filtering rail over the overview — no space route, no colour, no stored `Home`; the merged-board half superseded 2026-08-28, bible §10 owns it. **Why:** `decisions/2026/08/17/spaces-dashboard-follows-the-proposal-mock.md`.
 
 ## 2026-08-21 — The dashboard's spaces surface is calm, container-gated, and stream-safe
 - **Rule:** One `…` per space on both surfaces (rail row + group header) holding `Edit projects…` (two-way membership), move, rename, delete, hide-on-camera; no add-only `+` — bible §10.
@@ -114,8 +146,8 @@ One round floating button over the canvas, only while that pane is scrolled up, 
 - **Status:** Implemented. Evidence: `docs/ux/ux-architecture.yaml` `stored-secret-revealed-before-edit`, `src/mainview/components/global-settings/ModelCatalogSection.tsx` (`ProviderKeyField`), `src/bun/rpc-handlers/model-catalog.ts` (`modelCatalogRevealKey`).
 
 ## 2026-08-14 — An agent-to-agent message toast names two tasks and owns its own hue
-- **Rule:** The toast for `dev3 message` between two agents renders `#fromSeq title → #toSeq title` as its source line, uses the non-severity `agent` variant (violet `--agent`), and clicks through to the RECEIVER; every other toast keeps one origin and a severity variant.
-- **Why:** `decisions/2026/08/14/agent-message-toast-two-identities.md`.
+
+Two-task source line, non-severity `agent` violet, click-through to the receiver — bible §5.7. Why: `decisions/2026/08/14/agent-message-toast-two-identities.md`.
 
 ## 2026-08-14 — An agent-written log gets a capped preview, not a whole screen
 
@@ -150,8 +182,7 @@ One round floating button over the canvas, only while that pane is scrolled up, 
 - **Status:** Implemented. Evidence: `src/mainview/components/TaskDiffViewer.tsx` (`addAndSendInlineComment`, `InlineCommentComposer`), bible §5.3.
 
 ## 2026-08-08 — The memory breakdown may kill leftover worktree processes, and nothing else
-- **Rule:** one conditional section at the bottom of the dev3 group in the memory popover/BottomSheet lists processes still running inside task worktrees; three ghost-danger controls — `Kill all` behind `confirm({ danger: true })`, a hover-revealed per-row kill with no dialog, and a rescan icon — bible §12.6 + yaml; yaml `global_header.ambient_resource_readout.reclaim_action`.
-- **Why:** `decisions/2026/08/08/reap-worktree-cwd-holders-on-teardown.md`.
+- **Rule:** one conditional section in the memory popover lists processes still holding task worktrees, with ghost-danger kill controls — bible §12.6, yaml `global_header.ambient_resource_readout.reclaim_action`. **Why:** `decisions/2026/08/08/reap-worktree-cwd-holders-on-teardown.md`.
 
 ## 2026-08-08 — An archived task reaches its images and artifacts as enumerated rows
 - Rule lives in bible §3 and yaml `task_image_viewer.reached_from`; why in `decisions/2026/08/08/archived-task-shared-outputs.md` (its standalone-overlay half superseded 2026-09-05).

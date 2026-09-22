@@ -10,13 +10,14 @@
  * same adapter.
  */
 import { claudeAdapter } from "./claude";
-import { copilotAdapter } from "./copilot";
 import { codexAdapter } from "./codex";
+import { copilotAdapter } from "./copilot";
 import { cursorAdapter } from "./cursor";
 import { antigravityAdapter } from "./antigravity";
 import { agentKey } from "./families";
 import { geminiAdapter } from "./gemini";
 import { genericAdapter } from "./generic";
+import { ompAdapter } from "./omp";
 import { opencodeAdapter } from "./opencode";
 import type { AgentFamily } from "../types";
 import type { AgentAdapter } from "./types";
@@ -31,6 +32,7 @@ const REGISTRY: Record<string, AgentAdapter> = {
 	[antigravityAdapter.command]: antigravityAdapter,
 	[cursorAdapter.command]: cursorAdapter,
 	[opencodeAdapter.command]: opencodeAdapter,
+	[ompAdapter.command]: ompAdapter,
 };
 
 /** The adapter for an agent; GenericAdapter for unknown/custom commands. */

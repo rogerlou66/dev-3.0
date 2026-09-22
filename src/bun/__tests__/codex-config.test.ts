@@ -5,6 +5,7 @@ import {
 	codexServersWithTransport,
 	ensureCodexProfileFile,
 	getCodexSyntaxForVersion,
+	hasNarrowedWorkspaceProfile,
 	pruneOrphanedMcpServers,
 	pickCodexProfileLaunchFlag,
 	tomlBasicString,
@@ -52,11 +53,19 @@ describe("ensureCodexConfig", () => {
 			const result = ensureCodexConfig(null, WORKTREES_PATH, SOCKETS_PATH);
 			expect(result).toContain('default_permissions = "workspace"');
 			expect(result).toContain("[permissions.workspace.filesystem]");
-			expect(result).toContain('":minimal" = "read"');
+			expect(result).toContain('":root" = "read"');
 			expect(result).toContain('[permissions.workspace.filesystem.":project_roots"]');
 			expect(result).toContain('"." = "write"');
 			expect(result).toContain("[permissions.workspace.network]");
 			expect(result).toContain("enabled = true");
+		});
+
+		it("does not narrow the filesystem sandbox of Codex runs outside dev3", () => {
+			const result = ensureCodexConfig(null, WORKTREES_PATH, SOCKETS_PATH);
+			const workspaceFs = result.slice(result.indexOf("[permissions.workspace.filesystem]"));
+			const workspaceFsBlock = workspaceFs.slice(0, workspaceFs.indexOf("\n["));
+			expect(workspaceFsBlock).toContain('":root" = "read"');
+			expect(workspaceFsBlock).not.toContain('":minimal"');
 		});
 
 		it("can trust an exact worktree path in addition to the shared worktrees root", () => {
@@ -853,8 +862,8 @@ describe.each([
 	it("declares each status hook exactly once, however often it runs", () => {
 		let config = ensure(null);
 		for (let i = 0; i < 3; i++) config = ensure(config);
-		expect(dev3Handlers(config)).toBe(6);
-		expect(groups(config)).toBe(6);
+		expect(dev3Handlers(config)).toBe(8);
+		expect(groups(config)).toBe(8);
 	});
 
 	it("collapses a duplicated block whose opening marker was lost", () => {
@@ -862,11 +871,11 @@ describe.each([
 		// no longer starts with its marker, so the marker-based replace misses it and
 		// every launch appends one more copy.
 		const orphaned = ensure(null).replace("# >>> dev3 status hooks (generated — do not edit) >>>\n", "");
-		expect(dev3Handlers(orphaned)).toBe(6);
+		expect(dev3Handlers(orphaned)).toBe(8);
 
 		const healed = ensure(orphaned);
-		expect(dev3Handlers(healed)).toBe(6);
-		expect(groups(healed)).toBe(6);
+		expect(dev3Handlers(healed)).toBe(8);
+		expect(groups(healed)).toBe(8);
 		expect(ensure(healed)).toBe(healed);
 	});
 
@@ -892,9 +901,9 @@ describe.each([
 		expect(config).toContain("# my own notification hook — do not touch");
 		expect(config).toContain('trusted_hash = "sha256:abc"');
 		expect(config).toContain('model = "gpt-5"');
-		expect(dev3Handlers(config)).toBe(6);
+		expect(dev3Handlers(config)).toBe(8);
 		// Ours plus the user's one Stop group.
-		expect(groups(config)).toBe(7);
+		expect(groups(config)).toBe(9);
 	});
 
 	it("keeps a mixed group the user glued together, rather than guessing", () => {
@@ -916,12 +925,12 @@ describe.each([
 		const config = ensure(mixed);
 		expect(config).toContain('command = "~/bin/notify-me.sh"');
 		// The user's group survives untouched, so its dev3 handler is still counted.
-		expect(dev3Handlers(config)).toBe(7);
+		expect(dev3Handlers(config)).toBe(9);
 	});
 
 	it("writes the command this platform's hook runner can actually execute", () => {
 		const config = ensure(null);
-		expect(count(config, ourCommandLine)).toBe(6);
+		expect(count(config, ourCommandLine)).toBe(8);
 
 		if (dialect.posixShell) {
 			// The env guard is what keeps a foreign Codex session free (#1527).
@@ -960,9 +969,9 @@ describe.each([
 		const config = ensure(ensure(own));
 		expect(config).toContain('command = "~/.dev3.0/bin/dev3 task move --status in-progress"');
 		expect(config).toContain('command = "~/.dev3.0/bin/dev3 note add mine"');
-		expect(dev3Handlers(config)).toBe(6);
+		expect(dev3Handlers(config)).toBe(8);
 		// Ours plus the user's two groups.
-		expect(groups(config)).toBe(8);
+		expect(groups(config)).toBe(10);
 	});
 
 	it("still collects an orphan left by an older build, or by the other platform", () => {
@@ -973,11 +982,11 @@ describe.each([
 			// would have written it — then heal it with THIS dialect.
 			const foreign = orphaned.replaceAll(ourCommandLine, commandLine(spelling));
 			const healed = ensure(foreign);
-			expect(dev3Handlers(healed)).toBe(6);
-			expect(groups(healed)).toBe(6);
+			expect(dev3Handlers(healed)).toBe(8);
+			expect(groups(healed)).toBe(8);
 			// Nothing but the freshly written block is left.
-			expect((healed.match(/^command = /gm) ?? []).length).toBe(6);
-			expect(count(healed, ourCommandLine)).toBe(6);
+			expect((healed.match(/^command = /gm) ?? []).length).toBe(8);
+			expect(count(healed, ourCommandLine)).toBe(8);
 		}
 	});
 });
@@ -1048,5 +1057,77 @@ theme = "github"
 		const parsed = load(config) as { tui?: Record<string, unknown> };
 		expect(parsed.tui?.whimsy).toBe(false);
 		expect(parsed.tui?.theme).toBe("github");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// An older dev3 wrote `default_permissions = "workspace"` with `":minimal" =
+// "read"` into the user's global Codex config. That profile is narrower than
+// Codex's own default and, on a Homebrew install, stops standalone Codex from
+// starting a session at all. dev3 put it there, so dev3 takes it back out on
+// the next launch — the fingerprint is exact, and a profile carrying anything
+// else belongs to the user and is never touched.
+// ---------------------------------------------------------------------------
+
+const NARROWED = `default_permissions = "workspace"
+
+[permissions.workspace.filesystem]
+":minimal" = "read"
+
+[permissions.workspace.filesystem.":workspace_roots"]
+"." = "write"
+
+[permissions.workspace.network]
+enabled = true
+`;
+
+describe("repairing the profile an older dev3 narrowed", () => {
+	const WORKTREES_PATH = "/Users/testuser/.dev3.0/worktrees";
+	const SOCKETS_PATH = "/Users/testuser/.dev3.0/sockets";
+	const patch = (config: string) => ensureCodexConfig(config, WORKTREES_PATH, SOCKETS_PATH, [], { codexVersion: "codex-cli 0.154.0" });
+
+	it("widens it to what Codex itself defaults to, with no prompt", () => {
+		const result = patch(NARROWED);
+		expect(result).toContain('":root" = "read"');
+	});
+
+	it("leaves the rest of the profile alone", () => {
+		const result = patch(NARROWED);
+		expect(result).toContain('[permissions.workspace.filesystem.":workspace_roots"]');
+		expect(result).toContain("enabled = true");
+		expect(result).toContain('default_permissions = "workspace"');
+	});
+
+	it("is a no-op on the next launch — a repaired config is not rewritten again", () => {
+		const once = patch(NARROWED);
+		expect(patch(once)).toBe(once);
+	});
+
+	it("never touches a profile carrying any other grant — that one is the user's", () => {
+		const handWritten = NARROWED.replace('":minimal" = "read"', '":minimal" = "read"\n"/Users/testuser/notes" = "read"');
+		const result = patch(handWritten);
+		expect(result).not.toContain('":root" = "read"');
+		expect(result).toContain('"/Users/testuser/notes" = "read"');
+	});
+
+	it("never touches a profile the user pointed default_permissions away from", () => {
+		const elsewhere = NARROWED.replace('default_permissions = "workspace"', 'default_permissions = "mine"');
+		expect(patch(elsewhere)).not.toContain('":root" = "read"');
+	});
+});
+
+describe("hasNarrowedWorkspaceProfile", () => {
+	const parse = (config: string) => load(config) as Parameters<typeof hasNarrowedWorkspaceProfile>[0];
+
+	it("recognizes the profile an older dev3 wrote", () => {
+		expect(hasNarrowedWorkspaceProfile(parse(NARROWED))).toBe(true);
+	});
+
+	it("says no once the grant is already wide", () => {
+		expect(hasNarrowedWorkspaceProfile(parse(NARROWED.replace('":minimal"', '":root"')))).toBe(false);
+	});
+
+	it("says no for a config with no permissions at all", () => {
+		expect(hasNarrowedWorkspaceProfile({})).toBe(false);
 	});
 });

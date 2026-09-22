@@ -1,3 +1,4 @@
+import { interfaceOnboarding } from "../interface-onboarding";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -24,7 +25,8 @@ import { listAgentSkills as scanAgentSkills } from "../skills-catalog";
 import { spawn, spawnSync } from "../spawn";
 import { writeSystemClipboard } from "../system-clipboard";
 import { getPushMessage, getUploadedImageExtension, hideAppNative, log, logRendererError, logRendererDiagnostic, setActiveContext, setAppForeground, setStreamerPrivacy, setTerminalFocus } from "./shared";
-import { recordRendererHeartbeat } from "../renderer-watchdog";
+import { forgetRendererClient, recordRendererHeartbeat } from "../renderer-watchdog";
+import { consumeArtifactFreezeNotice } from "../artifact-freeze-recovery";
 import { applyMenuContext, type MenuContext } from "../../shared/application-menu";
 import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactDownloadFile, sharedArtifactHtmlPath } from "../shared-artifacts";
 import { issueArtifactDownloadTicket } from "../artifact-download-tickets";
@@ -1011,6 +1013,16 @@ async function checkCanaryChannelAvailable(): Promise<{ available: boolean }> {
 	return { available: hostPublishesCanary() };
 }
 
+async function getFreezeDiagnosticsStatus(): Promise<{ supported: boolean; running: boolean; directory: string }> {
+	const { freezeDiagnosticsDirectory, freezeDiagnosticsRunning, freezeDiagnosticsSupported } =
+		await import("../freeze-diagnostics");
+	return {
+		supported: freezeDiagnosticsSupported(),
+		running: freezeDiagnosticsRunning(),
+		directory: freezeDiagnosticsDirectory(),
+	};
+}
+
 async function getPreventSleepState(): Promise<{ enabled: boolean; available: boolean; forcedByRemote: boolean }> {
 	const { isCaffeinateAvailable, isPreventSleepEnabled } = await import("../caffeinate");
 	const { isRemoteAccessActive } = await import("../remote-access-server");
@@ -1049,9 +1061,12 @@ async function copyTerminalSelection(params: { taskId: string; text: string; mou
 }
 
 export const appHandlers = {
+	interfaceOnboarding,
 	logRendererError,
 	logRendererDiagnostic,
 	rendererHeartbeat: recordRendererHeartbeat,
+	rendererHeartbeatStop: ({ clientId }: { clientId: string }) => forgetRendererClient(clientId),
+	consumeArtifactFreezeNotice: () => consumeArtifactFreezeNotice(),
 	quitApp,
 	requestQuit,
 	consumePendingQuitDialog,
@@ -1099,6 +1114,7 @@ export const appHandlers = {
 	resetTipState,
 	checkCaffeinateAvailable,
 	checkCanaryChannelAvailable,
+	getFreezeDiagnosticsStatus,
 	getPreventSleepState,
 	setPreventSleep,
 	copyTerminalSelection,

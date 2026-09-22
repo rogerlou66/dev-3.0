@@ -7,6 +7,7 @@ import type {
 	ProviderConfig,
 } from "../../../shared/types";
 import { agentKey } from "../../../shared/agent-adapters/families";
+import { hasOmpFlag, OMP_APPROVAL_MODE } from "../../../shared/agent-adapters/omp-flags";
 import { buildProviderEnv, getProviderDefinition, providerPinnedModel } from "../../../shared/llm-provider";
 import { ENV_UNSET } from "../../../shared/agent-accounts";
 import { type ModelCatalog, resolveModelRoleLaunch, roleUnsetEnv } from "../../../shared/model-catalog";
@@ -111,6 +112,15 @@ export function normalizeExternalApps(
 	return validApps.length > 0 ? validApps : undefined;
 }
 
+/** dev3's permission modes in Copilot's own flags — mirrors `copilotAdapter`. */
+const COPILOT_PREVIEW_MODE_ARGS: Record<string, string[]> = {
+	plan: ["--mode", "plan"],
+	acceptEdits: ["--allow-tool", "write"],
+	auto: ["--allow-all-tools"],
+	dontAsk: ["--allow-all-tools", "--no-ask-user"],
+	bypassPermissions: ["--allow-all"],
+};
+
 function quoteIfUnsafeForPreview(s: string): string {
 	return /^[A-Za-z0-9_\-./:]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
 }
@@ -133,6 +143,7 @@ export function buildCommandPreview(
 	const isCodex = cmdName === "codex";
 	const isClaude = cmdName === "claude";
 	const isCopilot = cmdName === "copilot";
+	const isOmp = cmdName === "omp";
 
 	// Mirror the launcher: only a backend registered for THIS agent applies
 	// (same guard as agentProvider in agents.ts).
@@ -164,20 +175,21 @@ export function buildCommandPreview(
 		parts.push(quoteIfUnsafeForPreview(arg));
 	}
 
-	if (isCopilot && config.effort) {
-		parts.push("--effort", quoteIfUnsafeForPreview(config.effort));
-	}
-
-	if (!isCodex && config.permissionMode && config.permissionMode !== "default") {
-		if (isCopilot) {
-			if (config.permissionMode === "plan") parts.push("--plan");
-			else if (config.permissionMode === "bypassPermissions") parts.push("--allow-all");
-		} else if (isCursor) {
+	// omp is explicit for every mode, `default` included — no flag means its own
+	// configured tier, `yolo` out of the box (see omp-flags.ts).
+	if (isOmp) {
+		if (!hasOmpFlag(config.additionalArgs, "--approval-mode")) {
+			parts.push("--approval-mode", OMP_APPROVAL_MODE[config.permissionMode ?? "default"]);
+		}
+	} else if (!isCodex && config.permissionMode && config.permissionMode !== "default") {
+		if (isCursor) {
 			if (config.permissionMode === "plan") {
 				parts.push("--mode", "plan");
 			} else if (config.permissionMode === "bypassPermissions") {
 				parts.push("--force");
 			}
+		} else if (isCopilot) {
+			parts.push(...(COPILOT_PREVIEW_MODE_ARGS[config.permissionMode] ?? []));
 		} else {
 			parts.push("--permission-mode", config.permissionMode);
 		}
@@ -193,16 +205,23 @@ export function buildCommandPreview(
 		if (!hasBypassFlag) parts.push("--allow-dangerously-skip-permissions");
 	}
 
-	if (config.effort && !isCursor && !isCodex && !isCopilot) {
-		parts.push("--effort", config.effort);
+	// Copilot refuses `--model auto --effort <level>` outright; the launcher drops
+	// the flag there, so the preview must too.
+	if (config.effort && !isCursor && !isCodex && !(isCopilot && config.model === "auto")) {
+		if (!isOmp) parts.push("--effort", config.effort);
+		else if (!hasOmpFlag(config.additionalArgs, "--thinking")) parts.push("--thinking", config.effort);
 	}
 
-	if (config.maxBudgetUsd != null && config.maxBudgetUsd > 0 && !isCursor && !isCodex && !isCopilot) {
+	// Copilot budgets in AI credits, not dollars, and omp has no budget flag —
+	// the launcher drops this for both.
+	if (config.maxBudgetUsd != null && config.maxBudgetUsd > 0 && !isCursor && !isCodex && !isCopilot && !isOmp) {
 		parts.push("--max-budget-usd", String(config.maxBudgetUsd));
 	}
 
 	if (cmdName === "claude") {
-		parts.push("--append-system-prompt", "'…dev3 prompt…'");
+		parts.push("--append-system-prompt-file", "'…dev3 prompt file…'");
+	} else if (isOmp) {
+		parts.push("--append-system-prompt", "'…dev3 prompt file…'");
 	}
 
 	if (config.additionalArgs) {
@@ -218,8 +237,11 @@ export function buildCommandPreview(
 	if (isCursor) {
 		prompt += "\\n\\n…dev3 prompt…";
 	}
-	if (isCopilot) parts.push("--interactive", quoteIfUnsafeForPreview(prompt));
-	else parts.push(`'${prompt}'`);
+	// Copilot takes the prompt behind -i, which runs it and STAYS interactive;
+	// omp takes it positionally after the `--` separator.
+	if (isCopilot) parts.push("-i");
+	if (isOmp) parts.push("--");
+	parts.push(`'${prompt}'`);
 
 	// Mirror the launcher's env: provider env (Bedrock flag + pinned model)
 	// first, then config envVars (which win on conflict, as at launch time).

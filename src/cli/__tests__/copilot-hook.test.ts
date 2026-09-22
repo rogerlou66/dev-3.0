@@ -1,55 +1,156 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-vi.mock("../socket-client", () => ({ sendRequest: vi.fn() }));
+import type { CliContext } from "../context";
+
+vi.mock("../socket-client", () => ({
+	sendRequest: vi.fn(),
+}));
+
 import { sendRequest } from "../socket-client";
-import { copilotHookEvent, handleCopilotHook } from "../commands/copilot-hook";
+import { handleCopilotHook } from "../commands/copilot-hook";
+import { GENERIC_SKILL_BODY } from "../../shared/agent-skill-content";
 
-const context = { taskId: "task-1", projectId: "project-1", socketPath: "/tmp/dev3-test.sock" };
-const payload = (extra: object) => JSON.stringify({ sessionId: "session-1", cwd: "/tmp/worktree", ...extra });
-let stdout = "";
-beforeEach(() => {
-	vi.stubEnv("DEV3_COPILOT_SESSION", "1");
-	stdout = "";
-	vi.spyOn(process.stdout, "write").mockImplementation((chunk) => { stdout += String(chunk); return true; });
-	vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-	vi.mocked(sendRequest).mockReset().mockResolvedValue({ id: "1", ok: true, data: {} });
+const mockSend = vi.mocked(sendRequest);
+const SOCKET = "/tmp/test.sock";
+const CONTEXT: CliContext = {
+	projectId: "project-1",
+	taskId: "task-1",
+	socketPath: SOCKET,
+};
+
+/** One real Copilot 1.0.83 payload per event, captured from a live session. */
+const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({
+	sessionId: "session-1",
+	timestamp: 1789403013545,
+	cwd: "/private/tmp/work",
+	...extra,
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-describe("Copilot lifecycle handler", () => {
-	it("maps prompts and normal primary stops only", () => {
-		expect(copilotHookEvent("userPromptSubmitted", payload({ prompt: "Continue" }))).toBe("UserPromptSubmit");
-		expect(copilotHookEvent("agentStop", payload({ stopReason: "end_turn" }))).toBe("Stop");
-		for (const event of ["sessionEnd", "subagentStop", "errorOccurred"]) {
-			expect(copilotHookEvent(event, payload({ stopReason: "end_turn" }))).toBeNull();
-		}
-		for (const reason of ["error", "abort", "user_exit", undefined]) {
-			expect(copilotHookEvent("agentStop", payload({ stopReason: reason }))).toBeNull();
-		}
-		expect(copilotHookEvent("agentStop", "invalid")).toBeNull();
+let stdout = "";
+let stderr = "";
+let stdoutSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: ReturnType<typeof vi.spyOn>;
+let originalTmuxPane: string | undefined;
+
+beforeEach(() => {
+	stdout = "";
+	stderr = "";
+	originalTmuxPane = process.env.TMUX_PANE;
+	delete process.env.TMUX_PANE;
+	stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stdout += String(chunk);
+		return true;
 	});
-	it("forwards one atomic transition without storing Copilot ids as Codex sessions", async () => {
-		await handleCopilotHook("agentStop", payload({ stopReason: "end_turn" }), context.socketPath, context);
-		expect(sendRequest).toHaveBeenCalledTimes(1);
-		expect(sendRequest).toHaveBeenCalledWith(context.socketPath, "task.agentHook", {
-			taskId: "task-1", projectId: "project-1", event: "Stop",
-		}, { timeoutMs: 3_000, connectAttempts: 2, retryDelayMs: 50 });
+	stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+		stderr += String(chunk);
+		return true;
+	});
+	mockSend.mockReset();
+});
+
+afterEach(() => {
+	stdoutSpy.mockRestore();
+	stderrSpy.mockRestore();
+	if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+	else process.env.TMUX_PANE = originalTmuxPane;
+});
+
+describe("handleCopilotHook", () => {
+	it("maps each Copilot event onto the generic status event", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		for (const [copilotEvent, generic] of [
+			["sessionStart", "SessionStart"],
+			["preToolUse", "PreToolUse"],
+			["postToolUse", "PostToolUse"],
+			["agentStop", "Stop"],
+		]) {
+			mockSend.mockClear();
+			await handleCopilotHook(copilotEvent, payload(), SOCKET, CONTEXT);
+			expect(mockSend.mock.calls[0]?.[2]).toMatchObject({ event: generic, harness: "copilot" });
+		}
+	});
+
+	it("carries the submitted prompt, keyed by the event's own timestamp", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("userPromptSubmitted", payload({ prompt: "do the thing" }), SOCKET, CONTEXT);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.agentHook", expect.objectContaining({
+			event: "UserPromptSubmit",
+			harness: "copilot",
+			sessionId: "session-1",
+			prompt: "do the thing",
+			turnId: "1789403013545",
+		}), expect.anything());
+	});
+
+	// `ask_user` is Copilot's AskUserQuestion: it blocks until the human answers,
+	// so its preToolUse is the only moment the task is genuinely waiting on them.
+	it("parks the task in Has Questions when the tool about to run is ask_user", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("preToolUse", payload({ toolName: "ask_user" }), SOCKET, CONTEXT);
+
+		expect(mockSend.mock.calls[0]?.[2]).toMatchObject({ event: "PermissionRequest" });
+	});
+
+	it("reads the tool name from the snake_case payload shape too", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("preToolUse", payload({ tool_name: "ask_user" }), SOCKET, CONTEXT);
+
+		expect(mockSend.mock.calls[0]?.[2]).toMatchObject({ event: "PermissionRequest" });
+	});
+
+	it("leaves every other tool on the working path", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("preToolUse", payload({ toolName: "bash" }), SOCKET, CONTEXT);
+		await handleCopilotHook("postToolUse", payload({ toolName: "ask_user" }), SOCKET, CONTEXT);
+
+		expect(mockSend.mock.calls[0]?.[2]).toMatchObject({ event: "PreToolUse" });
+		expect(mockSend.mock.calls[1]?.[2]).toMatchObject({ event: "PostToolUse" });
+	});
+
+	it("ignores permissionRequest — Copilot fires it even when nothing asks the user", async () => {
+		await handleCopilotHook("permissionRequest", payload({ toolName: "bash" }), SOCKET, CONTEXT);
+
+		expect(mockSend).not.toHaveBeenCalled();
 		expect(stdout).toBe("{}");
 	});
-	it("isolates concurrent task targets", async () => {
-		await handleCopilotHook("userPromptSubmitted", payload({ prompt: "A" }), context.socketPath, context);
-		await handleCopilotHook("userPromptSubmitted", payload({ prompt: "B" }), context.socketPath, { ...context, taskId: "task-2" });
-		expect(vi.mocked(sendRequest).mock.calls.map((call) => call[2]?.taskId)).toEqual(["task-1", "task-2"]);
+
+	it("answers sessionStart with the dev3 protocol as additionalContext", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("sessionStart", payload({ source: "resume" }), SOCKET, CONTEXT);
+
+		expect(JSON.parse(stdout)).toEqual({ additionalContext: GENERIC_SKILL_BODY });
 	});
-	it("ignores hooks outside a managed Copilot session", async () => {
-		vi.stubEnv("DEV3_COPILOT_SESSION", "0");
-		await handleCopilotHook("agentStop", payload({ stopReason: "end_turn" }), context.socketPath, context);
-		expect(sendRequest).not.toHaveBeenCalled();
+
+	it("still delivers the protocol when dev3 is offline", async () => {
+		await handleCopilotHook("sessionStart", payload(), null, null);
+
+		expect(mockSend).not.toHaveBeenCalled();
+		expect(JSON.parse(stdout).additionalContext).toBe(GENERIC_SKILL_BODY);
+	});
+
+	// A non-zero exit or non-JSON stdout on preToolUse is fail-closed in Copilot:
+	// it blocks the tool call. A dev3 that is merely down must never do that.
+	it("stays silent-successful when the socket call throws", async () => {
+		mockSend.mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+		await handleCopilotHook("preToolUse", payload({ toolName: "bash" }), SOCKET, CONTEXT);
+
 		expect(stdout).toBe("{}");
+		expect(stderr).toContain("connect ECONNREFUSED");
 	});
-	it("returns successful JSON when offline or socket requests fail", async () => {
-		await handleCopilotHook("agentStop", payload({ stopReason: "end_turn" }), null, context);
-		vi.mocked(sendRequest).mockRejectedValue(new Error("offline"));
-		await handleCopilotHook("agentStop", payload({ stopReason: "end_turn" }), context.socketPath, context);
-		expect(stdout).toBe("{}{}");
+
+	it("survives a payload that is not JSON at all", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: {} });
+
+		await handleCopilotHook("agentStop", "<not json>", SOCKET, CONTEXT);
+
+		expect(stdout).toBe("{}");
+		expect(mockSend.mock.calls[0]?.[2]).toMatchObject({ event: "Stop" });
 	});
 });

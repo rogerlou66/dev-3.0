@@ -59,6 +59,10 @@ export const antigravityAdapter: AgentAdapter = {
 		return sessionId ? `${baseCmd} --conversation ${sessionId}` : `${baseCmd} --continue`;
 	},
 
+	exitProgram() {
+		return null;
+	},
+
 	hooksSpec() {
 		return { kind: "antigravity" };
 	},

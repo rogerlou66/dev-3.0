@@ -1,4 +1,6 @@
 import type { AgentConfiguration, ExternalApp } from "../../../../shared/types";
+import { DEFAULT_AGENTS } from "../../../../shared/types";
+import { OMP_APPROVAL_MODE } from "../../../../shared/agent-adapters/omp-flags";
 import {
 	AUTO_DIFF_VIEW_WIDTH_THRESHOLD,
 	buildCommandPreview,
@@ -10,6 +12,7 @@ import {
 	toStoredDiffViewMode,
 	toStoredTaskOpenMode,
 } from "../utils";
+import { getAgentAdapter } from "../../../../shared/agent-adapters";
 
 describe("global-settings utils", () => {
 	it("resolves system theme using OS preference", () => {
@@ -135,7 +138,7 @@ describe("global-settings utils", () => {
 
 		expect(buildCommandPreview("claude", claudeConfig)).toEqual({
 			command:
-				"claude --model sonnet --permission-mode plan --allow-dangerously-skip-permissions --effort high --max-budget-usd 5 --append-system-prompt '…dev3 prompt…' --verbose '{{TASK_DESCRIPTION}}\\n\\nextra instructions'",
+				"claude --model sonnet --permission-mode plan --allow-dangerously-skip-permissions --effort high --max-budget-usd 5 --append-system-prompt-file '…dev3 prompt file…' --verbose '{{TASK_DESCRIPTION}}\\n\\nextra instructions'",
 			envLine: "FOO=bar",
 		});
 		expect(buildCommandPreview("agent", cursorConfig)).toEqual({
@@ -145,34 +148,37 @@ describe("global-settings utils", () => {
 		});
 	});
 
-	it.each([
-		["bypassPermissions", " --allow-all"],
-		["default", ""],
-		["plan", " --plan"],
-	] as const)("previews Copilot %s as an interactive launch", (permissionMode, permissionArgs) => {
-		const config: AgentConfiguration = { id: "c", name: "Copilot", permissionMode };
-		expect(buildCommandPreview("copilot", config)).toEqual({
-			command: `copilot${permissionArgs} --interactive '{{TASK_DESCRIPTION}}'`,
-			envLine: null,
-		});
+	it("previews omp with the flags omp actually receives", () => {
+		expect(buildCommandPreview("omp", { id: "o", name: "YOLO (X-High)", permissionMode: "bypassPermissions", effort: "xhigh", maxBudgetUsd: 5 }).command)
+			.toBe("omp --approval-mode yolo --thinking xhigh --append-system-prompt '…dev3 prompt file…' -- '{{TASK_DESCRIPTION}}'");
+		// No flag would mean omp's own tier (`yolo`), so the launcher says
+		// always-ask for default, plan and auto — and the preview must show it.
+		for (const permissionMode of ["default", "plan", "auto"] as const) {
+			expect(buildCommandPreview("omp", { id: "o", name: "Plan", permissionMode }).command)
+				.toBe("omp --approval-mode always-ask --append-system-prompt '…dev3 prompt file…' -- '{{TASK_DESCRIPTION}}'");
+		}
+		expect(buildCommandPreview("omp", { id: "o", name: "Default" }).command)
+			.toBe("omp --approval-mode always-ask --append-system-prompt '…dev3 prompt file…' -- '{{TASK_DESCRIPTION}}'");
 	});
 
-	it("previews Copilot wrappers with model, effort, additional args and escaped instructions", () => {
-		const config: AgentConfiguration = {
-			id: "c", name: "Copilot", baseCommandOverride: "company-copilot",
-			model: "custom[model]", effort: "high", permissionMode: "plan",
-			additionalArgs: ["--no-color"], appendPrompt: "Don't change files",
-			envVars: { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "/instructions" },
-		};
-		expect(buildCommandPreview("copilot", config, undefined, undefined, "copilot")).toEqual({
-			command: "company-copilot --model 'custom[model]' --effort high --plan --no-color --interactive '{{TASK_DESCRIPTION}}\\n\\nDon'\\''t change files'",
-			envLine: "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/instructions",
-		});
+	it("previews omp without doubling a flag the preset's own args already carry", () => {
+		expect(buildCommandPreview("omp", { id: "o", name: "x", effort: "high", additionalArgs: ["--thinking", "max"] }).command)
+			.toBe("omp --approval-mode always-ask --append-system-prompt '…dev3 prompt file…' --thinking max -- '{{TASK_DESCRIPTION}}'");
+		expect(buildCommandPreview("omp", { id: "o", name: "x", additionalArgs: ["--approval-mode=yolo"] }).command)
+			.toBe("omp --append-system-prompt '…dev3 prompt file…' --approval-mode=yolo -- '{{TASK_DESCRIPTION}}'");
 	});
 
-	it("does not advertise an unsupported Copilot budget flag", () => {
-		expect(buildCommandPreview("copilot", { id: "c", name: "Copilot", maxBudgetUsd: 5 }).command)
-			.not.toContain("--max-budget-usd");
+	it("never previews a shipped omp preset with the generic flags omp does not take", () => {
+		// The preview is a hand-kept mirror of the launcher. For omp a stale copy
+		// is worse than cosmetic: it shows --permission-mode, which the launcher
+		// replaced because a wrong approval value falls silently into yolo.
+		const omp = DEFAULT_AGENTS.find((a) => a.id === "builtin-omp")!;
+		for (const config of omp.configurations) {
+			const { command } = buildCommandPreview("omp", config);
+			expect(command).not.toMatch(/--permission-mode|--effort|--max-budget-usd/);
+			expect(command).toContain(`--approval-mode ${OMP_APPROVAL_MODE[config.permissionMode ?? "default"]}`);
+			expect(command.match(/--thinking/g)?.length ?? 0).toBeLessThanOrEqual(1);
+		}
 	});
 
 	it("omits --model for Claude when provider is bedrock", () => {
@@ -265,6 +271,38 @@ describe("global-settings utils", () => {
 			model: "claude-opus-4-8[1m]",
 		};
 		expect(buildCommandPreview("claude", config, "anthropic").envLine).toBeNull();
+	});
+
+	// The preview is a hand-written mirror of the launcher (the renderer must not
+	// import the adapters — that would pull every skill body into the app bundle),
+	// so nothing but a test keeps the two in step. Copilot shipped with the mirror
+	// missing `-i` and showing Claude's `--permission-mode`; this is that guard.
+	describe("Copilot preview mirrors the copilot adapter", () => {
+		const ctx = {
+			taskTitle: "T",
+			taskDescription: "{{TASK_DESCRIPTION}}",
+			projectName: "p",
+			projectPath: "/p",
+			worktreePath: "/w",
+		};
+		const cases: Partial<AgentConfiguration>[] = [
+			{ model: "auto" },
+			{ model: "auto", permissionMode: "bypassPermissions" },
+			{ model: "auto", permissionMode: "plan", effort: "high" },
+			{ model: "auto", effort: "xhigh" },
+			{ model: "gpt-5.6-sol", permissionMode: "bypassPermissions", effort: "xhigh" },
+			{ permissionMode: "acceptEdits" },
+			{ permissionMode: "dontAsk" },
+			{ model: "claude-opus-5", maxBudgetUsd: 12 },
+		];
+
+		it.each(cases)("%o", (partial) => {
+			const config: AgentConfiguration = { id: "c", name: "C", ...partial };
+			const fromAdapter = getAgentAdapter("copilot")
+				.launchArgs("copilot", config, ctx)
+				.join(" ");
+			expect(buildCommandPreview("copilot", config).command).toBe(fromAdapter);
+		});
 	});
 
 	describe("model roles in the preview", () => {

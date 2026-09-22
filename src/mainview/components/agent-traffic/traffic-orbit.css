@@ -222,6 +222,25 @@
 .traffic-node-label.is-coordinator {
 	border: 1px dashed rgb(var(--success) / 0.7);
 }
+/* Parked reads inactive on three axes at once — a seq that drops its live hue,
+   a dashed neutral outline and the word itself — so neither colour nor greyness
+   is load-bearing alone. `--text-secondary`, NOT `--text-tertiary`: measured on
+   this surface tertiary is 3.13:1 and secondary 5.07:1, and the state line is
+   10px. No blanket `opacity` either, for the same reason. */
+.traffic-node-label.is-parked {
+	border: 1px dashed rgb(var(--text-secondary) / 0.8);
+	background: rgb(var(--surface-base) / 0.86);
+}
+.traffic-node-label.is-parked b,
+.traffic-node-label.is-parked small.is-parked-state {
+	color: rgb(var(--text-secondary));
+}
+/* Selecting or hovering a parked node restores the live presentation: inactive
+   is a state to read, never a control to take away. */
+.traffic-node-label.is-parked.is-selected b,
+.traffic-node-label.is-parked:hover b {
+	color: rgb(var(--agent));
+}
 .traffic-node-label.is-selected {
 	box-shadow: 0 0 0 1px rgb(var(--accent));
 	background: rgb(var(--surface-elevated));
@@ -438,6 +457,14 @@
 .traffic-task-row b {
 	color: rgb(var(--agent));
 }
+/* Same reading as the parked node label: a seq that drops its live hue plus the
+   word, and the selected row snaps back to the live presentation. */
+.traffic-task-row.is-parked b {
+	color: rgb(var(--text-secondary));
+}
+.traffic-task-row.is-parked.is-selected b {
+	color: rgb(var(--agent));
+}
 .traffic-task-row small {
 	color: rgb(var(--text-tertiary));
 }
@@ -495,9 +522,273 @@
 .traffic-view button.traffic-primary:hover {
 	background: rgb(var(--accent-fill-hover));
 }
+/* The inspector's message composer. Its own row under the task's identity block,
+   never inside it: that block scrolls, and a composer below its fold is a control
+   nobody finds. A rule rather than a card — one more thing you can do to the
+   selected task, not a second panel. */
+.traffic-compose,
+.traffic-compose-closed {
+	flex-shrink: 0;
+	padding: 12px 16px;
+	font-size: 13px;
+	line-height: 1.6;
+	border-bottom: 1px solid rgb(var(--border-default) / 0.5);
+}
+.traffic-compose-closed {
+	margin: 0;
+	font-size: 13px;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-compose-input {
+	display: block;
+	width: 100%;
+	resize: vertical;
+	min-height: 56px;
+	max-height: 160px;
+	padding: 8px 10px;
+	border: 1px solid rgb(var(--border-default) / 0.6);
+	border-radius: 8px;
+	background: rgb(var(--surface-base) / 0.5);
+	color: rgb(var(--text-primary));
+	font: inherit;
+	line-height: 1.5;
+}
+.traffic-compose-input::placeholder {
+	color: rgb(var(--text-tertiary));
+}
+.traffic-compose-input:focus-visible {
+	outline: 2px solid rgb(var(--accent));
+	outline-offset: 1px;
+	border-color: transparent;
+}
+.traffic-compose-input:disabled {
+	opacity: 0.6;
+}
+.traffic-compose-foot {
+	display: flex;
+	align-items: flex-end;
+	gap: 8px;
+	margin-top: 8px;
+}
+.traffic-compose-status {
+	flex: 1;
+	min-width: 0;
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+.traffic-view .traffic-compose-status.is-hint {
+	color: rgb(var(--text-tertiary));
+}
+.traffic-view .traffic-compose-status.is-warn {
+	color: rgb(var(--warning));
+}
+.traffic-view .traffic-compose-status.is-error {
+	color: rgb(var(--danger));
+}
+.traffic-view .traffic-compose-status.is-sent {
+	color: rgb(var(--success));
+}
+.traffic-compose-count {
+	font-size: 12px;
+	color: rgb(var(--text-tertiary));
+	font-variant-numeric: tabular-nums;
+	padding-bottom: 8px;
+}
+.traffic-view button.traffic-compose-send {
+	flex-shrink: 0;
+	padding: 8px 12px;
+	border-radius: 8px;
+	background: rgb(var(--surface-elevated));
+	color: rgb(var(--text-primary));
+	font-weight: 500;
+	transition: transform 0.12s cubic-bezier(0.2, 0, 0, 1);
+}
+.traffic-view button.traffic-compose-send:hover:not(:disabled) {
+	background: rgb(var(--surface-elevated-hover));
+}
+.traffic-view button.traffic-compose-send:active:not(:disabled) {
+	transform: scale(0.96);
+}
+.traffic-view button.traffic-compose-send:disabled {
+	color: rgb(var(--text-tertiary));
+	cursor: default;
+}
 .traffic-empty {
 	padding: 20px;
 	color: rgb(var(--text-secondary));
+}
+/* The task's own conversation. A reader, so density is lower than the message
+   list and the two speakers must never be confusable with each other. */
+.traffic-conversation {
+	font-size: 12px;
+	line-height: 1.6;
+}
+.traffic-conversation-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 16px;
+	border-bottom: 1px solid rgb(var(--border-default) / 0.3);
+}
+.traffic-conversation-head b {
+	color: rgb(var(--agent));
+}
+.traffic-conversation-head small {
+	color: rgb(var(--text-tertiary));
+}
+.traffic-conversation-head select {
+	max-width: 170px;
+	font-size: 11px;
+	padding: 3px 6px;
+	border-radius: 6px;
+	background: rgb(var(--surface-base) / 0.6);
+	color: rgb(var(--text-primary));
+}
+.traffic-conversation-origin {
+	font-size: 10px;
+	padding: 2px 6px;
+	border-radius: 999px;
+	color: rgb(var(--text-secondary));
+	background: rgb(var(--surface-base) / 0.7);
+}
+.traffic-conversation-origin.origin-archived {
+	color: rgb(var(--warning-strong));
+}
+.traffic-conversation-earlier {
+	width: 100%;
+	padding: 8px 16px;
+	font-size: 11px;
+	color: rgb(var(--accent));
+	border-bottom: 1px solid rgb(var(--border-default) / 0.3);
+}
+.traffic-turn {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px 16px;
+	border-bottom: 1px solid rgb(var(--border-default) / 0.3);
+}
+.traffic-turn time {
+	font-size: 10px;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-turn b {
+	display: block;
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	margin-bottom: 2px;
+}
+.traffic-turn p {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+/* Markdown inside a 340px column: the renderer's own spacing is tuned for a
+   page, so tighten it and let code and tables scroll rather than push the
+   inspector wider. */
+.traffic-turn-body {
+	min-width: 0;
+	font-size: 12px;
+	line-height: 1.6;
+}
+.traffic-turn-body p,
+.traffic-turn-body ul,
+.traffic-turn-body ol,
+.traffic-turn-body pre,
+.traffic-turn-body blockquote,
+.traffic-turn-body table {
+	margin: 6px 0;
+}
+.traffic-turn-body > :first-child {
+	margin-top: 0;
+}
+.traffic-turn-body > :last-child {
+	margin-bottom: 0;
+}
+.traffic-turn-body ul,
+.traffic-turn-body ol {
+	padding-left: 18px;
+}
+.traffic-turn-body li {
+	margin: 2px 0;
+}
+.traffic-turn-body h1,
+.traffic-turn-body h2,
+.traffic-turn-body h3,
+.traffic-turn-body h4 {
+	margin: 8px 0 4px;
+	font-size: 13px;
+	font-weight: 600;
+}
+.traffic-turn-body pre {
+	overflow-x: auto;
+	padding: 8px;
+	border-radius: 6px;
+	background: rgb(var(--surface-base) / 0.7);
+}
+.traffic-turn-body :not(pre) > code {
+	padding: 1px 4px;
+	border-radius: 4px;
+	background: rgb(var(--surface-base) / 0.7);
+	overflow-wrap: anywhere;
+}
+.traffic-turn-body a {
+	color: rgb(var(--accent));
+	overflow-wrap: anywhere;
+}
+.traffic-turn-body table {
+	display: block;
+	overflow-x: auto;
+	border-collapse: collapse;
+}
+.traffic-turn-body th,
+.traffic-turn-body td {
+	padding: 3px 6px;
+	border: 1px solid rgb(var(--border-default) / 0.5);
+	white-space: nowrap;
+}
+.traffic-turn-body img {
+	max-width: 100%;
+	height: auto;
+}
+.traffic-turn-user {
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: rgb(var(--surface-base) / 0.5);
+}
+.traffic-turn-user b {
+	color: rgb(var(--text-tertiary));
+}
+.traffic-turn-agent b {
+	color: rgb(var(--agent));
+}
+.traffic-turn-agent p {
+	color: rgb(var(--text-secondary));
+}
+.traffic-turn-actions {
+	margin: 0;
+	font-size: 11px;
+	color: rgb(var(--text-tertiary));
+	overflow-wrap: anywhere;
+}
+.traffic-turn-clamped {
+	font-size: 10px;
+	color: rgb(var(--text-tertiary));
+}
+/* The fold's own control: a link inside the message, never a button competing
+   with the panel's real actions. */
+.traffic-turn-more {
+	margin-top: 4px;
+	padding: 0;
+	font-size: 11px;
+	color: rgb(var(--accent));
+	background: none;
+}
+.traffic-turn-more:hover {
+	text-decoration: underline;
 }
 .traffic-statusbar {
 	display: flex;
@@ -744,4 +1035,118 @@
 	box-shadow:
 		0 0 0 1px rgb(var(--accent)),
 		0 8px 24px rgb(0 0 0 / 0.25);
+}
+
+/* ── Terminal snapshot ───────────────────────────────────────────────────────
+   Collapsed, this is ONE control in the inspector; Refresh and the pane chips
+   only exist once the user has asked for a read. The screen keeps terminal
+   columns (`pre`, no wrapping) and scrolls in both directions rather than
+   reflowing text that was laid out for a wider pane. */
+/* The detail box is capped at 45% so the message list keeps the panel. An open
+   snapshot needs more than that cap leaves, or it expands below the fold and
+   reads as an empty disclosure. */
+.traffic-task-detail:has(.traffic-peek-body) {
+	max-height: 72%;
+}
+.traffic-peek {
+	margin-top: 16px;
+	border-top: 1px solid rgb(var(--border-default) / 0.5);
+	padding-top: 12px;
+}
+.traffic-peek-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.traffic-view button.traffic-peek-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: 1;
+	min-width: 0;
+	padding: 7px 10px;
+	border-radius: 8px;
+	background: rgb(var(--surface-elevated));
+	color: rgb(var(--text-secondary));
+	text-align: left;
+}
+.traffic-view button.traffic-peek-toggle:hover {
+	background: rgb(var(--surface-elevated-hover));
+	color: rgb(var(--text-primary));
+}
+.traffic-peek-toggle > span {
+	margin-left: auto;
+	color: rgb(var(--text-tertiary));
+	font-size: 12px;
+}
+.traffic-view button.traffic-peek-refresh {
+	padding: 7px 10px;
+	border-radius: 8px;
+	background: rgb(var(--surface-elevated));
+	color: rgb(var(--text-secondary));
+}
+.traffic-view button.traffic-peek-refresh:hover:not(:disabled) {
+	background: rgb(var(--surface-elevated-hover));
+	color: rgb(var(--text-primary));
+}
+.traffic-peek-panes {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 12px;
+}
+.traffic-view .traffic-peek-panes button {
+	padding: 4px 8px;
+	border-radius: 6px;
+	font-size: 12px;
+	background: rgb(var(--surface-elevated));
+	color: rgb(var(--text-secondary));
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.traffic-view .traffic-peek-panes button:hover {
+	background: rgb(var(--surface-elevated-hover));
+	color: rgb(var(--text-primary));
+}
+.traffic-view .traffic-peek-panes button[aria-pressed="true"],
+.traffic-view .traffic-peek-panes button[aria-pressed="true"]:hover {
+	background: rgb(var(--accent-fill) / 0.2);
+	color: rgb(var(--text-primary));
+}
+.traffic-detail .traffic-peek-meta {
+	margin: 10px 0 2px;
+	font-size: 12px;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-detail .traffic-peek-note {
+	margin: 8px 0;
+	font-size: 12px;
+	color: rgb(var(--text-secondary));
+}
+.traffic-peek-note code {
+	display: block;
+	margin-top: 4px;
+	font-family: var(--dev3-mono-stack);
+	font-size: 11px;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-detail .traffic-peek-disclaimer {
+	margin: 0 0 8px;
+	color: rgb(var(--text-tertiary));
+}
+.traffic-peek-screen {
+	max-height: 200px;
+	overflow: auto;
+	margin: 0;
+	padding: 10px;
+	border-radius: 8px;
+	background: rgb(var(--surface-base) / 0.6);
+	color: rgb(var(--text-primary));
+	font-family: var(--dev3-mono-stack);
+	font-size: 11px;
+	line-height: 1.45;
+	white-space: pre;
+	tab-size: 4;
 }

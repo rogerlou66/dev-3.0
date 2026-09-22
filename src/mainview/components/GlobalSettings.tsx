@@ -53,6 +53,8 @@ import TerminalSettingsSection from "./global-settings/TerminalSettingsSection";
 import WorkspaceSettingsSection from "./global-settings/WorkspaceSettingsSection";
 import type { SettingsPresetTarget, SettingsSectionId } from "../state";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useIsControlHidden } from "../hooks/useIsControlHidden";
+import { applySimplifyViewPreset, unapplySimplifyViewPreset } from "../hidden-controls";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import {
 	filterSettingsEntries,
@@ -77,10 +79,6 @@ type GlobalSettingsUpdater = (
 
 interface PersistOptions {
 	onLocalUpdate?: (next: GlobalSettingsType) => void;
-	tracking?: {
-		setting: string;
-		value: string;
-	};
 }
 
 function GlobalSettings({
@@ -119,6 +117,10 @@ function GlobalSettings({
 	// FALSE until the host answers: the channel publishes per platform, and defaulting to
 	// true would flash an enabled control that then leads to a 403 on a platform with no build.
 	const [canaryAvailable, setCanaryAvailable] = useState(false);
+	// Null until the host answers whether this machine can be sampled at all.
+	const [freezeDiagnostics, setFreezeDiagnostics] = useState<
+		{ supported: boolean; running: boolean; directory: string } | null
+	>(null);
 	// Null until the host answers — the backend picker stays inert rather than
 	// guessing that native is (un)available.
 	const [nativeTerminalAvailability, setNativeTerminalAvailability] =
@@ -129,12 +131,25 @@ function GlobalSettings({
 	// machine has no zsh before anyone has looked.
 	const [shellAvailability, setShellAvailability] = useState<ShellAvailability | null>(null);
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	// The "keyboard-shortcut-editor" control (§5.10) hides the Keyboard category
+	// — the ⌘/ reference overlay is a different surface and stays reachable.
+	const keyboardEditorHidden = useIsControlHidden("keyboard-shortcut-editor");
+	const visibleSettingsCategories = keyboardEditorHidden
+		? SETTINGS_CATEGORIES.filter((category) => category.id !== "keyboard")
+		: SETTINGS_CATEGORIES;
 	const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(() =>
 		normalizeSettingsCategoryId(section),
 	);
 	const [mobileCategory, setMobileCategory] = useState<SettingsCategoryId | null>(
 		() => (section ? normalizeSettingsCategoryId(section) : null),
 	);
+	useEffect(() => {
+		if (keyboardEditorHidden && activeCategory === "keyboard") {
+			// Fall back into the currently visible list, not the unfiltered one —
+			// correct today only because "appearance" happens never to be hidden.
+			setActiveCategory(visibleSettingsCategories[0].id);
+		}
+	}, [keyboardEditorHidden, activeCategory, visibleSettingsCategories]);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [pendingAnchor, setPendingAnchor] = useState<string | null>(anchor ?? null);
 	// A deep-link that names a preset, held until the agents list has loaded and
@@ -149,9 +164,17 @@ function GlobalSettings({
 	const pendingAgentsSaveRef = useRef<CodingAgent[] | null>(null);
 	const agentsSaveInFlightRef = useRef(false);
 
+	const visibleCategoryIds = useMemo(
+		() => new Set(visibleSettingsCategories.map((category) => category.id)),
+		[visibleSettingsCategories],
+	);
+	// Search is an entry point like the palette and the native menu (§5.10
+	// finding #2): a hidden category's rows must not surface here either, or
+	// picking one lands the user on a category the reset effect bounces away
+	// from with no explanation.
 	const filteredSettingsEntries = useMemo(
-		() => filterSettingsEntries(searchQuery, t),
-		[searchQuery, t],
+		() => filterSettingsEntries(searchQuery, t).filter((entry) => visibleCategoryIds.has(entry.category)),
+		[searchQuery, t, visibleCategoryIds],
 	);
 	const groupedSearchResults = useMemo(
 		() => groupSettingsEntriesByCategory(filteredSettingsEntries),
@@ -251,6 +274,15 @@ function GlobalSettings({
 				localStorage.removeItem("dev3-task-open-mode");
 			}
 		}).catch(() => {});
+		// Follow the settings push, like KanbanBoard does. Every save here sends the
+		// WHOLE object, so a snapshot taken at mount silently reverts anything written
+		// from outside this screen since — `hiddenControls` (a right-click "Hide", the
+		// Simplify View preset) being the field that actually got erased.
+		function onSettingsUpdated(e: Event) {
+			setGlobalSettingsState((e as CustomEvent<GlobalSettingsType>).detail);
+		}
+		window.addEventListener("rpc:globalSettingsUpdated", onSettingsUpdated);
+		return () => window.removeEventListener("rpc:globalSettingsUpdated", onSettingsUpdated);
 	}, [setGlobalSettingsState]);
 
 	useEffect(() => {
@@ -276,6 +308,18 @@ function GlobalSettings({
 			.then((result) => setCanaryAvailable(result.available))
 			.catch(() => {});
 	}, []);
+
+	// Null until the host answers — the freeze row stays inert rather than
+	// claiming a machine can be sampled before anyone has looked.
+	const refreshFreezeDiagnostics = useCallback(() => {
+		api.request.getFreezeDiagnosticsStatus()
+			.then((status) => setFreezeDiagnostics(status))
+			.catch(() => {});
+	}, []);
+
+	useEffect(() => {
+		refreshFreezeDiagnostics();
+	}, [refreshFreezeDiagnostics]);
 
 	useEffect(() => {
 		return () => clearTimeout(resetTimerRef.current);
@@ -414,7 +458,6 @@ function GlobalSettings({
 		(enabled: boolean) => {
 			persistSettingChange(
 				{ openArtifactsInPopup: enabled },
-				{ tracking: { setting: "open_artifacts_in_popup", value: enabled ? "popup" : "panel" } },
 			);
 		},
 		[persistSettingChange],
@@ -438,12 +481,6 @@ function GlobalSettings({
 		(enabled: boolean) => {
 			persistSettingChange(
 				{ dimInactivePanes: enabled },
-				{
-					tracking: {
-						setting: "dim_inactive_panes",
-						value: enabled ? "on" : "off",
-					},
-				},
 			);
 		},
 		[persistSettingChange],
@@ -453,12 +490,6 @@ function GlobalSettings({
 		(shell: ShellFlavor | undefined) => {
 			persistSettingChange(
 				{ terminalShell: shell },
-				{
-					tracking: {
-						setting: "terminal_shell",
-						value: shell ?? "auto",
-					},
-				},
 			);
 			// The host re-resolves on save; re-read so a missing shell reports its
 			// fallback immediately instead of after a reopen.
@@ -471,7 +502,6 @@ function GlobalSettings({
 		(tunnel: RemoteTunnelSettings | undefined) => {
 			persistSettingChange(
 				{ remoteTunnel: tunnel },
-				{ tracking: { setting: "remote_tunnel_provider", value: tunnel?.provider ?? "cloudflare" } },
 			);
 		},
 		[persistSettingChange],
@@ -483,7 +513,6 @@ function GlobalSettings({
 				// Undefined rather than "" so an unset code leaves no key behind in
 				// settings.json — getStaticCode() reads absence, not emptiness.
 				{ staticAccessCode: code || undefined },
-				{ tracking: { setting: "remote_static_access_code", value: code ? "set" : "cleared" } },
 			);
 		},
 		[persistSettingChange],
@@ -493,7 +522,6 @@ function GlobalSettings({
 		(port: number | undefined) => {
 			persistSettingChange(
 				{ remotePort: port },
-				{ tracking: { setting: "remote_port", value: port === undefined ? "auto" : "pinned" } },
 			);
 		},
 		[persistSettingChange],
@@ -545,7 +573,7 @@ function GlobalSettings({
 
 	const handleTerminalBidiToggle = useCallback(
 		(enabled: boolean) => {
-			persistSettingChange({ experimentalTerminalBidi: enabled ? true : undefined });
+			persistSettingChange({ experimentalTerminalBidi: enabled });
 		},
 		[persistSettingChange],
 	);
@@ -555,16 +583,29 @@ function GlobalSettings({
 			persistSettingChange(
 				// Stored either way: an explicit false is the opt-out from a default-on beta.
 				{ experimentalAgentTraffic: enabled },
-				{
-					tracking: {
-						setting: "experimental_agent_traffic",
-						value: String(enabled),
-					},
-				},
 			);
 		},
 		[persistSettingChange],
 	);
+
+	const handleFreezeDiagnosticsToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange(
+				// Default-off opt-in: the key only exists while recording is wanted.
+				{ freezeDiagnosticsEnabled: enabled ? true : undefined },
+			);
+			// The host starts or stops the collector on save; read back what it did
+			// instead of assuming the switch and the worker agree.
+			refreshFreezeDiagnostics();
+		},
+		[persistSettingChange, refreshFreezeDiagnostics],
+	);
+
+	const handleSimplifyModeToggle = useCallback((enabled: boolean) => {
+
+		if (enabled) applySimplifyViewPreset();
+		else unapplySimplifyViewPreset();
+	}, []);
 
 	const handlePxpipeProxyToggle = useCallback(
 		(enabled: boolean) => {
@@ -751,6 +792,7 @@ function GlobalSettings({
 						zoomLevel={zoomLevel}
 						onThemeChange={applyThemeChange}
 						onLocaleChange={handleLocaleChange}
+						onSimplifyModeToggle={handleSimplifyModeToggle}
 					/>
 				);
 			case "tasks":
@@ -872,8 +914,10 @@ function GlobalSettings({
 						<AdvancedExperienceSection
 							t={t}
 							globalSettings={globalSettings}
+							freezeDiagnostics={freezeDiagnostics}
 							onTerminalBidiToggle={handleTerminalBidiToggle}
 							onAgentTrafficToggle={handleAgentTrafficToggle}
+							onFreezeDiagnosticsToggle={handleFreezeDiagnosticsToggle}
 						/>
 						<DeveloperToolsSection
 							t={t}
@@ -913,11 +957,12 @@ function GlobalSettings({
 	}, []);
 
 	const selectedCategory =
-		SETTINGS_CATEGORIES.find((category) => category.id === activeCategory) ??
-		SETTINGS_CATEGORIES[0];
+		visibleSettingsCategories.find((category) => category.id === activeCategory) ??
+		visibleSettingsCategories[0];
 	const settingsNavigation = (
 		<SettingsNavigation
 			t={t}
+			categories={visibleSettingsCategories}
 			activeCategory={activeCategory}
 			query={searchQuery}
 			narrow={narrow}
@@ -964,7 +1009,11 @@ function GlobalSettings({
 								{t(selectedCategory.descriptionKey)}
 							</p>
 						</div>
-						<div className="space-y-8">{renderCategoryPage(activeCategory)}</div>
+						{/* Body reads the same resolved id as the heading above it (§5.10
+					    finding #3) — `activeCategory` alone could name a category the
+					    fallback effect hasn't caught up to yet, painting one frame of
+					    the wrong page under the right heading, or vice versa. */}
+					<div className="space-y-8">{renderCategoryPage(selectedCategory.id)}</div>
 					</>
 				)}
 			</div>
@@ -991,6 +1040,7 @@ function GlobalSettings({
 
 function SettingsNavigation({
 	t,
+	categories,
 	activeCategory,
 	query,
 	narrow,
@@ -1000,6 +1050,7 @@ function SettingsNavigation({
 	onSearchResult,
 }: {
 	t: TFunction;
+	categories: readonly (typeof SETTINGS_CATEGORIES)[number][];
 	activeCategory: SettingsCategoryId;
 	query: string;
 	narrow: boolean;
@@ -1055,7 +1106,7 @@ function SettingsNavigation({
 					/>
 				) : (
 					<ul className="space-y-1">
-						{SETTINGS_CATEGORIES.map((category) => (
+						{categories.map((category) => (
 							<li key={category.id}>
 								<button
 									type="button"

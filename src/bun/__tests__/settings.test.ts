@@ -55,6 +55,76 @@ describe("saveSettings", () => {
 		expect(loadSettingsSync().appearancePreset).toBe("default");
 	});
 
+	it("starts only a fresh installation in Simplified Mode, in both loaders", async () => {
+		for (const settings of [await loadSettings(), loadSettingsSync()]) {
+			expect(settings.simplifiedMode).toBe(true);
+			expect(settings.simplifiedModeSource).toBe("fresh");
+			expect(settings.personalHiddenControls).toEqual([]);
+			expect(settings.hiddenControls).toContain("bug-hunters");
+		}
+	});
+
+	it("persists fresh defaults before bootstrap creates project data", async () => {
+		const initial = loadSettingsSync();
+		expect(initial.simplifiedMode).toBe(true);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).simplifiedModeSource).toBe("fresh");
+		mkdirSync(join(TEST_HOME, "data"));
+		writeFileSync(join(TEST_HOME, "projects.json"), "[]");
+		for (const reloaded of [await loadSettings(), loadSettingsSync()]) {
+			expect(reloaded.simplifiedMode).toBe(true);
+			expect(reloaded.simplifiedModeSource).toBe("fresh");
+			expect(reloaded.personalHiddenControls).toEqual([]);
+		}
+	});
+
+	it("does not overwrite settings created after the missing-file check", async () => {
+		const winner = makeSettings({ simplifiedMode: false, personalHiddenControls: ["bug-hunters"], simplifiedModeSource: "existing" });
+		vi.spyOn(Bun, "file").mockImplementationOnce(() => ({
+			exists: async () => {
+				writeFileSync(settingsPath, JSON.stringify(winner));
+				return false;
+			},
+		}) as ReturnType<typeof Bun.file>);
+		const loaded = await loadSettings();
+		expect(loaded.simplifiedMode).toBe(false);
+		expect(loaded.personalHiddenControls).toEqual(["bug-hunters"]);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual(winner);
+	});
+
+	it.each(["projects.json", "data"])("does not treat an existing %s as a fresh install", async (marker) => {
+		if (marker === "data") mkdirSync(join(TEST_HOME, marker));
+		else writeFileSync(join(TEST_HOME, marker), "[]");
+		expect((await loadSettings()).simplifiedMode).toBe(false);
+		expect(loadSettingsSync().simplifiedMode).toBe(false);
+	});
+
+	it("preserves existing full-interface choice when upgrading without mode fields", async () => {
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ hiddenControls: ["bug-hunters"] })));
+		const settings = await loadSettings();
+		expect(settings.simplifiedMode).toBe(false);
+		expect(settings.simplifiedModeSource).toBe("existing");
+		expect(settings.personalHiddenControls).toEqual(["bug-hunters"]);
+		expect(settings.hiddenControls).toEqual(["bug-hunters"]);
+	});
+
+	it("preserves explicit disabled mode and personal hides through save and reload", async () => {
+		vi.spyOn(Bun, "write").mockImplementation(async (target, contents) => {
+			writeFileSync(String(target), String(contents));
+			return String(contents).length;
+		});
+		await saveSettings(makeSettings({ simplifiedMode: false, simplifiedModeSource: "fresh", personalHiddenControls: ["bug-hunters"], hiddenControls: ["bug-hunters"] }));
+		const settings = await loadSettings();
+		expect(settings.simplifiedMode).toBe(false);
+		expect(settings.simplifiedModeSource).toBe("fresh");
+		expect(settings.personalHiddenControls).toEqual(["bug-hunters"]);
+	});
+
+	it("does not enable Simplified Mode after a corrupt existing settings file", async () => {
+		writeFileSync(settingsPath, "{broken");
+		expect((await loadSettings()).simplifiedMode).not.toBe(true);
+		expect(loadSettingsSync().simplifiedMode).not.toBe(true);
+	});
+
 	it("does not corrupt the existing settings file if a write crashes mid-save", async () => {
 		const previousSettings = makeSettings({ updateChannel: "canary" });
 		writeFileSync(settingsPath, JSON.stringify(previousSettings, null, 2), "utf-8");
@@ -131,6 +201,31 @@ describe("saveSettings", () => {
 
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ experimentalAgentTraffic: true }), null, 2), "utf-8");
 		expect((await loadSettings()).experimentalAgentTraffic).toBe(true);
+	});
+
+	/**
+	 * Freeze diagnostics is default-off: only an explicit true is a stored opt-in,
+	 * so a stray `false` never keeps the key alive on disk.
+	 */
+	it("stores only an explicit freeze-diagnostics opt-in", async () => {
+		expect((await loadSettings()).freezeDiagnosticsEnabled).toBeUndefined();
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ freezeDiagnosticsEnabled: false }), null, 2), "utf-8");
+		expect((await loadSettings()).freezeDiagnosticsEnabled).toBeUndefined();
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ freezeDiagnosticsEnabled: true }), null, 2), "utf-8");
+		expect((await loadSettings()).freezeDiagnosticsEnabled).toBe(true);
+	});
+
+	/** Terminal bidi is default-on too: an explicit false is the opt-out and must survive. */
+	it("keeps both explicit terminal-bidi choices and stores no default", async () => {
+		expect((await loadSettings()).experimentalTerminalBidi).toBeUndefined();
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ experimentalTerminalBidi: false }), null, 2), "utf-8");
+		expect((await loadSettings()).experimentalTerminalBidi).toBe(false);
+
+		writeFileSync(settingsPath, JSON.stringify(makeSettings({ experimentalTerminalBidi: true }), null, 2), "utf-8");
+		expect((await loadSettings()).experimentalTerminalBidi).toBe(true);
 	});
 
 	// Absent = the docked artifact panel, which is what every existing install gets
@@ -275,7 +370,12 @@ describe("saveSettings", () => {
 			agentCustomBinaryPaths: { "builtin-codex": "/opt/wrappers/codex-wrapper" },
 			keyboardShortcuts: { "go-to-project": { primary: "Mod+KeyJ", alias: null } },
 			experimentalTerminalBidi: true,
+			hiddenControls: ["bug-hunters", "stats-nav"],
+			personalHiddenControls: ["bug-hunters", "stats-nav"],
+			simplifiedMode: false,
+			simplifiedModeSource: "existing",
 			experimentalAgentTraffic: true,
+			freezeDiagnosticsEnabled: true,
 			agentTrafficExperiment: "1",
 			lowBatteryEnabled: true,
 			lowBatteryDisabled: true,

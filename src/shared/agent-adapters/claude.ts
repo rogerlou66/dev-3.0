@@ -1,7 +1,7 @@
 /** Claude Code adapter. */
 import { CLAUDE_SKILL_BODY } from "../agent-skill-content";
 import { claudeTranscriptDir } from "../conversation-search-core";
-import { modelArgs, providerArgs } from "./common";
+import { modelArgs, providerArgs, slashExitProgram } from "./common";
 import { shellEscape, quoteIfUnsafe } from "./shell";
 import { buildTaskPrompt } from "./template";
 import type { AgentAdapter } from "./types";
@@ -49,8 +49,11 @@ export const claudeAdapter: AgentAdapter = {
 		}
 
 		if (!options?.skipSystemPrompt) {
-			// The body is ~34 000 characters, which is past the Windows command-line
-			// ceiling on its own, so there it travels as a file the backend wrote.
+			// The body travels as a file the backend wrote, on every platform: it is
+			// past the Windows command-line ceiling, and on POSIX an argv copy is
+			// what `pkill -f` matches against (h0x91b/dev-3.0#1734). Every dev3
+			// launch goes through `resolveAgentCommand`, which always supplies the
+			// file; the inline branch is what a caller with no backend behind it gets.
 			if (options?.systemPromptFile) {
 				args.push("--append-system-prompt-file", quoteIfUnsafe(options.systemPromptFile));
 			} else {
@@ -92,5 +95,9 @@ export const claudeAdapter: AgentAdapter = {
 
 	hooksSpec(options) {
 		return { kind: "claude", stopTarget: options?.stopTarget, permissionMode: options?.permissionMode };
+	},
+
+	exitProgram() {
+		return slashExitProgram("/exit");
 	},
 };

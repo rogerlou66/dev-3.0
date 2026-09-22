@@ -426,12 +426,8 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 				// the prompt and nothing about the task (see TASK_TYPES).
 				...(taskType !== "standard" ? { taskType } : {}),
 			});
-			// Show the persisted task immediately in the originating project view.
-			// The backend push keeps other boards and windows synchronized, while
-			// title and label updates remain non-fatal follow-ups.
-			if (created.projectId === initialProject.id) {
-				dispatch({ type: "addTask", task: created });
-			}
+			// Display the persisted task before non-fatal title and label updates.
+			dispatch({ type: "addTask", task: created });
 			let task = created;
 			let followUpError: unknown = null;
 			try {

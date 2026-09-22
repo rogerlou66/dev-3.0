@@ -7,14 +7,14 @@ import {
 	AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS,
 	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
 } from "../shared/agent-message-hold-timing";
-import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
+import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY } from "../shared/agent-skill-content";
 import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
 import { applyLowBattery } from "./low-battery";
 
 // Re-exported for backward-compat: agents.ts and other callers import the
 // composed skill bodies from here. The section constants that compose them now
 // live in ../shared/agent-skill-content (pure, shared with the agent adapters).
-export { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "../shared/agent-skill-content";
+export { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY } from "../shared/agent-skill-content";
 
 const log = createLogger("agent-skills");
 
@@ -86,6 +86,25 @@ Then begin working. Do not move the task status on session start; the injected \
 `;
 }
 
+export function buildOmpSkillContent(dialect: HookCliDialect = hookCliDialect()): string {
+	return `---
+name: dev3
+description: "${SKILL_DESCRIPTION}"
+user-invocable: true
+---
+
+${OMP_SKILL_BODY}
+## On session start
+
+Run these two commands to learn about available CLI commands and your current task:
+
+- \`${dialect.cli} --help\` — learn all available CLI commands
+- \`${dialect.cli} current\` — see your current project, task, and status
+
+Then begin working. Do not move the task status on session start; the dev3 status extension loaded into this session already owns that transition.
+`;
+}
+
 export function buildGenericSkillContent(dialect: HookCliDialect = hookCliDialect()): string {
 	return `---
 name: dev3
@@ -110,6 +129,11 @@ const CLAUDE_SKILL_DIR = ".claude/skills/dev3";
 
 /** Codex skill directory (hook-aware, but no command injection support). */
 const CODEX_SKILL_DIR = ".codex/skills/dev3";
+
+/** omp skill directory (hook-aware). omp reads ~/.omp/agent/skills and, at lower
+ *  precedence, ~/.claude/skills — its own dir wins, so it gets its own body
+ *  rather than Claude's short one. */
+const OMP_SKILL_DIR = ".omp/agent/skills/dev3";
 
 /** Generic agent skill directories (no command injection support). */
 const GENERIC_SKILL_DIRS = [
@@ -159,6 +183,7 @@ is genuinely ambiguous (e.g., multiple possible dev servers, unclear base branch
    |-------|-----------------|
    | \`setupScript\` | Package manager install command. Detect from lockfile: \`bun.lockb\` → \`bun install\`, \`pnpm-lock.yaml\` → \`pnpm install\`, \`yarn.lock\` → \`yarn\`, \`package-lock.json\` → \`npm install\`. For Python: \`pip install -e .\` or \`poetry install\`. For Rust: \`cargo build\`. Chain multiple steps with \`&&\` if needed. |
    | \`devScript\` | The dev server command. Check \`package.json\` scripts for \`dev\`, \`start\`, \`serve\`. Use the full command: \`bun run dev\`, \`npm run dev\`, etc. If no dev server exists, leave empty. |
+   | \`devServers\` | Additional dev servers, by name, when the project is several processes (an API, a worker, a back office). \`{ "api": { "script": "bun run api", "ports": ["api"] } }\` — each entry may also carry \`env\`, \`cwd\` (relative to the worktree) and \`title\`. Leave it out for a single-process project: \`devScript\` alone already declares the server named \`dev\`, and declaring \`dev\` here as well is an error. |
    | \`cleanupScript\` | Teardown hook that runs before the task worktree is removed — on \`completed\` / \`cancelled\`, when an active task is deleted (\`$DEV3_TASK_STATUS\` = \`deleted\`), or when task preparation is cancelled (\`$DEV3_TASK_STATUS\` = \`todo\`). Useful for copy-back, exports, cache cleanup, and tearing down per-worktree containers. Inside the script you can branch on \`$DEV3_TASK_STATUS\`, \`$DEV3_TASK_FROM_STATUS\`, and \`$DEV3_TASK_TO_STATUS\`, plus the workspace env vars from step 3b. |
    | \`clonePaths\` | Directories **and individual files** CoW-cloned from the project root into every new worktree instead of being re-downloaded or lost. Heavy dirs: \`node_modules\`, \`.venv\`, \`target\`, \`.next\`, \`build\`. Single files matter just as much: a git-ignored \`.npmrc\`, \`.env\`, or a personal instruction file reaches the worktree only through here. Glob patterns are expanded. A path missing from the project root is skipped silently; a path that exists but fails to copy is logged as an error and shown on the task. |
    | \`defaultBaseBranch\` | Check \`git symbolic-ref refs/remotes/origin/HEAD\` or look at common branches. Usually \`main\` or \`master\`. |
@@ -236,6 +261,7 @@ EOF
 |-------|------|-------------|
 | \`setupScript\` | string | Runs after a new worktree is created (install deps, generate code, etc.). Gets the workspace env vars from step 3b |
 | \`devScript\` | string | Dev server command (powers the "Dev Server" button in the UI) |
+| \`devServers\` | object | Dev servers beyond \`devScript\`, keyed by name: \`{ script, ports?, env?, cwd?, title? }\`. Each starts, stops and restarts on its own; every \`ports\` entry becomes one of the task's pool ports and reaches EVERY server of that task as \`DEV3_PORT_<NAME>\` |
 | \`cleanupScript\` | string | Runs before the task worktree is removed (\`completed\` / \`cancelled\` / task deleted / preparation cancelled) |
 | \`clonePaths\` | string[] | Files and dirs (globs allowed) CoW-cloned into every worktree. Runs BEFORE the agent launches — unlike \`setupScript\`, which in the default \`parallel\` mode starts alongside the already-running agent — so this is the only hook that can put a git-ignored file in place before the agent reads it. Missing sources are skipped |
 | \`defaultBaseBranch\` | string | Base branch for new task branches (default: \`main\`) |
@@ -690,6 +716,87 @@ const BUG_HUNTER_OPENAI_YAML = `interface:
   default_prompt: "Use $dev3-bug-hunter to run a read-only bug hunt with a seeded exploration strategy in this codebase."
 `;
 
+// ---- dev3-coordinator skill (promote THIS task mid-conversation) ----
+//
+// The skill carries no copy of the coordinator brief. `dev3 task update --type
+// coordinator --print-role` resolves the effective one (project override, then
+// the Settings one, then the built-in COORDINATOR_PROMPT) and prints it, so the
+// startup preamble and this skill can never drift apart and an override is
+// honoured here too. Nothing in this file may promote a task on its own: the
+// body has no `!`-injected command, and installing it writes a file and nothing
+// else.
+
+const COORDINATOR_SKILL_DESCRIPTION =
+	// No double quotes in here: it is interpolated into a double-quoted YAML scalar,
+	// where a nested quote ends the string and the harness falls back to the H1.
+	"Turn the CURRENT dev3 task into a coordinator in the middle of its conversation, keeping all work, history, branch and identity. Use ONLY when the user explicitly invokes it — /dev3-coordinator, 'make this task a coordinator', 'switch me to coordinator mode'. Never run it on your own initiative, and never to promote a different task.";
+
+const COORDINATOR_SKILL_CONTENT = `---
+name: dev3-coordinator
+description: "${COORDINATOR_SKILL_DESCRIPTION}"
+user-invocable: true
+---
+
+# dev3-coordinator — become the coordinator of this board, right here
+
+Invoking this skill IS the user's explicit request to change **this** task's role. It is the only thing that may trigger it: never promote a task because the work looks coordination-shaped, because a skill was installed, or because you read this description while looking for something else.
+
+## What it does
+
+One command. Run it in this worktree, with no task selector — it must land on the task you are already in:
+
+\`\`\`bash
+dev3 task update --type coordinator --print-role
+\`\`\`
+
+It does three things:
+
+1. Sets the board type, so the card becomes a coordinator: dashed green, above every priority band, never auto-completed.
+2. Rewrites this task's description so the role brief is in it — that is what a future session of this task reads at launch.
+3. Prints the canonical coordinator brief to stdout. **That printed text is your standing instruction from that moment on**, and it replaces any earlier instruction about what this task is. Read it in full and follow it.
+
+The brief is printed rather than typed into your pane precisely because you are the agent being promoted: a delivery would arrive as a second copy in a second turn and look like the role changed twice.
+
+## What does NOT change
+
+Your conversation, your context, your finished work, the branch, the worktree, the task's id and number, its title, labels and priority — all of it stays exactly as it is. This is a role change, not a restart, and nothing here asks you to redo or abandon work already done.
+
+Permissions do not change either. Everything the user has and has not authorised in this session stays exactly as it was: becoming a coordinator authorises no push, no pull request, no merge, no publication, no completion.
+
+## Re-running it
+
+Harmless, by design. On a task that is already a coordinator nothing on the board changes and the same brief is printed again — run it when you want the brief back in front of you.
+
+## When the command fails
+
+Report the failure exactly as it happened and say the role did **not** change. A non-zero exit means the board still calls this task whatever it called it before; do not start behaving as a coordinator on a failed promotion, and do not claim the type changed.
+
+Two answers you may see, neither of them a failure:
+
+- \`Role: coordinator — printed below instead of typed into your own pane.\` — the promotion landed.
+- No \`Role:\` line at all, with the brief still printed — the task was already a coordinator.
+
+## If the CLI on this machine predates \`--print-role\`
+
+\`error: Unknown option: --print-role\` means the installed \`dev3\` is older than this skill, and it stopped before changing anything. Fall back to the plain form, which every version has:
+
+\`\`\`bash
+dev3 task update --type coordinator
+\`\`\`
+
+Same promotion, same preserved conversation — the only difference is that the brief is then typed into your pane as a message rather than printed here, so it arrives a few seconds later as its own turn. Tell the user which of the two ran.
+
+## Going back
+
+\`dev3 task update --type standard --print-role\` clears the role and prints the one line saying so. Same rule: only on the user's explicit word.
+`;
+
+const COORDINATOR_OPENAI_YAML = `interface:
+  display_name: "dev3 Coordinator"
+  short_description: "Turn this task into a coordinator without losing its conversation"
+  default_prompt: "Use \$dev3-coordinator when the user asks to make this task the board's coordinator."
+`;
+
 // ---- ask-dev3 skill (feature router / user education) ----
 
 const ASK_DEV3_SKILL_DESCRIPTION =
@@ -719,8 +826,8 @@ A **flow** is a path through dev3's features. Most work travels one **main flow*
 6. **Work across projects → use Dashboard → Board.** The workspace board aligns every project as a swimlane; on desktop, drag the project handle to put important projects first while Operations stays pinned, and click the project name to open its board. Questions stay in Agent Working as amber **Needs input** cards, AI Review appears only when occupied, and PR Review stays visible as the external-review queue. Click an active task to float its full inspector + coding terminal over the board; click the dimmed Kanban around it, close it, or choose **Global Kanban** to return to the exact same board position, or choose **Open full page** when you want to leave the cross-project view. The compact cards keep titles to one line; hover one to read the complete title and latest agent update. Cancelled tasks remain available on each project's board instead of occupying the daily workspace matrix. Open **Projects** beside Board for project management.
    **Review blocked by an external dependency?** Drag a settled **Your Review** or **PR Review** task into **Blocked**, or choose **Move to Blocked** in its status menu. It leaves Inbox and Needs You while its workspace and underlying review stage remain intact. Use **Unblock task** or drag it back when ready; agent updates cannot silently unblock it. Search with \`is:blocked\` or \`status:blocked\`.
 7. **How the agent reaches you → it pings, you don't poll.** It raises an attention badge when it needs help, fires toasts / desktop notifications on milestones, and moves the task into the **User questions** status when it needs an answer. Subscribe to any task for watch notifications.
-8. **Review the changes → Show Diff.** On the card, *Show Diff* lets you hide test noise and leave inline comments — each one has its own **Send to agent** so a fix can start the moment you spot it, or ship the whole batch at the end. Confirmed sends mark comments **Sent** and keep them for reference; ambiguous delivery leaves them retryable and never auto-resends. Turn on **AI Review** so a machine pass (the AI review column) pre-chews the diff before your human pass.
-9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. Every PR dev3 opens ends with a deep link back to its task, so anyone reading it can jump straight in — switch that off under **Settings → Tasks & Board → Link pull requests back to the task** if a public PR shouldn't reveal it was made with dev3. An agent does the same in one command, and should reach for it before raw \`gh\`: \`dev3 pr create --title "..." --description "..." [--auto-merge]\` pushes the branch, opens the PR with that footer already appended and targets the base branch the task was created from — and refuses with exit 23 before pushing anything if \`gh\` is missing or logged out. Auto-merge on a PR that is already open is \`dev3 pr auto-merge [--strategy squash|merge|rebase]\`, and \`--off\` clears it.
+8. **Review the changes → Show Diff, and comment on artifacts too.** On the card, *Show Diff* lets you hide test noise and leave inline comments — each one has its own **Send to agent** so a fix can start the moment you spot it, or ship the whole batch at the end. An HTML artifact has the same thing: the speech-bubble toggle in its header turns on comment mode, click any element, comment beside it, send. Comments live on the task (the same list on desktop, phone and for the agent); sent ones stay greyed until the agent closes them with \`dev3 review resolve <id> --reply "…"\` — the reply shows under your comment and the pin turns green. \`dev3 review list\` is the agent's to-do list. Turn on **AI Review** so a machine pass (the AI review column) pre-chews the diff before your human pass.
+9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. An agent does the same in one command, and should reach for it before raw \`gh\`: \`dev3 pr create --title "..." --description "..." [--auto-merge]\` pushes the branch, opens the PR and targets the base branch the task was created from — and refuses with exit 23 before pushing anything if \`gh\` is missing or logged out. Auto-merge on a PR that is already open is \`dev3 pr auto-merge [--strategy squash|merge|rebase]\`, and \`--off\` clears it.
 10. **What completing does → the worktree is destroyed, notes survive.** Finishing a task removes its worktree and branch checkout, but its **notes** persist as project memory that future agents find via search. So durable findings belong in notes, not just the chat. Completion is guarded: dev3 warns about uncommitted changes, unpushed commits, and unmerged branches before destroying anything — and it auto-saves a diff snapshot on every branch refresh, so work is recoverable even if a worktree gets wiped.
 11. **Changed your mind → reopen or restart.** Reopening a completed or cancelled task resumes the previous agent conversation instead of starting fresh. Want a truly clean slate? Move the task to Cancelled and back to Todo — fresh worktree, clean agent session.
 
@@ -730,7 +837,7 @@ A starting situation that generates work, then merges onto the main flow.
 
 - **A bug report arrived** → make it a task with the repro as the description; the fix then flows through review and PR like any feature. Don't know where the bug lives? → **bug-hunter swarm**: a multi-variant task where each agent runs \`/dev3-bug-hunter\` with a seeded strategy, so different agents start from different corners of the codebase.
 - **"Review this PR"** → create a **PR review task**: paste the GitHub PR URL straight into the Create Task modal — dev3 fetches the branch into a worktree and the agent reviews the actual diff — runnable code, not a GitHub-tab skim. Such a task is marked **someone else's code** (eye glyph on the card, \`Code\` row in the inspector): dev3 will not run that branch's own \`.dev3\` setup/dev/cleanup scripts, env vars, MCP servers or agent hooks, using the project's own config instead. Nothing is read-only — edit, commit and push as usual — and one click in the inspector hands the branch its trust back if you deliberately want its scripts. In the diff, a file dev3 executes by itself wears a **RUNS** badge; read its commands rather than skimming.
-- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. From the CLI you can also start it that way in one command: \`dev3 task create --title "..." --description "..." --type coordinator\` writes the same role brief above your text at creation; a review task is \`dev3 task create --pr <number> --title "..."\`, where \`--pr\` both implies \`pr-review\` and starts the worktree on the pull request's own branch (without it the task lands on the base branch with nothing to review). A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, each one's priority, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
+- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, create a task and ask to launch it in the same breath rather than asking twice, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. Mid-conversation, ask the agent you are already talking to for \`/dev3-coordinator\`: it promotes its OWN task and reads the brief out of the command's output, so the conversation, the work already done, the branch, the title, the labels and the priority all stay exactly as they are. From the CLI you can also start it that way in one command: \`dev3 task create --title "..." --description "..." --type coordinator\` writes the same role brief above your text at creation; a review task is \`dev3 task create --pr <number> --title "..."\`, where \`--pr\` both implies \`pr-review\` and starts the worktree on the pull request's own branch (without it the task lands on the base branch with nothing to review). A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, each one's priority, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
 - **"Continue what we did in that other task"** → past conversations are searchable: the agent runs \`dev3 conversations search\` and reads the old task's notes and transcript. This is *why* notes matter — they are weighted highest in that search.
 - **"What did every task record since I last looked?"** → \`dev3 events\`. One feed of the notes written by EVERY task on the board AND of every board movement — created, a status change (completed and cancelled included), a custom-column move — finished tasks included — a live task can still message you, a completed one cannot, and its notes are all that outlived its worktree. It is addressed by a **position, not a time window**: each run ends with a \`Cursor:\` line — one compact instant such as \`2026-08-28T20:22:22.303\` — plus the exact next command, and passing it back returns only what happened since. \`--from\` also takes an event id straight from the ID column (\`8eb2da3d\`) — the shortest form to carry, though a deleted or evicted note makes it exit 19 rather than pretend the board was quiet — or a plain date (\`2026-08-01\`) or a duration (\`2h\`, \`3d\`) when you deliberately want a window. Keep the cursor yourself; the app remembers nothing per caller, so the same cursor always gives the same answer. A bare \`dev3 events\` shows the last 24 hours and tells you, as a number, how many events are older than that window — so a lost cursor is visible instead of silent. \`--kind note\` or \`--kind move\` narrows it, and a cursor from a filtered run covers that kind only — the run says so. Movements are recorded from the version that shipped them onward; nothing older exists and none is invented. One line per event; \`dev3 note show <id> --task <seq>\` prints a note's full body.
 - **A new codebase** → add the project from a folder or clone it from a URL, then run \`/dev3-project-config\` to auto-detect its setup / dev / cleanup scripts, ports, and clone paths.
@@ -741,12 +848,13 @@ A starting situation that generates work, then merges onto the main flow.
 - **Work from an Android tablet → the dev3 Android app + dev3 remote.** Run \`dev3 remote\` on the computer, scan its QR in the tablet app, then use the same boards, tasks and host actions. Task/project prompts are composed natively outside the WebView, drafts survive task switches, and only confirmed task delivery clears them; prefer HTTPS, SSH or Tailscale, while plain private-LAN HTTP requires an explicit warning step.
 - **Work from any other phone/browser → dev3 remote.** The full app is served through a secure tunnel; mobile has its own pane pager and browser composer, and notifications keep the agent's pings reaching you.
 - **Expose task ports** — share a task's running dev server through a public tunnel URL and click through it from any device. Agents keep working while you are away, and dev3 can keep the machine awake while tasks run.
-- **A remote box keeps itself up to date — you never SSH in to upgrade it.** It checks every 30 minutes and installs the update by itself once nothing is in progress, no terminal is printing and nobody is connected; the restart hands the port and the live tunnel to the new build, so the public link and your open browser session survive it and running agents are untouched. \`dev3 update\` does the same on demand from any shell (\`--check\` / \`--dry-run\` report without changing anything, and detect whether this install came from brew or a CLI tarball). Turn the automatic half off in **Settings → System** to hold a box on one build while you chase a bug. Under systemd the update still happens but the tunnel URL changes — re-run \`dev3 remote url\`.
+- **A remote box keeps itself up to date — you never SSH in to upgrade it.** It checks every 30 minutes and installs the update by itself once no terminal is printing and nobody is connected; the restart hands the port and the live tunnel to the new build, so the public link and your open browser session survive it, and detached agents keep running. Under systemd or in a container it also waits for running agents, because the supervisor can tear down the whole cgroup. \`dev3 update\` does the same on demand from any shell (\`--check\` / \`--dry-run\` report without changing anything, and detect whether this install came from brew or a CLI tarball). Turn the automatic half off in **Settings → System** to hold a box on one build while you chase a bug. There the tunnel URL also changes — re-run \`dev3 remote url\`.
 
 ## Verifying work
 
-- **Set up the dev server — the first, simplest, most important thing.** If the project is a local app or a website that can run locally, wire up its dev server (\`/dev3-project-config\` does it for you). From then on it's one button on the task — it turns green and runs the project's \`devScript\` in that task's isolated environment with that task's own ports, so N tasks give N side-by-side dev servers that never fight over a port. This one habit helps everyone at once: the **agent** can hop into the running app with a browser tool (agent-browser, Puppeteer, a browser MCP) and screenshot its own work instead of claiming it works, and the **human** can glance at the real thing in seconds. Highly recommended for every project where it's possible.
+- **Set up the dev server — the first, simplest, most important thing.** If the project is a local app or a website that can run locally, wire up its dev server (\`/dev3-project-config\` does it for you). From then on it's one button on the task — it turns green and runs the project's \`devScript\` in that task's isolated environment with that task's own ports, so N tasks give N side-by-side dev servers that never fight over a port. An app that is several processes declares them by name (\`devServers\` in the project config): the button then opens a list with a row per server — its state, its port, its own start / stop / restart, plus Start all and Stop all — and \`dev3 dev-server start api\` / \`--all\` does the same from a shell. Each server gets its own pane and its own named ports, and every server sees every named port of the task as \`DEV3_PORT_<NAME>\`, so the front end knows where the API is. This one habit helps everyone at once: the **agent** can hop into the running app with a browser tool (agent-browser, Puppeteer, a browser MCP) and screenshot its own work instead of claiming it works, and the **human** can glance at the real thing in seconds. Highly recommended for every project where it's possible.
 - **Ports — unique per task, allocated by dev3.** Most dev servers need ports, and for parallel tasks they must not collide. Tell dev3 how many ports the project needs (\`portCount\` in the project config) and it allocates that many *per task*, injected into every project script as environment variables: \`$DEV3_PORT0\`, \`$DEV3_PORT1\`, … (plus \`$DEV3_PORTS\` as a comma-separated list and \`$DEV3_PORT_COUNT\`). Reference them in \`devScript\` and friends — e.g. \`VITE_PORT=\${DEV3_PORT0:-5173} bun run dev\` — and every task's server comes up on its own port. Don't wire this by hand: just ask the agent to set up the dev server — \`/dev3-project-config\` is trained to discover the project's port mechanism and wire it all up.
+- **The dev server writes its output to a file, not only to the pane.** Everything it prints is mirrored as plain text to \`<taskDir>/logs/dev-server.log\` — beside the worktree, so it never shows up in \`git status\`. That is what lets an agent grep a stack trace, tail a failing build, or find the request that 500'd without attaching to a terminal: \`dev3 dev-server logs [--lines N]\` prints the tail, and the file itself greps (its path is in \`dev3 dev-server status\`). Each start begins a fresh log, and colours and progress-bar redraws are stripped, so it reads like a log rather than a terminal recording.
 - **Slice features small enough for a 30-second check.** The dev server pays off most when a feature is small enough that pressing the button and clicking around for ~30 seconds tells you whether it's done: the new button is there and works, nothing that should exist has vanished, it looks right. If you can't verify a feature that fast, the task was probably too big — split it.
 - **Screenshots → the agent takes them and shows them to you.** With the dev server up (or any page the agent can reach) and a browser tool at hand (agent-browser, Puppeteer, a browser MCP), just say *"take a screenshot and show it to me in dev3"* — the agent will understand: it drives the browser, captures the pixels, and pushes them into the app (\`dev3 show-image\` under the hood). Prefer pixels over prose when the change is visual.
 - **Reports and richer results → dev3 artifacts.** An artifact is an HTML page shown right inside dev3's UI — it can embed screenshots, tables from CSVs, charts, anything dynamic. Perfect for reports and for validating what the agent did: often you don't even need to launch the dev server yourself — the agent has already screenshotted everything and presents the finished result as one page. To activate it, just tell the agent to *"use a dev3 artifact"*.
@@ -831,6 +939,7 @@ Off the main flow entirely.
 - **\`/dev3-tmux\`** — full tmux reference: panes, windows, capturing output.
 - **\`/dev3-bug-hunter\`** — seeded, review-only bug hunting; shines in multi-variant swarms.
 - **\`/dev3-share-artifact\`** — publish an HTML report as a gist and hand back a verified preview URL.
+- **\`/dev3-coordinator\`** — turn the task you are already in into a coordinator, keeping its conversation and work.
 
 ## When the map is not enough — read the source
 
@@ -1062,6 +1171,10 @@ export function getBugHunterSkillContent(): string {
 	return BUG_HUNTER_SKILL_CONTENT;
 }
 
+export function getCoordinatorSkillContent(): string {
+	return COORDINATOR_SKILL_CONTENT;
+}
+
 export function getAskDev3SkillContent(): string {
 	return ASK_DEV3_SKILL_CONTENT;
 }
@@ -1072,6 +1185,10 @@ export function getClaudeSkillContent(): string {
 
 export function getCodexSkillContent(): string {
 	return buildCodexSkillContent();
+}
+
+export function getOmpSkillContent(): string {
+	return buildOmpSkillContent();
 }
 
 export function getGenericSkillContent(): string {
@@ -1089,6 +1206,7 @@ const GENERIC_PROJECT_CONFIG_DIRS = [
 	".codex/skills/dev3-project-config",
 	".opencode/skills/dev3-project-config",
 	".config/opencode/skills/dev3-project-config",
+	".omp/agent/skills/dev3-project-config",
 ];
 
 /** Claude Code tmux skill directory. */
@@ -1102,6 +1220,7 @@ const GENERIC_TMUX_DIRS = [
 	".codex/skills/dev3-tmux",
 	".opencode/skills/dev3-tmux",
 	".config/opencode/skills/dev3-tmux",
+	".omp/agent/skills/dev3-tmux",
 ];
 
 const BUG_HUNTER_SKILL_DIRS = [
@@ -1112,6 +1231,7 @@ const BUG_HUNTER_SKILL_DIRS = [
 	".codex/skills/dev3-bug-hunter",
 	".opencode/skills/dev3-bug-hunter",
 	".config/opencode/skills/dev3-bug-hunter",
+	".omp/agent/skills/dev3-bug-hunter",
 ];
 
 const ASK_DEV3_SKILL_DIRS = [
@@ -1122,6 +1242,17 @@ const ASK_DEV3_SKILL_DIRS = [
 	".codex/skills/ask-dev3",
 	".opencode/skills/ask-dev3",
 	".config/opencode/skills/ask-dev3",
+	".omp/agent/skills/ask-dev3",
+];
+
+const COORDINATOR_SKILL_DIRS = [
+	".claude/skills/dev3-coordinator",
+	".cursor/skills/dev3-coordinator",
+	".agents/skills/dev3-coordinator",
+	".codex/skills/dev3-coordinator",
+	".opencode/skills/dev3-coordinator",
+	".config/opencode/skills/dev3-coordinator",
+	".omp/agent/skills/dev3-coordinator",
 ];
 
 const SHARE_ARTIFACT_SKILL_DIRS = [
@@ -1131,6 +1262,7 @@ const SHARE_ARTIFACT_SKILL_DIRS = [
 	".codex/skills/dev3-share-artifact",
 	".opencode/skills/dev3-share-artifact",
 	".config/opencode/skills/dev3-share-artifact",
+	".omp/agent/skills/dev3-share-artifact",
 ];
 
 /**
@@ -1141,6 +1273,7 @@ const SHARE_ARTIFACT_SKILL_DIRS = [
 export const MANAGED_SKILL_FILES = [
 	CLAUDE_SKILL_DIR,
 	CODEX_SKILL_DIR,
+	OMP_SKILL_DIR,
 	...GENERIC_SKILL_DIRS,
 	CLAUDE_PROJECT_CONFIG_DIR,
 	...GENERIC_PROJECT_CONFIG_DIRS,
@@ -1149,6 +1282,7 @@ export const MANAGED_SKILL_FILES = [
 	...BUG_HUNTER_SKILL_DIRS,
 	...ASK_DEV3_SKILL_DIRS,
 	...SHARE_ARTIFACT_SKILL_DIRS,
+	...COORDINATOR_SKILL_DIRS,
 ].map((dir) => `${dir}/SKILL.md`);
 
 const SHARED_SKILL_OPENAI_CONFIGS = [
@@ -1175,6 +1309,10 @@ const SHARED_SKILL_OPENAI_CONFIGS = [
 	{
 		dir: ".agents/skills/dev3-share-artifact",
 		content: SHARE_ARTIFACT_OPENAI_YAML,
+	},
+	{
+		dir: ".agents/skills/dev3-coordinator",
+		content: COORDINATOR_OPENAI_YAML,
 	},
 ];
 
@@ -1455,7 +1593,7 @@ export interface InstallAgentSkillsOptions {
 	lowBattery?: boolean;
 }
 
-export function installAgentSkills(options: InstallAgentSkillsOptions = {}): void {
+export async function installAgentSkills(options: InstallAgentSkillsOptions = {}): Promise<void> {
 	const home = homedir();
 
 	// Install Claude-specific skill (with command injection). SKILL.md is short
@@ -1485,6 +1623,20 @@ export function installAgentSkills(options: InstallAgentSkillsOptions = {}): voi
 	} catch (err) {
 		log.warn("Failed to install Codex skill (non-fatal)", {
 			path: codexSkillFile,
+			error: String(err),
+		});
+	}
+
+	// Install the omp skill (hook-aware, like Codex's)
+	const ompSkillDir = `${home}/${OMP_SKILL_DIR}`;
+	const ompSkillFile = `${ompSkillDir}/SKILL.md`;
+	try {
+		mkdirSync(ompSkillDir, { recursive: true });
+		writeFileSync(ompSkillFile, getOmpSkillContent(), "utf-8");
+		log.info("omp skill installed", { path: ompSkillFile });
+	} catch (err) {
+		log.warn("Failed to install omp skill (non-fatal)", {
+			path: ompSkillFile,
 			error: String(err),
 		});
 	}
@@ -1610,6 +1762,21 @@ export function installAgentSkills(options: InstallAgentSkillsOptions = {}): voi
 		}
 	}
 
+	for (const dir of COORDINATOR_SKILL_DIRS) {
+		const skillDir = `${home}/${dir}`;
+		const skillFile = `${skillDir}/SKILL.md`;
+		try {
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(skillFile, COORDINATOR_SKILL_CONTENT, "utf-8");
+			log.info("coordinator skill installed", { path: skillFile });
+		} catch (err) {
+			log.warn("Failed to install coordinator skill (non-fatal)", {
+				path: skillFile,
+				error: String(err),
+			});
+		}
+	}
+
 	// No choice stored ⇒ touch nothing on disk. dev3's own managed block still
 	// drops the always-on line, because that block is dev3's to rewrite.
 	if (options.lowBattery !== undefined) applyLowBattery(home, options.lowBattery);
@@ -1619,6 +1786,6 @@ export function installAgentSkills(options: InstallAgentSkillsOptions = {}): voi
 	installAgentsMd(options.lowBattery === true);
 	ensureClaudeSettings(home);
 	if (options.configureCodex !== false) {
-		ensureCodexConfigFile(home);
+		await ensureCodexConfigFile(home);
 	}
 }

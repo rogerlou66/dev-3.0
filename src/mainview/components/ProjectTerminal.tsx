@@ -10,6 +10,7 @@ import TerminalComposer, { type TerminalComposerApi } from "./TerminalComposer";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
 import { appendAndroidDraft, bindAndroidTerminal, isAndroidAppHost } from "../android-client-bridge";
+import { isTouchPrimary } from "../utils/platform";
 
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal");
 
@@ -26,7 +27,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	const [error, setError] = useState(false);
 	const [restarting, setRestarting] = useState(false);
 	// Same touch input model as TaskTerminal: compose mode by default, ⌨ raw toggle.
-	const touchInput = !isElectrobun && navigator.maxTouchPoints > 0;
+	const touchInput = !isElectrobun && isTouchPrimary();
 	const androidComposer = isAndroidAppHost();
 	const [scrolledUp, setScrolledUp] = useState(false);
 	// Undefined off touch: its absence keeps the copy-mode poll from arming on a pointer.
@@ -55,6 +56,8 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 		else termHandle?.paste(`${escaped.join(" ")} `);
 	}
 
+	// A session key, not a task id: no task record backs it, which is why this
+	// terminal never offers review comments (`canComment` stays off below).
 	const sessionKey = `project-${projectId}`;
 
 	useEffect(() => {

@@ -1,6 +1,7 @@
 import { syncAppearanceSettings } from "./appearance-preset";
+import InterfaceOnboarding from "./components/InterfaceOnboarding";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, canGoBack, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
+import { useAppState, canGoBack, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskOpenRoute, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
@@ -48,9 +49,16 @@ import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry
 import { useSpaces } from "./useSpaces";
 import AgentTrafficScreen from "./components/agent-traffic/AgentTrafficScreen";
 import { noteTrafficArrival } from "./agent-traffic";
-import { OPEN_AGENT_TRAFFIC_LOG_EVENT, openAgentTrafficLog } from "./agent-traffic-events";
+import {
+	OPEN_AGENT_TRAFFIC_LOG_EVENT,
+	openAgentTrafficLog,
+	type OpenAgentTrafficLogDetail,
+} from "./agent-traffic-events";
 import { getAgentTrafficEnabled, syncAgentTrafficFromGlobalSettings } from "./agent-traffic-flag";
 import { useAgentTrafficEnabled } from "./hooks/useAgentTrafficEnabled";
+import { isControlHidden, syncHiddenControlsFromGlobalSettings } from "./hidden-controls";
+import { useIsControlHidden } from "./hooks/useIsControlHidden";
+import { syncGlobalSettingsCache } from "./global-settings-cache";
 import StuckPreparationPopover from "./components/StuckPreparationPopover";
 import FolderPickerHost from "./components/FolderPickerModal";
 import KeyboardShortcutsModal, { type ShortcutsTab } from "./components/KeyboardShortcutsModal";
@@ -91,12 +99,13 @@ import StatusDock from "./components/StatusDock";
 import TerminalImmersiveChrome from "./components/TerminalImmersiveChrome";
 import { useRpcStatus } from "./hooks/useDiagnostics";
 import { reconnectRpc } from "./rpc";
-import { DIAGNOSTICS_OPEN_EVENT } from "./diagnostics";
+import { DIAGNOSTICS_OPEN_EVENT, RPC_STATUS_EVENT } from "./diagnostics";
 import { getAdjacentAliveVariant } from "./utils/variantGroups";
 import { isTaskTerminalRoute } from "./utils/terminalFullscreen";
 import WorkspaceTaskOverlay from "./components/WorkspaceTaskOverlay";
 import { closeTopBackLayer } from "./back-navigation";
 import PushEnrollmentInvite from "./components/PushEnrollmentInvite";
+import ArtifactFreezeNotice from "./components/ArtifactFreezeNotice";
 
 /** Command shown when cloudflared is missing (Cloudflare Tunnel remote access). */
 const CLOUDFLARED_INSTALL_CMD = "brew install cloudflared";
@@ -172,6 +181,17 @@ function isRemoteTunnelActive(tunnelState?: string): boolean {
 	return tunnelState === "starting" || tunnelState === "connected";
 }
 
+/**
+ * Combines the agent-traffic beta flag with its own hidden-controls id
+ * (§5.10). A plain function, not a hook — deliberately, so it can be read
+ * inside event handlers and other non-render call sites without either flag
+ * having to know the other exists (see the coupling this replaced in
+ * agent-traffic-flag.ts).
+ */
+function isAgentTrafficVisible(): boolean {
+	return getAgentTrafficEnabled() && !isControlHidden("agent-traffic");
+}
+
 /** Parse a 1–9 project index from a physical digit code (`"Digit3"` → 3), layout-independent. */
 function digitFromCode(code: string): number | null {
 	const m = /^Digit([1-9])$/.exec(code);
@@ -195,6 +215,8 @@ function App() {
 	const effectiveProjectId = workspaceTaskTarget?.projectId ?? projectIdForRoute(state.route);
 	const effectiveTaskId = workspaceTaskTarget?.taskId ?? routeTaskId(state.route);
 	const effectiveTasks = workspaceTaskTarget?.tasks ?? state.currentProjectTasks;
+	const findViewerTask = (taskId: string | undefined) => effectiveTasks.find((task) => task.id === taskId)
+		?? state.currentProjectTasks.find((task) => task.id === taskId);
 	const workspaceDispatch = useCallback((action: AppAction) => {
 		setWorkspaceTaskTarget((target) => target ? reduceWorkspaceTasks(target, action) : target);
 		dispatch(action);
@@ -331,13 +353,21 @@ function App() {
 	// the flag also has to reach registries that are not components, so the module
 	// mirror is the single source and this just re-renders when it flips.
 	const agentTrafficOn = useAgentTrafficEnabled();
+	const agentTrafficHidden = useIsControlHidden("agent-traffic");
+	const statsNavHidden = useIsControlHidden("stats-nav");
 	const menuContext = useMemo(() => {
 		const r = state.route;
 		const hasProject = workspaceTaskTarget !== null || r.screen === "project" || r.screen === "task" || r.screen === "project-terminal" || r.screen === "project-settings";
 		const hasTask = workspaceTaskTarget !== null || r.screen === "task" || (r.screen === "project" && Boolean(r.activeTaskId));
 		const hasTerminal = workspaceTaskTarget !== null || r.screen === "task" || r.screen === "project-terminal";
-		return { hasTask, hasProject, hasTerminal };
-	}, [state.route, workspaceTaskTarget]);
+		return {
+			hasTask,
+			hasProject,
+			hasTerminal,
+			agentTrafficEnabled: agentTrafficOn && !agentTrafficHidden,
+			statsNavHidden,
+		};
+	}, [state.route, workspaceTaskTarget, agentTrafficOn, agentTrafficHidden, statsNavHidden]);
 
 	// Push the current MenuContext to the bun side on every route change so the
 	// native menu can grey out task / project / terminal items that don't apply.
@@ -452,6 +482,7 @@ function App() {
 	// Help mode — the "Explain this screen" overlay (bible §5.4). Entered via
 	// ⇧⌘/, Help menu, the ⇧⌘P palette, or a HelpCard "Explain this screen" link.
 	const [helpMode, setHelpMode] = useState(false);
+	const [invitationVisible, setInvitationVisible] = useState(false);
 
 	// HelpCard navigation links dispatch a window event (no prop drilling from
 	// arbitrary HelpSpot hosts) — route them to the owning overlays here.
@@ -472,7 +503,7 @@ function App() {
 	// `newIds` freezes which images were unread at open time: opening marks them
 	// read, so without the snapshot the "these three are new" highlight would
 	// vanish on the same tick. It only ever grows while the viewer stays open.
-	const [imageViewer, setImageViewer] = useState<{ taskId: string; images: SharedImage[]; index: number; newIds: string[] } | null>(null);
+	const [imageViewer, setImageViewer] = useState<{ taskId: string; projectId: string; images: SharedImage[]; index: number; newIds: string[] } | null>(null);
 	const [filePreview, setFilePreview] = useState<OpenFilePreviewDetail | null>(null);
 	// Lightbox for artifacts an agent surfaced via `dev3 show-artifact`. Hosted
 	// here — never inside a task pane — so every surface that can open one (task
@@ -480,7 +511,7 @@ function App() {
 	// `paneless`: opened from a surface that has no workspace pane behind it (the
 	// task detail modal). Such a viewer is a popup for its whole life — it neither
 	// docks nor hides with the route, because there is no task screen it belongs to.
-	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number; paneless?: boolean } | null>(null);
+	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; projectId?: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number; paneless?: boolean } | null>(null);
 	const markSharedItemsRead = useCallback((
 		projectId: string,
 		taskId: string,
@@ -515,6 +546,7 @@ function App() {
 			}
 			return {
 				taskId,
+				projectId,
 				images,
 				index: index ?? (firstUnread >= 0 ? firstUnread : images.length - 1),
 				newIds: unreadIds,
@@ -589,7 +621,7 @@ function App() {
 	useEffect(() => {
 		let alive = true;
 		api.request.getGlobalSettings()
-			.then((next) => { if (alive) { syncAppearanceSettings(next); setGlobalSettings(next); setSettingsLoaded(true); } })
+			.then((next) => { if (alive) { syncAppearanceSettings(next); syncGlobalSettingsCache(next); syncHiddenControlsFromGlobalSettings(next); setGlobalSettings(next); setSettingsLoaded(true); } })
 			.catch(() => {});
 		return () => { alive = false; };
 	}, []);
@@ -916,16 +948,14 @@ function App() {
 
 	// Shared click-to-open path for every task notification surface. Exiting the
 	// ephemeral terminal view happens before applying the user's normal open mode.
+	// `archived` means the caller already knows the task is not active (completed,
+	// cancelled, todo): those have no terminal, so they land on their project's
+	// Kanban with the board's detail modal open — the same surface the card opens.
 	const openTaskFromNotification = useCallback(
-		(taskId: string, projectId: string) => {
+		(taskId: string, projectId: string, opts?: { archived?: boolean }) => {
 			setTerminalImmersiveActive(false);
 			if (!taskId || !projectId) return;
-			const openMode = getTaskOpenMode();
-			if (openMode === "fullscreen") {
-				navigate({ screen: "task", projectId, taskId });
-			} else {
-				navigate({ screen: "project", projectId, activeTaskId: taskId });
-			}
+			navigate(taskOpenRoute(taskId, projectId, getTaskOpenMode(), opts?.archived === true));
 		},
 		[navigate, setTerminalImmersiveActive],
 	);
@@ -1417,7 +1447,7 @@ function App() {
 				e.preventDefault();
 				e.stopPropagation();
 				setShortcutsModal((s) => (s.open ? { ...s, open: false } : { open: true, tab: "app" }));
-			} else if (matchesShortcut(e, "agent-traffic-log") && getAgentTrafficEnabled()) {
+			} else if (matchesShortcut(e, "agent-traffic-log") && isAgentTrafficVisible()) {
 				// Reachable from wherever the user is, including a focused terminal. Read
 				// through the module getter so the beta flag needs no effect re-bind.
 				// Pressed again ON the screen it steps back, so the one key both opens and
@@ -1549,7 +1579,9 @@ function App() {
 			} else if (matchesShortcut(e, "task-hints")) {
 				// Vimium-style hint navigation. Works on any screen that has hint
 				// targets ([data-hint-id]); the overlay self-closes if nothing is
-				// actually visible (e.g. a modal covers the board).
+				// actually visible (e.g. a modal covers the board). Never hideable
+				// (§5.10 §2.5) — it has no visible anchor to right-click and no row
+				// to restore, so gating it here would silently dead-key ⌘/'s advert.
 				if (!document.querySelector("[data-hint-id]")) return;
 				e.preventDefault();
 				e.stopPropagation();
@@ -1717,7 +1749,10 @@ function App() {
 
 	useEffect(() => {
 		function onGlobalSettingsUpdated(e: Event) {
-			setGlobalSettings((e as CustomEvent<GlobalSettingsType>).detail);
+			const next = (e as CustomEvent<GlobalSettingsType>).detail;
+			syncGlobalSettingsCache(next);
+			syncHiddenControlsFromGlobalSettings(next);
+			setGlobalSettings(next);
 		}
 		window.addEventListener("rpc:globalSettingsUpdated", onGlobalSettingsUpdated);
 		return () => window.removeEventListener("rpc:globalSettingsUpdated", onGlobalSettingsUpdated);
@@ -1831,7 +1866,7 @@ function App() {
 			// This window is already showing the traffic screen, where the message
 			// lands in full — a toast previewing it would cover its own destination.
 			// Per window, via this renderer's own route: another window keeps its toast.
-			if (getAgentTrafficEnabled() && routeRef.current.screen === "agent-traffic") return;
+			if (isAgentTrafficVisible() && routeRef.current.screen === "agent-traffic") return;
 			// Either side sensitive on camera drops the whole toast: it names both.
 			if (isProjectSilencedForDisplay(projectId) || isProjectSilencedForDisplay(fromProjectId)) return;
 			const from = [`#${fromSeq}`, fromTitle].filter(Boolean).join(" ");
@@ -1841,7 +1876,7 @@ function App() {
 				taskId,
 				// Read the flag at CLICK time, not here: a toast can outlive a toggle.
 				onClick: () => {
-					if (!getAgentTrafficEnabled()) {
+					if (!isAgentTrafficVisible()) {
 						openTaskFromNotification(taskId, projectId);
 						return;
 					}
@@ -1849,7 +1884,12 @@ function App() {
 					// toggle back to, and navigating again would stack a second identical
 					// history entry and make Back a dead key.
 					if (routeRef.current.screen === "agent-traffic") return;
-					openAgentTrafficLog();
+					// All projects, never the board in view: the message the toast is
+					// about may belong to any board, and seeding the current one hides
+					// exactly the traffic the click was asking to see. The RECEIVER
+					// rides along as the screen's subject — the click is about one
+					// task, and it lands the same way clicking that card would.
+					openAgentTrafficLog("all-projects", { taskId, projectId });
 				},
 			});
 		}
@@ -1859,7 +1899,7 @@ function App() {
 
 	useEffect(() => {
 		function onLogChanged(event: Event) {
-			if (!getAgentTrafficEnabled()) return;
+			if (!isAgentTrafficVisible()) return;
 			const { projectId } = (event as CustomEvent<{ projectId: string }>).detail;
 			noteTrafficArrival(projectId);
 		}
@@ -1870,21 +1910,39 @@ function App() {
 	// Everything that opens agent traffic goes through one event: the header
 	// readout, the native View menu and the command palette all fire it, and it
 	// lands as an ordinary navigation — so Back returns to wherever they were.
-	// The project in view rides along as the screen's initial scope.
+	// The project in view rides along as the screen's initial scope, unless the
+	// opener asked for all projects (a notification click — see the toast above).
 	useEffect(() => {
-		function onOpen() {
-			if (!getAgentTrafficEnabled()) return;
-			navigate({ screen: "agent-traffic", scopeProjectId: projectIdForRoute(state.route) ?? undefined });
+		function onOpen(event: Event) {
+			if (!isAgentTrafficVisible()) return;
+			const detail = (event as CustomEvent<OpenAgentTrafficLogDetail>).detail;
+			const scope = detail?.scope ?? "current-project";
+			const scopeProjectId =
+				scope === "all-projects" ? undefined : projectIdForRoute(state.route) ?? undefined;
+			navigate({
+				screen: "agent-traffic",
+				scopeProjectId,
+				focusTaskId: detail?.focus?.taskId,
+				focusProjectId: detail?.focus?.projectId,
+			});
 		}
 		window.addEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
 		return () => window.removeEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, onOpen);
 	}, [navigate, state.route]);
 
-	// Switching the beta off while the screen is open must not leave the user on a
-	// destination nothing can reach any more (the overlay closed itself instead).
+	// Switching the beta off, or hiding the control, while the screen is open
+	// must not leave the user on a destination nothing can reach any more.
 	useEffect(() => {
-		if (state.route.screen === "agent-traffic" && !agentTrafficOn) navigate({ screen: "dashboard" });
-	}, [state.route.screen, agentTrafficOn, navigate]);
+		if (state.route.screen === "agent-traffic" && (!agentTrafficOn || agentTrafficHidden)) {
+			navigate({ screen: "dashboard" });
+		}
+	}, [state.route.screen, agentTrafficOn, agentTrafficHidden, navigate]);
+
+	// Same for Stats (§5.10 finding #5): a hidden nav entry must not strand a
+	// window (or a remote session) already parked on the screen it hides.
+	useEffect(() => {
+		if (state.route.screen === "stats" && statsNavHidden) navigate({ screen: "dashboard" });
+	}, [state.route.screen, statsNavHidden, navigate]);
 
 	// Cmd/Ctrl+Click on a file path in any terminal (preview mode).
 	useEffect(() => {
@@ -1989,6 +2047,7 @@ function App() {
 				// fresh one lands on the task the user is looking at, so it can dock.
 				setArtifactViewer((prev) => ({
 					taskId,
+					projectId,
 					artifacts,
 					index: artifacts.length - 1,
 					paneless: prev?.taskId === taskId ? prev.paneless : false,
@@ -2003,7 +2062,7 @@ function App() {
 					// in its pane rather than as a popup over the board it came from.
 					openTaskFromNotification(taskId, projectId);
 					markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-					setArtifactViewer({ taskId, artifacts, index: artifacts.length - 1, paneless: false });
+					setArtifactViewer({ taskId, projectId, artifacts, index: artifacts.length - 1, paneless: false });
 				},
 			});
 		}
@@ -2027,7 +2086,7 @@ function App() {
 			// slot for it, so it lives as a popup — only a viewer that started docked
 			// may later hide itself when the route walks away from its task.
 			const noPane = paneless === true || effectiveTaskId !== taskId;
-			setArtifactViewer({ taskId, taskStatus, artifacts, index: index ?? artifacts.length - 1, paneless: noPane });
+			setArtifactViewer({ taskId, projectId, taskStatus, artifacts, index: index ?? artifacts.length - 1, paneless: noPane });
 		}
 		window.addEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
 		return () => window.removeEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
@@ -2237,26 +2296,36 @@ function App() {
 		}
 		window.addEventListener("rpc:agentCompletionRequested", onAgentCompletionRequested);
 
-		// The push above is a one-shot event. A window that reloads before answering
-		// would otherwise never be offered the dialog again — the blocked agent's
-		// retry joins the same request instead of triggering a new push — so the
-		// request would sit unanswerable for the rest of the app session. Ask what
-		// is still pending as soon as this client is listening.
-		api.request.listPendingCompletionRequests({}).then(async (pending) => {
-			if (pending.length === 0) return;
-			// `confirm()` is fail-closed, and this runs during startup: calling it
-			// before ConfirmHost has mounted would resolve `false` with no dialog on
-			// screen and answer "declined" for a user who was never asked. Rather
-			// than auto-decline, leave the request pending — the next window to
-			// connect replays it again.
-			if (!await whenConfirmHostMounted()) {
-				console.error("[App] pending completion dialogs skipped — ConfirmHost never mounted");
-				return;
-			}
-			for (const request of pending) void showCompletionDialog(request);
-		}).catch((err) => console.error("listPendingCompletionRequests failed:", err));
+		// The push above is a one-shot event, so a client that was not listening for
+		// it — starting up, or a transport that dropped and came back without a
+		// page reload — would never see that dialog. Ask what is still pending on
+		// connect and on every reconnect. `showing` dedups, so a dialog already on
+		// screen is untouched.
+		function replayPending() {
+			api.request.listPendingCompletionRequests({}).then(async (pending) => {
+				if (pending.length === 0) return;
+				// `confirm()` is fail-closed, and this runs during startup: calling it
+				// before ConfirmHost has mounted would resolve `false` with no dialog on
+				// screen and answer "declined" for a user who was never asked. Rather
+				// than auto-decline, leave the request pending — the next window to
+				// connect replays it again.
+				if (!await whenConfirmHostMounted()) {
+					console.error("[App] pending completion dialogs skipped — ConfirmHost never mounted");
+					return;
+				}
+				for (const request of pending) void showCompletionDialog(request);
+			}).catch((err) => console.error("listPendingCompletionRequests failed:", err));
+		}
+		replayPending();
+		const onRpcStatus = (e: Event) => {
+			if ((e as CustomEvent).detail?.state === "connected") replayPending();
+		};
+		window.addEventListener(RPC_STATUS_EVENT, onRpcStatus);
 
-		return () => window.removeEventListener("rpc:agentCompletionRequested", onAgentCompletionRequested);
+		return () => {
+			window.removeEventListener("rpc:agentCompletionRequested", onAgentCompletionRequested);
+			window.removeEventListener(RPC_STATUS_EVENT, onRpcStatus);
+		};
 	}, [dispatch, navigate, t]);
 
 	// Agent-initiated CANCELLATION requests. Same blocked-CLI contract as the
@@ -2324,18 +2393,29 @@ function App() {
 		}
 		window.addEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
 
-		// Replayed for the same reason as the completion dialogs: the push is
-		// one-shot and an agent's retry joins the pending request.
-		api.request.listPendingCancellationRequests({}).then(async (pending) => {
-			if (pending.length === 0) return;
-			if (!await whenConfirmHostMounted()) {
-				console.error("[App] pending cancellation dialogs skipped — ConfirmHost never mounted");
-				return;
-			}
-			for (const request of pending) void showCancellationDialog(request);
-		}).catch((err) => console.error("listPendingCancellationRequests failed:", err));
+		// Replayed on connect AND on every reconnect, for the same reason as the
+		// completion dialogs: the push is one-shot, so a transport that dropped
+		// while the request was created leaves nothing on screen.
+		function replayPending() {
+			api.request.listPendingCancellationRequests({}).then(async (pending) => {
+				if (pending.length === 0) return;
+				if (!await whenConfirmHostMounted()) {
+					console.error("[App] pending cancellation dialogs skipped — ConfirmHost never mounted");
+					return;
+				}
+				for (const request of pending) void showCancellationDialog(request);
+			}).catch((err) => console.error("listPendingCancellationRequests failed:", err));
+		}
+		replayPending();
+		const onRpcStatus = (e: Event) => {
+			if ((e as CustomEvent).detail?.state === "connected") replayPending();
+		};
+		window.addEventListener(RPC_STATUS_EVENT, onRpcStatus);
 
-		return () => window.removeEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
+		return () => {
+			window.removeEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
+			window.removeEventListener(RPC_STATUS_EVENT, onRpcStatus);
+		};
 	}, [dispatch, navigate, t]);
 
 	// An agent wants to set another task running. Queued, never stacked: two
@@ -2496,17 +2576,8 @@ function App() {
 	// off-screen project heavily — the fix for the git-process storm that stalled
 	// the main loop when many worktrees were polled blindly.
 	useEffect(() => {
-		const route = state.route;
-		const projectId =
-			route.screen === "project" ||
-			route.screen === "project-terminal" ||
-			route.screen === "task" ||
-			route.screen === "project-settings"
-				? route.projectId
-				: null;
-		const taskId = routeTaskId(route);
-		void api.request.setActiveContext?.({ projectId, taskId })?.catch?.(() => { /* best-effort */ });
-	}, [state.route]);
+		void api.request.setActiveContext?.({ projectId: effectiveProjectId, taskId: effectiveTaskId })?.catch?.(() => { /* best-effort */ });
+	}, [effectiveProjectId, effectiveTaskId]);
 
 	// Publish the sensitive ids so surfaces that only know a projectId (tmux
 	// sessions, notification payloads) can ask for the privacy verdict.
@@ -2975,6 +3046,7 @@ function App() {
 						remoteAccessAvailable={!isElectrobun}
 						remoteAccessActive={remoteAccessActive}
 						helpDiscovered={globalSettings.helpModeDiscovered}
+						suppressHelpCallout={invitationVisible}
 						tourRunning={!!tour}
 					/>
 					{ghWarning && (
@@ -2994,6 +3066,7 @@ function App() {
 					</>
 				) : terminalImmersiveVisible ? renderTerminalImmersiveScreen() : renderScreen()}
 			</main>
+			<InterfaceOnboarding route={state.route} onVisibilityChange={setInvitationVisible} blocked={helpMode || hintMode || !!tour || terminalImmersiveVisible || !!switcher.session} />
 			{!terminalImmersiveVisible && (
 			<>
 			{workspaceTaskTarget && (
@@ -3591,6 +3664,8 @@ function App() {
 			{artifactViewer && (
 				<TaskArtifactViewer
 					taskId={artifactViewer.taskId}
+					projectId={artifactViewer.projectId}
+					task={findViewerTask(artifactViewer.taskId)}
 					taskStatus={artifactViewer.taskStatus}
 					artifacts={artifactViewer.artifacts}
 					initialIndex={artifactViewer.index}
@@ -3601,6 +3676,8 @@ function App() {
 			{imageViewer && (
 				<TaskImageViewer
 					taskId={imageViewer.taskId}
+					projectId={imageViewer.projectId}
+					task={findViewerTask(imageViewer.taskId)}
 					images={imageViewer.images}
 					initialIndex={imageViewer.index}
 					newIds={imageViewer.newIds}
@@ -3630,6 +3707,8 @@ function App() {
 					path={filePreview.path}
 					line={filePreview.line}
 					taskId={filePreview.taskId}
+					projectId={findViewerTask(filePreview.taskId)?.projectId}
+					task={findViewerTask(filePreview.taskId)}
 					onClose={() => setFilePreview(null)}
 				/>
 			)}
@@ -3640,6 +3719,7 @@ function App() {
 			{/* Toasts are transient feedback, not immersive chrome; notification toasts
 			    must remain clickable so their handler can exit fullscreen first. */}
 			<PushEnrollmentInvite t={t} />
+			<ArtifactFreezeNotice t={t} />
 			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} />
 		</div>
 	);
@@ -3708,6 +3788,7 @@ function App() {
 						onToggleTerminalFullscreen={toggleTerminalImmersive}
 						skipCopyModeReset={skipTerminalCopyReset}
 						openUnresolvedComments={route.openUnresolvedComments}
+						taskDetailId={route.taskDetailId}
 					/>
 				);
 			case "project-terminal": {
@@ -3778,6 +3859,11 @@ function App() {
 				return agentTrafficOn ? (
 					<AgentTrafficScreen
 						projectId={route.scopeProjectId ?? null}
+						focus={
+							route.focusTaskId && route.focusProjectId
+								? { taskId: route.focusTaskId, projectId: route.focusProjectId }
+								: null
+						}
 						onOpenTask={openTaskFromNotification}
 					/>
 				) : null;
