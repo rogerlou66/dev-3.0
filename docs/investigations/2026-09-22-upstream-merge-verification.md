@@ -24,6 +24,13 @@ The integration's built renderer and real headless backend ran with a separate Q
 - `review resolve --reply` updated the comment in the browser with a resolved pin and reply; the same reply remained after reload and reopening the overlay.
 - Consecutive cmux and Simplified Mode toggles matched disk readback and visible controls after fixing a reproduced stale-settings race. Restoring Default and Full interface restored the palette and advanced controls without reload.
 - Browser error collection was empty during these checks.
+- Restored uncommitted terminal-key-bar work passed its 21 focused tests, typecheck, and build. A separate Chromium context with real `hasTouch` device emulation verified collapsed, expanded, and collapsed-again rendering, persisted `false`, and an empty page-error list. The installed agent-browser CLI only changed viewport/user-agent, so this check used its existing Playwright dependency directly.
+
+## Restoration and incidental finding
+
+The original tracked delta remains 10 files, 165 insertions and 34 deletions; its only restore conflict was two independent CSS blocks inserted at the same location, resolved by retaining both. The new key-bar hook remains byte-identical. Neither the tracked delta nor the original untracked files is part of the integration commit.
+
+During terminal-key-bar QA, the button labelled `Wake with a plain shell` unexpectedly launched the default Claude agent in the isolated fixture repository. The agent stopped at a clarification question; the dedicated `dev3-merge-qa-20260922` test session was terminated and the QA service stopped. Both `handleStartFresh` and `restartTask` have this behavior in original commit `8fedf831`; it is a pre-existing mismatch, not changed by this merge. Launching through the app also registered the disposable fixture path in the user's Claude trust configuration. No Copilot or Antigravity live session was launched.
 
 Local screenshots and raw validation logs are retained in the task artifact directory `01a0c7e4-8007-7d50-acb0-6b9f7913f462` outside the repository. The server log and local test access code are private test-runtime artifacts and must not be published.
 
