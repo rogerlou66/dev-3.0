@@ -157,7 +157,7 @@ gh auth switch --user h0x91b 2>/dev/null || true
 
 ### Opening a PR — `dev3 pr`, not `gh` by hand
 
-**`dev3 pr create --title "..." --description "..."`** is the way in. It pushes the branch, opens the pull request through `gh`, targets the task's own base branch, and ends the description with the deep link back to the originating task — so nobody hand-writes that footer or pastes the wrong task id. A missing or logged-out `gh` exits `23` before anything is pushed. Long body: `--description @<file>`.
+**`dev3 pr create --title "..." --description "..."`** is the way in. It pushes the branch, opens the pull request through `gh`, targets the task's own base branch. A missing or logged-out `gh` exits `23` before anything is pushed. Long body: `--description @<file>`.
 
 **PRs are squash-merged**, and auto-merge is `dev3 pr auto-merge` (squash by default; `--strategy merge|rebase`, `--off` to clear) or `--auto-merge` on `pr create`. Raw `gh pr merge --auto --squash <branch>` still works, but a bare `gh pr merge --auto` fails non-interactively — which is the trap `dev3 pr auto-merge` exists to remove. Reach for `gh` directly only for a flag `dev3 pr` does not pass through (`gh pr view`/`diff`/`checks` are reads and unaffected).
 
@@ -329,7 +329,7 @@ The app auto-installs the **dev3 skill** into agent config dirs (`~/.claude/skil
 The same text is also injected as the agent's system prompt at launch, and for every agent except Claude it travels **on the command line**. A Windows command line stops at **32 767 characters** (`CreateProcess` refuses past it, and PowerShell reports that as `ApplicationFailedException` naming neither the length nor the argument), so a body that grows too big does not fail loudly — it makes Windows refuse to start the agent at all. That is exactly how it shipped: the body reached ~34 000 characters and no agent could launch on Windows, with an error that looked like a quoting bug.
 
 - `src/shared/agent-command-line-budget.ts` owns the numbers: `WINDOWS_COMMAND_LINE_LIMIT`, the `AGENT_COMMAND_LINE_RESERVE` kept for the user's own task description, and `AGENT_SKILL_BODY_LIMIT` derived from them.
-- `src/bun/__tests__/agent-command-line-budget.test.ts` enforces both: each composed body against the cap **on both platforms** (the PR-footer section differs by platform, and the Windows wording is the longer one), and the whole `resolveAgentCommand` line for **every** agent against the ceiling with a full-size task.
+- `src/bun/__tests__/agent-command-line-budget.test.ts` enforces both: each composed body against the cap **on both platforms** (platform-specific launch instructions must fit on each host), and the whole `resolveAgentCommand` line for **every** agent against the ceiling with a full-size task.
 - When it fails, **cut prose — do not raise the cap.** Raising it moves the failure back into the OS, where there is no error message. Adding a new adapter means adding its command to that test's `AGENT_COMMANDS`.
 - Nothing else warns you: writing in `src/shared/agent-skill-content.ts` gives no length signal, and POSIX has no comparable limit, so a body written on macOS looks fine right up to the point where Windows will not launch.
 

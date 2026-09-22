@@ -140,7 +140,7 @@ describe("CreateTaskModal", () => {
 		expect(dialog.contains(document.activeElement)).toBe(true);
 	});
 
-	it("prefills the description from initialText (dev3://new-task deep link)", () => {
+	it("prefills the description for guided onboarding", () => {
 		renderModal({ initialText: "Fix the login race" });
 		const textarea = screen.getByPlaceholderText(/describe what needs/i) as HTMLTextAreaElement;
 		expect(textarea.value).toBe("Fix the login race");

@@ -12,7 +12,6 @@ import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
 import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
-import type { DeepLinkNav } from "../shared/deep-link";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { useAgents } from "./hooks/useAgents";
 import { isRemote } from "./utils/platform";
@@ -466,8 +465,7 @@ function App() {
 		return () => window.removeEventListener(HELP_LINK_ACTION_EVENT, onHelpLink);
 	}, []);
 	const [createTaskProjectId, setCreateTaskProjectId] = useState<string | null>(null);
-	// Prefill for the Create Task modal when opened from a `dev3://new-task` deep
-	// link. Consumed once by CreateTaskModal's initial description; cleared on close.
+	// The guided tour prefills its sandbox task; closing the modal clears it.
 	const [createTaskInitialText, setCreateTaskInitialText] = useState<string>("");
 	const [launchModal, setLaunchModal] = useState<{ task: Task; targetStatus: TaskStatus; project: Project } | null>(null);
 	// Lightbox for images an agent surfaced via `dev3 show-image`, bound to a task.
@@ -1004,29 +1002,6 @@ function App() {
 			return undefined;
 		},
 		[currentProjectTasks, projects, openTaskFromNotification, navigateToProject],
-	);
-
-	// Route an inbound `dev3://…` deep link (resolved by the backend) to the right
-	// surface: jump to a task, open a project board, or open the Create Task modal
-	// on a project prefilled with text. Reuses the same navigation the notification
-	// click and Cmd+1..9 paths use.
-	const handleDeepLink = useCallback(
-		(nav: DeepLinkNav) => {
-			if (nav.kind === "task") {
-				openTaskFromNotification(nav.taskId, nav.projectId);
-			} else if (nav.kind === "project") {
-				navigateToProject(nav.projectId);
-			} else if (nav.kind === "space") {
-				// The backend already picked a member project that exists here, so this
-				// never has to re-resolve; a dead space never reaches the renderer.
-				navigate({ screen: "project", projectId: nav.projectId, spaceId: nav.spaceId });
-			} else {
-				navigateToProject(nav.projectId);
-				setCreateTaskInitialText(nav.text);
-				setCreateTaskProjectId(nav.projectId);
-			}
-		},
-		[navigate, navigateToProject, openTaskFromNotification],
 	);
 
 	const cycleVariant = useCallback((direction: -1 | 1): boolean => {
@@ -2455,12 +2430,13 @@ function App() {
 	}, [openTaskFromNotification]);
 
 	useEffect(() => {
-		function onOpenDeepLink(e: Event) {
-			handleDeepLink((e as CustomEvent).detail as DeepLinkNav);
+		function onOpenTaskNavigation(e: Event) {
+			const { taskId, projectId } = (e as CustomEvent<{ taskId: string; projectId: string }>).detail;
+			openTaskFromNotification(taskId, projectId);
 		}
-		window.addEventListener("rpc:openDeepLink", onOpenDeepLink);
-		return () => window.removeEventListener("rpc:openDeepLink", onOpenDeepLink);
-	}, [handleDeepLink]);
+		window.addEventListener("rpc:openTaskNavigation", onOpenTaskNavigation);
+		return () => window.removeEventListener("rpc:openTaskNavigation", onOpenTaskNavigation);
+	}, [openTaskFromNotification]);
 
 	// If this window was reopened by a notification click while the app sat
 	// window-less in the dock, the click target is waiting in the backend — pull
@@ -2481,13 +2457,13 @@ function App() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	// Same cold-start pull for a `dev3://…` deep link that reopened this window.
+	// Consume a CLI task-open request that reopened this window.
 	useEffect(() => {
-		const pending = api.request.consumePendingDeepLinkNav?.();
+		const pending = api.request.consumePendingTaskNavigation?.();
 		if (!pending) return;
 		pending
 			.then((nav) => {
-				if (nav) handleDeepLink(nav);
+				if (nav) openTaskFromNotification(nav.taskId, nav.projectId);
 			})
 			.catch(() => {});
 		// eslint-disable-next-line react-hooks/exhaustive-deps

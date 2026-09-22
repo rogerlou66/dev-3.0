@@ -96,12 +96,8 @@ interface BehaviorSettingsSectionProps {
 	/** True = centred popup, false = the docked right-hand artifact panel. */
 	onOpenArtifactsInPopupToggle: (enabled: boolean) => void;
 	onSuggestCompletingTasksAfterMergeToggle: (enabled: boolean) => void;
-	onPrOriginTaskLinkToggle: (enabled: boolean) => void;
 	/** Minutes before an unanswered agent-launch dialog approves itself; 0 = never. */
 	onAgentLaunchAutoApproveChange: (minutes: number) => void;
-	/** False on a host with no OS-registered `dev3://` handler (Windows, Linux) — the
-	 *  toggle then reads Off and inert, while the stored preference on disk is untouched. */
-	prOriginTaskLinkSupported: boolean;
 	onTaskSortOrderChange: (order: GlobalSettings["taskSortOrder"]) => void;
 	onTaskOpenModeChange: (mode: "split" | "fullscreen") => void;
 	onTipsDisabledToggle: (disabled: boolean) => void;
@@ -119,9 +115,7 @@ export default function BehaviorSettingsSection({
 	onDefaultDiffViewModeChange,
 	onOpenArtifactsInPopupToggle,
 	onSuggestCompletingTasksAfterMergeToggle,
-	onPrOriginTaskLinkToggle,
 	onAgentLaunchAutoApproveChange,
-	prOriginTaskLinkSupported,
 	onTaskSortOrderChange,
 	onTaskOpenModeChange,
 	onTipsDisabledToggle,
@@ -224,35 +218,6 @@ export default function BehaviorSettingsSection({
 				minutes={globalSettings.agentLaunchAutoApproveMinutes ?? DEFAULT_AGENT_LAUNCH_AUTO_APPROVE_MINUTES}
 				onChange={onAgentLaunchAutoApproveChange}
 			/>
-			</SettingsEntry>
-
-			<SettingsEntry anchor="pr-origin-task-link">
-			<div>
-				<p className="block text-fg text-sm font-semibold mb-2">
-					{t("settings.prOriginTaskLink")}
-				</p>
-				<p className="text-fg-3 text-sm mb-3">
-					{t("settings.prOriginTaskLinkDesc")}
-				</p>
-				{prOriginTaskLinkSupported ? null : (
-					<p
-						className="text-warning-strong text-xs mb-3 break-words"
-						data-testid="pr-origin-task-link-unsupported"
-					>
-						{t("settings.prOriginTaskLinkUnsupported")}
-					</p>
-				)}
-				<SettingsToggle
-					checked={prOriginTaskLinkSupported && globalSettings.prOriginTaskLink !== false}
-					disabled={!prOriginTaskLinkSupported}
-					ariaLabel={t("settings.prOriginTaskLink")}
-					onLabel={t("settings.on")}
-					offLabel={t("settings.off")}
-					onToggle={() =>
-						onPrOriginTaskLinkToggle(globalSettings.prOriginTaskLink === false)
-					}
-				/>
-			</div>
 			</SettingsEntry>
 
 			<SettingsEntry anchor="auto-open-images">

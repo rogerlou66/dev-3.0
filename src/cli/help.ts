@@ -147,7 +147,7 @@ const COMMANDS: CommandHelp[] = [
 			{
 				name: "open",
 				usage: "dev3 task open [<id>] [--task <id>]",
-				summary: "Focus the app on a task (same navigation as a dev3://task/<id> link).",
+				summary: "Focus the app on a task.",
 				details: [
 					"Without an id, targets the current worktree's task.",
 					"Honors the split-vs-fullscreen task open-mode preference.",
@@ -715,8 +715,6 @@ const COMMANDS: CommandHelp[] = [
 					"--auto-merge[=<m>]    Enable auto-merge after creating it: squash (default), merge, rebase.",
 					"                      A repo with that strategy disabled exits 1 — the pull request is",
 					"                      still open, only auto-merge was not enabled.",
-					"Inside a task worktree the body ends with a link back to the originating task",
-					"(Settings → Tasks turns it off; it is also dropped where no dev3:// handler exists).",
 					"`gh` missing or logged out exits 23 BEFORE anything is pushed.",
 					"Takes no --task: the pull request is for the branch checked out here, so naming",
 					"another task would push one branch and describe another.",

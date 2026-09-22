@@ -14155,12 +14155,8 @@ describe("handlers.createPullRequest", () => {
 		expect(typedText(guardedSends()[0])).not.toContain("\n");
 	});
 
-	/**
-	 * The footer, its platform gate and the user's `prOriginTaskLink` preference all
-	 * live inside `dev3 pr create` now (covered by src/cli/__tests__/pr.test.ts). The
-	 * handoff must therefore carry no footer text at all — and must not read settings,
-	 * because a second copy of that decision is a second thing to get wrong.
-	 */
+	// PR handoff must not append links or consult the retired setting.
+
 	it("carries no footer text and reads no settings", async () => {
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", worktreePath: "/tmp/test-worktree" });
@@ -14172,7 +14168,9 @@ describe("handlers.createPullRequest", () => {
 
 		const prompt = typedText(guardedSends()[0]);
 		expect(prompt).not.toContain("dev3://task/task-1");
-		expect(prompt).not.toContain("open.html?task=task-1");
+		expect(prompt).not.toContain("open.html");
+		expect(prompt).not.toContain("link back");
+		expect(prompt).not.toContain("footer");
 		expect(loadSettings).not.toHaveBeenCalled();
 		expect(saveSettings).not.toHaveBeenCalled();
 	});

@@ -183,7 +183,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			d.agentLaunchAutoApproveMinutes >= 0
 				? d.agentLaunchAutoApproveMinutes
 				: undefined,
-		// Default-on toggle — only an explicit false is a stored opt-out.
+		// Retired preference: preserve the opt-out for older co-installed versions.
 		prOriginTaskLink: d.prOriginTaskLink === false ? false : undefined,
 		agentsLayoutRevision: typeof d.agentsLayoutRevision === "number" ? d.agentsLayoutRevision : undefined,
 		// Default-off experimental toggle — only an explicit true is a stored opt-in.

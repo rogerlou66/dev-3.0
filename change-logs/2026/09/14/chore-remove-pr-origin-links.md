@@ -1,0 +1,1 @@
+Remove automatic origin-task links from pull request descriptions, their settings control, and the public redirect page. Remove the dev3 URL protocol and Copy Deep Link action. PR creation uses only the supplied description, while CLI task opening and notification navigation remain available.

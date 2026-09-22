@@ -9,8 +9,8 @@ import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS,
 import { CODEX_STATUS_HOOK_EVENTS, getCodexHookTargetStatus, type CodexStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
 import { DEFAULT_EVENT_LIMIT, DEFAULT_EVENT_WINDOW_MS, MAX_EVENT_LIMIT, formatMovementText, normalizeEventInstant, resolveEventIdPrefix, selectEvents, type BoardEvent, type BoardEventKind } from "../shared/board-events";
-import type { DeepLinkNav } from "../shared/deep-link";
-import { markPendingDeepLinkNav } from "./deep-link-nav";
+import type { TaskNavigationTarget } from "../shared/types";
+import { markPendingTaskNavigation } from "./task-navigation";
 import { SharedImageError, saveSharedImage } from "./shared-images";
 import { SharedArtifactError, saveSharedArtifact } from "./shared-artifacts";
 import { appendArtifactVersion, latestArtifactVersion } from "../shared/artifact-versions";
@@ -1563,22 +1563,14 @@ const handlers: Record<string, Handler> = {
 		return { taskId: updated.id, projectId: project.id, ...state, liveBackend: null };
 	},
 
-	/**
-	 * `dev3 task open` — navigate the running UI to a task from outside the app.
-	 * Deliberately the same two paths as an inbound `dev3://task/<id>` link
-	 * (decisions/2026/08/04/dev3-url-scheme-deep-links.md), so the open-mode
-	 * preference and the cold-start pull-on-mount come for free.
-	 *
-	 * The window layer is imported lazily and never in headless remote mode,
-	 * which has no windows and must not drag in electrobun.
-	 */
+	// Import desktop windows lazily: headless task navigation needs only RPC.
 	"task.open": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		const nav: DeepLinkNav = { kind: "task", taskId: task.id, projectId: project.id };
+		const nav: TaskNavigationTarget = { taskId: task.id, projectId: project.id };
 		if (process.env.DEV3_HEADLESS !== "1") {
 			const { focusFocusedWindow, getWindowCount, openNewWindow } = await import("./window-manager");
 			if (getWindowCount() === 0) {
-				markPendingDeepLinkNav(nav);
+				markPendingTaskNavigation(nav);
 				openNewWindow();
 				return { taskId: task.id, projectId: project.id, delivered: true, reopened: true };
 			}
@@ -1586,7 +1578,7 @@ const handlers: Record<string, Handler> = {
 		}
 		const push = getPushMessage();
 		if (!push) return { taskId: task.id, projectId: project.id, delivered: false };
-		push("openDeepLink", nav);
+		push("openTaskNavigation", nav);
 		return { taskId: task.id, projectId: project.id, delivered: true };
 	},
 

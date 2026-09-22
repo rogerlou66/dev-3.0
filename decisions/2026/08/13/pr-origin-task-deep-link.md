@@ -1,3 +1,5 @@
+Superseded on 2026-09-14 by `decisions/2026/09/14/remove-pr-origin-links.md`: PR origin-task links, the web redirect, and application URL navigation have been removed.
+
 # PR origin-task deep link + https open page
 
 ## Context

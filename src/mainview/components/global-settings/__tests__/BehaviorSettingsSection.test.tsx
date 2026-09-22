@@ -16,12 +16,8 @@ const t = Object.assign((key: string) => key, {
 	plural: (key: string, count: number) => `${key}|${count}`,
 }) as unknown as TFunction;
 
-function renderSection(
-	settings: Partial<GlobalSettings> = {},
-	{ prOriginTaskLinkSupported = true }: { prOriginTaskLinkSupported?: boolean } = {},
-) {
+function renderSection(settings: Partial<GlobalSettings> = {}) {
 	const onReviewModePromptChange = vi.fn();
-	const onPrOriginTaskLinkToggle = vi.fn();
 	const onOpenArtifactsInPopupToggle = vi.fn();
 	render(
 		<I18nProvider>
@@ -32,9 +28,7 @@ function renderSection(
 				onDefaultDiffViewModeChange={vi.fn()}
 				onOpenArtifactsInPopupToggle={onOpenArtifactsInPopupToggle}
 				onSuggestCompletingTasksAfterMergeToggle={vi.fn()}
-				onPrOriginTaskLinkToggle={onPrOriginTaskLinkToggle}
 				onAgentLaunchAutoApproveChange={vi.fn()}
-				prOriginTaskLinkSupported={prOriginTaskLinkSupported}
 				onTaskSortOrderChange={vi.fn()}
 				onTaskOpenModeChange={vi.fn()}
 				onTipsDisabledToggle={vi.fn()}
@@ -46,7 +40,7 @@ function renderSection(
 	);
 	const textarea = screen.getByLabelText("settings.reviewModePrompt") as HTMLTextAreaElement;
 	const reset = screen.getByRole("button", { name: "settings.reviewModePromptReset" });
-	return { textarea, reset, onReviewModePromptChange, onPrOriginTaskLinkToggle, onOpenArtifactsInPopupToggle };
+	return { textarea, reset, onReviewModePromptChange, onOpenArtifactsInPopupToggle };
 }
 
 describe("BehaviorSettingsSection — review prompt", () => {
@@ -91,41 +85,6 @@ describe("BehaviorSettingsSection — review prompt", () => {
 		await userEvent.click(reset);
 		expect(textarea.value).toBe(BUILTIN_PROMPT);
 		expect(onReviewModePromptChange).toHaveBeenCalledWith("");
-	});
-});
-
-describe("BehaviorSettingsSection — PR origin-task link toggle", () => {
-	function prSwitch() {
-		return screen.getByRole("switch", { name: "settings.prOriginTaskLink" });
-	}
-
-	it("is on by default and turning it off reports false", async () => {
-		const { onPrOriginTaskLinkToggle } = renderSection();
-		expect(prSwitch()).toHaveAttribute("aria-checked", "true");
-		await userEvent.click(prSwitch());
-		expect(onPrOriginTaskLinkToggle).toHaveBeenCalledWith(false);
-	});
-
-	it("reflects a stored opt-out and turning it on reports true", async () => {
-		const { onPrOriginTaskLinkToggle } = renderSection({ prOriginTaskLink: false });
-		expect(prSwitch()).toHaveAttribute("aria-checked", "false");
-		await userEvent.click(prSwitch());
-		expect(onPrOriginTaskLinkToggle).toHaveBeenCalledWith(true);
-	});
-
-	// Windows: the host registers no dev3:// handler, so the control reads Off and
-	// inert — while the stored `true` on disk stays exactly as the user left it.
-	it("reads off, inert and explained when the host cannot open dev3:// links", async () => {
-		const { onPrOriginTaskLinkToggle } = renderSection(
-			{ prOriginTaskLink: true },
-			{ prOriginTaskLinkSupported: false },
-		);
-		expect(prSwitch()).toHaveAttribute("aria-checked", "false");
-		expect(screen.getByTestId("pr-origin-task-link-unsupported")).toHaveTextContent(
-			"settings.prOriginTaskLinkUnsupported",
-		);
-		await userEvent.click(prSwitch());
-		expect(onPrOriginTaskLinkToggle).not.toHaveBeenCalled();
 	});
 });
 

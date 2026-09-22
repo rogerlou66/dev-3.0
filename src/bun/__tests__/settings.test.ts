@@ -85,12 +85,19 @@ describe("saveSettings", () => {
 		expect((await loadSettings()).importShellEnv).toBeUndefined();
 	});
 
-	it("defaults prOriginTaskLink to on and stores only an explicit opt-out", async () => {
-		// No file → default on; every consumer gates with `!== false` / `=== false`.
+	it("preserves the retired PR backlink opt-out for older installed versions", async () => {
+		// The current app no longer consumes this preference.
 		expect((await loadSettings()).prOriginTaskLink).toBeUndefined();
 
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ prOriginTaskLink: false }), null, 2), "utf-8");
-		expect((await loadSettings()).prOriginTaskLink).toBe(false);
+		const loaded = await loadSettings();
+		expect(loaded.prOriginTaskLink).toBe(false);
+		vi.spyOn(Bun, "write").mockImplementation(async (target, data) => {
+			writeFileSync(String(target), String(data), "utf-8");
+			return 0;
+		});
+		await saveSettings(loaded);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).prOriginTaskLink).toBe(false);
 
 		// Explicit true normalizes back to undefined — the default-on representation.
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ prOriginTaskLink: true }), null, 2), "utf-8");

@@ -64,8 +64,6 @@ function deps(
 			return ok();
 		},
 		cwd: CWD,
-		platform: "darwin",
-		originTaskLinkEnabled: () => true,
 		...overrides,
 	};
 	return { deps: base, calls };
@@ -170,55 +168,18 @@ describe("dev3 pr create — gh must be installed and logged in", () => {
 	});
 });
 
-describe("dev3 pr create — the origin-task footer", () => {
-	function bodyOf(calls: Call[]): string {
+describe("dev3 pr create — description only", () => {
+	it.each([ctx(), null])("never appends task metadata to the description (%j)", async (context) => {
+		const { deps: d, calls } = deps();
+		await handlePr("create", args({ title: "T", description: "Body\n\nDetails" }), context, d);
 		const create = ran(calls, "gh", ["pr", "create"])!;
-		return create.args[create.args.indexOf("--body") + 1];
-	}
-
-	it("links back to the task when run inside a task worktree", async () => {
+		expect(create.args[create.args.indexOf("--body") + 1]).toBe("Body\n\nDetails");
+	});
+	it.each([ctx(), null])("keeps an omitted description empty (%j)", async (context) => {
 		const { deps: d, calls } = deps();
-
-		await handlePr("create", args({ title: "T", description: "Body" }), ctx(), d);
-
-		const body = bodyOf(calls);
-		expect(body).toContain("Body");
-		expect(body).toContain("Origin task in dev3");
-		expect(body).toContain("open.html?task=task-1");
-	});
-
-	it("omits the footer outside a task worktree", async () => {
-		const { deps: d, calls } = deps();
-
-		await handlePr("create", args({ title: "T", description: "Body" }), null, d);
-
-		expect(bodyOf(calls)).toBe("Body");
-	});
-
-	it("omits the footer when the user turned it off", async () => {
-		const { deps: d, calls } = deps({}, { originTaskLinkEnabled: () => false });
-
-		await handlePr("create", args({ title: "T", description: "Body" }), ctx(), d);
-
-		expect(bodyOf(calls)).toBe("Body");
-	});
-
-	// A dev3:// link is dead anywhere the scheme is not registered, and a PR body
-	// is public — so the host decides before the preference does.
-	it("omits the footer where no dev3:// handler exists", async () => {
-		const { deps: d, calls } = deps({}, { platform: "linux" });
-
-		await handlePr("create", args({ title: "T", description: "Body" }), ctx(), d);
-
-		expect(bodyOf(calls)).toBe("Body");
-	});
-
-	it("sends an empty body when --description is absent", async () => {
-		const { deps: d, calls } = deps();
-
-		await handlePr("create", args({ title: "T" }), null, d);
-
-		expect(bodyOf(calls)).toBe("");
+		await handlePr("create", args({ title: "T" }), context, d);
+		const create = ran(calls, "gh", ["pr", "create"])!;
+		expect(create.args[create.args.indexOf("--body") + 1]).toBe("");
 	});
 });
 

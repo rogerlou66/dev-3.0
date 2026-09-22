@@ -6,7 +6,6 @@ import type { AgentRateLimitsReport } from "./rate-limits";
 import type { AgentAccount, AgentAccountKind, AgentAccountsState, ClaudeSlotModels } from "./agent-accounts";
 import type { TerminalBackendIdentity } from "./terminal-backend-identity";
 import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind } from "./task-panes";
-import type { DeepLinkNav } from "./deep-link";
 import type { UpdateChannel } from "./update-channel";
 import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
 import type { AgentPromptDelivery } from "./agent-prompt-delivery";
@@ -14,6 +13,11 @@ import type { AgentMessageLogPage, AgentMessageOrigin } from "./agent-message-lo
 import type { NotificationLogPage } from "./notification-log";
 import type { LowBatteryStatus } from "./low-battery";
 export type { LowBatteryStatus, OutputStyleOutcome } from "./low-battery";
+
+export interface TaskNavigationTarget {
+	taskId: string;
+	projectId: string;
+}
 
 // ---- Changelog ----
 
@@ -1340,11 +1344,7 @@ export interface GlobalSettings {
 	 * applied to the completion dialog: that one destroys a worktree.
 	 */
 	agentLaunchAutoApproveMinutes?: number;
-	/**
-	 * When false, the Create-PR handoff stops asking the agent to append the
-	 * deep link back to the originating task. Default on; the opt-out exists
-	 * because a public PR would otherwise advertise that dev3 produced it.
-	 */
+	/** Retired PR backlink preference, retained for N-2 on-disk readability. */
 	prOriginTaskLink?: boolean;
 	/**
 	 * One-time migration marker: when this is behind the app's current
@@ -5301,14 +5301,10 @@ export type AppRPCSchema = {
 				params: void;
 				response: { taskId: string; projectId: string } | null;
 			};
-			/**
-			 * Read-and-clear a deep link (`dev3://…`) that arrived while the app sat
-			 * window-less in the dock. The reopened renderer pulls it on mount and
-			 * navigates — same pull-on-mount pattern as consumePendingNotificationNav.
-			 */
-			consumePendingDeepLinkNav: {
+			/** Read and clear a CLI task-open request queued while no window existed. */
+			consumePendingTaskNavigation: {
 				params: void;
-				response: DeepLinkNav | null;
+				response: TaskNavigationTarget | null;
 			};
 			openNewWindow: {
 				params: void;
@@ -5736,17 +5732,6 @@ export type AppRPCSchema = {
 				params: void;
 				response: { available: boolean };
 			};
-			/**
-			 * Can THIS host's PRs carry a working `dev3://` back-link? True on macOS only —
-			 * Windows and Linux register no handler for the scheme, so the link would be
-			 * dead for whoever clicks it. Asked of the host because browser-side platform
-			 * sniffing would answer for the machine holding the browser, not the one
-			 * opening the PR.
-			 */
-			checkPrOriginTaskLinkSupported: {
-				params: void;
-				response: { supported: boolean };
-			};
 			getPreventSleepState: {
 				params: void;
 				response: { enabled: boolean; available: boolean; forcedByRemote: boolean };
@@ -6093,13 +6078,8 @@ export type AppRPCSchema = {
 			 * The renderer navigates to the referenced task — implements click-to-open for native notifications.
 			 */
 			openTaskFromNotification: { taskId: string; projectId: string };
-			/**
-			 * Navigate from an inbound `dev3://…` deep link while a window is already
-			 * open: jump to a task, open a project board, or open the Create Task
-			 * modal prefilled with `text`. Cold-start (no window) uses the
-			 * consumePendingDeepLinkNav pull instead — see decisions/144.
-			 */
-			openDeepLink: DeepLinkNav;
+			/** Navigate to the task selected by the CLI. */
+			openTaskNavigation: TaskNavigationTarget;
 			/**
 			 * CLI-initiated in-app toast (`dev3 notify`). When `taskId`/`projectId`
 			 * are present the toast is clickable and navigates to that task.

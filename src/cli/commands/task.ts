@@ -703,8 +703,7 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 
 /**
  * `dev3 task open [<id>]` — bring the running app to the front on a task, the
- * CLI twin of clicking a `dev3://task/<id>` link (and it works on every OS,
- * because nothing here needs a registered URL scheme).
+ * Focus the running app on a task through the local CLI transport.
  */
 async function openTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
 	rejectUnknownFlags(args, ["id", "task", "task-id", "project"]);

@@ -681,19 +681,10 @@ async function pushTask(params: { taskId: string; projectId: string }): Promise<
 	log.info("← pushTask (pane opened)", { paneId, forced: lease !== null });
 }
 
-/**
- * PR handoff prompt. `dev3 pr create` is the whole recipe now: it pushes the
- * branch, opens the pull request through `gh`, targets the task's own base branch
- * and appends the origin-task footer itself (from `shared/deep-link.ts`, honouring
- * the user's opt-out) — so the prompt no longer carries the footer text, and the
- * agent can no longer paste it with the wrong task id.
- *
- * The prompt stays on ONE line: it is typed into the pane as raw bytes, and an
- * embedded newline can submit it early on an agent that reads `\n` as Enter.
- */
+// Keep the handoff on one line: terminal input can submit embedded newlines.
 function createPrAgentPrompt(autoMerge: boolean): string {
 	const flag = autoMerge ? " --auto-merge" : "";
-	return `Please open a pull request for this branch by running: dev3 pr create --title "..." --description "..."${flag} — it pushes the branch, opens the PR through gh and ends the description with a link back to this dev3 task, so do not run git push or gh pr create yourself and do not write that footer by hand. Choose the title and description from the work in this conversation (pass a long description with --description @<file> rather than inline).`;
+	return `Please open a pull request for this branch by running: dev3 pr create --title "..." --description "..."${flag} — it pushes the branch, opens the PR through gh, so do not run git push or gh pr create yourself. Choose the title and description from the work in this conversation (pass a long description with --description @<file> rather than inline).`;
 }
 
 const COMMIT_AGENT_PROMPT =
@@ -724,9 +715,7 @@ async function createPullRequest(params: { taskId: string; projectId: string; au
 		throw new Error("Create pull request needs a GitHub remote — `gh` is the only forge client dev3 speaks");
 	}
 
-	// The footer's two gates (no `dev3://` handler on this platform, and the user's
-	// `prOriginTaskLink` preference) now live in `dev3 pr create` itself, so this
-	// handoff neither reads settings nor builds the line.
+
 	const delivery = await deliverAgentPrompt(task, createPrAgentPrompt(params.autoMerge ?? false));
 	log.info("← createPullRequest", { taskId: task.id.slice(0, 8), status: delivery.status, reason: delivery.reason });
 	return { delivery };

@@ -29,6 +29,7 @@ vi.mock("../rpc", () => ({
 			requestQuit: vi.fn().mockResolvedValue(undefined),
 			consumePendingQuitDialog: vi.fn().mockResolvedValue(false),
 			consumePendingNotificationNav: vi.fn().mockResolvedValue(null),
+			consumePendingTaskNavigation: vi.fn().mockResolvedValue(null),
 			openNewWindow: vi.fn().mockResolvedValue(undefined),
 			hideApp: vi.fn().mockResolvedValue(undefined),
 			setWindowTitleContext: vi.fn().mockResolvedValue(undefined),
@@ -2361,66 +2362,66 @@ describe("App keyboard shortcuts", () => {
 		});
 	});
 
-	describe("dev3:// deep links", () => {
-		const dlProjects = [
+	describe("CLI task navigation", () => {
+		const navigationProjects = [
 			{ id: "p1", name: "Alpha", path: "/a", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
 			{ id: "p2", name: "Beta", path: "/b", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
 		];
 
-		it("navigates to a task from an openDeepLink event", async () => {
-			vi.mocked(api.request.getProjects).mockResolvedValue(dlProjects);
+		it.each(["split", "fullscreen"])("opens a CLI task using %s presentation", async (mode) => {
+			localStorage.setItem("dev3-task-open-mode", mode);
+			vi.mocked(api.request.getProjects).mockResolvedValue(navigationProjects);
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
 				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t1" }),
 			});
 
 			await renderApp();
 			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:openTaskNavigation", {
+					detail: { taskId: "t2", projectId: "p2" },
+				}));
+			});
+
+			await waitFor(() => {
+				if (mode === "fullscreen") {
+					expect(screen.getByTestId("task-screen")).toBeInTheDocument();
+				} else {
+					expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p2");
+					expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t2");
+				}
+			});
+		});
+
+		it("ignores the removed URL navigation event", async () => {
+			vi.mocked(api.request.getProjects).mockResolvedValue(navigationProjects);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({
+				route: JSON.stringify({ screen: "project", projectId: "p1" }),
+			});
+			await renderApp();
+			await act(async () => {
 				window.dispatchEvent(new CustomEvent("rpc:openDeepLink", {
 					detail: { kind: "task", taskId: "t2", projectId: "p2" },
 				}));
 			});
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p1");
+		});
 
+		it("consumes a pending CLI task request after the window opens", async () => {
+			localStorage.setItem("dev3-task-open-mode", "split");
+			vi.mocked(api.request.getProjects).mockResolvedValue(navigationProjects);
+			let resolvePending!: (target: { taskId: string; projectId: string }) => void;
+			vi.mocked(api.request.consumePendingTaskNavigation).mockImplementationOnce(
+				() => new Promise((resolve) => { resolvePending = resolve; }),
+			);
+			await renderApp();
+			await act(async () => resolvePending({ taskId: "t2", projectId: "p2" }));
+			expect(api.request.consumePendingTaskNavigation).toHaveBeenCalledTimes(1);
 			await waitFor(() => {
 				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p2");
 				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t2");
 			});
 		});
 
-		it("opens a project board from an openDeepLink event", async () => {
-			vi.mocked(api.request.getProjects).mockResolvedValue(dlProjects);
-			vi.mocked(api.request.getLastRoute).mockResolvedValue({
-				route: JSON.stringify({ screen: "project", projectId: "p1" }),
-			});
-
-			await renderApp();
-			act(() => {
-				window.dispatchEvent(new CustomEvent("rpc:openDeepLink", {
-					detail: { kind: "project", projectId: "p2" },
-				}));
-			});
-
-			await waitFor(() => {
-				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p2");
-			});
-		});
-
-		it("opens the Create Task modal prefilled from a new-task deep link", async () => {
-			vi.mocked(api.request.getProjects).mockResolvedValue(dlProjects);
-			vi.mocked(api.request.getLastRoute).mockResolvedValue({
-				route: JSON.stringify({ screen: "project", projectId: "p1" }),
-			});
-
-			await renderApp();
-			await act(async () => {
-				window.dispatchEvent(new CustomEvent("rpc:openDeepLink", {
-					detail: { kind: "new-task", projectId: "p2", text: "Prefilled body" },
-				}));
-			});
-
-			expect(await screen.findByText("New Task")).toBeInTheDocument();
-			const textarea = await screen.findByPlaceholderText(/describe what needs/i) as HTMLTextAreaElement;
-			expect(textarea.value).toBe("Prefilled body");
-		});
 	});
 
 	describe("Escape from project view", () => {

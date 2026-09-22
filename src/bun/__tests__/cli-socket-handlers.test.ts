@@ -4177,7 +4177,7 @@ describe("vent.add", () => {
 });
 
 describe("task.open", () => {
-	it("focuses the live window and pushes the same nav an inbound deep link uses", async () => {
+	it("focuses the live window and pushes task navigation", async () => {
 		const project = makeProject();
 		const task = makeTask();
 		const push = vi.fn();
@@ -4192,7 +4192,7 @@ describe("task.open", () => {
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ taskId: task.id, projectId: project.id, delivered: true });
 		expect(wm.focusFocusedWindow).toHaveBeenCalled();
-		expect(push).toHaveBeenCalledWith("openDeepLink", { kind: "task", taskId: task.id, projectId: project.id });
+		expect(push).toHaveBeenCalledWith("openTaskNavigation", { taskId: task.id, projectId: project.id });
 	});
 
 	it("stashes the target and reopens a window when the app sits window-less", async () => {
@@ -4210,8 +4210,9 @@ describe("task.open", () => {
 		expect(resp.data).toMatchObject({ delivered: true, reopened: true });
 		expect(wm.openNewWindow).toHaveBeenCalled();
 		expect(push).not.toHaveBeenCalled();
-		const { consumePendingDeepLinkNav } = await import("../deep-link-nav");
-		expect(consumePendingDeepLinkNav()).toEqual({ kind: "task", taskId: task.id, projectId: project.id });
+		const { consumePendingTaskNavigation } = await import("../task-navigation");
+		expect(consumePendingTaskNavigation()).toEqual({ taskId: task.id, projectId: project.id });
+		expect(consumePendingTaskNavigation()).toBeNull();
 	});
 
 	it("fails on an unknown task", async () => {
