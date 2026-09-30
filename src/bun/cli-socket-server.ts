@@ -2544,6 +2544,7 @@ const integration = createIntegration({
 		});
 		return tasks[0];
 	},
+	message: async (params) => await handlers["message.send"](params) as { status: AgentPromptDeliveryStatus; detail?: string },
 	events: (params) => handlers["events.list"](params),
 });
 for (const [method, handler] of Object.entries(integration)) handlers[`integration.${method}`] = handler;

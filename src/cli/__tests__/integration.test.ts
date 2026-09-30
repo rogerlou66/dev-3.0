@@ -21,7 +21,7 @@ describe("integration CLI", () => {
 		expect(process.stdout.write).toHaveBeenCalledWith('{"protocolVersion":1}\n');
 		expect(readStdin).not.toHaveBeenCalled();
 	});
-	it.each(["create", "launch", "show", "events"])("passes %s JSON through without shell interpretation", async (command) => {
+	it.each(["create", "launch", "message", "show", "events"])("passes %s JSON through without shell interpretation", async (command) => {
 		const params = { description: "Quotes ' and `commands` and $(text)\nSecond line" };
 		vi.mocked(readStdin).mockResolvedValue(JSON.stringify(params));
 		await handleIntegration(command, { flags: { json: "-" }, positional: [] }, "/test.sock");

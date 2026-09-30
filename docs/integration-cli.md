@@ -17,6 +17,7 @@ by interpolating a prompt into a shell command. `--instance` can pin another ins
 | `dev3 integration agents` | None | `{agents:[{id,name,defaultConfigId,configurations:[{id,name,model}]}]}` |
 | `dev3 integration create --json -` | `{projectId,title,description,idempotencyKey}` | `{task,replayed,operationState:"created"}` |
 | `dev3 integration launch --json -` | `{projectId,taskId,agentId,configId,idempotencyKey,confirmed:true}` | `{task,replayed,operationState:"dispatched"\|"uncertain"}` |
+| `dev3 integration message --json -` | `{projectId,taskId,text,idempotencyKey,confirmed:true}` | `{taskId,projectId,status,delivered,queued,replayed,operationState,detail?}` |
 | `dev3 integration show --json -` | `{projectId,taskId}` | `{task}` |
 | `dev3 integration events --json -` | `{projectId?,cursor?,limit?}` | Existing `EventSelection`: `events`, `cursor`, `droppedNewer`, `olderThanWindow`, `matched`, `from`, `movementsEvicted` |
 
@@ -42,6 +43,21 @@ through this API. If the process stops or throws after recording intent, a repla
 `uncertain`; inspect the task in dev3 instead of issuing another automatic launch.
 This intentionally favors avoiding duplicate execution over automatic crash recovery.
 
+`message` sends context only after the user explicitly approves that update. It reuses
+the existing `message.send` delivery path and supplies the subject "Topic context update";
+message text is data, never a shell command. Use a stable key per reviewed context update.
+The receipt records intent before delivery and saves the returned outcome. Repeating the
+same key never sends again, including after a lost response. Different text with the same
+key is rejected; an uncertain attempt needs inspection before the user authorizes a new one.
+
+Message `status` preserves `delivered`, `held`, `unconfirmed`, or `not-delivered`.
+`delivered` is true only for `delivered`; `queued` is true only for `held`. The held queue
+is in memory, so a persisted receipt is evidence of earlier queue acceptance, not proof
+of delivery after an application restart. A replay returns that recorded outcome; it
+does not observe the queue. A crash before the outcome was recorded returns `uncertain`
+with `unconfirmed`, and never resends automatically. `dispatched` is receipt state, not
+a claim that the agent read the context.
+
 `dispatched` means preparation was requested; it does not prove a worktree or agent is
 running. Read back `preparing`, `preparationError`, and `runtimeState`. A persisted runtime
 state is a recovery hint, and a Kanban column is not proof of successful execution.
@@ -59,3 +75,8 @@ locally. Without a cursor the default window is 24 hours. There are at most 50 r
 notes and 50 movements per task; inspect reported omissions and reconcile linked tasks
 after gaps. `show` is the result snapshot; this protocol does not parse terminal text or
 invent a universal agent-success event.
+
+For an isolated transport check, run `bun src/bun/__tests__/integration-transport.bun-e2e.ts`.
+It runs real CLI subprocesses and a real local socket against temporary task data and
+receipts. Agent launch and message delivery are recorded test boundaries; the check
+does not start an agent or touch the installed application's state.

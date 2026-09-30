@@ -37,6 +37,7 @@ beforeEach(async () => {
 			return task;
 		}),
 		events: vi.fn(async (params) => ({ events: [], cursor: params.cursor ?? null })),
+		message: vi.fn(async () => ({ status: "held" as const, detail: "Waiting for an idle pane" })),
 	};
 });
 afterEach(async () => { await rm(home, { recursive: true, force: true }); });
@@ -142,6 +143,53 @@ describe("local integration", () => {
 		const { task } = await api.create(createInput);
 		Object.assign(tasks.get(task.id)!, { status: "completed", prUrl: "https://example.test/pr/1", notes: [{ content: "Test failure" }] });
 		expect(await api.show({ projectId: project.id, taskId: task.id })).toMatchObject({ task: { status: "completed", notes: [{ content: "Test failure" }] } });
+	});
+
+	it("queues confirmed context using the existing delivery contract and deduplicates after restart", async () => {
+		const api = createIntegration(deps);
+		const { task } = await api.create(createInput);
+		const input = { projectId: project.id, taskId: task.id, text: "New context `echo unsafe`\n$(do not execute)", idempotencyKey: "context:1", confirmed: true };
+		const response = await api.message(input);
+		expect(response).toMatchObject({ status: "held", queued: true, delivered: false, replayed: false });
+		expect(await createIntegration(deps).message(input)).toMatchObject({ status: "held", replayed: true });
+		expect(deps.message).toHaveBeenCalledExactlyOnceWith({ projectId: project.id, taskId: task.id, text: input.text, subject: "Topic context update" });
+	});
+
+	it("never resends context whose outcome was lost", async () => {
+		const api = createIntegration(deps);
+		const { task } = await api.create(createInput);
+		const input = { projectId: project.id, taskId: task.id, text: "Context", idempotencyKey: "context:1", confirmed: true };
+		deps.message = vi.fn(async () => { throw new Error("Lost response after sending"); });
+		await expect(api.message(input)).rejects.toThrow("Lost response");
+		expect(await createIntegration(deps).message(input)).toMatchObject({ status: "unconfirmed", operationState: "uncertain", delivered: false, queued: false });
+		expect(deps.message).toHaveBeenCalledTimes(1);
+	});
+
+	it("serializes duplicate context requests while allowing a new reviewed update", async () => {
+		const api = createIntegration(deps);
+		const { task } = await api.create(createInput);
+		const input = { projectId: project.id, taskId: task.id, text: "Context", idempotencyKey: "context:1", confirmed: true };
+		await Promise.all([api.message(input), createIntegration(deps).message(input)]);
+		expect(deps.message).toHaveBeenCalledTimes(1);
+		await api.message({ ...input, text: "More context", idempotencyKey: "context:2" });
+		expect(deps.message).toHaveBeenCalledTimes(2);
+	});
+
+	it("rejects unconfirmed context and key reuse with edited content", async () => {
+		const api = createIntegration(deps);
+		const { task } = await api.create(createInput);
+		const input = { projectId: project.id, taskId: task.id, text: "Context", idempotencyKey: "context:1", confirmed: true };
+		await expect(api.message({ ...input, confirmed: false })).rejects.toThrow("confirmed: true");
+		await api.message(input);
+		await expect(api.message({ ...input, text: "Different" })).rejects.toThrow("different context");
+		expect(deps.message).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["delivered", "unconfirmed", "not-delivered"] as const)("preserves the %s context delivery outcome", async (status) => {
+		const api = createIntegration(deps);
+		const { task } = await api.create(createInput);
+		deps.message = vi.fn(async () => ({ status }));
+		expect(await api.message({ projectId: project.id, taskId: task.id, text: "Context", idempotencyKey: "context:1", confirmed: true })).toMatchObject({ status, delivered: status === "delivered", queued: false });
 	});
 	it("validates cursor and forwards bounded event requests", async () => {
 		const api = createIntegration(deps);

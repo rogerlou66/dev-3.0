@@ -4,14 +4,14 @@ import { exitError, exitUsage } from "../output";
 import { sendRequest } from "../socket-client";
 import { readStdin } from "../stdin";
 
-const COMMANDS = ["capabilities", "projects", "agents", "create", "launch", "show", "events"];
+const COMMANDS = ["capabilities", "projects", "agents", "create", "launch", "message", "show", "events"];
 
 export async function handleIntegration(subcommand: string | undefined, args: ParsedArgs, socketPath: string): Promise<void> {
 	rejectUnknownFlags(args, ["json"]);
 	if (!subcommand || !COMMANDS.includes(subcommand) || args.positional.length) {
-		exitUsage("Usage: dev3 integration <capabilities|projects|agents|create|launch|show|events> [--json -]");
+		exitUsage("Usage: dev3 integration <capabilities|projects|agents|create|launch|message|show|events> [--json -]");
 	}
-	const needsInput = ["create", "launch", "show", "events"].includes(subcommand);
+	const needsInput = ["create", "launch", "message", "show", "events"].includes(subcommand);
 	if (needsInput && args.flags.json !== "-") exitUsage("Pass --json - and provide one JSON object on stdin");
 	if (!needsInput && args.flags.json !== undefined) exitUsage("This command takes no input");
 	let params: Record<string, unknown> = {};

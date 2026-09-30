@@ -10,11 +10,11 @@ The existing CLI request ID correlates responses but does not deduplicate mutati
 
 ## Decision
 
-`src/bun/integration.ts` adds protocol 1 over the existing local CLI transport, with allowlisted metadata and explicit confirmation for launch. A new parallel `integration-v1` directory holds atomic receipts: creation reserves a UUID passed through `createTask` and deduplicated inside `data.addTask`'s existing lock; launch records intent before calling `launchTaskWithAgentChoice` and never automatically repeats uncertain execution.
+`src/bun/integration.ts` adds protocol 1 over the existing local CLI transport, with allowlisted metadata and explicit confirmation for launch and context delivery. A new parallel `integration-v1` directory holds atomic receipts: creation reserves a UUID passed through `createTask` and deduplicated inside `data.addTask`'s existing lock; launch records intent before calling `launchTaskWithAgentChoice`, and context updates reuse `message.send` while preserving its delivery status. Neither automatically repeats an uncertain execution.
 
 ## Risks
 
-A crash before launch dispatch can leave an unstarted task requiring manual inspection; avoiding duplicate execution takes priority. Existing data paths and schemas remain readable by N-2 versions, which ignore the new receipt directory; there is no sunset or migration of existing paths. Receipts are retained, and this local protocol relies on a trusted caller to authenticate its user and attest confirmation.
+A crash before dispatch can leave an unstarted task or unsent context requiring manual inspection; avoiding duplicate execution takes priority. Message receipts retain the original acceptance outcome, and a held queue lives in memory, so replay does not prove eventual delivery. Existing data paths and schemas remain readable by N-2 versions, which ignore the new receipt directory; there is no sunset or migration of existing paths. Receipts are retained, and this local protocol relies on a trusted caller to authenticate its user and attest confirmation.
 
 ## Alternatives considered
 

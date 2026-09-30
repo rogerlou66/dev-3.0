@@ -54,9 +54,9 @@ const COMMANDS: CommandHelp[] = [
 	{
 		name: "integration",
 		summary: "Local JSON integration for user-approved task dispatch and result reads.",
-		subcommands: ["capabilities", "projects", "agents", "create", "launch", "show", "events"].map((name) => ({
+		subcommands: ["capabilities", "projects", "agents", "create", "launch", "message", "show", "events"].map((name) => ({
 			name,
-			usage: `dev3 integration ${name}${["create", "launch", "show", "events"].includes(name) ? " --json -" : ""}`,
+			usage: `dev3 integration ${name}${["create", "launch", "message", "show", "events"].includes(name) ? " --json -" : ""}`,
 			summary: `Return integration ${name} as JSON.`,
 			details: ["See docs/integration-cli.md for the versioned payload contract.", "Create never starts an agent. Launch requires confirmed: true and the user's chosen agent and preset."],
 		})),

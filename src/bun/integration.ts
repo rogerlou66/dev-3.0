@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodingAgent, Project, Task } from "../shared/types";
-import { getTaskTitle } from "../shared/types";
+import { getTaskTitle, MAX_SCHEDULED_MESSAGE_LENGTH } from "../shared/types";
+import type { AgentPromptDeliveryStatus } from "../shared/agent-prompt-delivery";
 import { parseEventCursor } from "../shared/board-events";
 import { atomicWriteFile } from "./atomic-write";
 import { withFileLock } from "./file-lock";
@@ -16,6 +17,7 @@ export interface IntegrationDependencies {
 	task(project: Project, id: string): Promise<Task>;
 	create(input: { projectId: string; title: string; description: string; reservationId: string }): Promise<Task>;
 	launch(input: { projectId: string; taskId: string; agentId: string; configId: string }): Promise<Task>;
+	message(input: { projectId: string; taskId: string; text: string; subject: string }): Promise<{ status: AgentPromptDeliveryStatus; detail?: string }>;
 	events(input: Params): Promise<unknown>;
 }
 
@@ -24,6 +26,7 @@ interface Receipt {
 	fingerprint: string;
 	taskId: string;
 	state: "reserved" | "created" | "dispatching" | "dispatched";
+	delivery?: { status: AgentPromptDeliveryStatus; detail?: string };
 }
 
 function required(input: Params, key: string, max = 512): string {
@@ -88,8 +91,9 @@ export function createIntegration(deps: IntegrationDependencies) {
 			fields(input, []);
 			return {
 				protocolVersion: 1,
-				commands: ["capabilities", "projects", "agents", "create", "launch", "show", "events"],
+				commands: ["capabilities", "projects", "agents", "create", "launch", "message", "show", "events"],
 				createIdempotency: "durable", launchIdempotency: "at-most-once",
+				messageIdempotency: "at-most-once",
 				launchRequiresConfirmation: true, eventKinds: ["note", "move"],
 				eventRetention: "bounded; persist events and reconcile tasks",
 			};
@@ -157,6 +161,34 @@ export function createIntegration(deps: IntegrationDependencies) {
 				record.state = "dispatched";
 				await save(path, record);
 				return { task: integrationTask(launched), replayed: false, operationState: "dispatched" };
+			});
+		},
+		message: async (input: Params) => {
+			fields(input, ["projectId", "taskId", "text", "idempotencyKey", "confirmed"]);
+			if (input.confirmed !== true) throw new Error("Sending context requires confirmed: true from an explicit user action");
+			const projectId = required(input, "projectId");
+			const taskId = required(input, "taskId");
+			const text = required(input, "text", MAX_SCHEDULED_MESSAGE_LENGTH);
+			const key = required(input, "idempotencyKey", 256);
+			const project = await deps.project(projectId);
+			await deps.task(project, taskId);
+			const fingerprint = hash({ projectId, taskId, text, key });
+			return locked(`message-${hash({ projectId, taskId, key })}`, async (path) => {
+				const previous = await receipt(path);
+				if (previous && previous.fingerprint !== fingerprint) throw new Error("Idempotency key already used with different context");
+				const record: Receipt = previous ?? { version: 1, fingerprint, taskId, state: "dispatching" };
+				if (!previous) {
+					await save(path, record);
+					record.delivery = await deps.message({ projectId, taskId, text, subject: "Topic context update" });
+					record.state = "dispatched";
+					await save(path, record);
+				}
+				const status = record.delivery?.status ?? "unconfirmed";
+				return {
+					taskId, projectId, status, delivered: status === "delivered", queued: status === "held",
+					replayed: previous !== null, operationState: record.state === "dispatched" ? "dispatched" : "uncertain",
+					...(record.delivery?.detail ? { detail: record.delivery.detail } : {}),
+				};
 			});
 		},
 		show: async (input: Params) => {
