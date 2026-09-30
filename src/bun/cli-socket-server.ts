@@ -49,6 +49,8 @@ import { readTaskTerminalBackendState, switchTaskTerminalBackend } from "./task-
 import { DEV3_HOME } from "./paths";
 import { cliTransportFor, startCliListener } from "./cli-listener";
 import { CodexQuestionState } from "./codex-question-state";
+import { createIntegration } from "./integration";
+import { getAllAgents } from "./agents";
 
 const log = createLogger("cli-socket");
 const codexQuestions = new CodexQuestionState();
@@ -2527,6 +2529,24 @@ const handlers: Record<string, Handler> = {
 		return await runSelfUpdate({ channel, restart: true });
 	},
 };
+
+const integration = createIntegration({
+	home: DEV3_HOME,
+	projects: async () => [...await data.loadProjects(), ...await data.loadVirtualProjects()],
+	agents: () => getAllAgents(),
+	project: (id) => data.getProject(id),
+	task: (project, id) => data.getTask(project, id),
+	create: (input) => createTask({ ...input, status: "todo" }),
+	launch: async ({ projectId, taskId, agentId, configId }) => {
+		const tasks = await launchTaskWithAgentChoice({
+			projectId, taskId, targetStatus: "in-progress",
+			choice: { variants: [{ agentId, configId }] },
+		});
+		return tasks[0];
+	},
+	events: (params) => handlers["events.list"](params),
+});
+for (const [method, handler] of Object.entries(integration)) handlers[`integration.${method}`] = handler;
 
 export async function handleRequest(req: CliRequest): Promise<CliResponse> {
 	const handler = handlers[req.method];

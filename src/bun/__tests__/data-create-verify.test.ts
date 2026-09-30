@@ -94,4 +94,19 @@ describe("addTask verifies persistence before returning", () => {
 		expect(onDisk.find((t) => t.id === task.id)).toBeDefined();
 		expect(task.description).toBe("Real task");
 	});
+
+	it("reuses a persisted reserved UUID after a lost integration response", async () => {
+		const data = await import("../data");
+		const reservationId = "01234567-89ab-4cde-8fab-0123456789ab";
+		const first = await data.addTask(makeProject(), "Integration task", "todo", { reservationId });
+		const retried = await data.addTask(makeProject(), "Integration task", "todo", { reservationId });
+		expect(retried.id).toBe(first.id);
+		const onDisk = JSON.parse(readFileSync(tasksFile, "utf8")) as Task[];
+		expect(onDisk.filter((task) => task.id === reservationId)).toHaveLength(1);
+	});
+
+	it("refuses invalid reserved identities", async () => {
+		const data = await import("../data");
+		await expect(data.addTask(makeProject(), "Invalid reservation", "todo", { reservationId: "../task" })).rejects.toThrow("Invalid integration task reservation");
+	});
 });

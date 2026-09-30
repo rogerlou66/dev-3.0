@@ -809,6 +809,8 @@ export async function addTask(
 	description: string,
 	status: TaskStatus = "todo",
 	extras?: {
+		/** Reserved before an integration create; retries reuse the same task identity. */
+		reservationId?: string;
 		groupId?: string;
 		variantIndex?: number;
 		/**
@@ -860,6 +862,13 @@ export async function addTask(
 		const title = extras?.title?.trim() || titleFromDescription(description);
 		log.info("Creating task", { projectId: project.id, title, status });
 		const tasks = await rawLoadTasks(project, { strict: true, persistMigrations: true });
+		if (extras?.reservationId) {
+			if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(extras.reservationId)) {
+				throw new Error("Invalid integration task reservation");
+			}
+			const existing = tasks.find((task) => task.id === extras.reservationId);
+			if (existing) return existing;
+		}
 		const now = new Date().toISOString();
 		// Race-safe variant index allocation — see `autoVariantIndex` above. The
 		// scan runs against the under-lock snapshot, so it reflects any variants a
@@ -877,7 +886,7 @@ export async function addTask(
 		const hidden = extras?.groupId ? tasks.some((task) => task.groupId === extras.groupId && task.hidden) : false;
 		const newBackend = newTaskTerminalBackend(process.platform, readNewTaskTerminalBackendPreference());
 		const task: Task = {
-			id: crypto.randomUUID(),
+			id: extras?.reservationId ?? crypto.randomUUID(),
 			seq: extras?.seq ?? nextSeq(tasks),
 			projectId: project.id,
 			title,

@@ -2,6 +2,7 @@ import { extractInstanceFlag, parseArgs, resolveFileArgs } from "./args";
 import { detectContext, resolveInstanceSocket, resolveSocketPath, resolveSocketPathWithRetry, socketDiagnostics } from "./context";
 import { exitAppNotRunning, exitInternalError, exitUsage } from "./output";
 import { handleProjects } from "./commands/projects";
+import { handleIntegration } from "./commands/integration";
 import { handleTasks } from "./commands/tasks";
 import { handleTask } from "./commands/task";
 import { handleCurrent } from "./commands/current";
@@ -60,6 +61,7 @@ Commands:
   dev3 task terminal-backend [--task <id>] [--to tmux|native]  Inspect/switch this task's terminal backend
   dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off] [--type coordinator|pr-review|standard]  Update task fields
   dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard]  Create a new task (To Do)
+  dev3 integration <command>          Local JSON task integration (see integration --help)
                                          (--pr <n> starts the worktree on that pull request's branch and implies --type pr-review)
   dev3 note add "..." [--content "..."] [--task <id>] [--source user]  Add note to a task
   dev3 note list [--task <id>]          List notes
@@ -379,6 +381,8 @@ async function main(): Promise<void> {
 
 	try {
 		switch (command) {
+			case "integration":
+				return await handleIntegration(subcommand, args, socketPath);
 			case "projects":
 			// Alias: the plural is the real command, but `dev3 project list` is the
 			// natural mistype and used to answer "Unknown command" with no hint —

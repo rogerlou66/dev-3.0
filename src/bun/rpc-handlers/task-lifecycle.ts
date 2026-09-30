@@ -158,7 +158,7 @@ async function getWorkspaceBoardTasks(): Promise<{ projectId: string; tasks: Tas
  * too — a second creation path is how `foreignCode` came to be set in the GUI
  * and nowhere else.
  */
-export async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType }): Promise<Task> {
+export async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType; reservationId?: string }): Promise<Task> {
 	log.info("→ createTask", {
 		projectId: params.projectId,
 		requestedStatus: params.status ?? "todo",
@@ -202,6 +202,7 @@ export async function createTask(params: { projectId: string; description: strin
 		? await reviewTitleForBranch(project, params.existingBranch)
 		: "";
 	const extras: Parameters<typeof data.addTask>[3] = {
+		...(params.reservationId ? { reservationId: params.reservationId } : {}),
 		...(params.existingBranch ? { existingBranch: params.existingBranch } : {}),
 		...(foreignCode ? { foreignCode: true } : {}),
 		...(isScratch ? { scratch: true } : {}),

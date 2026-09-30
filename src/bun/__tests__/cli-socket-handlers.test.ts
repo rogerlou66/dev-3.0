@@ -271,6 +271,23 @@ function makeRequest(method: string, params: Record<string, unknown> = {}): CliR
 	return { id: "req-1", method, params };
 }
 
+describe("integration socket registration", () => {
+	it("advertises the versioned contract through the real request dispatcher", async () => {
+		const response = await handleRequest(makeRequest("integration.capabilities"));
+		expect(response).toMatchObject({ ok: true, data: { protocolVersion: 1, launchRequiresConfirmation: true } });
+	});
+	it("projects only safe project metadata", async () => {
+		vi.mocked(data.loadProjects).mockResolvedValue([{ id: "integration-project", name: "Example", path: "/example", env: { TOKEN: "secret" } } as unknown as Project]);
+		const response = await handleRequest(makeRequest("integration.projects"));
+		expect(response).toMatchObject({ ok: true, data: { projects: [{ id: "integration-project", name: "Example", path: "/example", kind: "git" }] } });
+		expect(JSON.stringify(response)).not.toContain("secret");
+	});
+	it("rejects unconfirmed launches before entering the lifecycle", async () => {
+		const response = await handleRequest(makeRequest("integration.launch", {}));
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("confirmed: true") });
+	});
+});
+
 // ---- Tests ----
 
 beforeEach(() => {
