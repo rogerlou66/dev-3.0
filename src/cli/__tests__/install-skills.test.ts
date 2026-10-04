@@ -23,10 +23,22 @@ describe("install-skills", () => {
 			return true;
 		});
 		mockInstall.mockReset();
+		vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
 	});
 
 	afterEach(() => {
 		stdoutSpy.mockRestore();
+		vi.unstubAllEnvs();
+	});
+
+	it("prints Claude's files under CLAUDE_CONFIG_DIR when it is set", async () => {
+		vi.stubEnv("CLAUDE_CONFIG_DIR", "/pinned/cfg");
+		await handleInstallSkills();
+
+		expect(stdoutOutput).toContain("  /pinned/cfg/skills/dev3/SKILL.md\n");
+		expect(stdoutOutput).toContain("  /pinned/cfg/settings.json (Bash permission)\n");
+		expect(stdoutOutput).not.toContain("~/.claude/skills/dev3/SKILL.md");
+		expect(stdoutOutput).toContain("~/.codex/skills/dev3/SKILL.md");
 	});
 
 	it("calls installAgentSkills and prints installed paths", async () => {
@@ -46,6 +58,7 @@ describe("install-skills", () => {
 		expect(stdoutOutput).toContain(".config/opencode/skills/dev3-bug-hunter/SKILL.md");
 		expect(stdoutOutput).toContain(".claude/skills/ask-dev3/SKILL.md");
 		expect(stdoutOutput).toContain(".claude/skills/dev3-tmux/SKILL.md");
+		expect(stdoutOutput).toContain(".claude/skills/dev3-artifact/SKILL.md");
 		expect(stdoutOutput).toContain(".claude/skills/dev3-share-artifact/SKILL.md");
 		expect(stdoutOutput).not.toContain(".gemini/skills/dev3/SKILL.md");
 		expect(stdoutOutput).toContain("~/.agents/skills/*/agents/openai.yaml");

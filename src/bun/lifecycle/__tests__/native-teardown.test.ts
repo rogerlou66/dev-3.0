@@ -27,6 +27,8 @@ vi.mock("../../cow-clone", () => ({ clonePaths: vi.fn(async () => undefined) }))
 vi.mock("../../data", () => ({ updateTask: vi.fn(async () => undefined), deleteTask: vi.fn(async () => undefined) }));
 vi.mock("../../git", () => ({
 	removeWorktree: vi.fn(async () => undefined),
+	// A fresh fixture folder: the failure judge clears it.
+	assertWorkspaceReclaimable: vi.fn(async () => undefined),
 	getBranchDiffStats: vi.fn(async () => ({ files: 1, insertions: 2, deletions: 3 })),
 	resolveCompareRef: vi.fn(async (_path: string, base: string) => `origin/${base}`),
 	taskDir: vi.fn(() => "/managed/task"),
@@ -202,6 +204,7 @@ function recordSideEffects(): void {
 	});
 	vi.mocked(git.removeWorktree).mockImplementation(async () => {
 		calls.push("removeWorktree");
+		return { deleted: [], kept: [] };
 	});
 	vi.mocked(data.deleteTask).mockImplementation(async () => {
 		calls.push("deleteTaskRecord");
@@ -400,5 +403,21 @@ describe("native teardown ordering", () => {
 		expect(run.error).toBeNull();
 		expect(run.order).toEqual(["askAgentToExit", "destroyTmux", "cleanupScript", "diffStats", "removeWorktree"]);
 		expect(pty.destroyNativeTaskSession).not.toHaveBeenCalled();
+	});
+});
+
+describe("persistTerminalTask", () => {
+	it("drops the hibernated flag so a finished task can be moved out again", async () => {
+		const frozen = task({ status: "in-progress", hibernated: true });
+		await executeLifecycleEffect(
+			{ type: "persistTerminalTask", status: "completed", onError: "abort" } as LifecycleEffect,
+			context(frozen),
+		);
+
+		expect(data.updateTask).toHaveBeenCalledWith(
+			expect.anything(),
+			TASK_ID,
+			expect.objectContaining({ status: "completed", hibernated: false }),
+		);
 	});
 });

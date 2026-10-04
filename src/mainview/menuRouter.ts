@@ -199,6 +199,10 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "open-command-palette":
 			window.dispatchEvent(new CustomEvent("menu:open-command-palette"));
 			return;
+		// Palette-only: a cross-project picker, so it needs no current project.
+		case "find-coordinator":
+			window.dispatchEvent(new CustomEvent("menu:open-coordinator-finder"));
+			return;
 
 		// ── Project: navigation ──
 		case "project-settings": {
@@ -325,14 +329,18 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "task-move-user-questions":
 		case "task-move-review-ai":
 		case "task-move-review-user": {
-			const projectId = currentProjectId(state);
-			const taskId = currentTaskId(state);
-			if (!projectId || !taskId) return;
-			try {
-				await api.request.moveTask({ taskId, projectId, newStatus: TASK_MOVE_STATUS[action] });
-			} catch (err) {
-				console.error(`[menu] moveTask(${TASK_MOVE_STATUS[action]}) failed`, err);
-			}
+			// Same helper as the board, so "Move to To Do" on a running task gets the
+			// reset confirmation and a refused move is reported, not just logged.
+			const task = currentTask(state);
+			const project = state.projects?.find((p) => p.id === currentProjectId(state));
+			if (!task || !project) return;
+			await moveTaskToStatus({
+				task,
+				project,
+				newStatus: TASK_MOVE_STATUS[action],
+				dispatch: ctx.dispatch,
+				t: ctx.t,
+			});
 			return;
 		}
 
@@ -460,7 +468,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"view-agent-traffic-log",
 	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview",
 	"debug-play-sound-completed", "debug-play-sound-cancelled", "debug-push-sound-completed",
-	"open-new-task", "open-add-project", "open-project-switch", "open-command-palette",
+	"open-new-task", "open-add-project", "open-project-switch", "open-command-palette", "find-coordinator",
 	// Project
 	"project-settings", "project-import-conversations", "project-pull-main", "project-create-pr",
 	"project-dev-server-start", "project-dev-server-stop", "project-dev-server-restart", "project-dev-server-status",

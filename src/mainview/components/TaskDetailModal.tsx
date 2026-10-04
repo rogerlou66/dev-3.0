@@ -3,6 +3,7 @@ import { toast } from "../toast";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { Project, Task, TaskStatus } from "../../shared/types";
 import { titleFromDescription, getAllowedTransitions, getTaskTitle } from "../../shared/types";
+import { allPullRequests } from "../../shared/task-pull-requests";
 import { useStatusColors } from "../hooks/useStatusColors";
 import LabelChip from "./LabelChip";
 import LabelPicker from "./LabelPicker";
@@ -26,6 +27,7 @@ import { useFocusTrap } from "../utils/useFocusTrap";
 import { useClipboardPaste } from "../hooks/useClipboardPaste";
 import { useFileDrop } from "../hooks/useFileDrop";
 import { removeImagePath } from "../utils/imageAttachments";
+import { prDisplayState, prStateTone } from "../utils/prStateTone";
 
 interface TaskDetailModalProps {
 	task: Task;
@@ -34,11 +36,14 @@ interface TaskDetailModalProps {
 	onClose: () => void;
 	/** Opens the task workspace from a terminal-state confirmation card. */
 	onOpenTask?: () => void;
-	/** Opens the LaunchVariantsModal to start a todo task (agent + variant picker). */
-	onLaunchVariants: (task: Task, targetStatus: TaskStatus) => void;
+	/** Opens the LaunchVariantsModal to start a todo task (agent + variant picker).
+	 *  Absent on surfaces that only ever open the modal for a running task. */
+	onLaunchVariants?: (task: Task, targetStatus: TaskStatus) => void;
+	/** Opens straight into title editing — the context menu's "Rename…". */
+	autoRename?: boolean;
 }
 
-function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunchVariants }: TaskDetailModalProps) {
+function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunchVariants, autoRename }: TaskDetailModalProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const trapRef = useFocusTrap<HTMLDivElement>();
@@ -155,6 +160,11 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 		setTimeout(() => renameInputRef.current?.focus(), 0);
 	}
 
+	// Opened from "Rename…": land in the title editor, not on the modal body.
+	useEffect(() => {
+		if (autoRename) handleStartRename();
+	}, [autoRename]);
+
 	async function handleRenameSave() {
 		const trimmed = renameValue.trim();
 		if (!trimmed || trimmed === getTaskTitle(task)) {
@@ -247,6 +257,7 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 
 	/** Start the task: close this modal and hand off to the launch-variants flow. */
 	function handleRun() {
+		if (!onLaunchVariants) return;
 		onClose();
 		onLaunchVariants(task, "in-progress");
 	}
@@ -647,17 +658,19 @@ function TaskDetailModal({ task, project, dispatch, onClose, onOpenTask, onLaunc
 									)}
 								</div>
 							</div>
-							<button
-								onClick={handleRun}
-								disabled={deleting || moving}
-								className="flex items-center gap-1.5 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-green-900/30 transition-colors hover:bg-green-500 disabled:opacity-50"
-								title={t("task.run")}
-							>
-								<svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
-									<path d="M8 5v14l11-7z" />
-								</svg>
-								{t("task.run")}
-							</button>
+							{onLaunchVariants && (
+								<button
+									onClick={handleRun}
+									disabled={deleting || moving}
+									className="flex items-center gap-1.5 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-green-900/30 transition-colors hover:bg-green-500 disabled:opacity-50"
+									title={t("task.run")}
+								>
+									<svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+										<path d="M8 5v14l11-7z" />
+									</svg>
+									{t("task.run")}
+								</button>
+							)}
 						</div>
 					</div>
 				)}
@@ -694,6 +707,7 @@ function ArchivedView({
 	const statusColors = useStatusColors();
 	const menuRef = useRef<HTMLDivElement>(null);
 	const trapRef = useFocusTrap<HTMLDivElement>();
+	const pullRequests = allPullRequests(task);
 
 	// Close status menu on click outside
 	useEffect(() => {
@@ -889,6 +903,30 @@ function ArchivedView({
 									<>
 										<span className="text-fg-3">{t("infoPanel.baseBranch")}</span>
 										<span className="text-fg-2 font-mono">{task.baseBranch}</span>
+									</>
+								)}
+
+								{pullRequests.length > 0 && (
+									<>
+										<span className="text-fg-3">{t("infoPanel.pullRequest")}</span>
+										<span className="flex min-w-0 flex-wrap gap-x-2 gap-y-1" data-testid="task-detail-pull-requests">
+											{pullRequests.map((pr) => {
+												const tone = prStateTone(prDisplayState(pr.state));
+												return (
+													<a
+														key={pr.number}
+														href={pr.url}
+														target="_blank"
+														rel="noreferrer"
+														className={`inline-flex items-baseline gap-1 font-mono hover:underline ${tone.labelKey ? tone.text : "text-accent hover:text-accent-emphasis"}`}
+														title={pr.title ?? undefined}
+													>
+														{t("task.prNumber", { number: String(pr.number) })}
+														{tone.labelKey && <span className="font-sans text-dense text-fg-3">{t(tone.labelKey)}</span>}
+													</a>
+												);
+											})}
+										</span>
 									</>
 								)}
 

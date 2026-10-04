@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import type { GlobalSettings, Project, Task, TaskDiffResponse } from "../../shared/types";
 import { MAX_TASK_NOTES_KEPT, buildTaskDialogSubject, getPreparingStageProgress, resolveTaskCompareBaseBranch } from "../../shared/types";
 import { ENV_UNSET } from "../../shared/agent-accounts";
 import * as agentAccounts from "../agent-accounts";
-import { resolveCodexResumeHome } from "../codex-resume-home";
+import { chooseTaskCodexConversations } from "../codex-task-selection";
 import {
 	activatePane,
 	closePane,
@@ -20,6 +20,12 @@ import {
 
 // ---- Mocks ----
 
+vi.mock("../task-workspace-guard", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../task-workspace-guard")>()),
+	// Fixture worktree paths do not exist on disk; the guard has its own tests.
+	assertTaskWorkspacePresent: vi.fn((_project: unknown, path: string | null | undefined) => path ?? ""),
+	worktreeAccessState: vi.fn(() => "present"),
+}));
 vi.mock("electrobun/bun", () => ({
 	PATHS: {
 		VIEWS_FOLDER: "/fake-bundle/Resources/app/views/",
@@ -77,6 +83,8 @@ vi.mock("../data", () => ({
 
 vi.mock("../git", () => ({
 	removeWorktree: vi.fn(),
+	// A fresh fixture folder: the failure judge clears it.
+	assertWorkspaceReclaimable: vi.fn(async () => undefined),
 	createWorktree: vi.fn(),
 	applySparseCheckout: vi.fn(),
 	isGitRepo: vi.fn(),
@@ -172,7 +180,7 @@ vi.mock("../pty-server", () => ({
 // disk/probe logic that settings-config tests control per-case.
 vi.mock("../tmux", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../tmux")>();
-	const client = new actual.TmuxClient({ spawn: ((...args: unknown[]) => mockSpawn(...args)) as never });
+	const client = new actual.TmuxClient({ cwdExists: () => true, spawn: ((...args: unknown[]) => mockSpawn(...args)) as never });
 	client.selectBinary = vi.fn(async (preferred: string) => preferred) as never;
 	client.probeVersion = vi.fn(async () => "tmux 3.6a") as never;
 	client.dereferenceShim = vi.fn((p: string) => (p === "/mock/dev3-home/bin/tmux" ? "/opt/homebrew/bin/tmux" : p)) as never;
@@ -214,10 +222,11 @@ vi.mock("../agent-prompt-native", () => ({
 	NATIVE_PROMPT_DELIVERY_METHOD: "_native.deliverPrompt",
 }));
 
-vi.mock("../codex-resume-home", () => ({ resolveCodexResumeHome: vi.fn() }));
+vi.mock("../codex-task-selection", () => ({ chooseTaskCodexConversations: vi.fn(async () => new Map()) }));
 
 vi.mock("../agents", () => ({
 	ensureClaudeTrust: vi.fn(),
+	ensureClaudeConfigDir: vi.fn(),
 	ensureCodexTrust: vi.fn(),
 	ensureGeminiTrust: vi.fn(),
 	ensureAntigravityTrust: vi.fn(),
@@ -323,7 +332,18 @@ vi.mock("../paths", () => ({
 
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
-	return { ...actual, mkdir: vi.fn(() => Promise.resolve(undefined)), rm: vi.fn(() => Promise.resolve(undefined)) };
+	return {
+		...actual,
+		mkdir: vi.fn(() => Promise.resolve(undefined)),
+		rm: vi.fn(() => Promise.resolve(undefined)),
+		writeFile: vi.fn(() => Promise.resolve(undefined)),
+		readFile: vi.fn((...args: Parameters<typeof actual.readFile>) => {
+			if (String(args[0]) === "/tmp/test-dev3/interface-onboarding.json") {
+				return Promise.reject(Object.assign(new Error("Missing onboarding fixture"), { code: "ENOENT" }));
+			}
+			return actual.readFile(...args);
+		}),
+	};
 });
 
 const mockSpawn = vi.fn();
@@ -381,6 +401,7 @@ import { getUserShell } from "../shell-env";
 import { tmux } from "../tmux";
 import * as systemClipboard from "../system-clipboard";
 import * as agents from "../agents";
+import * as workspaceGuard from "../task-workspace-guard";
 import * as updater from "../updater";
 import { setupAgentHooks } from "../agent-hooks";
 import { loadSettings, loadSettingsSync, saveSettings } from "../settings";
@@ -442,18 +463,38 @@ const {
 	launchTaskWithAgentChoice,
 } = await import("../rpc-handlers");
 const {
+	handlePaneExited,
 	nativeHunterColumnRatios,
+	launchColumnAgent,
 	tmuxAction,
 	tmuxKillPane,
 	tmuxPaneCount,
 	tmuxPaneNavigate,
 } = await import("../rpc-handlers/tmux-pty");
 const { AuxPaneUnavailableError } = await import("../task-aux-panes");
+const { placePaneSession } = await import("../pane-session-capture");
 const { dev3TaskTempPath } = await import("../temp-paths");
 const { _resetLifecycleActorsForTest } = await import("../lifecycle/service");
 
+/**
+ * Board operations write through `updateTaskWith`/`updateProjectWith`. Run their
+ * mutators against the mocked board (`getTask`/`getProject`) and hand a non-empty
+ * patch to the mocked `updateTask`/`updateProject`, so handler tests keep asserting
+ * on the patch. Rules are tested on a real board in `board-operations-*.test.ts`.
+ */
+function bridgeLockedWrites(): void {
+	vi.mocked(data.updateTaskWith).mockImplementation(async (project, taskId, mutator) => {
+		const current = await data.getTask(project, taskId);
+		const { updates, result } = await mutator(current);
+		if (Object.keys(updates).length === 0) return { task: current, result };
+		const written = await data.updateTask(project, taskId, updates);
+		return { task: written ?? { ...current, ...updates }, result };
+	});
+}
+
 beforeEach(async () => {
 	await _resetLifecycleActorsForTest();
+	bridgeLockedWrites();
 });
 
 // ---- Test helpers ----
@@ -473,6 +514,9 @@ function makeProject(overrides?: Partial<Project>): Project {
 }
 
 function makeTask(overrides?: Partial<Task>): Task {
+	// A To Do card owns no worktree unless a test says so: a To Do task with one is
+	// the legacy "earlier run" state the lifecycle refuses to re-initialise.
+	const todoDefaults: Partial<Task> = overrides?.status === "todo" ? { worktreePath: null, branchName: null } : {};
 	return {
 		id: "task-1",
 		seq: 1,
@@ -489,6 +533,7 @@ function makeTask(overrides?: Partial<Task>): Task {
 		configId: null,
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
+		...todoDefaults,
 		...overrides,
 	};
 }
@@ -1415,6 +1460,60 @@ describe("handlers.getProjects", () => {
 	});
 });
 
+describe("handlers.getResolvedProject", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	// The task header reads this to decide whether the task HAS a dev server. A
+	// worktree-only resolution misses the main checkout's gitignored
+	// config.local.json and shows "Setup Dev Server" for a project that starts one.
+	it("resolves through the worktree+main cascade, not the worktree alone", async () => {
+		const project = makeProject({ path: "/repo" });
+		const task = makeTask({ worktreePath: "/wt" });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await handlers.getResolvedProject({ projectId: project.id, taskId: task.id });
+
+		expect(repoConfig.resolveOperationalProjectConfig).toHaveBeenCalledWith(
+			project,
+			"/wt",
+			{ foreignCode: undefined },
+		);
+	});
+
+	// A reviewed branch must not be able to advertise its own devScript in the
+	// header when a start would refuse to run it.
+	it("passes foreignCode so a reviewed branch's commands stay untrusted", async () => {
+		const project = makeProject({ path: "/repo" });
+		const task = makeTask({ worktreePath: "/wt", foreignCode: true });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await handlers.getResolvedProject({ projectId: project.id, taskId: task.id });
+
+		expect(repoConfig.resolveOperationalProjectConfig).toHaveBeenCalledWith(
+			project,
+			"/wt",
+			{ foreignCode: true },
+		);
+	});
+
+	it("resolves the project's own checkout when the task has no worktree yet", async () => {
+		const project = makeProject({ path: "/repo" });
+		const task = makeTask({ worktreePath: null });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+
+		await handlers.getResolvedProject({ projectId: project.id, taskId: task.id });
+
+		expect(repoConfig.resolveOperationalProjectConfig).toHaveBeenCalledWith(
+			project,
+			undefined,
+			{ foreignCode: undefined },
+		);
+	});
+});
+
 describe("handlers.reorderProjects", () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -1440,9 +1539,9 @@ describe("launchTaskWithAgentChoice", () => {
 		vi.mocked(data.setTaskPriority).mockReset();
 	});
 
-	it("applies the launch priority group-wide before the task moves", async () => {
+	it("applies the launch priority before the task moves", async () => {
 		// Issue #1496: the launch dialog's priority pick (or the inherited default)
-		// is not part of the single-task patch — priority belongs to the group.
+		// goes through the dedicated setter, not the single-task patch.
 		const project = makeProject();
 		const task = makeTask({ id: "task-1", status: "todo", priority: "P3" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
@@ -2036,6 +2135,8 @@ describe("handlers.saveGlobalSettings", () => {
 		vi.mocked(loadSettings).mockResolvedValue({ appearancePreset: "cmux", theme: "light", resolvedTheme: "dark" } as GlobalSettings);
 		await handlers.saveGlobalSettings({ appearancePreset: "default", theme: "light", resolvedTheme: "light", simplifiedMode: true } as GlobalSettings);
 		expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ appearancePreset: "cmux", resolvedTheme: "dark", simplifiedMode: true }));
+		const onboardingWrite = vi.mocked(writeFile).mock.calls.find(([path]) => path === "/tmp/test-dev3/interface-onboarding.json");
+		expect(JSON.parse(String(onboardingWrite?.[1]))).toMatchObject({ enabled: true, source: "manual" });
 	});
 	const push = vi.fn();
 
@@ -2135,14 +2236,16 @@ describe("handlers.saveGlobalSettings", () => {
 
 			await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
 
-			expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
+			// No `paneDimming`: a shell change must not override the server-wide
+			// dimming choice another dev3 instance may have made since.
+			expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", { appearancePreset: "default" });
 		},
 	);
 
 	it.skipIf(process.platform === "win32")("retains cmux while rewriting shell and dimming settings", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({ appearancePreset: "cmux", theme: "light", terminalShell: "sh" } as GlobalSettings);
 		await handlers.saveGlobalSettings({ appearancePreset: "cmux", theme: "light", terminalShell: "bash", dimInactivePanes: false } as GlobalSettings);
-		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", "cmux");
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", { appearancePreset: "cmux", paneDimming: false });
 	});
 
 	it.skipIf(process.platform === "win32")("leaves tmux alone when the shell did not change", async () => {
@@ -2153,15 +2256,22 @@ describe("handlers.saveGlobalSettings", () => {
 		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
 	});
 
-	// Pane dimming lives in the tmux config, so switching it has to reach the live
-	// server the same way a shell change does — otherwise the toggle only takes
-	// effect after an app restart.
-	it.skipIf(process.platform === "win32")("re-sources tmux when pane dimming is switched off", async () => {
+	// The toggle is an explicit override of the server-wide choice: it has to
+	// reach the live server at once, whichever instance the user clicked in.
+	it.skipIf(process.platform === "win32")("overrides the server-wide choice when pane dimming is switched off", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
 
 		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: false } as GlobalSettings);
 
-		expect(pty.applyTmuxTheme).toHaveBeenCalled();
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith(expect.any(String), { appearancePreset: "default", paneDimming: false });
+	});
+
+	it.skipIf(process.platform === "win32")("overrides the server-wide choice when pane dimming is switched back on", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", dimInactivePanes: false } as GlobalSettings);
+
+		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: true } as GlobalSettings);
+
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith(expect.any(String), { appearancePreset: "default", paneDimming: true });
 	});
 
 	it.skipIf(process.platform === "win32")("leaves tmux alone when pane dimming stays at its default", async () => {
@@ -2203,7 +2313,7 @@ describe("handlers.setTmuxTheme", () => {
 		expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
 			appearancePreset: "cmux", theme: "system", resolvedTheme: "dark",
 		}));
-		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", "cmux");
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("dark", { appearancePreset: "cmux" });
 	});
 
 	it("allows an explicit return to Default to restore a light theme", async () => {
@@ -2213,7 +2323,7 @@ describe("handlers.setTmuxTheme", () => {
 		expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
 			appearancePreset: "default", theme: "light", resolvedTheme: "light",
 		}));
-		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", { appearancePreset: "default" });
 	});
 
 	beforeEach(() => vi.clearAllMocks());
@@ -2232,7 +2342,7 @@ describe("handlers.setTmuxTheme", () => {
 			theme: "system",
 			resolvedTheme: "light",
 		}));
-		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", "default");
+		expect(pty.applyTmuxTheme).toHaveBeenCalledWith("light", { appearancePreset: "default" });
 	});
 });
 
@@ -2683,7 +2793,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
 		mockTaskWrites(task);
 
-		const result = await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		const result = await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 		expect(result.status).toBe("in-progress");
 		expect(git.createWorktree).toHaveBeenCalled();
 		expect(pty.createSession).toHaveBeenCalled();
@@ -2703,7 +2813,7 @@ describe("handlers.moveTask", () => {
 			return { ...stored };
 		});
 
-		const result = await handlers.moveTask({
+		const result = await handlers.moveTask({ explicitLaunch: true,
 			taskId: stored.id,
 			projectId: project.id,
 			newStatus: "in-progress",
@@ -2724,7 +2834,7 @@ describe("handlers.moveTask", () => {
 		// must short-circuit before activateTask so no worktree is created.
 		vi.mocked(data.updateTask).mockResolvedValue(task);
 
-		const result = await handlers.moveTask({
+		const result = await handlers.moveTask({ explicitLaunch: true,
 			taskId: "task-1",
 			projectId: "proj-1",
 			newStatus: "in-progress",
@@ -2770,7 +2880,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
 		mockTaskWrites(task);
 
-		const result = await handlers.moveTask({
+		const result = await handlers.moveTask({ explicitLaunch: true,
 			taskId: "task-1",
 			projectId: "proj-1",
 			newStatus: "in-progress",
@@ -2791,7 +2901,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
 		vi.mocked(data.updateTask).mockResolvedValue(updatedTask);
 
-		await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 
 		expect(setupAgentHooks).toHaveBeenCalledWith("/tmp/wt", expect.any(String), { stopTarget: "review-by-user" });
 	});
@@ -2806,7 +2916,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
 		vi.mocked(data.updateTask).mockResolvedValue(updatedTask);
 
-		await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 
 		expect(setupAgentHooks).toHaveBeenCalledWith("/tmp/wt", expect.any(String), { stopTarget: "review-by-ai" });
 	});
@@ -2821,7 +2931,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "feature/login" });
 		vi.mocked(data.updateTask).mockResolvedValue(updatedTask);
 
-		await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 		expect(git.createWorktree).toHaveBeenCalledWith(project, task, "feature/login");
 	});
 
@@ -2835,7 +2945,7 @@ describe("handlers.moveTask", () => {
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/wt", branchName: "dev3/t" });
 		vi.mocked(data.updateTask).mockResolvedValue(updatedTask);
 
-		await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 		expect(git.createWorktree).toHaveBeenCalled();
 	});
 
@@ -2856,7 +2966,7 @@ describe("handlers.moveTask", () => {
 			return current;
 		});
 
-		await handlers.moveTask({ taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
+		await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "proj-1", newStatus: "in-progress" });
 
 		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", {
 			mergeCompletionPrompt: {
@@ -3305,7 +3415,7 @@ describe("handlers.deleteTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(pty.destroySession).mockImplementation(() => {});
-		vi.mocked(git.removeWorktree).mockResolvedValue(undefined);
+		vi.mocked(git.removeWorktree).mockResolvedValue({ deleted: [], kept: [] });
 
 		await handlers.deleteTask({ taskId: "task-1", projectId: "proj-1" });
 		expect(pty.destroySession).toHaveBeenCalledWith("task-1", undefined);
@@ -3331,6 +3441,7 @@ describe("handlers.deleteTask", () => {
 		});
 		vi.mocked(git.removeWorktree).mockImplementation(async () => {
 			callOrder.push("removeWorktree");
+			return { deleted: [], kept: [] };
 		});
 
 		await handlers.deleteTask({ taskId: "task-1", projectId: "proj-1" });
@@ -3350,7 +3461,7 @@ describe("handlers.deleteTask", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(pty.destroySession).mockImplementation(() => {});
-		vi.mocked(git.removeWorktree).mockResolvedValue(undefined);
+		vi.mocked(git.removeWorktree).mockResolvedValue({ deleted: [], kept: [] });
 		vi.mocked(existsSync).mockReturnValue(true);
 		mockSpawn.mockImplementation(() => {
 			throw new Error("tmux unavailable");
@@ -3436,7 +3547,7 @@ describe("virtual task lifecycle", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		mockTaskWrites(task);
 
-		const result = await handlers.moveTask({ taskId: "task-1", projectId: "vp1", newStatus: "in-progress" });
+		const result = await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "vp1", newStatus: "in-progress" });
 
 		expect(git.createWorktree).not.toHaveBeenCalled();
 		expect(mkdir).toHaveBeenCalledWith("/tmp/test-dev3/ops/operations/task-1/work", { recursive: true });
@@ -3452,7 +3563,7 @@ describe("virtual task lifecycle", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		mockTaskWrites(task);
 
-		const result = await handlers.moveTask({ taskId: "task-1", projectId: "vp1", newStatus: "in-progress" });
+		const result = await handlers.moveTask({ explicitLaunch: true, taskId: "task-1", projectId: "vp1", newStatus: "in-progress" });
 
 		expect(pty.createSession).toHaveBeenCalledWith("task-1", "vp1", "/Users/me/Downloads", expect.anything(), expect.anything(), expect.anything());
 		expect(result.worktreePath).toBe("/Users/me/Downloads");
@@ -3613,7 +3724,7 @@ describe("handlers.editTask", () => {
 	});
 
 	it("saves a whole draft in a single write", async () => {
-		const project = makeProject();
+		const project = makeProject({ labels: [{ id: "l1", name: "one", color: "#ef4444" }] });
 		const task = makeTask({ status: "todo", draft: true, description: "" });
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
@@ -3638,8 +3749,9 @@ describe("handlers.editTask", () => {
 			priority: "P1",
 			labelIds: ["l1"],
 			existingBranch: "feature/x",
-			draft: true,
 		}));
+		// Already a draft: an unchanged field is left out of the patch.
+		expect(vi.mocked(data.updateTask).mock.calls[0]![2]).not.toHaveProperty("draft");
 	});
 
 	it("keeps the placeholder title of a draft that still has no description", async () => {
@@ -3649,11 +3761,11 @@ describe("handlers.editTask", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		vi.mocked(data.updateTask).mockResolvedValue(task);
 
-		await handlers.editTask({ taskId: "task-1", projectId: "proj-1", description: "", draft: true });
+		const result = await handlers.editTask({ taskId: "task-1", projectId: "proj-1", description: "", draft: true });
 
-		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", expect.objectContaining({
-			title: "Draft — 09:12",
-		}));
+		// Everything already matches, so nothing is rewritten and the placeholder stays.
+		expect(result.title).toBe("Draft — 09:12");
+		expect(data.updateTask).not.toHaveBeenCalled();
 	});
 
 	it("promotes a draft into a runnable task", async () => {
@@ -3790,9 +3902,11 @@ describe("handlers.renameTask", () => {
 		vi.mocked(data.updateTask).mockResolvedValue(updated);
 
 		await handlers.renameTask({ taskId: "task-1", projectId: "proj-1", customTitle: null });
+		// Clearing recomputes the auto title from the description (one rule for every door).
 		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", {
 			customTitle: null,
 			titleEditedByUser: false,
+			title: "Test task description",
 		});
 	});
 
@@ -3829,9 +3943,11 @@ describe("handlers.renameTask", () => {
 		vi.mocked(data.updateTask).mockResolvedValue(task);
 
 		await handlers.renameTask({ taskId: "task-1", projectId: "proj-1", customTitle: "   " });
+		// Clearing recomputes the auto title from the description (one rule for every door).
 		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", {
 			customTitle: null,
 			titleEditedByUser: false,
+			title: "Test task description",
 		});
 	});
 });
@@ -4617,8 +4733,7 @@ describe("handlers.spawnVariants", () => {
 
 	// The priority the user picks in the Create-Task modal is stored on the
 	// source task, which becomes variant #1 in place — sibling variants must
-	// inherit it (priority is group-wide), otherwise a P0 launch would spawn
-	// P3 siblings and split the group across sort bands.
+	// start at it, otherwise a P0 launch would spawn P3 siblings.
 	it("preserves priority from the source task on sibling variants", async () => {
 		const project = makeProject();
 		const sourceTask = makeTask({ status: "todo", seq: 5, priority: "P0" });
@@ -4927,8 +5042,8 @@ describe("handlers.addAttempts", () => {
 	});
 
 	// Added attempts belong to the same group as the source task, so they must
-	// carry the same priority — priority belongs to the whole variant group, so
-	// re-running a P0 task must not spawn a P3 sibling.
+	// start at the same priority — re-running a P0 task must not spawn a P3
+	// sibling.
 	it("inherits priority from the source task into added attempts", async () => {
 		const project = makeProject();
 		const sourceTask = makeTask({
@@ -5288,7 +5403,7 @@ describe("handlers.cancelTaskPreparation", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		mockTaskWrites(task);
-		vi.mocked(git.removeWorktree).mockResolvedValue(undefined);
+		vi.mocked(git.removeWorktree).mockResolvedValue({ deleted: [], kept: [] });
 		vi.mocked(git.taskDir).mockReturnValue("/tmp/test-dev3/worktrees/tmp-test-project/variant-1");
 
 		const cancellation = handlers.cancelTaskPreparation({
@@ -5336,7 +5451,7 @@ describe("handlers.cancelTaskPreparation", () => {
 		expect(git.removeWorktree).toHaveBeenCalledWith(project, expect.objectContaining({
 			id: task.id,
 			worktreePath: "/tmp/test-dev3/worktrees/tmp-test-project/variant-1/worktree",
-		}));
+		}), { branchPolicy: "unique-kept" });
 	});
 
 	it("continues best-effort cleanup when a killed preparation process never reports exit", async () => {
@@ -5364,7 +5479,7 @@ describe("handlers.cancelTaskPreparation", () => {
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.getTask).mockResolvedValue(task);
 		mockTaskWrites(task);
-		vi.mocked(git.removeWorktree).mockResolvedValue(undefined);
+		vi.mocked(git.removeWorktree).mockResolvedValue({ deleted: [], kept: [] });
 		vi.mocked(git.taskDir).mockReturnValue("/tmp/test-dev3/worktrees/tmp-test-project/variant-stuck");
 
 		try {
@@ -5387,7 +5502,7 @@ describe("handlers.cancelTaskPreparation", () => {
 			expect(git.removeWorktree).toHaveBeenCalledWith(project, expect.objectContaining({
 				id: task.id,
 				worktreePath: "/tmp/test-dev3/worktrees/tmp-test-project/variant-stuck/worktree",
-			}));
+			}), { branchPolicy: "unique-kept" });
 		} finally {
 			finishTaskPreparation(task.id, runId);
 			finishGit(137);
@@ -5583,7 +5698,7 @@ describe("handlers.getBranchStatus", () => {
 		vi.mocked(data.getTask).mockResolvedValue(task);
 
 		const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
-		expect(result).toEqual({ ahead: 0, behind: 0, baseUnreachable: false, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, preservedOutsideBranch: false, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 });
+		expect(result).toEqual({ ahead: 0, behind: 0, baseUnreachable: false, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, preservedOutsideBranch: false, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, prState: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 });
 	});
 
 	// A project added from a local folder has no `origin`. Comparing against
@@ -5821,6 +5936,7 @@ describe("handlers.getBranchStatus", () => {
 			const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 
 			expect(result.prNumber).toBe(1300);
+			expect(result.prState).toBe("MERGED");
 			expect(result.mergedByContent).toBe(true);
 		});
 
@@ -5837,6 +5953,25 @@ describe("handlers.getBranchStatus", () => {
 			const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 
 			expect(result.prNumber).toBe(1300);
+			expect(result.prState).toBeNull();
+		});
+
+		it("reports an open PR found for the branch as OPEN", async () => {
+			const project = makeProject();
+			const task = makeTask({
+				worktreePath: "/tmp/wt", branchName: "fix/mine", prNumber: 1400, prUrl: "https://gh/pr/1400",
+			});
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.getTask).mockResolvedValue(task);
+			mockClean();
+			vi.mocked(github.findOpenPullRequest).mockResolvedValueOnce({
+				pr: { number: 1400, url: "https://gh/pr/1400", title: null, author: null }, isGitHub: true,
+			});
+
+			const result = await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
+
+			expect(result.prNumber).toBe(1400);
+			expect(result.prState).toBe("OPEN");
 		});
 	});
 
@@ -6028,7 +6163,11 @@ describe("handlers.getBranchStatus", () => {
 
 		await handlers.getBranchStatus({ taskId: task.id, projectId: project.id });
 
-		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, { prNumber: 42, prUrl });
+		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, {
+			prNumber: 42,
+			prUrl,
+			pullRequests: [{ number: 42, url: prUrl, firstSeenAt: expect.any(String) }],
+		});
 		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task: persisted });
 	});
 
@@ -6176,7 +6315,11 @@ describe("handlers.getProjectPRs", () => {
 		const result = await handlers.getProjectPRs({ projectId: project.id });
 
 		expect(result).toEqual([{ number: 42, headRefName: task.branchName, url: prUrl }]);
-		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, { prNumber: 42, prUrl });
+		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, {
+			prNumber: 42,
+			prUrl,
+			pullRequests: [{ number: 42, url: prUrl, firstSeenAt: expect.any(String) }],
+		});
 		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task: persisted });
 	});
 });
@@ -7438,9 +7581,10 @@ describe("handlers.setTaskLabels", () => {
 	beforeEach(() => vi.clearAllMocks());
 
 	it("sets label IDs on a task", async () => {
-		const project = makeProject();
+		const project = makeProject({ labels: [{ id: "l1", name: "one", color: "#ef4444" }, { id: "l2", name: "two", color: "#14b8a6" }] });
 		const updated = makeTask({ labelIds: ["l1", "l2"] });
 		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(makeTask({ labelIds: [] }));
 		vi.mocked(data.updateTask).mockResolvedValue(updated);
 
 		const result = await handlers.setTaskLabels({ taskId: "task-1", projectId: "proj-1", labelIds: ["l1", "l2"] });
@@ -7475,6 +7619,38 @@ describe("handlers.markTaskSharedItemsRead", () => {
 		});
 
 		expect(result.sharedImages?.map((image) => image.isUnread)).toEqual([false, true, undefined]);
+	});
+
+	it("marks images and clips read from one viewer call, each in its own list", async () => {
+		const project = makeProject();
+		const task = makeTask({
+			sharedImages: [{ id: "shot", isUnread: true }] as Task["sharedImages"],
+			sharedVideos: [{ id: "clip", isUnread: true }, { id: "later", isUnread: true }] as Task["sharedVideos"],
+		});
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await mutator(task);
+			return { task: { ...task, ...updates }, result };
+		});
+
+		const result = await handlers.markTaskSharedItemsRead({ taskId: "task-1", projectId: "proj-1", kind: "images", itemIds: ["shot", "clip"] });
+
+		expect(result.sharedImages?.map((item) => [item.id, item.isUnread])).toEqual([["shot", false]]);
+		expect(result.sharedVideos?.map((item) => [item.id, item.isUnread])).toEqual([["clip", false], ["later", true]]);
+	});
+
+	it("does not invent a sharedVideos field on a task that never had clips", async () => {
+		const project = makeProject();
+		const task = makeTask({ sharedImages: [{ id: "shot", isUnread: true }] as Task["sharedImages"] });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		let written: Partial<Task> = {};
+		vi.mocked(data.updateTaskWith).mockImplementation(async (_project, _taskId, mutator) => {
+			const { updates, result } = await mutator(task);
+			written = updates;
+			return { task: { ...task, ...updates }, result };
+		});
+		await handlers.markTaskSharedItemsRead({ taskId: "task-1", projectId: "proj-1", kind: "images", itemIds: ["shot"] });
+		expect("sharedVideos" in written).toBe(false);
 	});
 
 	it("marks only the requested artifacts as read", async () => {
@@ -9670,8 +9846,9 @@ describe("handlers.spawnAgentInTask", () => {
 
 		await handlers.spawnAgentInTask({ taskId: "abcd1234-full-id", projectId: "proj-1", agentId: "builtin-claude", configId: "claude-default" });
 
-		// 3rd arg is the per-launch accountId (undefined here → registry default).
-		expect(agents.ensureClaudeTrust).toHaveBeenCalledWith("/tmp/wt", project.path, undefined);
+		// 3rd arg is the per-launch accountId (undefined here → registry default);
+		// 4th is the launch env, which decides the Claude config dir the trust lands in.
+		expect(agents.ensureClaudeTrust).toHaveBeenCalledWith("/tmp/wt", project.path, undefined, expect.any(Object));
 	});
 
 	// The tmux pane registry is what recovery reconciles against live tmux panes,
@@ -10669,7 +10846,25 @@ describe("resumeTask session-id healing", () => {
 	});
 });
 
-describe("resumeTask exact Codex session home", () => {
+describe("restartTask (start fresh) floors the Codex scan", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it("writes codexScanFloorAt in the same update that clears the session state", async () => {
+		const project = makeProject();
+		const task = makeTask({ sessionState: { panes: [{ agentCmd: "codex", agentId: "builtin-codex", configId: "codex-default", sessionId: null }] } });
+		mockTaskWrites(task);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(pty.hasSession).mockReturnValue(false);
+		const before = Date.now();
+		await handlers.restartTask({ taskId: task.id });
+		const clear = vi.mocked(data.updateTask).mock.calls.find((call) => call[2].sessionState === null)?.[2];
+		expect(Date.parse(clear?.codexScanFloorAt ?? "")).toBeGreaterThanOrEqual(before);
+		expect(clear?.lifecycleStartedAt).toBeUndefined();
+	});
+});
+
+describe("resumeTask resumes the Codex conversations the selection engine chose", () => {
 	let restoreResolve: () => void;
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -10678,9 +10873,14 @@ describe("resumeTask exact Codex session home", () => {
 		resolve.mockResolvedValue({ command: "codex", extraEnv: {}, agentFamily: "codex" } as any);
 		restoreResolve = () => resolve.mockImplementation(original!);
 	});
-	afterEach(() => restoreResolve());
-	const sessionId = "019f50b3-6415-7dc3-8ad5-b60f0818f704";
+	afterEach(() => {
+		restoreResolve();
+		vi.mocked(chooseTaskCodexConversations).mockReset().mockResolvedValue(new Map());
+	});
+	const sessionId = "00000000-0000-4000-8000-0000c0de2704";
 	const home = "/tmp/account-b";
+	const chose = (...entries: Array<[number, string, string]>) =>
+		vi.mocked(chooseTaskCodexConversations).mockResolvedValue(new Map(entries.map(([i, id, codexHome]) => [i, { sessionId: id, codexHome }])));
 	function arrange() {
 		const project = makeProject();
 		const task = makeTask({ sessionState: { panes: [{ agentCmd: "codex", agentFamily: "codex", agentId: "builtin-codex", configId: "codex-default", sessionId }] } });
@@ -10690,25 +10890,24 @@ describe("resumeTask exact Codex session home", () => {
 		vi.mocked(pty.hasSession).mockReturnValue(false);
 		return { project, task };
 	}
-	afterEach(() => vi.mocked(resolveCodexResumeHome).mockReset());
 
-	it("recovers an old unpaired ID under its discovered home and saves the pairing", async () => {
+	it("asks for explicit-resume over the stored panes and launches under the chosen home", async () => {
 		const { project, task } = arrange();
 		const accountSpy = vi.spyOn(agentAccounts, "codexAccountIdForHome").mockImplementation((value) => value === home ? "account-b" : undefined);
-		vi.mocked(resolveCodexResumeHome).mockResolvedValue(home);
+		chose([0, sessionId, home]);
 		try {
 			await handlers.resumeTask({ taskId: task.id });
-			expect(resolveCodexResumeHome).toHaveBeenCalledWith(sessionId, expect.any(Array));
+			expect(chooseTaskCodexConversations).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: task.id }), [expect.objectContaining({ sessionId })], "explicit-resume", expect.objectContaining({ persist: true }));
 			expect(pty.createSession).toHaveBeenLastCalledWith(task.id, project.id, task.worktreePath, expect.any(String), expect.objectContaining({ CODEX_HOME: home }), expect.any(String));
 			expect((await data.getTask(project, task.id)).sessionState?.panes[0]).toMatchObject({ sessionId, accountId: "account-b" });
 		} finally { accountSpy.mockRestore(); }
 	});
 
-	it("keeps both exact session/account pairs when extra panes are resumed again", async () => {
+	it("keeps both panes' chosen ids and accounts across repeated resumes", async () => {
 		const { task, project } = arrange();
-		const secondId = "019f50b3-6415-7dc3-8ad5-b60f0818f705";
+		const secondId = "00000000-0000-4000-8000-0000c0de2705";
 		await data.updateTask(project, task.id, { sessionState: { panes: [task.sessionState!.panes[0], { ...task.sessionState!.panes[0], sessionId: secondId, paneId: "%5" }] } });
-		vi.mocked(resolveCodexResumeHome).mockImplementation(async (id) => id === sessionId ? home : "/tmp/account-c");
+		chose([0, sessionId, home], [1, secondId, "/tmp/account-c"]);
 		const accountSpy = vi.spyOn(agentAccounts, "codexAccountIdForHome").mockImplementation((value) => value === home ? "account-b" : "account-c");
 		try {
 			for (let attempt = 0; attempt < 2; attempt++) {
@@ -10725,42 +10924,203 @@ describe("resumeTask exact Codex session home", () => {
 		} finally { accountSpy.mockRestore(); }
 	});
 
-	it("searches relative custom homes from the task working directory", async () => {
-		const { task } = arrange();
-		const getAgents = vi.mocked(agents.getAllAgents);
-		const findConfig = vi.mocked(agents.findConfig);
-		const oldAgents = getAgents.getMockImplementation();
-		const oldConfig = findConfig.getMockImplementation();
-		getAgents.mockResolvedValue([{ id: "builtin-codex" }] as any);
-		findConfig.mockReturnValue({ id: "codex-default", name: "Codex", envVars: { CODEX_HOME: "custom-codex" } });
-		vi.mocked(resolveCodexResumeHome).mockResolvedValue(home);
-		try {
-			await handlers.resumeTask({ taskId: task.id });
-			expect(resolveCodexResumeHome).toHaveBeenCalledWith(sessionId, expect.arrayContaining([`${task.worktreePath}/custom-codex`]));
-		} finally {
-			getAgents.mockImplementation(oldAgents!);
-			findConfig.mockImplementation(oldConfig!);
-		}
-	});
-
-	it("does not substitute latest when a Codex pane has no saved ID", async () => {
+	it("resumes a newly chosen id on an extra pane, not the snapshot's null", async () => {
 		const { task, project } = arrange();
-		await data.updateTask(project, task.id, { sessionState: { panes: [{ ...task.sessionState!.panes[0], sessionId: null }] } });
-		vi.mocked(data.updateTask).mockClear();
-		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow("no saved conversation ID");
-		expect(resolveCodexResumeHome).not.toHaveBeenCalled();
-		expect(pty.createSession).not.toHaveBeenCalled();
-		expect(data.updateTask).not.toHaveBeenCalled();
+		const chosen = "00000000-0000-4000-8000-0000c0de2706";
+		await data.updateTask(project, task.id, { sessionState: { panes: [task.sessionState!.panes[0], { ...task.sessionState!.panes[0], sessionId: null, paneId: "%5" }] } });
+		chose([0, sessionId, home], [1, chosen, home]);
+		await handlers.resumeTask({ taskId: task.id });
+		expect(agents.resolveCommandForAgent).toHaveBeenLastCalledWith("builtin-codex", "codex-default", expect.anything(), expect.objectContaining({ sessionId: chosen }));
+		expect((await data.getTask(project, task.id)).sessionState!.panes[1]).toMatchObject({ sessionId: chosen });
 	});
 
-	it.each(["No saved Codex session", "Multiple Codex homes contain session"])("fails before teardown or metadata changes: %s", async (message) => {
+	it.each([
+		"Cannot resume Codex: No Codex conversation of this task's worktree was found for this pane.",
+		"Cannot resume Codex: Codex conversation x is the newest in this worktree, but another Codex pane of this task is still open.",
+		"Codex conversation x exists in multiple account stores.",
+	])("refuses before teardown, launch or metadata changes: %s", async (message) => {
 		const { task } = arrange();
 		vi.mocked(pty.hasSession).mockReturnValue(true);
-		vi.mocked(resolveCodexResumeHome).mockRejectedValue(new Error(message));
+		vi.mocked(chooseTaskCodexConversations).mockRejectedValue(new Error(message));
+		vi.mocked(data.updateTask).mockClear();
 		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow(message);
 		expect(pty.destroySessionAwaited).not.toHaveBeenCalled();
 		expect(pty.createSession).not.toHaveBeenCalled();
 		expect(data.updateTask).not.toHaveBeenCalled();
+	});
+});
+
+// Seq 1801 (2026-09-14 → 09-23): the entry kept naming the failed pane %5 while
+// the conversation ran on in %6; %5's exit then dropped the only entry, the wake
+// screen had nothing to resume, and a fresh start picked the default account.
+describe("Codex conversation survives pane-exit reconciliation into a wake", () => {
+	let restoreResolve: () => void;
+	beforeEach(() => {
+		vi.clearAllMocks();
+		const resolve = vi.mocked(agents.resolveCommandForAgent);
+		const original = resolve.getMockImplementation();
+		resolve.mockResolvedValue({ command: "codex", extraEnv: {}, agentFamily: "codex" } as any);
+		restoreResolve = () => resolve.mockImplementation(original!);
+	});
+	afterEach(() => {
+		restoreResolve();
+		vi.mocked(chooseTaskCodexConversations).mockReset().mockResolvedValue(new Map());
+	});
+	const sessionId = "00000000-0000-4000-8000-0000c0de1083";
+	const home = "/tmp/account-original";
+	const stalePane = { agentCmd: "codex", agentFamily: "codex" as const, agentId: "builtin-codex", configId: "codex-default", sessionId, paneId: "%5" };
+
+	function arrange(panes: NonNullable<Task["sessionState"]>["panes"]) {
+		const project = makeProject();
+		const task = makeTask({ agentId: "builtin-codex", configId: "codex-default", sessionState: { panes } });
+		mockTaskWrites(task);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(pty.hasSession).mockReturnValue(false);
+		vi.mocked(pty.listPaneIds).mockResolvedValue(["%6"]);
+		return { project, task };
+	}
+
+	it("without the hook following the conversation, %5's exit leaves nothing to resume", async () => {
+		const { project, task } = arrange([stalePane]);
+		await handlePaneExited(task.id, "%5");
+		expect((await data.getTask(project, task.id)).sessionState?.panes).toEqual([]);
+		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow("no stored pane sessions");
+	});
+
+	it("a hook from %6 moves the entry there, so %5's exit keeps it and a later wake resumes it under its own store", async () => {
+		const { project, task } = arrange([stalePane]);
+		const followed = placePaneSession([stalePane], "%6", sessionId, null);
+		await data.updateTask(project, task.id, { sessionState: { panes: followed! }, hibernated: true });
+
+		await handlePaneExited(task.id, "%5");
+		expect((await data.getTask(project, task.id)).sessionState?.panes).toEqual([expect.objectContaining({ paneId: "%6", sessionId })]);
+
+		const accountSpy = vi.spyOn(agentAccounts, "codexAccountIdForHome").mockImplementation((value) => value === home ? "account-original" : undefined);
+		vi.mocked(chooseTaskCodexConversations).mockResolvedValue(new Map([[0, { sessionId, codexHome: home }]]));
+		try {
+			await handlers.resumeTask({ taskId: task.id });
+			expect(pty.createSession).toHaveBeenLastCalledWith(task.id, project.id, task.worktreePath, expect.any(String), expect.objectContaining({ CODEX_HOME: home }), expect.any(String));
+			expect((await data.getTask(project, task.id)).sessionState?.panes[0]).toMatchObject({ sessionId, accountId: "account-original" });
+		} finally { accountSpy.mockRestore(); }
+	});
+
+	it("an entry recreated after the list emptied is resumed the same way", async () => {
+		const { project, task } = arrange([]);
+		const main = { agentCmd: "codex", sessionId: null, agentId: "builtin-codex", configId: "codex-default", agentFamily: "codex" as const };
+		await data.updateTask(project, task.id, { sessionState: { panes: placePaneSession([], "%6", sessionId, main)! } });
+		vi.mocked(chooseTaskCodexConversations).mockResolvedValue(new Map([[0, { sessionId, codexHome: home }]]));
+		await handlers.resumeTask({ taskId: task.id });
+		expect(pty.createSession).toHaveBeenLastCalledWith(task.id, project.id, task.worktreePath, expect.any(String), expect.objectContaining({ CODEX_HOME: home }), expect.any(String));
+	});
+
+	it("a closed pane stays removed: reconciliation with no live pane drops it and nothing recreates it", async () => {
+		const { project, task } = arrange([stalePane]);
+		vi.mocked(pty.listPaneIds).mockResolvedValue([]);
+		await handlePaneExited(task.id, "%5");
+		expect((await data.getTask(project, task.id)).sessionState?.panes).toEqual([]);
+		// Only a hook from a running agent can add an entry back.
+		expect(placePaneSession([], "%5", sessionId, null)).toBeNull();
+	});
+});
+
+// The tasks that already lost their record before the capture fix: nothing will
+// report their conversation again, so wake looks it up in the worktree's stores.
+describe("wake of a Codex task whose pane record was lost", () => {
+	const sessionId = "00000000-0000-4000-8000-0000c0de1083";
+	const home = "/tmp/account-original";
+	const codexAgent = { id: "builtin-codex", baseCommand: "codex", agentFamily: "codex", configurations: [] } as any;
+	let restore: Array<() => void> = [];
+	function override<T extends (...args: any[]) => any>(fn: T, impl: (...args: Parameters<T>) => ReturnType<T>) {
+		const mocked = vi.mocked(fn);
+		const original = mocked.getMockImplementation();
+		mocked.mockImplementation(impl as any);
+		restore.push(() => mocked.mockImplementation(original as any));
+	}
+	beforeEach(() => {
+		vi.clearAllMocks();
+		override(agents.resolveCommandForAgent, async () => ({ command: "codex", extraEnv: {}, agentFamily: "codex" }) as any);
+		override(agents.getAllAgents, async () => [codexAgent]);
+		override(agents.findConfig, () => ({ id: "codex-default", name: "Codex" }) as any);
+		vi.mocked(chooseTaskCodexConversations).mockResolvedValue(new Map([[0, { sessionId, codexHome: home }]]));
+	});
+	afterEach(() => {
+		restore.forEach((undo) => undo());
+		restore = [];
+		vi.mocked(chooseTaskCodexConversations).mockReset().mockResolvedValue(new Map());
+		vi.mocked(pty.tmuxSessionExists).mockReset().mockResolvedValue(true);
+	});
+	function arrange(overrides: Partial<Task> = {}) {
+		const project = makeProject();
+		const task = makeTask({ agentId: "builtin-codex", configId: "codex-default", status: "review-by-user", hibernated: true, worktreePath: "/tmp/wt-lost", sessionState: { panes: [] }, ...overrides });
+		mockTaskWrites(task);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(pty.hasSession).mockReturnValue(false);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		return { project, task };
+	}
+	// The terminal died with the reboot; only the restore probe sees it gone.
+	const openTerminal = (taskId: string) => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValueOnce(false);
+		return handlers.getPtyUrl({ taskId });
+	};
+
+	it("offers Resume on the wake screen without writing anything", async () => {
+		const { project, task } = arrange();
+		const result = await openTerminal(task.id);
+		expect(result).toMatchObject({ recoverable: true, hibernated: true, sessionState: { panes: [expect.objectContaining({ sessionId, agentId: "builtin-codex" })] } });
+		expect(chooseTaskCodexConversations).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ worktreePath: "/tmp/wt-lost" }), [expect.objectContaining({ sessionId: null })], "explicit-resume", { persist: false });
+		expect((await data.getTask(project, task.id)).sessionState?.panes).toEqual([]);
+	});
+
+	it("resumes that conversation under the store that holds it, not the default account, and records the pair", async () => {
+		const { project, task } = arrange();
+		const accountSpy = vi.spyOn(agentAccounts, "codexAccountIdForHome").mockImplementation((value) => value === home ? "account-original" : undefined);
+		try {
+			await handlers.resumeTask({ taskId: task.id });
+			expect(pty.createSession).toHaveBeenLastCalledWith(task.id, project.id, task.worktreePath, expect.any(String), expect.objectContaining({ CODEX_HOME: home }), expect.any(String));
+			expect((await data.getTask(project, task.id)).sessionState?.panes).toEqual([expect.objectContaining({ sessionId, accountId: "account-original" })]);
+		} finally { accountSpy.mockRestore(); }
+	});
+
+	it("offers recovery instead of a fresh launch for a non-hibernated task after its terminal died", async () => {
+		const { task } = arrange({ hibernated: false, status: "in-progress" });
+		const result = await openTerminal(task.id);
+		expect(result).toMatchObject({ recoverable: true, sessionState: { panes: [expect.objectContaining({ sessionId })] } });
+		expect(pty.createSession).not.toHaveBeenCalled();
+	});
+
+	it("keeps the old behaviour when no conversation of this worktree exists", async () => {
+		const { task } = arrange();
+		vi.mocked(chooseTaskCodexConversations).mockRejectedValue(new Error("Cannot resume Codex: No Codex conversation of this task's worktree was found for this pane."));
+		expect(await openTerminal(task.id)).toEqual({ recoverable: true, hibernated: true, sessionState: { panes: [] } });
+		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow("no stored pane sessions");
+	});
+
+	it("never looks up a conversation for a task whose agent is not Codex", async () => {
+		const { task } = arrange({ agentId: "builtin-claude" });
+		override(agents.getAllAgents, async () => [{ id: "builtin-claude", baseCommand: "claude", configurations: [] } as any]);
+		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow("no stored pane sessions");
+		expect(chooseTaskCodexConversations).not.toHaveBeenCalled();
+	});
+
+	it("offers Resume for an unclear choice, and the resume then says why instead of guessing", async () => {
+		const { task } = arrange();
+		const why = "Cannot resume Codex: Codex conversation x is the newest in this worktree, but matching conversations exist under more than one account.";
+		vi.mocked(chooseTaskCodexConversations).mockRejectedValue(new Error(why));
+		expect(await openTerminal(task.id)).toMatchObject({ recoverable: true, sessionState: { panes: [expect.objectContaining({ sessionId: null })] } });
+		await expect(handlers.resumeTask({ taskId: task.id })).rejects.toThrow(why);
+		expect(pty.createSession).not.toHaveBeenCalled();
+	});
+
+	it("leaves a task that still has pane records to its recorded ids", async () => {
+		const recorded = "00000000-0000-4000-8000-0000c0de2704";
+		const { task } = arrange({ sessionState: { panes: [{ agentCmd: "codex", agentFamily: "codex", agentId: "builtin-codex", configId: "codex-default", sessionId: recorded }] } });
+		vi.mocked(chooseTaskCodexConversations).mockResolvedValue(new Map([[0, { sessionId: recorded, codexHome: home }]]));
+		await handlers.resumeTask({ taskId: task.id });
+		expect(chooseTaskCodexConversations).toHaveBeenCalledTimes(1);
+		expect(chooseTaskCodexConversations).toHaveBeenCalledWith(expect.anything(), expect.anything(), [expect.objectContaining({ sessionId: recorded })], "explicit-resume", expect.objectContaining({ persist: true }));
 	});
 });
 
@@ -10796,7 +11156,7 @@ describe("resumeTask main pane account pairing", () => {
 			await launchTaskPty(project, task, task.worktreePath!, task.agentId, task.configId);
 			const saved = await data.getTask(project, task.id);
 			expect(saved.sessionState?.panes[0].accountId).toBe("account-b");
-			const sessionId = "019f50b3-6415-7dc3-8ad5-b60f0818f704";
+			const sessionId = "00000000-0000-4000-8000-0000c0de2704";
 			await data.updateTask(project, task.id, { sessionState: { panes: [{ ...saved.sessionState!.panes[0], sessionId }] } });
 			await handlers.resumeTask({ taskId: task.id });
 			expect(resolve).toHaveBeenLastCalledWith("builtin-codex", "codex-default", expect.anything(), expect.objectContaining({ accountId: "account-b", sessionId, resume: true }));
@@ -10814,7 +11174,7 @@ describe("resumeTask main pane account pairing", () => {
 		{ taskAccountId: undefined, paneAccountId: undefined, expectedAccountId: undefined },
 	])("preserves the saved conversation account across repeated recovery: $paneAccountId / $taskAccountId", async ({ taskAccountId, paneAccountId, expectedAccountId }) => {
 		const project = makeProject();
-		const sessionId = "019f50b3-6415-7dc3-8ad5-b60f0818f704";
+		const sessionId = "00000000-0000-4000-8000-0000c0de2704";
 		const task = makeTask({
 			accountId: taskAccountId,
 			sessionState: { panes: [{
@@ -10908,7 +11268,7 @@ describe("launchTaskPty", () => {
 
 			const startupCall = writeSpy.mock.calls.find(([path]) => String(path).endsWith("-startup.sh"));
 			const script = String(startupCall?.[1] ?? "");
-			const setupIndex = script.indexOf(`'${process.env.SHELL}' -x '${process.env.DEV3_TEST_ROOT}/dev3-task-1-setup.sh'`);
+			const setupIndex = script.indexOf(`'${process.env.SHELL}' '${process.env.DEV3_TEST_ROOT}/dev3-task-1-setup.sh'`);
 			const splitIndex = script.indexOf(`tmux split-window -v -b -c "/tmp/wt" "'${process.env.SHELL}' '${process.env.DEV3_TEST_ROOT}/dev3-task-1-cmd.sh'"`);
 
 			expect(setupIndex).toBeGreaterThanOrEqual(0);
@@ -10934,7 +11294,7 @@ describe("launchTaskPty", () => {
 			const startupCall = writeSpy.mock.calls.find(([path]) => String(path).endsWith("-startup.sh"));
 			const script = String(startupCall?.[1] ?? "");
 			const splitIndex = script.indexOf(`tmux split-window -v -b -c "/tmp/wt" "'${process.env.SHELL}' '${process.env.DEV3_TEST_ROOT}/dev3-task-1-cmd.sh'"`);
-			const setupIndex = script.indexOf(`'${process.env.SHELL}' -x '${process.env.DEV3_TEST_ROOT}/dev3-task-1-setup.sh'`);
+			const setupIndex = script.indexOf(`'${process.env.SHELL}' '${process.env.DEV3_TEST_ROOT}/dev3-task-1-setup.sh'`);
 
 			expect(splitIndex).toBeGreaterThanOrEqual(0);
 			expect(setupIndex).toBeGreaterThanOrEqual(0);
@@ -11027,7 +11387,7 @@ describe("launchTaskPty", () => {
 			stderr: new Uint8Array(),
 		});
 		(agents.resolveCommandForAgent as any).mockResolvedValueOnce({
-			command: "codex resume --last --model gpt-test",
+			command: "codex resume 00000000-0000-4000-8000-0000c0de2704 --model gpt-test",
 			extraEnv: {},
 			agent: { baseCommand: "codex" },
 			config: {},
@@ -11038,7 +11398,7 @@ describe("launchTaskPty", () => {
 			await launchTaskPty(project, task, "/tmp/codex-wt", "builtin-codex", "codex-default", false, true);
 
 			const runCall = writeSpy.mock.calls.find(([path]) => String(path).endsWith("-run.sh"));
-			expect(String(runCall?.[1] ?? "")).toContain("codex --dangerously-bypass-hook-trust resume --last --model gpt-test");
+			expect(String(runCall?.[1] ?? "")).toContain("codex --dangerously-bypass-hook-trust resume 00000000-0000-4000-8000-0000c0de2704 --model gpt-test");
 		} finally {
 			writeSpy.mockRestore();
 		}
@@ -11619,6 +11979,7 @@ describe("checkOpenPRsForPromotion", () => {
 			mergeStateStatus: "UNKNOWN",
 			state: "MERGED",
 			title: "Merged change",
+			headRefOid: "abc123",
 		};
 		vi.mocked(github.runGitHub)
 			.mockResolvedValueOnce({ ok: true, stdout: "[]", stderr: "", code: 0 })
@@ -11686,6 +12047,7 @@ describe("checkOpenPRsForPromotion", () => {
 						mergeStateStatus: "UNKNOWN",
 						state: "MERGED",
 						title: "Merged change",
+						headRefOid: "abc123",
 					}),
 					stderr: "",
 					code: 0,
@@ -11715,7 +12077,193 @@ describe("checkOpenPRsForPromotion", () => {
 		expect(push.mock.calls.filter(([message]) => message === "branchMerged")).toHaveLength(1);
 	});
 
-	it("uses the GraphQL review-thread page and persists the PR identity", async () => {
+		it("moves a replaced merged PR into the ledger when the follow-up PR opens", async () => {
+		const { project, task } = setup({
+			prNumber: 41,
+			prUrl: "https://github.com/test/repo/pull/41",
+			prStatusCache: {
+				number: 41, url: "https://github.com/test/repo/pull/41", ciStatus: null, reviewState: null,
+				unresolvedCount: 0, mergeState: { mergeable: "UNKNOWN", status: "UNKNOWN", state: "MERGED" },
+				checks: [], prTitle: "First PR", isDraft: false, cachedAt: "2026-09-28T00:00:00.000Z",
+			},
+		});
+		vi.mocked(github.runGitHub).mockImplementation(async (_project, _worktreePath, args) => {
+			if (args.includes("list")) {
+				return {
+					ok: true,
+					stdout: JSON.stringify([{
+						number: 42, isDraft: true, url: "https://github.com/test/repo/pull/42", statusCheckRollup: [],
+						state: "OPEN", title: "Follow-up PR", headRefName: "dev3/my-feature",
+					}]),
+					stderr: "",
+					code: 0,
+				};
+			}
+			return {
+				ok: true,
+				stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }),
+				stderr: "",
+				code: 0,
+			};
+		});
+		setPushMessage(vi.fn());
+
+		await checkOpenPRsForPromotion();
+
+		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, expect.objectContaining({
+			prNumber: 42,
+			pullRequests: [
+				expect.objectContaining({ number: 41, state: "MERGED", title: "First PR" }),
+				expect.objectContaining({ number: 42, state: "OPEN", title: "Follow-up PR" }),
+			],
+		}));
+	});
+
+	describe("a merged sticky PR with follow-up work on the branch", () => {
+		const reviewThreadsPage = JSON.stringify({
+			data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } },
+		});
+
+		function mockMergedStickyPr(headRefOid: string) {
+			vi.mocked(github.runGitHub).mockImplementation(async (_project, _worktreePath, args) => {
+				if (args.includes("list")) return { ok: true, stdout: "[]", stderr: "", code: 0 };
+				if (args.includes("view")) {
+					return {
+						ok: true,
+						stdout: JSON.stringify({
+							number: 42, isDraft: false, url: "https://github.com/test/repo/pull/42", statusCheckRollup: [],
+							state: "MERGED", title: "First PR", headRefName: "dev3/my-feature", headRefOid,
+						}),
+						stderr: "",
+						code: 0,
+					};
+				}
+				return { ok: true, stdout: reviewThreadsPage, stderr: "", code: 0 };
+			});
+		}
+
+		beforeEach(() => {
+			vi.mocked(git.isWorktreeDirty).mockReset().mockResolvedValue(false);
+			vi.mocked(git.getBranchStatus).mockReset();
+			vi.mocked(git.getHeadSha).mockReset().mockResolvedValue("follow-up-sha");
+		});
+
+		it("does not offer completion for commits made after the merge", async () => {
+			setup({ prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" });
+			mockMergedStickyPr("merged-sha");
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0, baseUnreachable: false });
+			const push = vi.fn();
+			setPushMessage(push);
+
+			await checkOpenPRsForPromotion();
+
+			expect(push.mock.calls.filter(([message]) => message === "branchMerged")).toHaveLength(0);
+		});
+
+		it("does not offer completion while the worktree has uncommitted changes", async () => {
+			setup({ prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" });
+			mockMergedStickyPr("follow-up-sha");
+			vi.mocked(git.isWorktreeDirty).mockResolvedValue(true);
+			const push = vi.fn();
+			setPushMessage(push);
+
+			await checkOpenPRsForPromotion();
+
+			expect(push.mock.calls.filter(([message]) => message === "branchMerged")).toHaveLength(0);
+		});
+
+		it("still offers completion once the branch has nothing of its own left", async () => {
+			setup({ prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" });
+			mockMergedStickyPr("merged-sha");
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 3, baseUnreachable: false });
+			const push = vi.fn();
+			setPushMessage(push);
+
+			await checkOpenPRsForPromotion();
+
+			expect(push.mock.calls.filter(([message]) => message === "branchMerged")).toHaveLength(1);
+		});
+
+		it("a manual refresh of the merged old head persists MERGED + UNKNOWN but offers no completion over newer work", async () => {
+			const { project, task } = setup({ status: "review-by-user", prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.getTask).mockResolvedValue(task);
+			vi.mocked(github.runGitHub).mockImplementation(async (_project, _worktreePath, args) => {
+				if (args.includes("list")) return { ok: true, stdout: "[]", stderr: "", code: 0 };
+				if (args.includes("view")) {
+					return {
+						ok: true,
+						stdout: JSON.stringify({
+							number: 42, isDraft: false, url: "https://github.com/test/repo/pull/42", statusCheckRollup: [],
+							mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN", autoMergeRequest: null,
+							state: "MERGED", title: "First PR", headRefName: "dev3/my-feature", headRefOid: "merged-sha",
+						}),
+						stderr: "",
+						code: 0,
+					};
+				}
+				return { ok: true, stdout: reviewThreadsPage, stderr: "", code: 0 };
+			});
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 2, behind: 0, baseUnreachable: false });
+			const push = vi.fn();
+			setPushMessage(push);
+
+			const result = await handlers.refreshTaskPrStatus({ taskId: task.id, projectId: project.id });
+
+			expect(result).toEqual({ outcome: "updated" });
+			expect(push).toHaveBeenCalledWith("taskPrStatus", expect.objectContaining({
+				prNumber: 42,
+				mergeState: { mergeable: "UNKNOWN", status: "UNKNOWN", state: "MERGED" },
+				checks: [],
+			}));
+			expect(push.mock.calls.filter(([message]) => message === "branchMerged")).toHaveLength(0);
+		});
+	});
+
+describe("refreshTaskPrStatus outcome", () => {
+		const prUrl = "https://github.com/test/repo/pull/42";
+
+		function prepare(overrides: Record<string, unknown> = {}) {
+			const { project, task } = setup({ status: "review-by-user", prNumber: 42, prUrl, ...overrides });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.getTask).mockResolvedValue(task);
+			setPushMessage(vi.fn());
+			return { project, task };
+		}
+
+		it("reports unavailable when GitHub does not answer the open-PR lookup", async () => {
+			const { project, task } = prepare();
+			vi.mocked(github.runGitHub).mockResolvedValue({ ok: false, stdout: "", stderr: "HTTP 502", code: 1 });
+			expect(await handlers.refreshTaskPrStatus({ taskId: task.id, projectId: project.id })).toEqual({ outcome: "unavailable" });
+		});
+
+		it("reports unavailable, not 'no PR', when the stored PR cannot be fetched", async () => {
+			const { project, task } = prepare();
+			vi.mocked(github.runGitHub).mockImplementation(async (_project, _cwd, args) => (
+				args.includes("list")
+					? { ok: true, stdout: "[]", stderr: "", code: 0 }
+					: { ok: false, stdout: "", stderr: "HTTP 502", code: 1 }
+			));
+			expect(await handlers.refreshTaskPrStatus({ taskId: task.id, projectId: project.id })).toEqual({ outcome: "unavailable" });
+		});
+
+		it("reports not-found when the stored PR belongs to another branch", async () => {
+			const { project, task } = prepare();
+			vi.mocked(github.runGitHub).mockImplementation(async (_project, _cwd, args) => (
+				args.includes("list")
+					? { ok: true, stdout: "[]", stderr: "", code: 0 }
+					: { ok: true, stdout: JSON.stringify({ number: 42, url: prUrl, state: "MERGED", headRefName: "someone/else" }), stderr: "", code: 0 }
+			));
+			expect(await handlers.refreshTaskPrStatus({ taskId: task.id, projectId: project.id })).toEqual({ outcome: "not-found" });
+		});
+
+		it("reports skipped for a finished task", async () => {
+			const { project, task } = prepare({ status: "completed" });
+			expect(await handlers.refreshTaskPrStatus({ taskId: task.id, projectId: project.id })).toEqual({ outcome: "skipped" });
+		});
+	});
+
+it("uses the GraphQL review-thread page and persists the PR identity", async () => {
 		const { project, task } = setup({ status: "review-by-colleague" }, { githubAuthHost: "ghe.example.com" });
 		const prUrl = "https://ghe.example.com/test/repo/pull/42";
 		const persisted = { ...task, prNumber: 42, prUrl };
@@ -12912,10 +13460,8 @@ describe("setTaskManualCompletion", () => {
 		});
 
 		expect(result).toEqual(updated);
-		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, {
-			manualCompletion: true,
-			mergeCompletionPrompt: null,
-		});
+		// No stored merge prompt to reset, so the patch carries only the policy.
+		expect(data.updateTask).toHaveBeenCalledWith(project, task.id, { manualCompletion: true });
 		expect(push).toHaveBeenCalledWith("taskUpdated", { projectId: project.id, task: updated });
 		expect(push).not.toHaveBeenCalledWith("manualCompletionChanged", expect.anything());
 	});
@@ -14954,5 +15500,90 @@ describe("handlers.saveAgents", () => {
 		expect(call).toBeTruthy();
 		// The merged list, not the caller's payload: overrides only exist merged.
 		expect(call?.[1]).toBe(merged);
+	});
+});
+
+// ================================================================
+// Missing-worktree precondition (Seq 2003 review 2003-004/005): tmux starts a
+// missing cwd in $HOME, so each launcher must refuse BEFORE any trust write or spawn.
+// ================================================================
+
+describe("launchers refuse a missing worktree before touching anything", () => {
+	const passthrough = (_project: unknown, path: string | null | undefined) => path ?? "";
+	function missing(): void {
+		vi.mocked(workspaceGuard.assertTaskWorkspacePresent).mockImplementation((_project, path) => {
+			throw new workspaceGuard.TaskWorkspaceUnavailableError("missing", String(path));
+		});
+	}
+	beforeEach(() => {
+		vi.clearAllMocks();
+		missing();
+	});
+	afterEach(() => {
+		vi.mocked(workspaceGuard.assertTaskWorkspacePresent).mockImplementation(passthrough);
+	});
+
+	function stub(task: Task): Project {
+		const project = makeProject();
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(task);
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		return project;
+	}
+
+	it.each([
+		["no stored session", undefined],
+		["a stored session (would offer resume)", { panes: [{ agentCmd: "claude", sessionId: "s1", agentId: "a", configId: "c" }] }],
+	])("getPtyUrl with %s: no restore, no launch", async (_label, sessionState) => {
+		stub(makeTask({ status: "in-progress", worktreePath: "/tmp/gone", sessionState }));
+		vi.mocked(pty.hasSession).mockReturnValue(false);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(false);
+		await expect(handlers.getPtyUrl({ taskId: "task-1" })).rejects.toThrow(workspaceGuard.TaskWorkspaceUnavailableError);
+		expect(pty.createSession).not.toHaveBeenCalled();
+		expect(agents.ensureClaudeTrust).not.toHaveBeenCalled();
+	});
+
+	it("runDevServer: the devScript never starts", async () => {
+		stub(makeTask({ status: "in-progress", worktreePath: "/tmp/gone" }));
+		vi.mocked(repoConfig.resolveProjectConfig).mockResolvedValue({ ...makeProject(), devScript: "bun run dev" } as never);
+		await expect(handlers.runDevServer({ taskId: "task-1", projectId: "proj-1" })).rejects.toThrow(/worktree is missing/);
+		expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && cmd.includes("new-session"))).toBe(false);
+	});
+
+	it("spawnAgentInTask: no agent pane, no trust write", async () => {
+		stub(makeTask({ id: "abcd1234-full-id", status: "in-progress", worktreePath: "/tmp/gone" }));
+		await expect(handlers.spawnAgentInTask({ taskId: "abcd1234-full-id", projectId: "proj-1", agentId: "builtin-claude", configId: null }))
+			.rejects.toThrow(workspaceGuard.TaskWorkspaceUnavailableError);
+		expect(agents.ensureClaudeTrust).not.toHaveBeenCalled();
+		expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && cmd.includes("split-window"))).toBe(false);
+	});
+
+	it("launchColumnAgent: the column agent never launches", async () => {
+		const task = makeTask({ status: "review-by-ai", worktreePath: "/tmp/gone" });
+		const project = stub(task);
+		await expect(launchColumnAgent(project, task, { agentId: "builtin-claude", configId: null, prompt: "review" } as never, { paneTitle: "AI Review" }))
+			.rejects.toThrow(workspaceGuard.TaskWorkspaceUnavailableError);
+		expect(agents.ensureClaudeTrust).not.toHaveBeenCalled();
+		expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && cmd.includes("split-window"))).toBe(false);
+	});
+
+	it("rerunSetupScript refuses too", async () => {
+		stub(makeTask({ status: "in-progress", worktreePath: "/tmp/gone" }));
+		await expect(handlers.rerunSetupScript({ taskId: "task-1" })).rejects.toThrow(workspaceGuard.TaskWorkspaceUnavailableError);
+	});
+
+	it("spawnBugHuntersInTask: no hunter pane, no trust write", async () => {
+		stub(makeTask({ id: "abcd1234-full-id", status: "in-progress", worktreePath: "/tmp/gone" }));
+		await expect(handlers.spawnBugHuntersInTask({ taskId: "abcd1234-full-id", projectId: "proj-1", agentId: "builtin-claude", configId: null, count: 2 }))
+			.rejects.toThrow();
+		expect(agents.ensureClaudeTrust).not.toHaveBeenCalled();
+		expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && cmd.includes("split-window"))).toBe(false);
+	});
+
+	it("runScript (task script pane): nothing starts", async () => {
+		stub(makeTask({ status: "in-progress", worktreePath: "/tmp/gone" }));
+		await expect(handlers.runScript({ taskId: "task-1", projectId: "proj-1", scriptName: "build", source: "package", placement: "right" } as never))
+			.rejects.toThrow(workspaceGuard.TaskWorkspaceUnavailableError);
+		expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && (cmd.includes("split-window") || cmd.includes("new-window")))).toBe(false);
 	});
 });

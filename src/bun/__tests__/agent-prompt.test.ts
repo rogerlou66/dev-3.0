@@ -25,6 +25,21 @@ vi.mock("../tmux", () => ({
 	TMUX_AGENT_PANE_OPTION: "@dev3_agent",
 	TMUX_LAST_AGENT_PANE_OPTION: "@dev3_last_agent_pane",
 }));
+const pushCliAttention = vi.hoisted(() => vi.fn());
+vi.mock("../rpc-handlers/shared", () => ({ pushCliAttention }));
+/** Batch files the mocked spill has written and not yet discarded. */
+const batchFiles = vi.hoisted(() => ({ alive: new Set<string>(), written: 0 }));
+const spillHeldMessageBatch = vi.hoisted(() =>
+	vi.fn(async (_task: unknown, texts: string[]) => {
+		batchFiles.written += 1;
+		const path = batchFiles.written === 1 ? "/task/messages/burst-1.md" : `/task/messages/burst-${batchFiles.written}.md`;
+		batchFiles.alive.add(path);
+		return { path, pointer: `<dev3-ai-message>\n${texts.length} held messages: ${path}\n</dev3-ai-message>` };
+	}),
+);
+const discardHeldMessageBatch = vi.hoisted(() => vi.fn(async (path: string) => void batchFiles.alive.delete(path)));
+vi.mock("../agent-message-spill", () => ({ spillHeldMessageBatch, discardHeldMessageBatch }));
+
 vi.mock("../logger", () => ({
 	createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
@@ -37,7 +52,18 @@ import {
 	sendPromptToAgentPane,
 	sendPromptToPane,
 } from "../agent-prompt";
-import { deferHeldAgentMessagesForTask, flushHeldAgentMessagesForTask, resetAgentMessageHolds } from "../agent-message-hold";
+import {
+	claimDev3TypedPrompt,
+	noteDev3TypedPrompt,
+	resetTypedPromptClaims,
+	typedPromptClaimCount,
+} from "../agent-typed-prompt-claims";
+import {
+	deferHeldAgentMessagesForTask,
+	flushHeldAgentMessagesForTask,
+	releaseStrandedAgentMessagesOnSubmission,
+	resetAgentMessageHolds,
+} from "../agent-message-hold";
 import {
 	AGENT_MESSAGE_HOLD_CEILING_MS,
 	AGENT_MESSAGE_HOLD_HUMAN_IDLE_MS,
@@ -339,11 +365,100 @@ describe("the held dev3 message — nothing reaches the pane until it goes quiet
 	it("sends no Enter when the text itself did not land", async () => {
 		// A refused text stage leaves an unknown input box, so an Enter into it would
 		// submit whatever is sitting there.
-		vi.mocked(tmux.sendKeysGuarded).mockResolvedValue({ sent: false } as never);
+		vi.mocked(tmux.sendKeysGuarded).mockResolvedValue({ sent: false, inMode: false });
 		await holdMessageForAgentPane(TASK, "check CI", [agentPane("%1")]);
 
 		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS * 2);
 		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(1);
+	});
+
+	it("waits out a scrolled-up pane instead of losing the message, and lands it once", async () => {
+		// Copy mode refuses the keys but it is still the same pane: the user will scroll back.
+		vi.mocked(tmux.sendKeysGuarded)
+			.mockResolvedValueOnce({ sent: false, inMode: true })
+			.mockResolvedValueOnce({ sent: false, inMode: true });
+		await holdMessageForAgentPane(TASK, "check CI", [agentPane("%1")]);
+
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS * 2);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+		expect(sentChunks(1)).toEqual([{ literal: "check CI" }]);
+
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS + AGENT_PROMPT_ENTER_DELAY_MS);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(4);
+		expect(sentChunks(2)).toEqual([{ literal: "check CI" }]);
+		expect(sentChunks(3)).toEqual([{ keys: ["Enter"] }]);
+
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS * 3);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(4);
+	});
+
+	it("strands a turn whose Enter hit copy mode: no more keys, a badge, and a drop once the pane is gone", async () => {
+		pushCliAttention.mockClear();
+		// The text lands; the user scrolled up in the gap, so the Enter is refused.
+		vi.mocked(tmux.sendKeysGuarded)
+			.mockResolvedValueOnce({ sent: true, inMode: false })
+			.mockResolvedValueOnce({ sent: false, inMode: true });
+		await holdMessageForAgentPane(TASK, "check CI", [agentPane("%1")]);
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS + AGENT_PROMPT_ENTER_DELAY_MS);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+		expect(pushCliAttention).toHaveBeenCalledWith(expect.objectContaining({ taskId: TASK_ID, reason: expect.stringContaining("not sent") }));
+
+		// An hour of the pane staying alive: dev3 never types or presses anything more.
+		await vi.advanceTimersByTimeAsync(60 * 60_000);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+
+		vi.mocked(tmux.observePane).mockResolvedValue({ kind: "absent" } as never);
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS);
+		expect(pushCliAttention).toHaveBeenLastCalledWith(expect.objectContaining({ reason: expect.stringContaining("not delivered") }));
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+	});
+
+	/** Text lands, the Enter hits copy mode: the agent pane's box now holds an unsent peer message. */
+	async function strandCheckCi() {
+		vi.mocked(tmux.sendKeysGuarded)
+			.mockResolvedValueOnce({ sent: true, inMode: false })
+			.mockResolvedValueOnce({ sent: false, inMode: true });
+		await holdMessageForAgentPane(TASK, "check CI, a peer message long enough to match", [agentPane("%1")]);
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS + AGENT_PROMPT_ENTER_DELAY_MS);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+	}
+
+	// Commit / Create PR / rebase / role-brief hand-offs type AND press Enter at once; into
+	// a stranded box that Enter would submit the peer text and whatever the user typed after it.
+	it("refuses a direct prompt into a stranded box without sending a key, until a matching submission", async () => {
+		await strandCheckCi();
+
+		await expect(runPrompt(sendPromptToAgentPane(TASK, "commit your work", [agentPane("%1")]))).resolves.toMatchObject({
+			status: "not-started",
+			reason: "input-occupied",
+			retryableAsNewDelivery: true,
+		});
+		await expect(runPrompt(sendPromptToPane(TASK, "%1", "commit your work"))).resolves.toMatchObject({ reason: "input-occupied" });
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+
+		releaseStrandedAgentMessagesOnSubmission(TASK_ID, "check CI, a peer message long enough to match");
+		await expect(runPrompt(sendPromptToAgentPane(TASK, "commit your work", [agentPane("%1")]))).resolves.toMatchObject({
+			status: "delivered",
+		});
+	});
+
+	it("does not refuse a direct prompt to a different pane of the same task", async () => {
+		await strandCheckCi();
+		vi.mocked(tmux.listPanes).mockResolvedValue([{ paneId: "%1" }, { paneId: "%2" }] as never);
+		await expect(runPrompt(sendPromptToPane(TASK, "%2", "hunt bugs"))).resolves.toMatchObject({ status: "delivered" });
+	});
+
+	// tmux restarted while the app kept running: the same `%id` in the same session name is
+	// a new, empty box. Holding the old stranded turn for it would block the agent forever.
+	it("drops a stranded turn when the pane id now belongs to another tmux server generation", async () => {
+		pushCliAttention.mockClear();
+		await strandCheckCi();
+		vi.mocked(tmux.observePane).mockResolvedValue({ kind: "present", sessionName: SESSION, serverToken: "srv-token-2" } as never);
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS);
+		expect(pushCliAttention).toHaveBeenLastCalledWith(expect.objectContaining({ reason: expect.stringContaining("not delivered") }));
+		await expect(runPrompt(sendPromptToAgentPane(TASK, "commit your work", [agentPane("%1")]))).resolves.toMatchObject({
+			status: "delivered",
+		});
 	});
 
 	it("refuses a message for a task with no agent pane, while its sender is listening", async () => {
@@ -373,5 +488,47 @@ describe("the held dev3 message — nothing reaches the pane until it goes quiet
 		await runPrompt(sendPromptToAgentPane(TASK, "open a PR", [agentPane("%1")]));
 		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
 		expect(sentChunks(1)).toEqual([{ keys: ["Enter"] }]);
+	});
+});
+
+describe("a held backlog past one read is typed as ONE batch pointer", () => {
+	afterEach(() => {
+		resetAgentMessageHolds();
+		resetTypedPromptClaims();
+		batchFiles.alive.clear();
+		batchFiles.written = 0;
+	});
+
+	it("leaves no file and no receipt behind while the pane sits in copy mode for 10 minutes", async () => {
+		// Before the undo, each quiet window wrote a new file AND a new receipt; 64
+		// receipts is the per-task cap, so ~16 minutes evicted every older one.
+		noteDev3TypedPrompt(TASK_ID, "an older message still waiting for its submit hook");
+		// Its text is INSIDE every pointer: retracting by containment would spend it.
+		noteDev3TypedPrompt(TASK_ID, "held messages");
+		vi.mocked(tmux.sendKeysGuarded).mockResolvedValue({ sent: false, inMode: true } as never);
+		for (const text of ["a", "b", "c"].map((c) => c.repeat(600))) await holdMessageForAgentPane(TASK, text, [agentPane("%1")]);
+
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+		expect(batchFiles.written).toBeGreaterThan(30);
+		expect(batchFiles.alive.size).toBe(0);
+		expect(typedPromptClaimCount(TASK_ID)).toBe(2);
+		expect(claimDev3TypedPrompt(TASK_ID, "an older message still waiting for its submit hook")).toBe(true);
+		expect(claimDev3TypedPrompt(TASK_ID, "held messages")).toBe(true);
+	});
+
+	it("types only the pointer, then one Enter, and leaves a receipt for exactly that text", async () => {
+		const texts = ["a", "b", "c"].map((c) => c.repeat(600));
+		for (const text of texts) await holdMessageForAgentPane(TASK, text, [agentPane("%1")]);
+
+		await vi.advanceTimersByTimeAsync(AGENT_MESSAGE_HOLD_IDLE_MS + AGENT_PROMPT_ENTER_DELAY_MS);
+
+		const pointer = "<dev3-ai-message>\n3 held messages: /task/messages/burst-1.md\n</dev3-ai-message>";
+		expect(spillHeldMessageBatch).toHaveBeenCalledWith(TASK, texts);
+		expect(tmux.sendKeysGuarded).toHaveBeenCalledTimes(2);
+		expect(sentChunks(0)).toEqual([{ literal: pointer }]);
+		expect(sentChunks(1)).toEqual([{ keys: ["Enter"] }]);
+		// Without the receipt the receiver's submit hook records the pointer as the user's prompt.
+		expect(claimDev3TypedPrompt(TASK_ID, pointer)).toBe(true);
 	});
 });

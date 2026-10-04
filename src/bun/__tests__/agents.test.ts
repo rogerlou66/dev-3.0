@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveAgentCommand, supportsResume, supportsPreAssignedSessionId, buildResumeCommand, skillInvocationPrefix, mergeMcpApproval, mergeWithDefaults, applyBinaryPathOverride, applyLayoutResync, migrateOldFormat, applyModelOverride, applyProviderModel, resolveLaunchConfig, claudeModelFamily, claudeDefaultEnv, getDefaultEnvForAgent, __setCodexProfileV2Override, type TemplateContext } from "../agents";
+import { resolveAgentCommand, supportsResume, supportsPreAssignedSessionId, buildResumeCommand, skillInvocationPrefix, ensureClaudeMcpApproved, mergeMcpApproval, mergeWithDefaults, applyBinaryPathOverride, applyLayoutResync, findConfig, migrateOldFormat, applyModelOverride, applyProviderModel, resolveLaunchConfig, claudeModelFamily, claudeDefaultEnv, getDefaultEnvForAgent, __setCodexProfileV2Override, type TemplateContext } from "../agents";
 import type { AgentConfiguration, CodingAgent } from "../../shared/types";
 import { DEFAULT_AGENTS } from "../../shared/types";
 import { ENV_UNSET } from "../../shared/agent-accounts";
@@ -138,16 +138,25 @@ describe("resolveAgentCommand — resume", () => {
 	});
 
 	// ---- Codex ----
-	it("Codex: uses 'codex resume --last' subcommand when resume=true", async () => {
+	it("Codex: resumes the given conversation with the 'codex resume <id>' subcommand", async () => {
 		const cmd = await resolveAgentCommand(
 			makeAgent({ baseCommand: "codex" }),
 			makeConfig({ model: undefined }),
 			makeCtx({ taskDescription: "Some task" }),
-			{ resume: true },
+			{ resume: true, sessionId: "sid-1" },
 		);
 
-		expect(cmd).toMatch(/^codex resume --last/);
+		expect(cmd).toMatch(/^codex resume sid-1/);
 		expect(cmd).not.toContain("Some task");
+	});
+
+	it("Codex: refuses to resume without a conversation id instead of using --last (#1847)", async () => {
+		await expect(resolveAgentCommand(
+			makeAgent({ baseCommand: "codex" }),
+			makeConfig({ model: undefined }),
+			makeCtx({ taskDescription: "Some task" }),
+			{ resume: true },
+		)).rejects.toThrow(/never resumes Codex with --last/);
 	});
 
 	it("Codex: ignores unsupported generic config flags during resume", async () => {
@@ -160,10 +169,10 @@ describe("resolveAgentCommand — resume", () => {
 				maxBudgetUsd: 10,
 			}),
 			makeCtx({ taskDescription: "Some task" }),
-			{ resume: true },
+			{ resume: true, sessionId: "sid-1" },
 		);
 
-		expect(cmd).toMatch(/^codex resume --last/);
+		expect(cmd).toMatch(/^codex resume sid-1/);
 		expect(cmd).toContain("--model gpt-5");
 		expect(cmd).not.toContain("--permission-mode");
 		expect(cmd).not.toContain("--effort");
@@ -251,10 +260,10 @@ describe("resolveAgentCommand — resume", () => {
 			makeAgent({ baseCommand: "codex" }),
 			makeConfig({ model: undefined }),
 			makeCtx({ taskDescription: "Some task" }),
-			{ resume: true },
+			{ resume: true, sessionId: "sid-1" },
 		);
 
-		expect(cmd).toMatch(/^codex resume --last/);
+		expect(cmd).toMatch(/^codex resume sid-1/);
 		expect(cmd).toContain("-c 'developer_instructions=");
 	});
 
@@ -837,8 +846,8 @@ describe("buildResumeCommand", () => {
 		expect(buildResumeCommand("codex", "sid-2")).toBe("codex resume sid-2");
 	});
 
-	it("Codex: resume --last without sessionId", () => {
-		expect(buildResumeCommand("codex")).toBe("codex resume --last");
+	it("Codex: no resume command without sessionId (never --last)", () => {
+		expect(buildResumeCommand("codex")).toBeNull();
 	});
 
 	it("Gemini: --resume <id> with sessionId", () => {
@@ -1191,7 +1200,7 @@ describe("mergeWithDefaults — preserves user-defined order", () => {
 		});
 	});
 
-	it("upgrades the previous Codex default to Astra Medium and puts Astra first", () => {
+	it("upgrades the Luna-era Codex default to the current default and puts it first", () => {
 		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
 		const stored: CodingAgent[] = [{
 			...codex,
@@ -1213,10 +1222,78 @@ describe("mergeWithDefaults — preserves user-defined order", () => {
 			.toBe("gpt-5.6-luna");
 	});
 
+	it("moves the one-release GPT-6 Sol default back to GPT-6 Astra Medium and retires the duplicate Astra row", () => {
+		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
+		const stored: CodingAgent[] = [{
+			...codex,
+			configurations: [
+				{
+					id: "codex-default", name: "GPT-6 Sol Bypass [Medium] — Default",
+					model: "gpt-6-sol", groupLabel: "GPT-6 Sol", version: 11,
+					additionalArgs: ["-c", 'model_reasoning_effort="medium"'],
+				},
+				{ id: "codex-6-astra-medium-bypass", name: "GPT-6 Astra Bypass [Medium]", model: "gpt-6-astra", version: 3 },
+				{ ...codex.configurations.find((config) => config.id === "codex-6-sol-high-bypass")!, envVars: { KEEP: "1" } },
+			],
+		}];
+		const updated = applyLayoutResync(mergeWithDefaults(stored))
+			.find((agent) => agent.id === "builtin-codex")!;
+		expect(updated.configurations[0].id).toBe(updated.defaultConfigId);
+		expect(updated.configurations[0]).toMatchObject({
+			model: "gpt-6-astra", groupLabel: "GPT-6 Astra", name: "GPT-6 Astra Bypass [Medium] — Default",
+		});
+		expect(updated.configurations[0].additionalArgs).toContain('model_reasoning_effort="medium"');
+		expect(updated.configurations.some((config) => config.id === "codex-6-astra-medium-bypass")).toBe(false);
+		// An explicit Sol pick keeps its model and the user's own override.
+		expect(updated.configurations.find((config) => config.id === "codex-6-sol-high-bypass"))
+			.toMatchObject({ model: "gpt-6-sol", envVars: { KEEP: "1" } });
+		expect(updated.configurations.find((config) => config.id === "codex-6-sol-medium-bypass")?.model).toBe("gpt-6-sol");
+		expect(updated.configurations.find((config) => config.id === "codex-plan")?.model).toBe("gpt-6-sol");
+	});
+
+	it("keeps GPT-6.1 Sol, GPT-6 Sol, and GPT-6 Luna selectable next to the Astra default", () => {
+		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
+		const models = new Set(codex.configurations.map((config) => config.model));
+		expect(models.has("gpt-6.1-sol")).toBe(true);
+		expect(models.has("gpt-6-sol")).toBe(true);
+		expect(models.has("gpt-6-luna")).toBe(true);
+		expect(findConfig(codex, undefined)?.model).toBe("gpt-6-astra");
+		expect(findConfig(codex, "codex-6.1-sol-medium-bypass")?.model).toBe("gpt-6.1-sol");
+		expect(findConfig(codex, "codex-6-sol-medium-bypass")?.model).toBe("gpt-6-sol");
+		expect(findConfig(codex, "codex-6-luna-medium-bypass")?.model).toBe("gpt-6-luna");
+		// A task stored on the retired duplicate row lands on the Astra default, not the first row.
+		expect(findConfig(codex, "codex-6-astra-medium-bypass")?.id).toBe("codex-default");
+	});
+
+	it("adds GPT-6.1 Sol presets to an existing Codex configuration", () => {
+		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
+		const stored = [{ ...codex, configurations: [codex.configurations[0]] }];
+		const updated = mergeWithDefaults(stored).find((agent) => agent.id === "builtin-codex")!;
+		expect(updated.configurations.some((config) => config.id === "codex-6.1-sol-medium-bypass")).toBe(true);
+		expect(updated.defaultConfigId).toBe("codex-default");
+	});
+
+	it("launches GPT-6 Astra by default and GPT-6.1 Sol when chosen", async () => {
+		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
+		const omitted = await resolveAgentCommand(codex, findConfig(codex, undefined), makeCtx());
+		expect(omitted).toContain("gpt-6-astra");
+		expect(omitted).not.toContain("gpt-6.1-sol");
+		expect(omitted).not.toContain("gpt-6-sol");
+		const explicitNewSol = await resolveAgentCommand(codex, findConfig(codex, "codex-6.1-sol-medium-bypass"), makeCtx());
+		expect(explicitNewSol).toContain("gpt-6.1-sol");
+		expect(explicitNewSol).not.toContain("gpt-6-astra");
+		const explicitSol = await resolveAgentCommand(codex, findConfig(codex, "codex-6-sol-medium-bypass"), makeCtx());
+		expect(explicitSol).toContain("gpt-6-sol");
+		expect(explicitSol).not.toContain("gpt-6-astra");
+	});
+
 	it("ships canonical model labels on every Codex preset", () => {
 		const codex = DEFAULT_AGENTS.find((agent) => agent.id === "builtin-codex")!;
 		const expectedLabels: Record<string, string> = {
+			"gpt-6.1-sol": "GPT-6.1 Sol",
+			"gpt-6-sol": "GPT-6 Sol",
 			"gpt-6-astra": "GPT-6 Astra",
+			"gpt-6-luna": "GPT-6 Luna",
 			"gpt-5.6-sol": "GPT-5.6 Sol",
 			"gpt-5.6-terra": "GPT-5.6 Terra",
 			"gpt-5.6-luna": "GPT-5.6 Luna",
@@ -1339,6 +1416,37 @@ describe("mergeMcpApproval", () => {
 			{ enabledMcpjsonServers: ["a", 42, null, "b"] as unknown[] },
 		]);
 		expect(result.enabledMcpjsonServers).toEqual(["a", "b"]);
+	});
+});
+
+describe("ensureClaudeMcpApproved", () => {
+	let tmp: string;
+	let worktree: string;
+	let outside: string;
+
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "dev3-mcp-approve-"));
+		worktree = join(tmp, "worktree");
+		outside = join(tmp, "kit");
+		mkdirSync(worktree);
+		mkdirSync(outside);
+		writeFileSync(join(worktree, ".mcp.json"), "{}");
+	});
+
+	afterEach(() => {
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("pre-approves MCP servers in the worktree settings.local.json", () => {
+		ensureClaudeMcpApproved(worktree);
+		const written = JSON.parse(readFileSync(join(worktree, ".claude", "settings.local.json"), "utf-8"));
+		expect(written.enableAllProjectMcpServers).toBe(true);
+	});
+
+	it("writes nothing when .claude links outside the worktree", () => {
+		symlinkSync(outside, join(worktree, ".claude"));
+		ensureClaudeMcpApproved(worktree);
+		expect(existsSync(join(outside, "settings.local.json"))).toBe(false);
 	});
 });
 

@@ -7,7 +7,7 @@ import type { CliContext } from "../context";
 import type { ParsedArgs } from "../args";
 import type { Task, CliResponse } from "../../shared/types";
 import { DRAFT_TASK_ACTIVATION_ERROR, TASK_REF_UNRESOLVED_PREFIX } from "../../shared/types";
-import { CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT } from "../../shared/cli-exit-codes";
+import { CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_RESET_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT } from "../../shared/cli-exit-codes";
 
 vi.mock("../stdin", () => ({
 	readStdin: vi.fn(),
@@ -561,6 +561,12 @@ describe("task update", () => {
 		expect(mockSend.mock.calls[0]![2]!.description).toBe(markdown);
 	});
 
+	it("refuses a bare --description instead of overwriting the description with \"true\"", async () => {
+		await expect(handleTask("update", args(["aaaaaaaa"], { description: "true" }), SOCKET, null)).rejects.toThrow("EXIT_3");
+
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+
 	it("updates both title and description at once", async () => {
 		mockSend.mockResolvedValue(okResp(FAKE_TASK));
 
@@ -698,6 +704,7 @@ describe("task update", () => {
 			titlePreserved: false,
 			roleDelivery: "printed",
 			rolePrompt: "You are the COORDINATOR of this board.",
+			rolePromptSource: "project",
 		}));
 
 		await handleTask("update", args([], { type: "coordinator", "print-role": "true" }), SOCKET, CTX);
@@ -710,6 +717,7 @@ describe("task update", () => {
 		});
 		expect(stdoutOutput).toContain("Your role is now coordinator");
 		expect(stdoutOutput).toContain("You are the COORDINATOR of this board.");
+		expect(stdoutOutput).toContain("Brief source: project override");
 		expect(stderrOutput).toContain("printed below instead of typed into your own pane");
 	});
 
@@ -723,6 +731,8 @@ describe("task update", () => {
 		await handleTask("update", args([], { type: "coordinator", "print-role": "true" }), SOCKET, CTX);
 
 		expect(stdoutOutput).toContain("You are the COORDINATOR of this board.");
+		// An older backend sends no source: no line rather than a guessed one.
+		expect(stdoutOutput).not.toContain("Brief source:");
 		expect(stderrOutput).not.toContain("Role:");
 	});
 
@@ -903,12 +913,12 @@ describe("task move", () => {
 	});
 
 	it("--project flag overrides context projectId", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
 		await handleTask(
 			"move",
-			args(["aaaaaaaa"], { status: "todo", project: "other" }),
+			args(["aaaaaaaa"], { status: "review-by-user", project: "other" }),
 			SOCKET,
 			CTX,
 		);
@@ -926,7 +936,7 @@ describe("task move", () => {
 
 	it("exits when no task ID and no context", async () => {
 		await expect(
-			handleTask("move", args([], { status: "todo" }), SOCKET, null),
+			handleTask("move", args([], { status: "review-by-user" }), SOCKET, null),
 		).rejects.toThrow("EXIT_3");
 	});
 
@@ -950,7 +960,7 @@ describe("task move", () => {
 		mockSend.mockResolvedValue(errResp("Invalid status transition"));
 
 		await expect(
-			handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null),
+			handleTask("move", args(["aaaaaaaa"], { status: "review-by-user" }), SOCKET, null),
 		).rejects.toThrow("EXIT_1");
 		expect(stderrOutput).toContain("Invalid status transition");
 	});
@@ -1085,6 +1095,40 @@ describe("task move --status completed", () => {
 // Same approval contract as `completed`, its own method and its own exit code:
 // "the work landed" and "the work is garbage" must not be one answer.
 
+// A reset: `todo` on a task with a run. The user approves it in the app, whoever
+// asks — no task context grants consent (T17, T17b).
+describe("task move --status todo", () => {
+	it("always goes through task.requestReset with the long approval timeout, with or without a task context", async () => {
+		for (const ctx of [null, CTX]) {
+			mockSend.mockReset();
+			mockSend.mockResolvedValue(okResp({ approved: true, task: { ...FAKE_TASK, status: "todo" } }));
+			await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, ctx);
+			expect(mockSend.mock.calls.map((call) => call[1])).toEqual(["task.requestReset"]);
+			expect(mockSend.mock.calls[0]![3]).toEqual({ timeoutMs: 10 * 60 * 1000 });
+		}
+		expect(stderrOutput).toContain("resets it");
+		expect(stdoutOutput).toContain("moved to To Do");
+	});
+
+	it("reports a plain move when there was nothing to reset", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: true, plainMove: true, task: { ...FAKE_TASK, status: "todo" } }));
+		await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null);
+		expect(stdoutOutput).toContain("owned no run, so nothing was reset");
+		expect(stdoutOutput).not.toContain("User approved");
+	});
+
+	it("exits 27 when the user declines, saying nothing was stopped or deleted", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: false }));
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null)).rejects.toThrow(`EXIT_${CLI_EXIT_CODE_RESET_DECLINED}`);
+		expect(stderrOutput).toContain("nothing was stopped or deleted");
+	});
+
+	it("refuses --if-status with --status todo instead of guessing", async () => {
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo", "if-status": "in-progress" }), SOCKET, null)).rejects.toThrow("EXIT_3");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
+});
+
 describe("task move --status cancelled", () => {
 	it("sends task.requestCancellation with the long approval timeout", async () => {
 		mockSend.mockResolvedValue(okResp({ approved: true, task: { ...FAKE_TASK, status: "cancelled" } }));
@@ -1162,6 +1206,228 @@ describe("task move --status cancelled", () => {
 			handleTask("move", args(["aaaaaaaa"], { status: "cancelled" }), SOCKET, null),
 		).rejects.toThrow("EXIT_1");
 		expect(stderrOutput).toContain("Task is already cancelled");
+	});
+});
+
+// ─── approval after a dropped socket ────────────────────────────────────────
+// The request lives in the app, not on the connection. When the socket drops
+// mid-wait the CLI asks the SAME app where it stands (approval.status) and only
+// re-attaches (attachOnly) to a request it confirmed is pending — so neither a
+// retry nor a restart can ever open a second dialog. Pending, declined,
+// approved and unknown each get their own exit.
+
+function emptyResponse(): Error {
+	const err = new Error("Empty response from server");
+	err.name = "EmptyResponseError";
+	return err;
+}
+
+type Step = CliResponse | Error;
+
+/** Script sendRequest per method; each call consumes the next step (the last one repeats). */
+function script(steps: Record<string, Step[]>): void {
+	mockSend.mockImplementation(async (_socket, method) => {
+		const queue = steps[method];
+		if (!queue || queue.length === 0) throw new Error(`unexpected ${method}`);
+		const step = queue.length > 1 ? queue.shift()! : queue[0];
+		if (step instanceof Error) throw step;
+		return step;
+	});
+}
+
+function status(state: "pending" | "answered" | "none", taskStatus: string, approved?: boolean) {
+	return okResp({ kind: "cancel", state, taskStatus, ...(approved === undefined ? {} : { approved }) });
+}
+
+function callsOf(method: string) {
+	return mockSend.mock.calls.filter((call) => call[1] === method);
+}
+
+// S4/S6 (Seq 2003 review 2003-010): a legacy To Do card that owns a worktree is
+// ALREADY `todo`, so for a reset the status alone proves nothing.
+describe("task move --status todo after the socket drops", () => {
+	const method = "task.requestReset";
+	const reset = (state: "pending" | "answered" | "none", resetNeeded: boolean, extra: Record<string, unknown> = {}) =>
+		okResp({ kind: "reset", state, taskStatus: "todo", resetNeeded, ...extra });
+
+	it("a pending request on a todo card is still pending (exit 25), not a false success", async () => {
+		script({ [method]: [new Error("Socket timeout (600s)")], "approval.status": [reset("pending", true)] });
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null)).rejects.toThrow("EXIT_25");
+		expect(stdoutOutput).not.toContain("now To Do");
+	});
+
+	it("no record + todo card that still owns its run → outcome unknown, not success", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [reset("none", true)] });
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null)).rejects.toThrow("EXIT_26");
+	});
+
+	it("todo and no run left to reset → the reset happened", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [reset("answered", false, { approved: true })] });
+		await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null);
+		expect(stdoutOutput).toContain("now To Do");
+	});
+
+	it("a voided request says so — no false 'nothing was deleted'", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [reset("answered", false, { approved: false, stale: true })] });
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null)).rejects.toThrow(`EXIT_${CLI_EXIT_CODE_RESET_DECLINED}`);
+		expect(stderrOutput).toContain("voided before anyone answered");
+		expect(stderrOutput).toContain("may have removed its worktree");
+		expect(stderrOutput).not.toContain("nothing was stopped or deleted");
+	});
+
+	it("a direct stale result says the same, and a kept branch is reported", async () => {
+		mockSend.mockResolvedValue(okResp({ approved: false, stale: true }));
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null)).rejects.toThrow(`EXIT_${CLI_EXIT_CODE_RESET_DECLINED}`);
+		expect(stderrOutput).toContain("voided before anyone answered");
+
+		stderrOutput = "";
+		mockSend.mockResolvedValue(okResp({ approved: true, task: { ...FAKE_TASK, status: "todo" }, keptBranches: [{ name: "release/2.0", reason: "not-owned" }] }));
+		await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null);
+		expect(stdoutOutput).toContain("Kept branch release/2.0: dev3 did not create it for this task");
+	});
+});
+
+describe.each([
+	{ status: "cancelled", method: "task.requestCancellation", declineExit: "EXIT_22" },
+	{ status: "completed", method: "task.requestCompletion", declineExit: "EXIT_6" },
+] as const)("task move --status $status after the socket drops", ({ status: target, method, declineExit }) => {
+	it("re-attaches to a request the app confirms is pending, and reports the user's answer", async () => {
+		script({
+			[method]: [emptyResponse(), okResp({ approved: true, task: { ...FAKE_TASK, status: target } })],
+			"approval.status": [status("pending", "in-progress")],
+		});
+
+		await handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null);
+
+		const requests = callsOf(method);
+		expect(requests).toHaveLength(2);
+		expect(requests[0][2]).toEqual({ taskId: "aaaaaaaa" });
+		expect(requests[1][2]).toEqual({ taskId: "aaaaaaaa", attachOnly: true });
+		expect(stderrOutput).toContain("still pending there");
+		expect(stdoutOutput).toContain("User approved");
+	});
+
+	it("never re-sends the request when the app says the user already declined", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [status("answered", "in-progress", false)] });
+
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow(declineExit);
+		expect(callsOf(method)).toHaveLength(1);
+		expect(stderrOutput).toContain("User declined");
+	});
+
+	it("reports an approval that landed while disconnected as success", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [status("answered", target, true)] });
+
+		await handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null);
+		expect(callsOf(method)).toHaveLength(1);
+		expect(stdoutOutput).toContain("User approved");
+	});
+
+	it("exits 26 without re-asking when the app has no record and the task has not moved", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [status("none", "in-progress")] });
+
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow("EXIT_26");
+		expect(callsOf(method)).toHaveLength(1);
+		expect(stderrOutput).toContain("outcome is unknown");
+		// No record is not evidence either way.
+		expect(stderrOutput).toContain("not evidence");
+		expect(stderrOutput).not.toContain("User declined");
+		expect(stderrOutput).not.toMatch(/nothing was approved/i);
+	});
+
+	it("reports the move when the app has no record but the task reached its target", async () => {
+		script({ [method]: [emptyResponse()], "approval.status": [status("none", target)] });
+
+		await handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null);
+		expect(stdoutOutput).toContain("no record of how the request was answered");
+		expect(stdoutOutput).not.toContain("User approved");
+	});
+
+	it("never re-attaches through an app that does not know approval.status", async () => {
+		vi.useFakeTimers();
+		try {
+			// An old app would read attachOnly as a fresh ask and answer it; the CLI
+			// must never get that far.
+			script({
+				[method]: [emptyResponse(), okResp({ approved: true, task: { ...FAKE_TASK, status: target } })],
+				"approval.status": [errResp("Unknown method: approval.status")],
+			});
+
+			const run = expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow("EXIT_26");
+			await vi.advanceTimersByTimeAsync(61_000);
+			await run;
+			expect(callsOf(method)).toHaveLength(1);
+			expect(stderrOutput).toContain("could not be reached again");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps probing through a restart window, then re-attaches", async () => {
+		vi.useFakeTimers();
+		try {
+			const appDown = new Error("APP_NOT_RUNNING");
+			script({
+				[method]: [emptyResponse(), okResp({ approved: false })],
+				"approval.status": [appDown, appDown, status("pending", "in-progress")],
+			});
+
+			const run = expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow(declineExit);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await run;
+			expect(callsOf("approval.status")).toHaveLength(3);
+			expect(callsOf(method)[1][2]).toMatchObject({ attachOnly: true });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("exits 25 when the wait ran out and the app says the request is still pending", async () => {
+		script({ [method]: [new Error("Socket timeout (600s)")], "approval.status": [status("pending", "in-progress")] });
+
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow("EXIT_25");
+		expect(callsOf(method)).toHaveLength(1);
+		expect(stderrOutput).toContain("still pending");
+		expect(stderrOutput).toContain("does not open a second dialog");
+	});
+
+	it("does not treat a refused first connect as a lost request", async () => {
+		script({ [method]: [new Error("APP_NOT_RUNNING")], "approval.status": [status("pending", "in-progress")] });
+
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow("APP_NOT_RUNNING");
+		expect(callsOf("approval.status")).toHaveLength(0);
+	});
+
+	it("treats the app going down DURING a re-attach as another loss, not a hard error", async () => {
+		// Once the app confirmed the request is pending, a refused connect means it
+		// went away mid-wait: keep probing, do not surface APP_NOT_RUNNING.
+		script({
+			[method]: [emptyResponse(), new Error("APP_NOT_RUNNING"), okResp({ approved: false })],
+			"approval.status": [status("pending", "in-progress")],
+		});
+
+		await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow(declineExit);
+		expect(callsOf(method)).toHaveLength(3);
+		expect(callsOf(method)[2][2]).toMatchObject({ attachOnly: true });
+	});
+
+	it("stops at the original deadline when the connection keeps dropping on accept", async () => {
+		vi.useFakeTimers();
+		try {
+			// Every attempt is accepted and then dropped, and the app keeps answering
+			// "pending" — without a deadline check the re-attach loop never ends.
+			mockSend.mockImplementation(async (_socket, called) => {
+				if (called === "approval.status") return status("pending", "in-progress");
+				vi.setSystemTime(Date.now() + 61_000);
+				throw emptyResponse();
+			});
+
+			await expect(handleTask("move", args(["aaaaaaaa"], { status: target }), SOCKET, null)).rejects.toThrow("EXIT_25");
+			expect(callsOf(method).length).toBeLessThanOrEqual(12);
+			expect(stderrOutput).toContain("still pending");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -1307,10 +1573,10 @@ describe("task move --if-status flag", () => {
 	});
 
 	it("does not include ifStatus when --if-status is not provided", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null);
+		await handleTask("move", args(["aaaaaaaa"], { status: "review-by-user" }), SOCKET, null);
 
 		const params = mockSend.mock.calls[0]![2]!;
 		expect(params).not.toHaveProperty("ifStatus");
@@ -1335,10 +1601,10 @@ describe("task move --if-status-not flag", () => {
 	});
 
 	it("does not include ifStatusNot when --if-status-not is not provided", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args(["aaaaaaaa"], { status: "todo" }), SOCKET, null);
+		await handleTask("move", args(["aaaaaaaa"], { status: "review-by-user" }), SOCKET, null);
 
 		const params = mockSend.mock.calls[0]![2]!;
 		expect(params).not.toHaveProperty("ifStatusNot");
@@ -1378,47 +1644,47 @@ describe("task move --if-status-not flag", () => {
 
 describe("task move --id flag", () => {
 	it("uses --id flag when no positional arg given", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args([], { id: "bbbbbbbb", status: "todo" }), SOCKET, null);
+		await handleTask("move", args([], { id: "bbbbbbbb", status: "review-by-user" }), SOCKET, null);
 
 		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.move", {
 			taskId: "bbbbbbbb",
-			newStatus: "todo",
+			newStatus: "review-by-user",
 		});
 	});
 
 	it("--id flag takes priority over context taskId", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args([], { id: "bbbbbbbb", status: "todo" }), SOCKET, CTX);
+		await handleTask("move", args([], { id: "bbbbbbbb", status: "review-by-user" }), SOCKET, CTX);
 
-		const params = mockSend.mock.calls[0]![2]!;
+		const params = mockSend.mock.calls.find((call) => call[1] === "task.move")![2]!;
 		expect(params.taskId).toBe("bbbbbbbb");
 	});
 });
 
 describe("task move --task aliases", () => {
 	it("--task flag takes priority over context taskId", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args([], { task: "bbbbbbbb", status: "todo" }), SOCKET, CTX);
+		await handleTask("move", args([], { task: "bbbbbbbb", status: "review-by-user" }), SOCKET, CTX);
 
-		const params = mockSend.mock.calls[0]![2]!;
+		const params = mockSend.mock.calls.find((call) => call[1] === "task.move")![2]!;
 		expect(params.taskId).toBe("bbbbbbbb");
 		expect(params.taskId).not.toBe(CTX.taskId);
 	});
 
 	it("--task-id flag is accepted as an explicit target alias", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
-		await handleTask("move", args([], { "task-id": "cccccccc", status: "todo" }), SOCKET, CTX);
+		await handleTask("move", args([], { "task-id": "cccccccc", status: "review-by-user" }), SOCKET, CTX);
 
-		const params = mockSend.mock.calls[0]![2]!;
+		const params = mockSend.mock.calls.find((call) => call[1] === "task.move")![2]!;
 		expect(params.taskId).toBe("cccccccc");
 		expect(params.taskId).not.toBe(CTX.taskId);
 	});
@@ -1428,7 +1694,7 @@ describe("task move --task aliases", () => {
 // create should support --description to set initial description
 
 describe("task create --description", () => {
-	const createdTask: Task = { ...FAKE_TASK, status: "todo", seq: 50, title: "With desc", description: "Full description here" };
+	const createdTask: Task = { ...FAKE_TASK, status: "review-by-user", seq: 50, title: "With desc", description: "Full description here" };
 
 	it("sends description to server when --description is provided", async () => {
 		mockSend.mockResolvedValue(okResp(createdTask));
@@ -1497,6 +1763,23 @@ describe("task create --description", () => {
 		expect(params.title).toBe("Release notes");
 		expect(params.description).toBe(markdown);
 	});
+
+	it("refuses a positional description together with --description instead of dropping one", async () => {
+		await expect(
+			handleTask("create", args(["positional text"], { project: "proj-001", title: "T", description: "flag text" }), SOCKET, null),
+		).rejects.toThrow("EXIT_3");
+
+		expect(mockSend).not.toHaveBeenCalled();
+		expect(mockReadStdin).not.toHaveBeenCalled();
+	});
+
+	it("refuses a positional description together with --description -", async () => {
+		await expect(
+			handleTask("create", args(["positional text"], { project: "proj-001", title: "T", description: "-" }), SOCKET, null),
+		).rejects.toThrow("EXIT_3");
+
+		expect(mockSend).not.toHaveBeenCalled();
+	});
 });
 
 // ─── task move: status validation ────────────────────────────────────────────
@@ -1534,7 +1817,7 @@ describe("task move status validation", () => {
 describe("task create cross-project", () => {
 	const createdTask = {
 		...FAKE_TASK,
-		status: "todo" as const,
+		status: "review-by-user" as const,
 		seq: 50,
 		projectId: "other-proj",
 	};
@@ -1616,11 +1899,11 @@ describe("task update: short ID resolution", () => {
 
 describe("task move: short ID resolution", () => {
 	it("resolves 8-char short ID to full UUID before sending to server", async () => {
-		const moved = { ...FAKE_TASK, status: "todo" as const };
+		const moved = { ...FAKE_TASK, status: "review-by-user" as const };
 		mockSend.mockResolvedValue(okResp(moved));
 
 		const shortId = FAKE_TASK.id.slice(0, 8);
-		await handleTask("move", args([shortId], { status: "todo" }), SOCKET, CTX);
+		await handleTask("move", args([shortId], { status: "review-by-user" }), SOCKET, CTX);
 
 		const sentId = (mockSend.mock.calls[0]![2]! as Record<string, unknown>).taskId;
 		expect(sentId).toBe(FAKE_TASK.id);
@@ -1711,24 +1994,6 @@ describe("task create with positional content (e.g. @file)", () => {
 		const params = mockSend.mock.calls[0]![2]!;
 		expect(params.title).toBe("Port exposure");
 		expect(params.description).toBe(fileContent);
-	});
-
-	it("--description flag takes priority over positional content", async () => {
-		mockSend.mockResolvedValue(okResp(createdTask));
-
-		await handleTask(
-			"create",
-			args(["file content here"], {
-				project: "proj-001",
-				title: "Task",
-				description: "Explicit desc",
-			}),
-			SOCKET,
-			null,
-		);
-
-		const params = mockSend.mock.calls[0]![2]!;
-		expect(params.description).toBe("Explicit desc");
 	});
 
 	it("uses first line of positional as title when --title is not provided", async () => {

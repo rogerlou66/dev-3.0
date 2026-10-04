@@ -4,11 +4,12 @@ import { chmodSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from "node:
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PATHS } from "../electrobun-platform";
-import type { AgentCheckResult, CodingAgent, ConfigSourceEntry, Dev3RepoConfig, GitHubCliStatus, GlobalSettings, HarnessReadinessReport, Project, ProjectSettingsUpdate, RequirementCheckResult, RosettaWarningInfo, ShellAvailability } from "../../shared/types";
+import type { AgentCheckResult, AgentModelAvailability, CodingAgent, ConfigSourceEntry, Dev3RepoConfig, GitHubCliStatus, GlobalSettings, HarnessReadinessReport, Project, ProjectSettingsUpdate, RequirementCheckResult, RosettaWarningInfo, ShellAvailability } from "../../shared/types";
 import { SHELL_FALLBACK_ORDER, type ShellFlavor, shellCandidatePaths } from "../../shared/posix-shell";
 import { getUserShell, resolveUserShell, setShellPreference } from "../shell-env";
 import * as data from "../data";
 import * as agents from "../agents";
+import { resolveModelAvailability } from "../agent-available-models";
 import * as github from "../github";
 import * as updater from "../updater";
 import * as rosetta from "../rosetta";
@@ -33,6 +34,8 @@ import type { LowBatteryStatus } from "../../shared/low-battery";
 import { installAgentSkills } from "../agent-skills";
 
 import { forceSelectLowBatteryStyle, lowBatteryStatus } from "../low-battery";
+import { writeShellInit } from "../shell-init";
+import { previewShellPrompt } from "../shell-prompt-preview";
 
 /** Reject malformed env maps at the RPC boundary — the UI validates too, but
  *  saves must not depend on the client being well-behaved. */
@@ -64,10 +67,21 @@ function requireProjectName(raw: string): string {
 // existing `./settings-config` importers keep working.
 export { resolveOperationalProjectConfig } from "../repo-config";
 
-async function getResolvedProject(params: { projectId: string; worktreePath: string }): Promise<Project> {
-	log.debug("→ getResolvedProject", { projectId: params.projectId, worktreePath: params.worktreePath });
+/**
+ * The task-scoped config the UI reads to decide what a task HAS — a dev server,
+ * a setup script. It must use the same resolver a start uses
+ * ({@link repoConfig.resolveOperationalProjectConfig}), or the header disagrees
+ * with the machinery: a `devScript` set in the main checkout's gitignored
+ * `.dev3/config.local.json` never reaches a worktree, so a worktree-only
+ * resolution reports "no dev server" for a project that starts one fine.
+ */
+async function getResolvedProject(params: { projectId: string; taskId: string }): Promise<Project> {
+	log.debug("→ getResolvedProject", { projectId: params.projectId, taskId: params.taskId });
 	const project = await data.getProject(params.projectId);
-	const resolved = await repoConfig.resolveProjectConfig(project, params.worktreePath);
+	const task = await data.getTask(project, params.taskId);
+	const resolved = await repoConfig.resolveOperationalProjectConfig(project, task.worktreePath ?? undefined, {
+		foreignCode: task.foreignCode,
+	});
 	log.debug("← getResolvedProject");
 	return resolved;
 }
@@ -235,13 +249,13 @@ function getShellAvailability(): ShellAvailability {
  */
 async function applyTmuxConfigChange(
 	theme: "dark" | "light",
-	options: { refreshShell: boolean; dimInactivePanes: boolean; appearancePreset?: "default" | "cmux" },
+	options: { refreshShell: boolean; dimInactivePanes: boolean; dimChanged: boolean; appearancePreset?: "default" | "cmux" },
 ): Promise<void> {
 	try {
 		if (options.refreshShell) process.env.SHELL = getUserShell();
 		setTmuxPaneDimming(options.dimInactivePanes);
 		writeTmuxConfigs();
-		await pty.applyTmuxTheme(theme, options.appearancePreset ?? "default");
+		await pty.applyTmuxTheme(theme, { appearancePreset: options.appearancePreset ?? "default", ...(options.dimChanged ? { paneDimming: options.dimInactivePanes } : {}) });
 	} catch (err) {
 		log.warn("Failed to push the settings change into tmux (non-fatal)", { error: String(err) });
 	}
@@ -313,6 +327,18 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	// `resolvedTheme` may be absent (nothing has called setTmuxTheme yet); the
 	// live in-memory theme is the fallback, never a hardcoded "dark" — that would
 	// flip a light-theme user's terminals on an unrelated shell change.
+	// Shell panes source the prompt style at start, so a new style only needs the
+	// init files rewritten — no tmux reload.
+	if (
+		process.platform !== "win32" &&
+		(stored.shellPrompt !== next.shellPrompt || stored.shellPromptCustom !== next.shellPromptCustom)
+	) {
+		try {
+			writeShellInit(next);
+		} catch (err) {
+			log.warn("Failed to write the shell prompt style (non-fatal)", { error: String(err) });
+		}
+	}
 	const shellChanged = stored.terminalShell !== next.terminalShell;
 	const dimChanged = (stored.dimInactivePanes !== false) !== (next.dimInactivePanes !== false);
 	if (process.platform !== "win32" && (shellChanged || dimChanged)) {
@@ -320,6 +346,7 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 			refreshShell: shellChanged,
 			dimInactivePanes: next.dimInactivePanes !== false,
 			appearancePreset: next.appearancePreset,
+			dimChanged,
 		});
 	}
 	getPushMessage()?.("globalSettingsUpdated", next);
@@ -395,6 +422,17 @@ async function saveAgents(params: { agents: CodingAgent[] }): Promise<void> {
 	// overrides only exist merged, and every listener renders that view.
 	getPushMessage()?.("agentsUpdated", await agents.getAllAgents());
 	log.info("← saveAgents done");
+}
+
+async function getAgentAvailableModels(params: {
+	agentId: string;
+	accountId?: string | null;
+	refresh?: boolean;
+}): Promise<AgentModelAvailability> {
+	const all = await agents.getAllAgents();
+	const agent = all.find((a) => a.id === params.agentId);
+	if (!agent) return { status: "unknown" };
+	return resolveModelAvailability(agent, { accountId: params.accountId, refresh: params.refresh });
 }
 
 async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: string; error?: string }> {
@@ -703,7 +741,7 @@ async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dar
 	if (settings.appearancePreset !== appearancePreset || settings.theme !== next.theme || settings.resolvedTheme !== resolvedTheme) {
 		getPushMessage()?.("globalSettingsUpdated", next);
 	}
-	await pty.applyTmuxTheme(resolvedTheme, appearancePreset);
+	await pty.applyTmuxTheme(resolvedTheme, { appearancePreset });
 }
 
 async function getLowBatteryStatus(): Promise<LowBatteryStatus> {
@@ -730,6 +768,7 @@ export const settingsConfigHandlers = {
 	getGlobalSettings,
 	getGitHubCliStatus,
 	getShellAvailability,
+	previewShellPrompt: (params: { source: string; columns?: number }) => previewShellPrompt(params.source, params.columns),
 	saveGlobalSettings,
 	getLowBatteryStatus,
 	selectLowBatteryStyle,
@@ -737,6 +776,7 @@ export const settingsConfigHandlers = {
 	installDev3Cli,
 	getAgents,
 	saveAgents,
+	getAgentAvailableModels,
 	checkForUpdate,
 	downloadUpdate,
 	applyUpdate,

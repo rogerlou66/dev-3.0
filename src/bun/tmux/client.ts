@@ -15,6 +15,7 @@
  * (v1.29.1 ELOOP incident, decision 105).
  */
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { spawn as defaultSpawn } from "../spawn";
 import {
 	dereferenceTmuxShim,
@@ -37,6 +38,8 @@ type SpawnedProcess = ReturnType<SpawnFn>;
 export interface TmuxClientOptions {
 	/** Spawn implementation — defaults to the PATH-patched project wrapper. */
 	spawn?: SpawnFn;
+	/** Existence probe for pane working directories — defaults to `existsSync`. */
+	cwdExists?: (path: string) => boolean;
 	/** Default tmux socket for calls that don't pass one. */
 	socket?: string;
 }
@@ -71,6 +74,7 @@ export type TmuxPaneSighting =
 
 /** Printed by a guarded send if and only if the guard held and the keys went out. */
 const GUARDED_SEND_MARKER = "dev3-pane-input-sent";
+const GUARDED_SEND_IN_MODE_MARKER = "dev3-pane-input-in-mode:";
 /** The server option holding this server's generation token, for its whole lifetime. */
 const SERVER_TOKEN_OPTION = "@dev3_server_token";
 /** Bound for the token command: a wedged server must not hold a session's setup open. */
@@ -90,13 +94,32 @@ const DEFAULT_RUN_TIMEOUT_MS = 10_000;
 
 type RunResult = BoundedRunResult;
 
+/**
+ * tmux given `-c <dir that does not exist>` exits 0 and starts the pane in
+ * `$HOME`. Every task launcher checks its worktree first; this is the backstop
+ * for a launcher that forgot. Format strings (`#{pane_current_path}`) pass.
+ */
+export class TmuxMissingCwdError extends Error {
+	constructor(readonly cwd: string) {
+		super(`Refusing to start a tmux pane in a directory that does not exist: ${cwd}`);
+		this.name = "TmuxMissingCwdError";
+	}
+}
+
 export class TmuxClient {
 	private readonly spawnFn: SpawnFn;
+	private readonly cwdExists: (path: string) => boolean;
 	readonly defaultSocket: string;
 
 	constructor(opts: TmuxClientOptions = {}) {
 		this.spawnFn = opts.spawn ?? defaultSpawn;
+		this.cwdExists = opts.cwdExists ?? existsSync;
 		this.defaultSocket = opts.socket ?? DEFAULT_TMUX_SOCKET;
+	}
+
+	private assertPaneCwd(cwd: string | undefined): void {
+		if (!cwd || cwd.includes("#{")) return;
+		if (!this.cwdExists(cwd)) throw new TmuxMissingCwdError(cwd);
 	}
 
 	// ── Binary surface (delegates to ./binary — the only path to it) ──
@@ -221,6 +244,7 @@ export class TmuxClient {
 		// `-f` on every server-starting command: without it tmux falls back to
 		// /etc/tmux.conf + ~/.tmux.conf and the user's personal settings leak
 		// into the dev3 server (decisions/2026/08/02/isolate-tmux-config.md).
+		this.assertPaneCwd(opts.cwd);
 		const args = ["-f", activeTmuxConfigPath(), "new-session", "-d"];
 		for (const [key, value] of Object.entries(opts.env ?? {})) {
 			args.push("-e", `${key}=${value}`);
@@ -270,6 +294,7 @@ export class TmuxClient {
 		/** Environment for the client PROCESS itself (not the session env). */
 		processEnv?: Record<string, string>;
 	} & SocketOpt): SpawnedProcess {
+		this.assertPaneCwd(opts.cwd);
 		const args = ["-f", opts.configFile, "new-session"];
 		if (opts.attachIfExists) args.push("-A");
 		args.push("-c", opts.cwd);
@@ -352,6 +377,7 @@ export class TmuxClient {
 		cwd?: string;
 		command?: string;
 	} & SocketOpt): Promise<{ paneId: string | null; stderr: string }> {
+		this.assertPaneCwd(opts.cwd);
 		const args = ["split-window", opts.orientation === "vertical" ? "-v" : "-h"];
 		if (opts.before) args.push("-b");
 		if (opts.size) args.push("-l", opts.size);
@@ -375,6 +401,7 @@ export class TmuxClient {
 		cwd?: string;
 		command?: string;
 	} & SocketOpt): Promise<{ paneId: string | null; stderr: string }> {
+		this.assertPaneCwd(opts.cwd);
 		const args = ["new-window"];
 		if (opts.name) args.push("-n", opts.name);
 		if (opts.printPaneId) args.push("-P", "-F", PANE_ID_FORMAT.formatString);
@@ -388,6 +415,11 @@ export class TmuxClient {
 	/** `kill-pane -t`. */
 	killPane(paneId: string, opts?: CommandOpts): Promise<void> {
 		return this.runCommand(opts?.socket, ["kill-pane", "-t", paneId], opts);
+	}
+
+	/** `kill-window -t` — target a window id (`@N`); indexes renumber under you. */
+	killWindow(windowId: string, opts?: CommandOpts): Promise<void> {
+		return this.runCommand(opts?.socket, ["kill-window", "-t", windowId], opts);
 	}
 
 	/**
@@ -572,7 +604,8 @@ export class TmuxClient {
 	/**
 	 * Validate the pane's incarnation and send in ONE command list, so nothing can move
 	 * the pane in between. `{ sent: false }` means NOTHING went out — an unknown pane
-	 * included (tmux exits 0).
+	 * included (tmux exits 0). `inMode` says the ONLY failed condition was copy mode:
+	 * the same pane, still alive, that will take the keys once the user scrolls back.
 	 *
 	 * Literal text is loaded into a private tmux buffer and pasted with `paste-buffer -p`,
 	 * NOT typed with `send-keys`. Typed bytes reach the pane as whatever the kernel hands
@@ -600,7 +633,7 @@ export class TmuxClient {
 			/** Kill and reap the command when this aborts. */
 			signal?: AbortSignal;
 		} & SocketOpt,
-	): Promise<{ sent: boolean }> {
+	): Promise<{ sent: boolean; inMode: boolean }> {
 		if (!/^[A-Za-z0-9_.-]+$/.test(opts.session)) throw new Error(`unsafe tmux session name: ${opts.session}`);
 		if (!/^%\d+$/.test(opts.pane)) throw new Error(`unsafe tmux pane id: ${opts.pane}`);
 		if (!/^[A-Za-z0-9-]{1,64}$/.test(opts.serverToken)) throw new Error(`unsafe tmux server token: ${opts.serverToken}`);
@@ -623,17 +656,20 @@ export class TmuxClient {
 		// preflight: a dead pane stays addressable, and a pane in copy mode routes send-keys
 		// through the MODE key table — measured: the marker still prints and the program
 		// receives nothing, which would be a false `delivered`.
-		const guard =
+		const identity = (mode: string) =>
 			`#{&&:#{==:#{${SERVER_TOKEN_OPTION}},${opts.serverToken}},` +
 			`#{&&:#{==:#{session_name},${opts.session}},` +
-			`#{&&:#{==:#{pane_dead},0},#{==:#{pane_in_mode},0}}}}`;
+			`#{&&:#{==:#{pane_dead},0},#{${mode}:#{pane_in_mode},0}}}}`;
+		// The else branch tells a scrolled-up pane from a foreign one in the same server
+		// turn: it prints 1 only when identity and liveness held and copy mode alone refused.
 		const args = [
 			"if-shell",
 			"-t",
 			opts.pane,
 			"-F",
-			guard,
+			identity("=="),
 			[...commands, `display-message -p ${GUARDED_SEND_MARKER}`].join(" ; "),
+			`display-message -p -t ${opts.pane} '${GUARDED_SEND_IN_MODE_MARKER}${identity("!=")}'`,
 		];
 		// One send is now several tmux commands, so `timeoutMs` is the budget for ALL of
 		// them: spending it whole on each would let one stage run past the deadline its
@@ -655,7 +691,7 @@ export class TmuxClient {
 			const result = await this.run(opts.socket, args, bounds());
 			if (result.exitCode !== 0) throw new TmuxError(args, result.exitCode, result.stderr);
 			pasted = result.stdout.includes(GUARDED_SEND_MARKER);
-			return { sent: pasted };
+			return { sent: pasted, inMode: !pasted && result.stdout.includes(`${GUARDED_SEND_IN_MODE_MARKER}1`) };
 		} finally {
 			// `-d` dropped every buffer that was actually pasted; a refused guard or a failure
 			// leaves one behind, and a message body must not linger in the server's buffer
@@ -722,6 +758,11 @@ export class TmuxClient {
 	/** `set-option -t <target> <option> <value>`. */
 	setOption(target: string, option: string, value: string, opts?: CommandOpts): Promise<void> {
 		return this.runCommand(opts?.socket, ["set-option", "-t", target, option, value], opts);
+	}
+
+	/** `set-option -g <option> <value>` — a server-global (session) option. */
+	setGlobalOption(option: string, value: string, opts?: CommandOpts): Promise<void> {
+		return this.runCommand(opts?.socket, ["set-option", "-g", option, value], opts);
 	}
 
 	/** `set-option -p -t <paneId> <option> <value>` — a pane-scoped (user) option. */

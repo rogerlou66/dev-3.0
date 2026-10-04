@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import { I18nProvider } from "../i18n";
@@ -15,6 +15,7 @@ vi.mock("../rpc", () => ({
 	api: {
 		request: {
 			getSystemMemory: vi.fn().mockResolvedValue(null),
+			getAllProjectTasks: vi.fn().mockResolvedValue([]),
 			checkSystemRequirements: vi.fn().mockResolvedValue([]),
 			getRosettaWarning: vi.fn().mockResolvedValue(null),
 			checkGhAvailable: vi.fn().mockResolvedValue({ available: true, notInstalled: false }),
@@ -70,7 +71,10 @@ vi.mock("../rpc", () => ({
 			listPendingCompletionRequests: vi.fn().mockResolvedValue([]),
 			respondToAgentCancellationRequest: vi.fn().mockResolvedValue(undefined),
 			listPendingCancellationRequests: vi.fn().mockResolvedValue([]),
+			respondToAgentResetRequest: vi.fn().mockResolvedValue(undefined),
+			listPendingResetRequests: vi.fn().mockResolvedValue([]),
 			getUnsavedWork: vi.fn().mockResolvedValue({ insertions: 0, deletions: 0, unpushed: 0, ahead: 0, baseUnreachable: false }),
+			getPendingAgentLaunchRequests: vi.fn().mockResolvedValue([]),
 			respondToAgentLaunchRequest: vi.fn().mockResolvedValue(undefined),
 			// The launch dialog reports itself on screen on mount so the bun side
 			// restarts its countdown; null means there is no timer to restart.
@@ -166,18 +170,24 @@ vi.mock("../components/ProjectView", () => ({
 	default: (props: {
 		projectId: string;
 		activeTaskId?: string;
+		taskDetailId?: string;
 		taskView?: boolean;
 		bellCounts?: Map<string, number>;
 		dockArtifact?: boolean;
+		dispatch?: (action: { type: string; request?: unknown }) => void;
 	}) => (
 		<div
 			data-testid="project-screen"
 			data-project-id={props.projectId}
 			data-active-task-id={props.activeTaskId ?? ""}
+			data-task-detail-id={props.taskDetailId ?? ""}
 			data-task-view={props.taskView ? "true" : "false"}
 			data-dock-artifact={props.dockArtifact ? "true" : "false"}
 			data-bell-count={String(props.bellCounts?.get("t-overflow") ?? 0)}
-		/>
+		>
+			<button data-testid="mock-open-diff" onClick={() => props.dispatch?.({ type: "openTaskDiff", request: { mode: "branch" } })} />
+			<button data-testid="mock-close-diff" onClick={() => props.dispatch?.({ type: "closeTaskDiff" })} />
+		</div>
 	),
 }));
 vi.mock("../components/TaskWorkspaceView", () => ({
@@ -519,7 +529,7 @@ describe("App keyboard shortcuts", () => {
 		it("still claims the same keys with Ctrl off macOS", async () => {
 			fakePlatform("linux");
 			await renderApp();
-			const event = new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true, bubbles: true, cancelable: true });
+			const event = new KeyboardEvent("keydown", { key: "p", code: "KeyP", ctrlKey: true, bubbles: true, cancelable: true });
 			act(() => window.dispatchEvent(event));
 			expect(event.defaultPrevented).toBe(true);
 		});
@@ -1702,6 +1712,86 @@ describe("App keyboard shortcuts", () => {
 			await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-other"));
 			expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-presentation", "popup");
 		});
+
+		// The inline diff replaces the pane that holds the dock, so the docked viewer
+		// lost its slot and re-hosted itself as a popup over the diff the user just
+		// asked for. The diff is the task's screen too: the panel waits offscreen.
+		describe("while the inline diff is open", () => {
+			const panelSettings = {
+				defaultAgentId: "builtin-claude",
+				defaultConfigId: "claude-default",
+				taskSortOrder: "oldest-first" as const,
+				updateChannel: "stable" as const,
+			};
+
+			async function renderOnTask() {
+				vi.mocked(api.request.getProjects).mockResolvedValue(oneProject);
+				vi.mocked(api.request.getGlobalSettings).mockResolvedValue(panelSettings);
+				vi.mocked(api.request.getLastRoute).mockResolvedValue({
+					route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
+				});
+				await renderApp();
+			}
+
+			function openArtifact(taskId = "t-artifact") {
+				act(() => {
+					window.dispatchEvent(new CustomEvent("dev3:openArtifactViewer", {
+						detail: { taskId, projectId: "p1", artifacts: [artifact("a")], index: 0 },
+					}));
+				});
+			}
+
+			it("hides the docked viewer behind the diff, and re-docks it when the diff closes", async () => {
+				await renderOnTask();
+				openArtifact();
+				await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true"));
+
+				await userEvent.click(screen.getByTestId("mock-open-diff"));
+
+				await waitFor(() => expect(screen.getByTestId("artifact-viewer")).toHaveAttribute("data-presentation", "offscreen"));
+				expect(screen.getByTestId("artifact-viewer-offscreen")).toBeInTheDocument();
+				expect(document.documentElement.dataset.artifactViewer).toBeUndefined();
+
+				await userEvent.click(screen.getByTestId("mock-close-diff"));
+
+				await waitFor(() => expect(screen.getByTestId("artifact-viewer")).not.toHaveAttribute("data-presentation", "offscreen"));
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true");
+				expect(screen.getByText("Artifact a")).toBeInTheDocument();
+			});
+
+			it("shows an artifact opened from the diff as a popup instead of hiding it", async () => {
+				await renderOnTask();
+				await userEvent.click(screen.getByTestId("mock-open-diff"));
+
+				openArtifact();
+
+				const card = await screen.findByTestId("artifact-viewer");
+				expect(card).toHaveAttribute("data-presentation", "popup");
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "false");
+			});
+
+			it("raises the toast for a new artifact instead of covering the diff", async () => {
+				await renderOnTask();
+				await userEvent.click(screen.getByTestId("mock-open-diff"));
+
+				act(() => {
+					window.dispatchEvent(new CustomEvent("rpc:cliShowArtifact", {
+						detail: { taskId: "t-artifact", projectId: "p1", artifacts: [artifact("a")], newCount: 1, taskSeq: 7, taskTitle: "Report", projectName: "Alpha" },
+					}));
+				});
+
+				const toastButton = await screen.findByRole("button", { name: /#7 · Alpha · Report/ });
+				expect(screen.queryByTestId("artifact-viewer")).not.toBeInTheDocument();
+				// Nobody has seen it yet, so the artifact must stay unread until the click.
+				expect(api.request.markTaskSharedItemsRead).not.toHaveBeenCalled();
+
+				// The toast leaves the diff for the task screen, where the panel docks.
+				await userEvent.click(toastButton);
+				expect(api.request.markTaskSharedItemsRead).toHaveBeenCalledWith(expect.objectContaining({ taskId: "t-artifact", kind: "artifacts" }));
+				await waitFor(() => expect(screen.getByTestId("project-screen")).toHaveAttribute("data-dock-artifact", "true"));
+				expect(screen.getByTestId("artifact-viewer")).not.toHaveAttribute("data-presentation", "offscreen");
+			});
+		});
 	});
 
 	describe("agent-to-agent message toast", () => {
@@ -1714,7 +1804,10 @@ describe("App keyboard shortcuts", () => {
 			setStreamerMode(false);
 			delete document.documentElement.dataset.streamer;
 			setAgentTrafficEnabledForTests(false);
+			delete (api.request as { getTasks?: unknown }).getTasks;
 		});
+
+		const CARD = "#7 Coordinator → #42 Receiver — check the payload";
 
 		/** Flip the beta on the way production does: through the settings mirror. */
 		function enableTrafficBeta() {
@@ -1723,8 +1816,16 @@ describe("App keyboard shortcuts", () => {
 			});
 		}
 
+		/** The whole-card button with the beta on: its name says where it goes. */
 		function toastButton() {
-			return screen.findByRole("button", { name: "#7 Coordinator → #42 Receiver — check the payload" });
+			return screen.findByRole("button", { name: `Open agent traffic: ${CARD}` });
+		}
+
+		/** Answer the click-time lookup of a toast's end, per project. */
+		function mockBoards(boards: Record<string, Array<{ id: string; status: string }>>) {
+			(api.request as { getTasks?: unknown }).getTasks = vi.fn(({ projectId }: { projectId: string }) =>
+				Promise.resolve(boards[projectId] ?? []),
+			);
 		}
 
 		async function renderWithBoard() {
@@ -1745,6 +1846,7 @@ describe("App keyboard shortcuts", () => {
 						toTitle: "Receiver",
 						fromSeq: 7,
 						fromTitle: "Coordinator",
+						fromTaskId: "t-sender",
 						preview: "check the payload",
 						...detail,
 					},
@@ -1764,9 +1866,10 @@ describe("App keyboard shortcuts", () => {
 			disableTrafficBeta();
 			dispatchAgentMessage();
 
-			expect(screen.getByText("#7 Coordinator → #42 Receiver")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Open sender task #7 Coordinator" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Open recipient task #42 Receiver" })).toBeInTheDocument();
 			await userEvent.click(
-				await screen.findByRole("button", { name: "#7 Coordinator → #42 Receiver — check the payload" }),
+				await screen.findByRole("button", { name: `Open recipient task #42 Receiver: ${CARD}` }),
 			);
 			await waitFor(() => {
 				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
@@ -1844,16 +1947,233 @@ describe("App keyboard shortcuts", () => {
 			expect(await screen.findByTestId("agent-traffic-screen")).toHaveAttribute("data-focus-task-id", "");
 		});
 
-		// The toast outlives the toggle, so the destination cannot be captured when
-		// the toast is built — it has to be decided at click time.
-		it("follows a beta switched on after the toast was already on screen", async () => {
+		// The card's name says where it goes, so the destination is fixed when the
+		// toast is raised: a beta switched on later must not make the label lie.
+		it("keeps the destination its label names when the beta is switched on mid-toast", async () => {
 			await renderWithBoard();
+			disableTrafficBeta();
 			dispatchAgentMessage();
 			enableTrafficBeta();
 
-			await userEvent.click(await toastButton());
+			await userEvent.click(await screen.findByRole("button", { name: `Open recipient task #42 Receiver: ${CARD}` }));
 
-			expect(screen.getByTestId("agent-traffic-screen")).toBeInTheDocument();
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
+			});
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+			expect(screen.queryByRole("button", { name: "Agent traffic" })).toBeNull();
+		});
+
+		// Switched OFF mid-toast, there is no traffic screen left to open: the click
+		// falls back to the receiver, as the card always has without the beta.
+		it("falls back to the receiver when the beta is switched off mid-toast", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			const card = await toastButton();
+			disableTrafficBeta();
+
+			await userEvent.click(card);
+
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
+			});
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+		});
+
+		it("offers three labelled destinations: sender, agent traffic, recipient", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+
+			const actions = document.querySelector("[data-toast-actions]") as HTMLElement;
+			// Compact labels on one row; the spoken names keep the roles.
+			expect(Array.from(actions.querySelectorAll("button")).map((b) => b.textContent)).toEqual([
+				"#7",
+				"Agent traffic",
+				"#42",
+			]);
+			expect(Array.from(actions.querySelectorAll("button")).map((b) => b.getAttribute("aria-label"))).toEqual([
+				"Sender #7",
+				null,
+				"Recipient #42",
+			]);
+		});
+
+		it.each([
+			["the sender action", "Sender #7", "t-sender"],
+			["the recipient action", "Recipient #42", "t-receiver"],
+			["the sender header link", "Open sender task #7 Coordinator", "t-sender"],
+			["the recipient header link", "Open recipient task #42 Receiver", "t-receiver"],
+		])("%s opens that task, never the traffic screen", async (_what, name, expected) => {
+			mockBoards({ p1: [{ id: "t-sender", status: "in-progress" }, { id: "t-receiver", status: "in-progress" }] });
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+			const trafficOpens = vi.fn();
+			window.addEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, trafficOpens);
+
+			await userEvent.click(screen.getByRole("button", { name }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", expected);
+			});
+			window.removeEventListener(OPEN_AGENT_TRAFFIC_LOG_EVENT, trafficOpens);
+			// The click did not also fall through to the card's own destination — not
+			// even on the way: a traffic hop followed by the task would end up here too.
+			expect(trafficOpens).not.toHaveBeenCalled();
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+			// Acting is answering: the toast goes.
+			expect(screen.queryByRole("button", { name: `Open agent traffic: ${CARD}` })).toBeNull();
+		});
+
+		it("draws both task names in the header as underlined links that keep the number", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage({ fromTitle: "A very long sender title that will not fit in one line of a toast" });
+			await screen.findByRole("button", { name: /^Open agent traffic: #7 A very long/ });
+
+			const header = document.querySelector("[data-toast-context]") as HTMLElement;
+			const links = Array.from(header.querySelectorAll("button"));
+			expect(links).toHaveLength(2);
+			for (const link of links) expect(link.className).toContain("underline");
+			// The number is its own untruncated span; only the title takes the ellipsis.
+			expect(links[0]!.firstElementChild).toHaveTextContent("#7");
+			expect(links[0]!.firstElementChild!.className).not.toContain("truncate");
+			expect(links[0]!.children[1]!.className).toContain("truncate");
+		});
+
+		it("the traffic action opens the traffic screen with the receiver as subject", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+
+			await userEvent.click(screen.getByRole("button", { name: "Agent traffic" }));
+
+			const view = await screen.findByTestId("agent-traffic-screen");
+			expect(view).toHaveAttribute("data-focus-task-id", "t-receiver");
+		});
+
+		// Cross-project: the sender opens on ITS board, and both ends say which board.
+		it("opens a sender on another board there, naming both projects", async () => {
+			mockBoards({ p3: [{ id: "t-sender", status: "in-progress" }] });
+			vi.mocked(api.request.getProjects).mockResolvedValue([
+				...twoProjects,
+				{ id: "p3", name: "Billing", path: "/c", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "" },
+			]);
+			vi.mocked(api.request.getLastRoute).mockResolvedValue({ route: JSON.stringify({ screen: "project", projectId: "p1" }) });
+			await renderApp();
+			enableTrafficBeta();
+			dispatchAgentMessage({ fromProjectId: "p3" });
+
+			const header = await waitFor(() => document.querySelector("[data-toast-context]") as HTMLElement);
+			expect(header).toHaveTextContent("· Billing");
+			expect(header).toHaveTextContent("· Alpha");
+
+			await userEvent.click(screen.getByRole("button", { name: "Sender #7" }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-project-id", "p3");
+			});
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-sender");
+		});
+
+		// A variant group shares one seq; `#7-2` names the exact attempt.
+		it("names variant attempts with their index", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage({ fromVariantIndex: 2, toVariantIndex: 1 });
+			await screen.findByRole("button", { name: /^Open agent traffic: #7-2 Coordinator → #42-1 Receiver/ });
+
+			expect(screen.getByRole("button", { name: "Sender #7-2" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Recipient #42-1" })).toBeInTheDocument();
+		});
+
+		it("says a deleted task is gone instead of opening an empty screen", async () => {
+			mockBoards({ p1: [{ id: "t-receiver", status: "in-progress" }] });
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+
+			await userEvent.click(screen.getByRole("button", { name: "Sender #7" }));
+
+			expect(await screen.findByText("Task #7 no longer exists")).toBeInTheDocument();
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "");
+		});
+
+		it("opens a finished task as its board card, without resuming it", async () => {
+			mockBoards({ p1: [{ id: "t-sender", status: "completed" }] });
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+
+			await userEvent.click(screen.getByRole("button", { name: "Sender #7" }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-task-detail-id", "t-sender");
+			});
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "");
+		});
+
+		// A record queued before the sender id existed: no link to a task we cannot name.
+		it("keeps the sender as plain text when the payload has no sender id", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage({ fromTaskId: undefined });
+			await toastButton();
+
+			expect(screen.queryByRole("button", { name: /Open sender task/ })).toBeNull();
+			expect(document.querySelector("[data-toast-context]")).toHaveTextContent("#7 Coordinator");
+		});
+
+		it("dismisses without navigating anywhere", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			await toastButton();
+
+			const toastRoot = (await toastButton()).closest("[data-toast-id]") as HTMLElement;
+			await userEvent.click(within(toastRoot).getByRole("button", { name: "Dismiss" }));
+
+			expect(screen.queryByRole("button", { name: `Open agent traffic: ${CARD}` })).toBeNull();
+			expect(screen.queryByTestId("agent-traffic-screen")).toBeNull();
+			expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "");
+		});
+
+		it("reaches every destination by keyboard in reading order", async () => {
+			await renderWithBoard();
+			enableTrafficBeta();
+			dispatchAgentMessage();
+			const card = await toastButton();
+
+			const toastRoot = card.closest("[data-toast-id]") as HTMLElement;
+			const order = Array.from(toastRoot.querySelectorAll("button")).map((b) => b.getAttribute("aria-label"));
+			expect(order).toEqual([
+				"Open sender task #7 Coordinator",
+				"Open recipient task #42 Receiver",
+				"Sender #7",
+				null,
+				"Recipient #42",
+				`Open agent traffic: ${CARD}`,
+				"Dismiss",
+			]);
+			expect(Array.from(toastRoot.querySelectorAll("[data-toast-actions] button")).map((b) => b.textContent)).toEqual([
+				"#7",
+				"Agent traffic",
+				"#42",
+			]);
+			for (const button of toastRoot.querySelectorAll("button")) expect(button).not.toHaveAttribute("tabindex", "-1");
+
+			screen.getByRole("button", { name: "Recipient #42" }).focus();
+			await userEvent.keyboard("{Enter}");
+			await waitFor(() => {
+				expect(screen.getByTestId("project-screen")).toHaveAttribute("data-active-task-id", "t-receiver");
+			});
 		});
 
 		// The shortcut toggles the screen; a toast has nothing to toggle back to, so
@@ -1918,7 +2238,7 @@ describe("App keyboard shortcuts", () => {
 
 			dispatchAgentMessage();
 
-			expect(screen.queryByText("#7 Coordinator → #42 Receiver")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: /check the payload/ })).not.toBeInTheDocument();
 		});
 
 		// Off the screen the toast is the only signal there is — the beta being on
@@ -3960,6 +4280,56 @@ describe("App keyboard shortcuts", () => {
 		});
 	});
 
+	// R1: context menu / native menu start a To Do card through this app-level modal.
+	describe("launch requested from a status move", () => {
+		it("opens the launch dialog for the requested task", async () => {
+			await renderApp();
+			const task = { id: "t-launch", projectId: "p1", status: "todo", title: "Start me", description: "", worktreePath: null } as never;
+			const project = { id: "p1", name: "Alpha", path: "/a" } as never;
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent("dev3:launchRequested", { detail: { task, project, targetStatus: "in-progress" } }));
+			});
+			await waitFor(() => expect(document.getElementById("launch-variants-title")).not.toBeNull());
+		});
+	});
+
+	// Reset shares the cancellation dialog's red chrome (it destroys the worktree)
+	// but has its own channel, copy and answer RPC — a "yes" for one must never
+	// answer the other.
+	describe("agent reset request dialog", () => {
+		afterEach(() => {
+			vi.mocked(api.request.listPendingResetRequests).mockResolvedValue([]);
+		});
+
+		it("asks with danger chrome and the reset copy, answering through the reset channel only", async () => {
+			vi.mocked(confirm).mockResolvedValue(false);
+			await renderApp();
+			await act(async () => {
+				window.dispatchEvent(new CustomEvent("rpc:agentResetRequested", {
+					detail: { requestId: "req-r1", taskId: "t1", projectId: "p1", taskTitle: "Running task" },
+				}));
+			});
+			await waitFor(() => {
+				expect(api.request.respondToAgentResetRequest).toHaveBeenCalledWith({ requestId: "req-r1", approved: false });
+			});
+			expect(api.request.respondToAgentCancellationRequest).not.toHaveBeenCalled();
+			const opts = vi.mocked(confirm).mock.calls[0][0];
+			expect(opts).toMatchObject({ agentInitiated: true, danger: true, tone: "danger", title: "Reset to To Do requested" });
+			expect(opts.deferred?.gateConfirm).toBe(true);
+		});
+
+		it("replays a pending reset request on connect", async () => {
+			vi.mocked(api.request.listPendingResetRequests).mockResolvedValue([
+				{ requestId: "req-r-orphan", taskId: "t1", projectId: "p1", taskTitle: "Stranded", subject: undefined },
+			] as never);
+			vi.mocked(confirm).mockResolvedValue(false);
+			await renderApp();
+			await waitFor(() => {
+				expect(api.request.respondToAgentResetRequest).toHaveBeenCalledWith({ requestId: "req-r-orphan", approved: false });
+			});
+		});
+	});
+
 	// `agentCompletionRequested` is a one-shot push, so a window that reloads
 	// before answering never sees it again — and the blocked agent's retry joins
 	// the same request rather than pushing a second time. A connecting client asks
@@ -4004,6 +4374,18 @@ describe("App keyboard shortcuts", () => {
 	// Both agent dialogs are broadcast to every connected client (second window,
 	// remote browser). The first answer wins; the rest must close silently.
 	describe("agent request answered on another client", () => {
+		it("restores a pending extra-agent launch on mount", async () => {
+			vi.mocked(api.request.getPendingAgentLaunchRequests).mockResolvedValueOnce([{
+				requestId: "spawn-replay", taskId: "t1", projectId: "p1", taskTitle: "Restored agent launch",
+				targetStatus: "in-progress", scratch: false, requesterSeq: 42, requesterTitle: "Coordinator",
+				defaultPriority: "P3", canAddVariants: false, autoApproveAt: null,
+				subject: { seqLabel: "7", projectName: "Alpha", priority: "P3", labels: [], overview: null },
+				spawn: { choice: { agentId: null, configId: null }, handoff: false },
+			}]);
+			await renderApp();
+			expect(await screen.findByRole("dialog", { name: /Agent wants to add an agent/i })).toBeInTheDocument();
+		});
+
 		it("closes the completion dialog and skips this client's side effects", async () => {
 			vi.mocked(confirm).mockImplementation(((opts: { signal?: AbortSignal }) =>
 				new Promise<boolean>((resolve) => {
@@ -4092,5 +4474,83 @@ describe("App keyboard shortcuts", () => {
 			expect(document.title).toBe("dev-3.0");
 			expect(api.request.setWindowTitleContext).toHaveBeenCalledWith({ context: null });
 		});
+	});
+});
+
+describe("App navigation palettes are mutually exclusive", () => {
+	beforeEach(() => {
+		(window as Window & { __electrobunWebviewId?: number }).__electrobunWebviewId = 1;
+		rpcTransport.isElectrobun = true;
+		fakePlatform("mac");
+		vi.clearAllMocks();
+		vi.mocked(api.request.checkSystemRequirements).mockResolvedValue([]);
+		vi.mocked(api.request.getProjects).mockResolvedValue([]);
+		vi.mocked(api.request.getLastRoute).mockResolvedValue({ route: null });
+		vi.mocked(api.request.listTmuxSessions).mockResolvedValue([]);
+		vi.mocked(api.request.getAllProjectTasks).mockResolvedValue([]);
+	});
+
+	afterEach(() => {
+		Object.defineProperty(globalThis, "navigator", { value: realNavigator, writable: true, configurable: true });
+	});
+
+	const goToProject = () => userEvent.keyboard("{Meta>}{Shift>}k{/Shift}{/Meta}");
+	const commandPalette = () => userEvent.keyboard("{Meta>}{Shift>}p{/Shift}{/Meta}");
+	const openPalettes = () =>
+		["project-quick-switch", "command-palette", "coordinator-finder"].filter((id) => screen.queryByTestId(id));
+	const paletteInput = (testId: string) => within(screen.getByTestId(testId)).getByRole("textbox");
+
+	it("⇧⌘P replaces an open Go to Project palette instead of stacking on it", async () => {
+		await renderApp();
+		await goToProject();
+		expect(openPalettes()).toEqual(["project-quick-switch"]);
+
+		await commandPalette();
+		expect(openPalettes()).toEqual(["command-palette"]);
+		expect(document.activeElement).toBe(paletteInput("command-palette"));
+	});
+
+	it("⇧⌘K replaces an open command palette", async () => {
+		await renderApp();
+		await commandPalette();
+		await goToProject();
+		expect(openPalettes()).toEqual(["project-quick-switch"]);
+		expect(document.activeElement).toBe(paletteInput("project-quick-switch"));
+	});
+
+	it("pressing the same palette shortcut again still closes it", async () => {
+		await renderApp();
+		await goToProject();
+		await goToProject();
+		expect(openPalettes()).toEqual([]);
+		await commandPalette();
+		await commandPalette();
+		expect(openPalettes()).toEqual([]);
+	});
+
+	it("a menu-opened Find coordinator replaces the open palette", async () => {
+		await renderApp();
+		await goToProject();
+		act(() => {
+			window.dispatchEvent(new CustomEvent("menu:open-coordinator-finder"));
+		});
+		expect(openPalettes()).toEqual(["coordinator-finder"]);
+	});
+
+	it("typing after a switch reaches the new palette, and one Escape closes everything and restores focus", async () => {
+		await renderApp();
+		const trigger = document.createElement("button");
+		document.body.appendChild(trigger);
+		trigger.focus();
+
+		await goToProject();
+		await commandPalette();
+		await userEvent.keyboard("theme");
+		expect(paletteInput("command-palette")).toHaveValue("theme");
+
+		await userEvent.keyboard("{Escape}");
+		expect(openPalettes()).toEqual([]);
+		expect(document.activeElement).toBe(trigger);
+		trigger.remove();
 	});
 });

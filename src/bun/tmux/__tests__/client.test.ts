@@ -4,7 +4,7 @@ vi.mock("../../logger", () => ({
 	createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 
-import { TmuxClient } from "../client";
+import { TmuxClient, TmuxMissingCwdError } from "../client";
 import { TmuxError, TmuxSpawnError, isTmuxError, isTmuxSpawnError, isTmuxTimeoutError } from "../errors";
 import {
 	PANE_ID_FORMAT,
@@ -38,7 +38,7 @@ function makeProc(overrides: Partial<Record<string, unknown>> = {}) {
 
 function makeClient(result: Partial<Record<string, unknown>> = {}) {
 	const spawnFn = vi.fn().mockReturnValue(makeProc(result));
-	const client = new TmuxClient({ spawn: spawnFn as never });
+	const client = new TmuxClient({ cwdExists: () => true, spawn: spawnFn as never });
 	return { client, spawnFn };
 }
 
@@ -65,7 +65,7 @@ describe("argv construction", () => {
 
 	it("honors a custom default socket", async () => {
 		const spawnFn = vi.fn().mockReturnValue(makeProc());
-		const client = new TmuxClient({ spawn: spawnFn as never, socket: "custom" });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: spawnFn as never, socket: "custom" });
 		await client.killSession("s");
 		expect(argvOf(spawnFn).slice(0, 3)).toEqual(["tmux", "-L", "custom"]);
 	});
@@ -124,7 +124,7 @@ describe("hasSession", () => {
 
 	it("propagates a launch failure as TmuxSpawnError", async () => {
 		const spawnFn = vi.fn(() => { throw new Error("posix_spawn ENOENT"); });
-		const client = new TmuxClient({ spawn: spawnFn as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: spawnFn as never });
 		await expect(client.hasSession("s")).rejects.toSatisfy((err: unknown) => isTmuxSpawnError(err));
 	});
 });
@@ -150,14 +150,14 @@ describe("error model", () => {
 		await expect(client.killSession("x", { bestEffort: true })).resolves.toBeUndefined();
 
 		const spawnFn = vi.fn(() => { throw new Error("EACCES"); });
-		const broken = new TmuxClient({ spawn: spawnFn as never });
+		const broken = new TmuxClient({ cwdExists: () => true, spawn: spawnFn as never });
 		await expect(broken.killSession("x", { bestEffort: true })).rejects.toBeInstanceOf(TmuxSpawnError);
 	});
 
 	it("TmuxSpawnError carries the Full Disk Access hint and the cause", async () => {
 		const cause = new Error("posix_spawn '/opt/tmux'");
 		const spawnFn = vi.fn(() => { throw cause; });
-		const client = new TmuxClient({ spawn: spawnFn as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: spawnFn as never });
 		const err = await client.sourceFile("/tmp/x").catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(TmuxSpawnError);
 		expect((err as Error).message).toContain("Full Disk Access");
@@ -368,7 +368,7 @@ describe("spawnAttachedSession", () => {
 		expect(argvOf(spawnFn)).not.toContain("-A");
 
 		const throwing = vi.fn(() => { throw new Error("ENOENT"); });
-		const broken = new TmuxClient({ spawn: throwing as never });
+		const broken = new TmuxClient({ cwdExists: () => true, spawn: throwing as never });
 		expect(() => broken.spawnAttachedSession({
 			sessionName: "s", configFile: "/c", cwd: "/w",
 			terminal: { cols: 1, rows: 1, data: vi.fn() },
@@ -388,6 +388,7 @@ describe("command methods build the documented argv", () => {
 		["swapPaneStep next", (c) => c.swapPaneStep("dev3-a", "next"), ["swap-pane", "-D", "-t", "dev3-a"]],
 		["swapPaneStep prev", (c) => c.swapPaneStep("dev3-a", "prev"), ["swap-pane", "-U", "-t", "dev3-a"]],
 		["killPane", (c) => c.killPane("%4"), ["kill-pane", "-t", "%4"]],
+		["killWindow", (c) => c.killWindow("@3"), ["kill-window", "-t", "@3"]],
 		["sendKeys", (c) => c.sendKeys("%4", ["Left", "Left"]), ["send-keys", "-t", "%4", "Left", "Left"]],
 		["sendKeys literal", (c) => c.sendKeys("%4", ["echo hi\r"], { literal: true }), ["send-keys", "-l", "-t", "%4", "echo hi\r"]],
 		["resizeWindow", (c) => c.resizeWindow({ target: "dev3-a", cols: 120, rows: 40 }), ["resize-window", "-t", "dev3-a", "-x", "120", "-y", "40"]],
@@ -399,6 +400,7 @@ describe("command methods build the documented argv", () => {
 		["copyModeSearchStep newer", (c) => c.copyModeSearchStep("%4", "newer"), ["send-keys", "-t", "%4", "-X", "search-reverse"]],
 		["setOption", (c) => c.setOption("dev3-a", "pane-border-status", "top"), ["set-option", "-t", "dev3-a", "pane-border-status", "top"]],
 		["setPaneOption", (c) => c.setPaneOption("%1", "@dev3_agent", "1"), ["set-option", "-p", "-t", "%1", "@dev3_agent", "1"]],
+		["setGlobalOption", (c) => c.setGlobalOption("@dev3_pane_dimming", "off"), ["set-option", "-g", "@dev3_pane_dimming", "off"]],
 		["setWindowHook", (c) => c.setWindowHook("dev3-a", "pane-exited", "run-shell x"), ["set-hook", "-wt", "dev3-a", "pane-exited", "run-shell x"]],
 		["setEnvironment", (c) => c.setEnvironment("dev3-a", "K", "v"), ["set-environment", "-t", "dev3-a", "K", "v"]],
 		["removeEnvironment", (c) => c.removeEnvironment("dev3-a", "K"), ["set-environment", "-r", "-t", "dev3-a", "K"]],
@@ -460,7 +462,7 @@ describe("the default command bound", () => {
 	// the production default were dropped entirely.
 	it("reaps a capture-pane that never answers, after 10s and not before", async () => {
 		const proc = wedgedProc();
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 		vi.useFakeTimers();
 		try {
 			const failure = client.capturePane({ target: "dev3-abc" }).catch((err: unknown) => err);
@@ -477,7 +479,7 @@ describe("the default command bound", () => {
 
 	it("bounds a plain query too — a wedged list-sessions cannot hang its caller", async () => {
 		const proc = wedgedProc();
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 		vi.useFakeTimers();
 		try {
 			const failure = client.hasSession("dev3-abc").catch((err: unknown) => err);
@@ -491,7 +493,7 @@ describe("the default command bound", () => {
 
 	it("still lets a caller ask for a tighter bound", async () => {
 		const proc = wedgedProc();
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 		const failure = await client.ensureServerToken({ candidate: "srv-token-1", timeoutMs: 5 }).catch((err: unknown) => err);
 		expect(failure).toSatisfy(isTmuxTimeoutError);
 	});
@@ -535,7 +537,14 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 		const [[name, text]] = loadedBuffers(spawnFn);
 		expect(text).toBe("hi");
 		expect(argv[8]).toBe(`paste-buffer -d -p -r -b ${name} -t %3 ; display-message -p dev3-pane-input-sent`);
-		expect(result).toEqual({ sent: true });
+		// The else branch: 1 only when copy mode was the one condition that failed.
+		expect(argv[9]).toBe(
+			"display-message -p -t %3 'dev3-pane-input-in-mode:" +
+				"#{&&:#{==:#{@dev3_server_token},srv-token-1}," +
+				"#{&&:#{==:#{session_name},dev3-task-abc12345}," +
+				"#{&&:#{==:#{pane_dead},0},#{!=:#{pane_in_mode},0}}}}'",
+		);
+		expect(result).toEqual({ sent: true, inMode: false });
 	});
 
 	// `-p` is the whole point: it wraps the payload in bracketed paste when the running app
@@ -603,6 +612,7 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 		const { client, spawnFn } = makeClient({ stdout: "" });
 		await expect(client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "secret" }] })).resolves.toEqual({
 			sent: false,
+			inMode: false,
 		});
 		const [[name]] = loadedBuffers(spawnFn);
 		await vi.waitFor(() =>
@@ -627,6 +637,20 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 		const { client } = makeClient({ stdout: "" });
 		await expect(client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }] })).resolves.toEqual({
 			sent: false,
+			inMode: false,
+		});
+	});
+
+	it("reports inMode only when the else branch says copy mode alone refused", async () => {
+		const scrolled = makeClient({ stdout: "dev3-pane-input-in-mode:1\n" });
+		await expect(scrolled.client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }] })).resolves.toEqual({
+			sent: false,
+			inMode: true,
+		});
+		const foreign = makeClient({ stdout: "dev3-pane-input-in-mode:0\n" });
+		await expect(foreign.client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }] })).resolves.toEqual({
+			sent: false,
+			inMode: false,
 		});
 	});
 
@@ -660,7 +684,7 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 	it("cancels a half-open stream instead of abandoning the read", async () => {
 		const stdout = new ReadableStream({ start() { /* never closes */ } });
 		const proc = makeProc({ stdout, exited: Promise.resolve(0), kill: vi.fn() });
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 
 		await expect(
 			client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }], timeoutMs: 5 }),
@@ -671,7 +695,7 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 
 	it("gives up when the child's exit never settles at all", async () => {
 		const proc = makeProc({ stdout: "", exited: new Promise<number>(() => undefined), kill: vi.fn() });
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 
 		const failure = await client
 			.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }], timeoutMs: 5 })
@@ -688,7 +712,7 @@ describe("sendKeysGuarded — one server command list, no check/send window", ()
 			settle = resolve;
 		});
 		const proc = makeProc({ stdout: "", exited, kill: vi.fn(() => settle(143)) });
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 
 		const promise = client.sendKeysGuarded({ ...GUARDED, chunks: [{ literal: "x" }], timeoutMs: 5 });
 
@@ -785,7 +809,7 @@ describe("ensureServerToken mints once", () => {
 	// the default be multiplied by a thousand with nothing red.
 	it("bounds the token command by 3s when no caller says otherwise", async () => {
 		const proc = makeProc({ stdout: "", exited: new Promise<number>(() => undefined), kill: vi.fn() });
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 		vi.useFakeTimers();
 		try {
 			const failure = client.ensureServerToken({ candidate: "srv-token-1" }).catch((err: unknown) => err);
@@ -805,7 +829,7 @@ describe("ensureServerToken mints once", () => {
 	// pending forever inside a session's setup.
 	it("kills and reaps a wedged token command instead of hanging the caller", async () => {
 		const proc = makeProc({ stdout: "", exited: new Promise<number>(() => undefined), kill: vi.fn() });
-		const client = new TmuxClient({ spawn: vi.fn().mockReturnValue(proc) as never });
+		const client = new TmuxClient({ cwdExists: () => true, spawn: vi.fn().mockReturnValue(proc) as never });
 
 		const failure = await client.ensureServerToken({ candidate: "srv-token-1", timeoutMs: 5 }).catch((err: unknown) => err);
 		expect(failure).toSatisfy(isTmuxTimeoutError);
@@ -823,4 +847,33 @@ describe("ensureServerToken mints once", () => {
 		await expect(client.ensureServerToken({ candidate: "srv-token-1" })).rejects.toThrow("did not report a server token");
 	});
 
+});
+
+// S5 backstop: tmux given `-c <missing dir>` exits 0 and starts the pane in $HOME.
+// Every task launcher checks its worktree first; this catches the one that forgot.
+describe("missing pane cwd backstop", () => {
+	function refusingClient() {
+		const spawnFn = vi.fn().mockReturnValue(makeProc());
+		const client = new TmuxClient({ cwdExists: (path) => path !== "/gone", spawn: spawnFn as never });
+		return { client, spawnFn };
+	}
+
+	it("refuses new-session, split-window, new-window and an attached session in a missing dir — without spawning", async () => {
+		const { client, spawnFn } = refusingClient();
+		await expect(client.newSessionDetached({ sessionName: "dev3-x", cwd: "/gone" })).rejects.toThrow(TmuxMissingCwdError);
+		await expect(client.splitWindow({ target: "dev3-x:", orientation: "vertical", cwd: "/gone" })).rejects.toThrow(TmuxMissingCwdError);
+		await expect(client.newWindow({ target: "dev3-x:", cwd: "/gone" })).rejects.toThrow(TmuxMissingCwdError);
+		expect(() => client.spawnAttachedSession({
+			sessionName: "dev3-x", configFile: "/c", cwd: "/gone", terminal: { cols: 80, rows: 24, data: () => {} },
+		})).toThrow(TmuxMissingCwdError);
+		expect(spawnFn).not.toHaveBeenCalled();
+	});
+
+	it("lets an existing dir, a tmux format string and no cwd through", async () => {
+		const { client, spawnFn } = refusingClient();
+		await client.splitWindow({ target: "dev3-x:", orientation: "vertical", cwd: "#{pane_current_path}" });
+		await client.splitWindow({ target: "dev3-x:", orientation: "vertical" });
+		await client.newWindow({ target: "dev3-x:", cwd: "/here" });
+		expect(spawnFn).toHaveBeenCalledTimes(3);
+	});
 });

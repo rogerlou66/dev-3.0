@@ -78,4 +78,9 @@ describe("availableCommands", () => {
 		const android = availableCommands({ hasProject: true, hasTask: true, remote: true, androidApp: true });
 		expect(android.map((c) => c.id)).toContain("task-open-in-finder");
 	});
+
+	it("offers Find coordinator everywhere, with no project open", () => {
+		const ids = availableCommands({ hasProject: false, hasTask: false }).map((c) => c.id);
+		expect(ids).toContain("find-coordinator");
+	});
 });

@@ -217,6 +217,17 @@ it, stays attached to the task, and downloads as a ZIP. No server, no upload, no
   <img src="docs/screenshots/artifact-viewer.jpg" width="900" alt="An agent-authored interactive report open in the artifact panel, beside the terminal that wrote it">
 </p>
 
+### Your shell prompt, your style
+
+Shell panes get a two-line prompt with the task number, project, worktree-relative path, git
+changes and how long the last command took — and it sheds segments instead of wrapping when a pane
+gets narrow. Settings → Terminal → Shell prompt offers twelve zsh styles, each previewed by real
+zsh; copy any of them into your own and tweak it, or keep the prompt from your own `.zshrc`.
+
+<p align="center">
+  <img src="docs/screenshots/shell-prompt-styles.jpg" width="900" alt="Settings → Terminal → Shell prompt: zsh prompt styles with live previews, the selected one showing its source and an Edit a copy button">
+</p>
+
 ### And the small things
 
 Dark and light themes · a hand-tuned 16-color ANSI palette so agents look right in both ·
@@ -305,6 +316,10 @@ brew trust h0x91b/dev3   # newer Homebrew refuses untrusted third-party taps (sk
 brew install --cask dev3
 ```
 
+If a macOS task terminal later loses access to a repository on Desktop (`Operation not permitted`,
+or Git saying `not a git repository`), see [this troubleshooting entry](docs/troubleshooting.md#task-terminals-lose-access-to-desktop-or-documents-on-macos). Full Disk Access
+is a broad, optional troubleshooting step, not an install requirement.
+
 **Linux** (headless box, full UI in your browser):
 
 ```sh
@@ -345,7 +360,7 @@ rate-limit tracking and skill directories differ per agent — the full grid is 
 | [Your first task](https://dev3.h0x91b.com/first-task.html) | The guided first-run tour, screen by screen — the fastest way to see what using dev-3.0 feels like |
 | [Install guide](docs/install.md) | Every install path, tmux versions on Linux, cloud-VM caveats, build from source |
 | [Remote access](docs/remote-access.md) | `dev3 remote` in depth — tunnels, systemd, sessions, exposed ports, phone notifications |
-| [Troubleshooting](docs/troubleshooting.md) | `dev3 doctor`, disk reclamation, Full Disk Access, terminal colors and agent themes |
+| [Troubleshooting](docs/troubleshooting.md) | `dev3 doctor`, disk reclamation, Full Disk Access (including task terminals that lose access to Desktop on macOS), terminal colors and agent themes |
 | [Keyboard shortcuts](docs/keyboard-shortcuts.md) | The complete list, mirroring the in-app ⌘/ panel |
 | [Agent support matrix](agent-support-matrix.md) | What each agent supports, feature by feature |
 | [CLI exit codes](docs/cli-exit-codes.md) | The `dev3` exit-code contract, for scripting |

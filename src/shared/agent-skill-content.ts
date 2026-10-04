@@ -75,7 +75,7 @@ Labels, same session-start pass: \`dev3 label list\` first and reuse existing on
 
 ## Task priority
 
-\`P0\` (highest) … \`P4\` (lowest), default \`P3\`; the board sorts by it. \`dev3 task update --priority P0..P4\` sets it for the whole variant group.
+\`P0\` (highest) … \`P4\` (lowest), default \`P3\`; the board sorts by it. \`dev3 task update --priority P0..P4\` sets it for this task only.
 
 **Do NOT set or change a priority on your own initiative** — only when the user explicitly asks. It is their judgment of importance, same protected class as user-edited titles. Never re-prioritize during triage, cleanup, or "helpfully."
 
@@ -175,21 +175,33 @@ A project can declare **several dev servers by name**: every subcommand takes on
 
 Each server's output also lands as text in \`<taskDir>/logs/dev-server*.log\`, fresh per start: \`dev3 dev-server logs [--lines N]\` tails it, and it greps.
 `;
+/** When a report becomes a dev3 HTML artifact. Shared verbatim by the protocol and the `dev3-artifact` skill. */
+export const ARTIFACT_FORMAT_RULES = `Any report a human reads defaults to the dev3 template, text-only summaries and daily briefs included. Other meanings win: Claude Artifacts, CI/build artifacts, package outputs.
+
+- **Copy the starter and publish its directory.** Prose or lists are fine; charts are optional.
+- Publish \`.md\`/\`.txt\` directly (no template CSS) only when the user explicitly asks for Markdown or plain text. A \`.md\` report path in a brief says where to save it, not how to show it.
+- If "do not generate HTML" conflicts with the template, ask which wins before publishing: the template needs an HTML wrapper.
+`;
+
+/** How to make and publish one. Shared verbatim by the protocol and the `dev3-artifact` skill. */
+export const ARTIFACT_AUTHORING_STEPS = `\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is the pristine starter; never edit it. If unset, \`dev3 artifact-template\` creates \`./dev3-artifact-report\` instead. The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORING.md\` is the card, \`REFERENCE.md\` has optional depth, \`index.html\` + \`report.js\` are editable, \`app.css\` + \`app.js\` are the shell, \`dev3-icon.png\` is the brand asset.
+
+1. \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\`.
+2. Read the copied \`AUTHORING.md\`; edit \`index.html\` and \`report.js\`. Do not read the shell files for ordinary reports. Open \`REFERENCE.md\` sections only as needed. Keep data local; CDN libraries and live fetch are supported.
+3. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` bundles assets (16 MB each, 48 MB total); extras go after \`--assets\`. Completion requires the template's \`data-dev3-artifact-template="v1"\`, shell and brand asset, not merely a published \`.md\`.
+
+Publish directly: an ordinary report or revision needs no browser pass or screenshots; \`AUTHORING.md\` § Before you publish lists exceptions.
+
+The same \`--title\` or stable \`--artifact-id <slug>\` adds a VERSION. Never invent \`report-v2.html\`; \`--new\` is for a different report. Outside dev3, \`/dev3-share-artifact\` inlines the files and publishes a gist with a checked preview URL.
+`;
+
 const SKILL_ARTIFACTS = `
 ## dev3 HTML artifacts
 
-Inside a dev3 task, an unqualified "artifact", interactive report, dashboard or demo usually means a **dev3 HTML artifact** — not Claude Artifacts — whenever an interactive visual fits. Do not override explicit meanings: Claude Artifacts, CI/build artifacts, package outputs, files for other systems.
+${ARTIFACT_FORMAT_RULES}
+${ARTIFACT_AUTHORING_STEPS}
+Full workflow as a skill: \`/dev3-artifact\`.
 
-\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is a pristine task-local starter (\`dev3 artifact-template\` copies it in if the variable is missing; never invent a different template). The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORING.md\` is the card, \`REFERENCE.md\` the depth behind it, \`index.html\` + \`report.js\` the edit surface, \`app.css\` + \`app.js\` the shell, \`dev3-icon.png\` the brand asset.
-
-1. \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\` — never edit the pristine source.
-2. Read the copied \`AUTHORING.md\` (the card), then edit only \`index.html\` and \`report.js\` unless the format itself must change. Open a \`REFERENCE.md\` section only when the report needs one. Do not read the shell files for ordinary reports.
-3. Keep content and data local; external chart/UI libraries and live \`fetch\`/WebSocket are allowed, as \`REFERENCE.md\` says.
-4. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` — the directory publishes as a unit: \`index.html\` plus every CSS, JS, image and MP4/WebM clip (16 MB each, 48 MB together) under it. Keep assets beside or below the HTML with relative paths; only a file outside it goes after \`--assets\`.
-
-Re-running \`show-artifact\` **updates** the report: the same \`--title\` (or an explicit \`--artifact-id <slug>\`, which survives rewording) adds a VERSION to the row the user already has. Revise by publishing again, never by inventing \`report-v2.html\`; \`--new\` only for a genuinely different report that happens to share a title.
-
-Sharing it **outside** the app (a link, a phone, a GitHub comment) is a different job: load \`/dev3-share-artifact\`, which folds the report into one self-contained HTML and publishes it as a gist with a checked preview URL.
 `;
 
 const SKILL_GET_ATTENTION = `
@@ -199,8 +211,8 @@ Pull the user back deliberately — enough that they never miss something needin
 
 - \`dev3 attention "reason"\` — red badge on the card until the user opens the task (reasons accumulate, up to 5). Default for anything that needs them. \`--clear\` lowers it the moment the cause is resolved and they never came; a badge outliving its cause trains them to ignore badges.
 - \`dev3 notify "message" [--level info|success|error] [--duration <seconds>]\` — clickable in-app toast (ephemeral, 2s–30s). \`--desktop\` instead sends a native OS notification that shows even when the app is backgrounded; never combine the two flags.
-- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts); files are copied into the worktree and **each \`--caption\` annotates the image it immediately follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, put them in front of the user rather than describing them or leaving a path to open.
-- \`dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]\` — **show an interactive HTML artifact** (see the artifacts section above).
+- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts; \`show-video\` plays MP4/WebM ≤25 MB there); files are copied into the worktree and **each \`--caption\` annotates the file it follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, show them rather than describing them or leaving a path to open.
+- \`dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]\` — **show an HTML artifact** (see the artifacts section above).
 - \`dev3 ui state\` — focused task/project, app foreground, user idle time (\`userActivity\`). Check BEFORE pinging.
 
 MUST ping, one per logical event and never per step: **blocked** → \`attention "the question"\`; **finished** something important → \`notify --level success\`; something **broke** → \`notify --level error\`; an **image worth seeing** or an interactive report → proactive \`show-image\` / \`show-artifact\`. SHOULD, only on long runs when the user likely stepped away: a major milestone, or a go/no-go before a risky action. Never ping per-step progress, routine tool calls, or anything already on screen.
@@ -261,9 +273,11 @@ You may ask the user to set another task running; you never launch anything your
 - **An existing To Do task** → \`dev3 task move --task seq:<N> --status in-progress\`. Not your task, so the ordinary board move becomes an approval request.
 - **A throwaway peer agent** → \`dev3 task create --scratch --run\`. A scratch task has **no prompt by design** — it starts idle and you drive it with messages.
 
-It **inherits your priority** unless it has its own, and the dialog lets the user change that band; you never pass one. On approval you get its \`seq\` and the command to talk to it. By default it is already told you started it, that its description is the brief, and to report back as a file and message you only that path — never send that instruction by hand. Standing rules of your own go in \`--handoff-file <path>\` on either command. **Declined** → exit code 10, nothing launched: ask what to change rather than retrying. **Timeout** → the dialog may still be open, so it may start without you hearing back. An unanswered dialog **approves itself after a few minutes** (5 by default, configurable, switchable off), so wait — a second request joins the first and does NOT restart its clock.
+It **inherits your priority** unless it has its own; only the user may change that band. Approval returns its \`seq\` and reply command. Its first prompt already names you, treats its description as the brief, and asks for file reports sent back as paths. Add standing instructions with \`--handoff-file <path>\`. **Declined** → exit 10, nothing launched: ask what to change. **Timeout** → approval may still arrive later. An unanswered dialog **approves itself after a few minutes** (5 by default, configurable, switchable off); a retry joins it without restarting its clock.
 
-Use it when work genuinely belongs in its own session (a parallel investigation, a long build, an isolated experiment). Never to escape your own scope, never several at once — each interrupts the user.
+Use it only for work that belongs in its own session — never to escape your scope, never several at once: each interrupts the user.
+
+**Extra agent in an existing task** → \`dev3 agent spawn --task seq:<N> --prompt "brief"\`: new pane, same worktree and approval, prints the pane ID. \`dev3 agent list\` gives \`--agent\` / \`--config\` preset IDs; default account unless the user picks another. \`--handoff\` adds the conversation retelling. Messages reach the task, not the pane.
 
 **Talking to another task's agent** — \`dev3 message --task seq:<N> --subject "<about 6 words>" "text"\` types straight into any live task's agent, not only one you started; from a worktree it arrives labeled as agent traffic carrying the command to answer you. \`--in 30m\` / \`--at 14:00\` queues it (aim it at yourself for a wake-up).
 

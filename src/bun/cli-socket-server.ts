@@ -1,33 +1,40 @@
 import { existsSync, readdirSync, unlinkSync, mkdirSync } from "node:fs";
-import type { AgentMessageSource, CliRequest, CliResponse, CustomColumn, Label, Project, Task, TaskPriority, TaskStatus, TaskType, TaskNote, NoteSource, SharedArtifact, SharedImage } from "../shared/types";
+import type { AgentMessageSource, CliRequest, CliResponse, CustomColumn, PresetPromptSource, Project, ResetKeptBranch, Task, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus, TaskType, NoteSource, SharedArtifact, SharedImage } from "../shared/types";
 import { isValidNotificationDurationMs, NOTIFICATION_MAX_DURATION_MS, NOTIFICATION_MIN_DURATION_MS } from "../shared/duration";
 import { agentReplyCommand, seqIsShared } from "../shared/agent-message-envelope";
 import { requireMessageSubject } from "../shared/agent-message-subject";
 import { socketMetaPathFor } from "../shared/socket-meta";
 import { isCliEndpointHandle } from "../shared/cli-endpoint";
 import { replyToReviewComment, resolveReviewComment, resolveReviewCommentId, reopenReviewComment, type ReviewReplyAuthor } from "../shared/review";
-import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, LABEL_COLORS, TASK_TYPES, agentLaunchAutoApproveMs, appendTaskNote, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, normalizeTaskType, presetPromptForTaskType, repoConfigEnabled, titleFromDescription, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
+import { ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DEV3_REPO_CONFIG_KEYS, ID_PREFIX_MIN_LENGTH, TASK_TYPES, agentLaunchAutoApproveMs, buildTaskDialogSubject, formatStatus, getTaskTitle, STATUS_LABELS, isStatusGuardBlocked, normalizePriority, taskNeedsReset, taskResetConsent, normalizeTaskType, presetPromptForTaskType, presetPromptSourceForTaskType, taskSharedMedia, repoConfigEnabled, withPresetPrompt, withoutPresetPrompt } from "../shared/types";
 import { AGENT_STATUS_HOOK_EVENTS, getAgentHookTargetStatus, type AgentStatusHookEvent } from "../shared/agent-hooks";
 import { CLAUDE_STOP_FAILURE_ERRORS, describeClaudeStopFailure, type ClaudeStopFailureError } from "../shared/agent-stop-failure";
 import { DEFAULT_EVENT_LIMIT, DEFAULT_EVENT_WINDOW_MS, MAX_EVENT_LIMIT, formatMovementText, normalizeEventInstant, resolveEventIdPrefix, selectEvents, type BoardEvent, type BoardEventKind } from "../shared/board-events";
 import type { TaskNavigationTarget } from "../shared/types";
 import { markPendingTaskNavigation } from "./task-navigation";
-import { SharedImageError, saveSharedImage } from "./shared-images";
+import { SharedImageError, saveSharedImage, saveSharedVideo } from "./shared-images";
 import { SharedArtifactError, saveSharedArtifact } from "./shared-artifacts";
 import { appendArtifactVersion, latestArtifactVersion } from "../shared/artifact-versions";
 import { addAutomation, deleteAutomation, loadAutomations, updateAutomation } from "./automations-data";
-import { createAgentRequest } from "./agent-requests";
+import { createAgentRequest, getAgentRequestState, joinAgentRequest } from "./agent-requests";
+import { DESTRUCTIVE_APPROVAL_TARGET, type AgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../shared/agent-approval";
 import type { AgentLaunchChoice } from "../shared/types";
 import { deliverLaunchHandoff } from "./agent-launch-handoff";
 import * as data from "./data";
+import * as taskNotes from "./board-operations/task-notes";
+import * as labelOps from "./board-operations/labels";
+import { updateTaskMetadata, type TaskMetadataChange } from "./board-operations/task-metadata";
+import { boardPorts } from "./board-operations/runtime";
+import { AGENT_ACTOR } from "./board-operations/types";
 import { loadSpacesFile } from "./spaces-data";
 import { resolveTaskStartRef } from "./task-start-ref";
-import { createScratchTask, createTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, activeNotificationSuppression, isProjectSilenced, dropQueuedAttention, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode, clearMergeNotification } from "./rpc-handlers";
+import { createScratchTask, createTask, deleteTask, getPushMessage, getPushMessageLocal, launchTaskWithAgentChoice, moveTask, resetTaskToTodo, notifyFromCliDesktop, isAppForeground, getActiveContext, isNotificationSuppressed, activeNotificationSuppression, isProjectSilenced, dropQueuedAttention, pushCliAttention, pushCliToast, pushCliShowImage, pushCliShowArtifact, setFocusMode } from "./rpc-handlers";
 import { appendNotificationLog } from "./notification-log";
 import type { NotificationLogInput, NotificationLogMode, NotificationLogOutcome } from "../shared/notification-log";
 import { getDevServerStatus, runDevServer, stopDevServer, restartDevServer } from "./rpc-handlers/tmux-pty";
 import { getTmuxLayout } from "./pty-server";
-import { scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
+import { cancelScheduledMessageByRef, scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
+import { toScheduledMessageListing } from "../shared/scheduled-message-listing";
 import { NATIVE_PROMPT_DELIVERY_METHOD, deliverNativePromptAsOwner } from "./agent-prompt-native";
 import { deliverAgentPrompt } from "./agent-prompt-delivery";
 import { recordTerminalPromptSubmission } from "./agent-terminal-prompt-log";
@@ -38,9 +45,15 @@ import type { PaneInputProgram } from "../shared/pane-input";
 import { getUserIdleSeconds } from "./user-activity";
 import * as repoConfig from "./repo-config";
 import { loadSettings } from "./settings";
+import * as agents from "./agents";
+import { agentKey } from "../shared/agent-adapters/families";
+import { placePaneSession, placeUnaddressedPaneSession, type SessionPane } from "./pane-session-capture";
+import { isInteractiveCodexConversation } from "./codex-resume-home";
+import { configuredCodexHomes } from "./codex-task-selection";
 import { addVent } from "./vents";
 import { createLogger } from "./logger";
 import { syncTaskBranchName } from "./task-branch-sync";
+import { assertTaskWorkspacePresent } from "./task-workspace-guard";
 import { loadEffectiveTaskHistory } from "./task-blobs";
 import { taskPeek } from "./task-peek";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "./task-pane-runs";
@@ -341,6 +354,115 @@ function readEnvParam(params: Record<string, unknown>): Record<string, string> |
 function readServerParams(params: Record<string, unknown>): { server?: string; all?: boolean } {
 	const server = typeof params.server === "string" && params.server ? params.server : undefined;
 	return { ...(server ? { server } : {}), ...(params.all === true ? { all: true } : {}) };
+}
+
+function approvalStatusOf(kind: DestructiveApprovalKind, task: Task): AgentApprovalStatus {
+	const known = getAgentRequestState(kind, task.id);
+	return {
+		kind,
+		state: known.state,
+		...(known.state === "answered" ? { approved: known.approved, ...(known.stale ? { stale: true } : {}) } : {}),
+		taskStatus: task.status,
+		// A legacy To Do card that owns a worktree is already `todo`: only this
+		// says whether the reset actually happened.
+		...(kind === "reset" ? { resetNeeded: taskNeedsReset(task) } : {}),
+	};
+}
+
+/**
+ * Completion and cancellation: one blocking approval each, pushed to every
+ * client and settled by the first answer.
+ *
+ * `attachOnly` is the re-attach a CLI makes after its socket dropped mid-wait.
+ * It joins the live request or reports how it ended, and never creates one: a
+ * restarted app has no request left, and opening a fresh dialog then would be a
+ * second ask the agent never made.
+ */
+/** What each pending reset request asked to destroy, fixed when its dialog opened. */
+const resetConsentByRequestId = new Map<string, TaskResetConsent>();
+/**
+ * One reset per approved request, shared by every waiter joined to it: the
+ * original CLI, a retry, a re-attach after a dropped socket. Each must get the
+ * same truthful outcome, never a second attempt or a false "nothing happened".
+ */
+const resetRunByRequestId = new Map<string, Promise<TaskResetResult>>();
+
+async function requestDestructiveApproval(
+	kind: DestructiveApprovalKind,
+	params: Record<string, unknown>,
+): Promise<{ approved: boolean; task?: Task; stale?: boolean; plainMove?: boolean; keptBranches?: ResetKeptBranch[] } | AgentApprovalNotAttached> {
+	const { project, task } = await resolveTaskFromParams(params);
+	// A clean To Do card, a draft, a completed/cancelled task: moving it to To Do
+	// destroys nothing, so it stays the ordinary move it always was — no dialog.
+	if (kind === "reset" && params.attachOnly !== true && !taskNeedsReset(task)) {
+		const moved = await moveTask({ taskId: task.id, projectId: project.id, newStatus: "todo", enforceAllowedTransition: true });
+		return { approved: true, task: moved, plainMove: true };
+	}
+	const targetStatus = DESTRUCTIVE_APPROVAL_TARGET[kind];
+	const push = getPushMessage();
+	const dialog = {
+		taskTitle: getTaskTitle(task),
+		// Full read-only context (project, seq, priority, labels, overview)
+		// so the user recognizes which task the prompt destroys.
+		subject: buildTaskDialogSubject(task, project),
+	};
+
+	let request: { requestId: string; decision: Promise<{ approved: boolean; stale?: boolean }> };
+	if (params.attachOnly === true) {
+		const joined = joinAgentRequest(kind, task.id);
+		if (!joined) return { attached: false, status: approvalStatusOf(kind, task) };
+		request = joined;
+	} else {
+		if (task.status === "completed" || task.status === "cancelled") {
+			throw new Error(`Task is already ${task.status}`);
+		}
+		if (!push) {
+			throw new Error("No app window is connected — cannot ask the user for approval");
+		}
+		// Kept ON the request, not just pushed: the push is a one-shot event, so a
+		// renderer that reloads before answering can be handed it again on connect.
+		request = createAgentRequest(kind, task.id, project.id, { dialog });
+		if (kind === "reset" && !resetConsentByRequestId.has(request.requestId)) {
+			resetConsentByRequestId.set(request.requestId, taskResetConsent(task));
+		}
+	}
+
+	// Pushed on EVERY attempt, joined retries and re-attaches included. A retry
+	// used to push nothing, so once a client lost the original dialog the request
+	// became unreachable from the CLI side (h0x91b/dev-3.0#1669). Clients dedup by
+	// `requestId`, so a dialog already on screen is untouched.
+	push?.(kind === "complete" ? "agentCompletionRequested" : kind === "reset" ? "agentResetRequested" : "agentCancellationRequested", {
+		requestId: request.requestId, taskId: task.id, projectId: project.id, ...dialog,
+	});
+
+	const { approved, stale } = await request.decision;
+	if (!approved) {
+		resetConsentByRequestId.delete(request.requestId);
+		return { approved: false, ...(stale ? { stale: true } : {}) };
+	}
+	if (kind === "reset") {
+		const { requestId } = request;
+		let run = resetRunByRequestId.get(requestId);
+		if (!run) {
+			// Consent is bound to the run the dialog showed; the machine refuses a
+			// different one and deletes nothing.
+			const consent = resetConsentByRequestId.get(requestId);
+			resetConsentByRequestId.delete(requestId);
+			run = consent
+				? resetTaskToTodo({ taskId: task.id, projectId: project.id, consent })
+				: Promise.reject(new Error("The reset request lost its consent record, so the reset was not run. Ask again."));
+			resetRunByRequestId.set(requestId, run);
+			void run.catch(() => {}).finally(() => {
+				setTimeout(() => resetRunByRequestId.delete(requestId), 60_000);
+			});
+		}
+		const { task: reset, keptBranches } = await run;
+		return { approved: true, task: reset, keptBranches };
+	}
+	// Every caller joined to this request lands here; a repeat move to the same
+	// status is a no-op in the lifecycle machine.
+	const updated = await moveTask({ taskId: task.id, projectId: project.id, newStatus: targetStatus });
+	return { approved: true, task: updated };
 }
 
 /**
@@ -712,12 +834,13 @@ function getApprovalResumeStatus(
 async function paneSessionAlreadyRecorded(
 	project: Project,
 	taskId: string,
-	paneId: string,
+	paneId: string | null,
 	sessionId: string,
 ): Promise<boolean> {
 	try {
 		const task = await data.getTask(project, taskId);
-		const pane = task.sessionState?.panes?.find((p) => p.paneId === paneId);
+		const panes = task.sessionState?.panes ?? [];
+		const pane = paneId ? panes.find((p) => p.paneId === paneId) : panes.length === 1 ? panes[0] : undefined;
 		return pane?.sessionId === sessionId;
 	} catch {
 		return false;
@@ -732,12 +855,12 @@ async function paneSessionAlreadyRecorded(
  * the id is only knowable post-hoc: the lifecycle hook reports the resumable id
  * together with $TMUX_PANE (see src/cli/commands/status-hook-request.ts).
  *
- * Matching: extra panes store their tmux paneId at spawn, so match by paneId.
- * The main pane (panes[0]) is persisted without a paneId (assigned lazily by
- * pane-exit reconciliation); when no entry matches and exactly one entry has no
- * paneId, adopt that entry — it is the main pane — recording both its paneId and
- * session id. Ambiguous cases (no match, ≠1 null-paneId entries) are skipped; a
- * later hook fires once ids settle. A no-op once the id is already recorded.
+ * Matching, in order (see {@link placePaneSession}): the entry carrying this
+ * paneId; else the entry already carrying this session id (the conversation was
+ * resumed in a new pane); else the lone null-paneId entry (the main pane,
+ * persisted before its paneId is known); else — only when no entry is left at all
+ * and the reporting CLI is the task's own agent — a new main entry. Anything else
+ * is ambiguous and skipped. A no-op once the id is already recorded.
  *
  * The steady state is exactly that no-op — Codex fires this hook continuously for
  * the whole life of a session — so it is answered from the cached read BEFORE
@@ -747,28 +870,24 @@ async function paneSessionAlreadyRecorded(
 async function capturePaneSession(
 	project: Project,
 	taskId: string,
-	paneId: string,
+	paneId: string | null,
 	sessionId: string,
+	harness: PromptSubmitHarness,
 ): Promise<void> {
 	try {
 		if (await paneSessionAlreadyRecorded(project, taskId, paneId, sessionId)) return;
+		// Resolved outside the file lock: the agent registry has its own files.
+		const cached = await data.getTask(project, taskId);
+		// A `codex exec` or subagent in the pane fires the same hooks; only the
+		// user's own conversation, once its rollout exists, may become the pane's.
+		if (harness === "codex" && !(await isInteractiveCodexConversation(sessionId, await taskCodexHomes(project, cached)))) return;
+		const mainEntry = cached.sessionState?.panes?.length ? null : await ownAgentPaneEntry(cached, harness);
 		const { task: updated, result } = await data.updateTaskWith(project, taskId, (current) => {
-			const panes = current.sessionState?.panes;
-			if (!panes?.length) return { updates: {}, result: { changed: false } };
-			let idx = panes.findIndex((p) => p.paneId === paneId);
-			let adoptPaneId = false;
-			if (idx === -1) {
-				const nullIdxs = panes.flatMap((p, i) => (p.paneId ? [] : [i]));
-				if (nullIdxs.length !== 1) return { updates: {}, result: { changed: false } };
-				idx = nullIdxs[0];
-				adoptPaneId = true;
-			}
-			if (panes[idx].sessionId === sessionId && !adoptPaneId) {
-				return { updates: {}, result: { changed: false } };
-			}
-			const nextPanes = panes.map((p, i) =>
-				i === idx ? { ...p, sessionId, ...(adoptPaneId ? { paneId } : {}) } : p,
-			);
+			const panes = current.sessionState?.panes ?? [];
+			const nextPanes = paneId
+				? placePaneSession(panes, paneId, sessionId, mainEntry)
+				: placeUnaddressedPaneSession(panes, sessionId, mainEntry);
+			if (!nextPanes) return { updates: {}, result: { changed: false } };
 			return { updates: { sessionState: { panes: nextPanes } }, result: { changed: true } };
 		});
 		if (result.changed) {
@@ -780,7 +899,166 @@ async function capturePaneSession(
 	}
 }
 
+/** The Codex stores the task's own agent may write to, besides the managed accounts. */
+async function taskCodexHomes(project: Project, task: Task): Promise<string[]> {
+	if (!task.worktreePath) return [];
+	const agent = task.agentId ? (await agents.getAllAgents()).find((entry) => entry.id === task.agentId) : undefined;
+	try {
+		return await configuredCodexHomes(project, task, agent, task.configId);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * The main-pane entry a hook may recreate when pane-exit reconciliation left the
+ * task with none. Only for the task's own agent: resume relaunches panes[0] with
+ * the task's agent, so recording another CLI's conversation there would resume it
+ * with the wrong command. The account is left unset — Codex resume locates the
+ * account store from the conversation file itself.
+ */
+async function ownAgentPaneEntry(task: Task, harness: PromptSubmitHarness): Promise<SessionPane | null> {
+	if (!task.agentId) return null;
+	const agent = (await agents.getAllAgents()).find((entry) => entry.id === task.agentId);
+	if (!agent) return null;
+	const config = agents.findConfig(agent, task.configId);
+	const baseCommand = config?.baseCommandOverride || agent.baseCommand;
+	if (agentKey(baseCommand, agent.agentFamily) !== harness) return null;
+	return {
+		agentCmd: baseCommand,
+		sessionId: null,
+		agentId: task.agentId,
+		configId: task.configId,
+		...(agent.agentFamily ? { agentFamily: agent.agentFamily } : {}),
+	};
+}
+
+/**
+ * `dev3 label set|add|remove`. This adapter resolves short prefixes and owns the
+ * "Label not found" wording; the shared operation merges inside the tasks-file lock.
+ */
+async function changeTaskLabels(params: Record<string, unknown>, mode: "replace" | "add" | "remove"): Promise<Task> {
+	const rawLabelIds = params.labelIds as string[];
+	if (!params.taskId) throw new Error("taskId is required");
+	if (!params.projectId) throw new Error("projectId is required");
+	if (!Array.isArray(rawLabelIds)) throw new Error("labelIds must be an array");
+
+	const { project, task } = await resolveTaskFromParams(params);
+	const projectLabels = project.labels ?? [];
+
+	// Resolve short label ID prefixes to full UUIDs, rejecting any that do not
+	// match a real project label. Without this an id typo would be persisted
+	// verbatim into task.labelIds as permanent garbage (nothing prunes dangling
+	// labelIds), the UI would render zero labels for it, and the CLI would report success.
+	// Deduped after resolving: `label add lbl-1 lbl-1111-full` names one label twice
+	// and would otherwise append it twice, and nothing prunes a repeated id either.
+	const unknown: string[] = [];
+	const labelIds = [...new Set(rawLabelIds.map((raw) => {
+		const found = findByIdPrefix(projectLabels, raw, "label");
+		if (found) return found.id;
+		unknown.push(raw);
+		return raw;
+	}))];
+	if (unknown.length > 0) {
+		throw new Error(
+			`Label not found: ${unknown.join(", ")}. Run "dev3 label list" to see valid label IDs.`,
+		);
+	}
+
+	const { task: updated } = await labelOps.changeTaskLabels(boardPorts, project, task.id, { mode, labelIds });
+	return updated;
+}
+
+
+/** `ui.show-image` / `ui.show-video`: copy files into the task's shared-media history and surface the viewer. */
+async function showSharedMedia(params: Record<string, unknown>, kind: "image" | "video") {
+	const { project, task } = await resolveTaskFromParams(params);
+	if ((await loadSettings()).focusMode) setFocusMode(true);
+	// Preferred shape: images: [{ path, caption? }] — one note per image.
+	// Back-compat: paths: string[] + a single caption applied to all.
+	const items: { path: string; caption?: string }[] = [];
+	if (Array.isArray(params.images)) {
+		for (const raw of params.images as unknown[]) {
+			if (!raw || typeof raw !== "object") continue;
+			const rec = raw as { path?: unknown; caption?: unknown };
+			if (typeof rec.path !== "string" || rec.path.length === 0) continue;
+			const caption = typeof rec.caption === "string" && rec.caption.trim() ? rec.caption.trim() : undefined;
+			items.push({ path: rec.path, caption });
+		}
+	} else {
+		const rawPaths = Array.isArray(params.paths) ? (params.paths as unknown[]) : [];
+		const caption = typeof params.caption === "string" && params.caption.trim() ? params.caption.trim() : undefined;
+		for (const p of rawPaths) {
+			if (typeof p === "string" && p.length > 0) items.push({ path: p, caption });
+		}
+	}
+	if (items.length === 0) throw new Error(`At least one ${kind} path is required`);
+
+	// Copy every file into the worktree first — fail fast (usage error) if any
+	// path is invalid, so the agent gets a clear signal and nothing half-lands.
+	let incoming: SharedImage[];
+	try {
+		const save = kind === "video" ? saveSharedVideo : saveSharedImage;
+		incoming = items.map((it) => save(project.path, it.path, it.caption));
+	} catch (err) {
+		if (err instanceof SharedImageError) throw err;
+		throw new Error(`Failed to store ${kind}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+
+	// Append inside the file lock. The history is uncapped — the stored files
+	// live in the worktree and die with it.
+	// Clips get their own additive field: older versions read every sharedImages entry's bytes.
+	const { task: updated } = await data.updateTaskWith<void>(project, task.id, (current) => {
+		const updates: Partial<Task> = kind === "video"
+			? { sharedVideos: [...(current.sharedVideos ?? []), ...incoming] }
+			: { sharedImages: [...(current.sharedImages ?? []), ...incoming] };
+		return { updates, result: undefined };
+	});
+
+	// Persist to state everywhere (badge + history) regardless of focus mode.
+	getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+
+	const payload = {
+		taskId: task.id,
+		projectId: project.id,
+		images: taskSharedMedia(updated),
+		newCount: incoming.length,
+		newKind: kind,
+		taskSeq: task.seq,
+		taskTitle: getTaskTitle(task),
+		projectName: project.name,
+	};
+	if (isNotificationSuppressed()) {
+		pushCliShowImage(payload);
+		return { delivered: true, queued: true, stored: incoming.length, taskId: task.id };
+	}
+
+	const push = getPushMessage();
+	if (!push) return { delivered: false, stored: incoming.length, taskId: task.id };
+	push("cliShowImage", payload);
+	return { delivered: true, stored: incoming.length, taskId: task.id };
+}
+
 const handlers: Record<string, Handler> = {
+	"agent.list": async () => (await import("./cli-agent-spawn")).listCliAgents(),
+	"agent.spawn": async (params) => {
+		if ("accountId" in params) throw new Error("Account selection is not supported by agent.spawn — the default account is used unless the user changes it in the approval dialog.");
+		const { project, task } = await requirePaneTask(params);
+		const sourceId = typeof params.sourceTaskId === "string" ? params.sourceTaskId : "";
+		const requester = sourceId ? await resolveTaskAcrossProjects(sourceId) : null;
+		if (sourceId && !requester) throw new Error("Unknown requesting task — cannot attribute the launch request.");
+		for (const key of ["agentId", "configId", "prompt"]) {
+			if (params[key] !== undefined && params[key] !== null && typeof params[key] !== "string") throw new Error(`${key} must be a string.`);
+		}
+		if (typeof params.prompt === "string" && !params.prompt.trim()) throw new Error("prompt must not be empty.");
+		if (params.configId && !params.agentId) throw new Error("configId requires agentId.");
+		const { spawnCliAgent } = await import("./cli-agent-spawn");
+		return spawnCliAgent({
+			project, task, requester: requester?.task ?? null,
+			choice: { agentId: (params.agentId as string | null) ?? null, configId: (params.configId as string | null) ?? null },
+			prompt: typeof params.prompt === "string" ? params.prompt : undefined, handoff: params.handoff === true,
+		});
+	},
 	// Cross-instance notification: another dev-3.0 instance changed data.
 	// Re-read from disk and push to local renderer only (no re-broadcast).
 	"_notify": async (params) => {
@@ -899,6 +1177,7 @@ const handlers: Record<string, Handler> = {
 		const { task, project } = await requirePaneTask(params);
 		const cwd = task.worktreePath;
 		if (!cwd) throw new Error(`task ${task.id.slice(0, 8)} has no worktree, so it has no pane to split`);
+		assertTaskWorkspacePresent(project, cwd);
 		return await startPaneRun({
 			task,
 			command: String(params.command ?? ""),
@@ -1037,56 +1316,25 @@ const handlers: Record<string, Handler> = {
 			task = found.task;
 		}
 
-		const updates: Partial<Task> = {};
-		const force = Boolean(params.force);
-		let titlePreserved = false;
+		const change: TaskMetadataChange = {};
 
-		// Priority is group-wide (belongs to the logical task), so it is applied via
-		// the dedicated setter below, NOT folded into the single-task `updates` patch.
+		// Priority goes through the dedicated setter below (its own lock + push),
+		// NOT folded into the metadata change.
 		let priority = undefined;
 		if (params.priority !== undefined) {
 			priority = normalizePriority(String(params.priority));
 			if (!priority) throw new Error(`Invalid priority "${params.priority}". Use P0, P1, P2, P3, or P4.`);
 		}
+		// Empty string (--title "") is an explicit reset. A user-edited title is guarded
+		// inside the operation: refused for an agent unless --force.
 		if (params.title !== undefined) {
-			const newTitle = (params.title as string) || null;
-			// Defensive guard: refuse to overwrite a UI-set title from the CLI
-			// unless --force is passed. The agent skill instructs agents to
-			// leave user-edited titles alone, and this is the backstop.
-			// We key off `titleEditedByUser` — NOT `customTitle != null` — so
-			// that titles previously set by another agent (via this same CLI
-			// path) remain rewritable. Empty string (--title "") still goes
-			// through as an explicit reset, even when the user edited it.
-			if (newTitle && task.titleEditedByUser && !force) {
-				titlePreserved = true;
-			} else {
-				updates.customTitle = newTitle;
-				if (newTitle && task.scratch === true) updates.scratch = false;
-				// CLI writes never claim a user edit — only the UI rename RPC does.
-				// When the user explicitly clears their title via --title "" we
-				// also drop the user-edit flag so future agents can rename again.
-				if (!newTitle) updates.titleEditedByUser = false;
-			}
+			change.title = { value: (params.title as string) || null, force: Boolean(params.force) };
 		}
-		if (params.description !== undefined) {
-			const description = params.description as string;
-			updates.description = description;
-			if (
-				task.scratch === true
-				&& description.trim()
-				&& !/^Scratch — \d{2}:\d{2}$/.test(description.trim())
-			) {
-				updates.scratch = false;
-			}
-			// Only recompute auto-title if there's no custom override
-			if (!task.customTitle && !updates.customTitle) {
-				updates.title = titleFromDescription(description);
-			}
-		}
-		// Task type and the preamble in the description move together, always. The
-		// preset prompt is frozen into the description at creation, so flipping the
-		// field alone would produce a task the data calls a coordinator while its
-		// agent was never told it is one — a badge nobody behind it honours.
+		if (params.description !== undefined) change.description = params.description as string;
+		// Task type and the preamble in the description move together, always — in the
+		// same write. The preset prompt is frozen into the description at creation, so
+		// flipping the field alone would produce a task the data calls a coordinator while
+		// its agent was never told it is one — a badge nobody behind it honours.
 		let taskTypeChange: { next: TaskType | null; agentPrompt: string } | undefined;
 		// `--print-role`: the caller IS the agent behind this task and reads the role
 		// brief in the command output, so the brief is returned rather than typed into
@@ -1094,6 +1342,7 @@ const handlers: Record<string, Handler> = {
 		// promotion is idempotent instead of silent.
 		const printRole = params.printRole === true;
 		let rolePrompt: string | undefined;
+		let rolePromptSource: PresetPromptSource | undefined;
 		if (params.taskType !== undefined) {
 			const raw = params.taskType;
 			const next = raw === null || raw === "standard" ? null : normalizeTaskType(String(raw));
@@ -1101,11 +1350,13 @@ const handlers: Record<string, Handler> = {
 				throw new Error(`Invalid task type "${raw}". Use ${TASK_TYPES.join(", ")} or standard.`);
 			}
 			if (printRole) {
-				rolePrompt = next ? presetPromptForTaskType(next, project, await loadSettings()) : "";
+				const settings = await loadSettings();
+				rolePrompt = next ? presetPromptForTaskType(next, project, settings) : "";
+				if (next) rolePromptSource = presetPromptSourceForTaskType(next, project, settings);
 			}
 			if ((task.taskType ?? null) !== next) {
 				const settings = await loadSettings();
-				const base = (updates.description as string | undefined) ?? task.description;
+				const base = change.description ?? task.description;
 				// Strip EVERY type's preamble before building, so switching between two
 				// roles cannot leave the old brief behind, and a repeat cannot stack two
 				// copies of a 40-line preamble onto one description.
@@ -1113,9 +1364,9 @@ const handlers: Record<string, Handler> = {
 				for (const type of TASK_TYPES) {
 					ownText = withoutPresetPrompt(ownText, presetPromptForTaskType(type, project, settings));
 				}
-				updates.taskType = next;
 				const preamble = next ? presetPromptForTaskType(next, project, settings) : null;
-				updates.description = preamble ? withPresetPrompt(ownText, preamble) : ownText;
+				change.taskType = next;
+				change.description = preamble ? withPresetPrompt(ownText, preamble) : ownText;
 				taskTypeChange = {
 					next,
 					agentPrompt: preamble
@@ -1124,22 +1375,19 @@ const handlers: Record<string, Handler> = {
 				};
 			}
 		}
-		let manualCompletion: boolean | undefined;
 		if (params.manualCompletion !== undefined) {
 			if (typeof params.manualCompletion !== "boolean") {
 				throw new Error("manualCompletion must be a boolean");
 			}
-			manualCompletion = params.manualCompletion;
-			if (task.manualCompletion !== manualCompletion) {
-				updates.manualCompletion = manualCompletion;
-				updates.mergeCompletionPrompt = null;
-			}
+			change.manualCompletion = params.manualCompletion;
 		}
 
+		// Keyed on which params were provided, never on the verdict: a same-value
+		// --title is a quiet no-op, not an error.
 		if (
-			Object.keys(updates).length === 0
+			params.title === undefined
+			&& params.description === undefined
 			&& priority === undefined
-			&& !titlePreserved
 			&& params.manualCompletion === undefined
 			&& params.taskType === undefined
 		) {
@@ -1147,22 +1395,11 @@ const handlers: Record<string, Handler> = {
 		}
 
 		let updated = task;
-		if (Object.keys(updates).length > 0) {
-			updated = await data.updateTask(project, task.id, updates);
-			if (manualCompletion !== undefined && task.manualCompletion !== manualCompletion) {
-				clearMergeNotification(task.id);
-			}
-			getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-			if (manualCompletion !== undefined && task.manualCompletion !== manualCompletion) {
-				getPushMessage()?.("manualCompletionChanged", {
-					taskId: updated.id,
-					projectId: project.id,
-					manualCompletion,
-					taskSeq: updated.seq,
-					taskTitle: getTaskTitle(updated),
-					projectName: project.name,
-				});
-			}
+		let titlePreserved = false;
+		if (Object.keys(change).length > 0) {
+			const result = await updateTaskMetadata(boardPorts, project, task.id, change, AGENT_ACTOR);
+			updated = result.task;
+			titlePreserved = result.rejected.includes("title");
 		}
 		if (priority !== undefined) {
 			const changed = await data.setTaskPriority(project, task.id, priority);
@@ -1194,6 +1431,7 @@ const handlers: Record<string, Handler> = {
 			titlePreserved,
 			...(roleDelivery ? { roleDelivery } : {}),
 			...(rolePrompt === undefined ? {} : { rolePrompt }),
+			...(rolePromptSource ? { rolePromptSource } : {}),
 		};
 	},
 
@@ -1203,9 +1441,7 @@ const handlers: Record<string, Handler> = {
 			throw new Error("overview text is required");
 		}
 		const { project, task } = await resolveTaskFromParams(params);
-		const updated = await data.updateTask(project, task.id, { overview: overview.trim() });
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-		return updated;
+		return (await updateTaskMetadata(boardPorts, project, task.id, { overview }, AGENT_ACTOR)).task;
 	},
 
 	"overview.show": async (params) => {
@@ -1219,9 +1455,7 @@ const handlers: Record<string, Handler> = {
 
 	"overview.clear": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);
-		const updated = await data.updateTask(project, task.id, { overview: null });
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-		return updated;
+		return (await updateTaskMetadata(boardPorts, project, task.id, { overview: null }, AGENT_ACTOR)).task;
 	},
 
 	"note.add": async (params) => {
@@ -1246,23 +1480,9 @@ const handlers: Record<string, Handler> = {
 			task = found.task;
 		}
 
-		// Recompute the notes array from the CURRENT task inside the per-task lock.
-		// Appending to a pre-lock snapshot (`task.notes`) races with any concurrent
-		// note write — two parallel `dev3 note add` calls (routine for multi-variant
-		// bug-hunters) would both read the same snapshot and the last writer would
-		// silently drop the other's note. Mirrors the RPC addTaskNote handler.
-		const { task: updated } = await data.updateTaskWith(project, task.id, async (current) => {
-			const now = new Date().toISOString();
-			const note: TaskNote = {
-				id: crypto.randomUUID(),
-				content,
-				source: (params.source as NoteSource) ?? "ai",
-				createdAt: now,
-				updatedAt: now,
-			};
-			return { updates: { notes: appendTaskNote(current.notes, note) }, result: note };
-		});
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		const { task: updated } = await taskNotes.addNote(
+			boardPorts, project, task.id, content, AGENT_ACTOR, params.source as NoteSource | undefined,
+		);
 		return updated;
 	},
 
@@ -1374,21 +1594,11 @@ const handlers: Record<string, Handler> = {
 			task = found.task;
 		}
 
-		// Resolve + filter against the CURRENT task inside the per-task lock so a
-		// concurrent note write is not clobbered (same lost-update race the RPC twin
-		// avoids via updateTaskWith). Resolving the prefix on the pre-lock snapshot
-		// first lets us fail fast with a clear "Note not found" before taking the lock.
-		if (!findByIdPrefix(task.notes ?? [], noteId, "note")) {
-			throw new Error(`Note not found: ${noteId}`);
-		}
-		const { task: updated } = await data.updateTaskWith(project, task.id, async (current) => {
-			const before = current.notes ?? [];
-			const noteToDelete = findByIdPrefix(before, noteId, "note");
-			// Vanished between snapshot and lock (concurrent delete) — treat as done.
-			const notes = noteToDelete ? before.filter((n) => n.id !== noteToDelete.id) : before;
-			return { updates: { notes }, result: undefined };
-		});
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+		// Prefix resolution is this adapter's job; the operation takes a full id. A
+		// note that vanished before the lock (concurrent delete) comes back as a no-op.
+		const note = findByIdPrefix(task.notes ?? [], noteId, "note");
+		if (!note) throw new Error(`Note not found: ${noteId}`);
+		const { task: updated } = await taskNotes.deleteNote(boardPorts, project, task.id, note.id);
 		return updated;
 	},
 
@@ -1557,19 +1767,7 @@ const handlers: Record<string, Handler> = {
 		if (!projectId) throw new Error("projectId is required");
 		if (!name) throw new Error("name is required");
 
-		// Build + append the label from the CURRENT project inside the project lock.
-		// Reading project.labels before the lock and writing back [...labels, label]
-		// races with any concurrent label write (another create, or a label.delete):
-		// the last writer clobbers the other's change. updateProjectWith recomputes
-		// inside the lock. Mirrors the RPC createLabel handler.
-		const { result: label } = await data.updateProjectWith(projectId, async (current) => {
-			const labels = current.labels ?? [];
-			const usedColors = new Set(labels.map((l) => l.color));
-			const color = (params.color as string) ?? LABEL_COLORS.find((c) => !usedColors.has(c)) ?? LABEL_COLORS[labels.length % LABEL_COLORS.length];
-			const newLabel: Label = { id: crypto.randomUUID(), name, color };
-			return { updates: { labels: [...labels, newLabel] }, result: newLabel };
-		});
-		getPushMessage()?.("projectUpdated", { project: await data.getProject(projectId) });
+		const { result: label } = await labelOps.createLabel(boardPorts, projectId, { name, color: params.color as string | undefined });
 		return label;
 	},
 
@@ -1583,26 +1781,7 @@ const handlers: Record<string, Handler> = {
 		const label = findByIdPrefix(project.labels ?? [], labelId, "label");
 		if (!label) throw new Error(`Label not found: ${labelId}`);
 
-		// Recompute the surviving labels from the CURRENT project inside the lock so
-		// a concurrent label.create is not clobbered (same lost-update race the
-		// per-task loop below already avoids). Mirrors the RPC deleteLabel handler.
-		await data.updateProjectWith(projectId, async (current) => ({
-			updates: { labels: (current.labels ?? []).filter((l) => l.id !== label.id) },
-			result: undefined,
-		}));
-		// Remove from all tasks. Recompute labelIds from the CURRENT task inside the
-		// per-task lock (updateTaskWith) — filtering a pre-lock snapshot would clobber
-		// any concurrent labelIds change. Mirrors the RPC deleteLabel handler.
-		const tasks = await data.loadTasks(project);
-		for (const task of tasks.filter((t) => t.labelIds?.includes(label.id))) {
-			await data.updateTaskWith(project, task.id, async (currentTask) => ({
-				updates: {
-					labelIds: (currentTask.labelIds ?? []).filter((id) => id !== label.id),
-				},
-				result: undefined,
-			}));
-		}
-		getPushMessage()?.("projectUpdated", { project: await data.getProject(projectId) });
+		await labelOps.deleteLabel(boardPorts, projectId, label.id);
 		return { deleted: label.id };
 	},
 
@@ -1730,39 +1909,11 @@ const handlers: Record<string, Handler> = {
 		return { taskId: task.id, projectId: project.id, delivered: true };
 	},
 
-	"task.setLabels": async (params) => {
-		const taskId = params.taskId as string;
-		const projectId = params.projectId as string;
-		const rawLabelIds = params.labelIds as string[];
-		if (!taskId) throw new Error("taskId is required");
-		if (!projectId) throw new Error("projectId is required");
-		if (!Array.isArray(rawLabelIds)) throw new Error("labelIds must be an array");
-
-		const { project, task } = await resolveTaskFromParams(params);
-		const projectLabels = project.labels ?? [];
-
-		// Resolve short label ID prefixes to full UUIDs, rejecting any that do not
-		// match a real project label. The CLI does not validate, so without this an
-		// id typo would be persisted verbatim into task.labelIds as permanent garbage
-		// (nothing prunes dangling labelIds, unlike customColumnId), the UI would
-		// silently render zero labels for it, and the CLI would still report success.
-		const unknown: string[] = [];
-		const labelIds = rawLabelIds.map((raw) => {
-			const found = findByIdPrefix(projectLabels, raw, "label");
-			if (found) return found.id;
-			unknown.push(raw);
-			return raw;
-		});
-		if (unknown.length > 0) {
-			throw new Error(
-				`Label not found: ${unknown.join(", ")}. Run "dev3 label list" to see valid label IDs.`,
-			);
-		}
-
-		const updated = await data.updateTask(project, task.id, { labelIds });
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-		return updated;
-	},
+	"task.setLabels": (params) => changeTaskLabels(params, "replace"),
+	// Separate methods rather than a `mode` param on setLabels: an older app would
+	// ignore an unknown param and REPLACE the set, while an unknown method fails safe.
+	"task.addLabels": (params) => changeTaskLabels(params, "add"),
+	"task.removeLabels": (params) => changeTaskLabels(params, "remove"),
 
 	"task.agentHook": (params) => codexQuestions.run(String(params.taskId), async () => {
 		const { project, task } = await resolveTaskFromParams(params);
@@ -1796,6 +1947,8 @@ const handlers: Record<string, Handler> = {
 		else if (questionState.resumeStatus && task.status === "user-questions" && event !== "Stop") {
 			target = event === "Interrupt" || event === "SessionEnd" ? "review-by-user" : questionState.resumeStatus;
 		}
+		// A To Do card has no run to report on — not even a pending question.
+		if (task.status === "todo") target = null;
 		const resumeStatus = event === "PermissionRequest"
 			&& (task.status === "in-progress" || task.status === "review-by-ai")
 			? task.status
@@ -1826,9 +1979,11 @@ const handlers: Record<string, Handler> = {
 		}
 
 		// Record the session id for this pane (targeted per-pane recovery).
+		// A Codex hook without a pane id (a native session with no pane suffix) is
+		// still placed when the task has only one pane; other harnesses need the id.
 		const paneId = typeof params.paneId === "string" ? params.paneId : null;
-		if (sessionId && paneId) {
-			await capturePaneSession(project, task.id, paneId, sessionId);
+		if (sessionId && (paneId || harness === "codex")) {
+			await capturePaneSession(project, task.id, paneId, sessionId, harness);
 		}
 
 		// The submitted text rides on the same payload, so recording costs the
@@ -1905,7 +2060,8 @@ const handlers: Record<string, Handler> = {
 			...(typeof params.lastAssistantMessage === "string" ? { lastAssistantMessage: params.lastAssistantMessage } : {}),
 		});
 
-		if (task.status === "completed" || task.status === "cancelled") {
+		// A To Do task has no turn to park: the failing agent outlived its run.
+		if (task.status === "completed" || task.status === "cancelled" || task.status === "todo") {
 			return { task, moved: false, reason };
 		}
 
@@ -1985,6 +2141,13 @@ const handlers: Record<string, Handler> = {
 		// human at a terminal (no sourceTaskId) both stay on the silent path.
 		const requester = await resolveAgentMessageSource(params, task.id);
 		const isActivation = !ACTIVE_STATUSES.includes(task.status) && ACTIVE_STATUSES.includes(builtinStatus);
+		const sourceTaskId = typeof params.sourceTaskId === "string" ? params.sourceTaskId.trim() : "";
+		// A task's own agent never starts its To Do card again: after a reset the
+		// agent is dying, and its hooks (every tool call) must stay a quiet no-op.
+		if (isActivation && task.status === "todo" && sourceTaskId && sourceTaskId === task.id) {
+			log.info("Ignoring own-agent activation of a To Do task", { taskId: task.id.slice(0, 8), to: builtinStatus });
+			return task;
+		}
 		if (requester && isActivation && !isStatusGuardBlocked(task.status, { ifStatus, ifStatusNot })) {
 			return requestAgentLaunchApproval({
 				project,
@@ -2002,6 +2165,10 @@ const handlers: Record<string, Handler> = {
 			ifStatus,
 			ifStatusNot,
 			enforceAllowedTransition: true,
+			// No task context = an explicit command from outside any task (a person,
+			// a script). It keeps today's plain-move trust to start a To Do card and
+			// nothing more — it is never reset consent (that is `task.requestReset`).
+			...(sourceTaskId ? {} : { explicitLaunch: true }),
 		});
 	},
 
@@ -2009,36 +2176,7 @@ const handlers: Record<string, Handler> = {
 	// approves or declines in the app UI. Approval executes the move even if
 	// the requesting CLI has already disconnected (its tmux session may have
 	// hit a client-side timeout while the dialog stayed open).
-	"task.requestCompletion": async (params) => {
-		const { project, task } = await resolveTaskFromParams(params);
-		if (task.status === "completed" || task.status === "cancelled") {
-			throw new Error(`Task is already ${task.status}`);
-		}
-		const push = getPushMessage();
-		if (!push) {
-			throw new Error("No app window is connected — cannot ask the user for approval");
-		}
-
-		// Kept ON the request, not just pushed: the push is a one-shot event, so a
-		// renderer that reloads before answering could never be handed the dialog
-		// again (a retry joins instead of re-pushing). It asks for this on connect.
-		const dialog = {
-			taskTitle: getTaskTitle(task),
-			// Full read-only context (project, seq, priority, labels, overview)
-			// so the user recognizes which task the prompt destroys.
-			subject: buildTaskDialogSubject(task, project),
-		};
-		const { requestId, decision } = createAgentRequest("complete", task.id, project.id, { dialog });
-		// Pushed on EVERY attempt — see the note on `task.requestCancellation`.
-		push("agentCompletionRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
-
-		const { approved } = await decision;
-		if (!approved) {
-			return { approved: false };
-		}
-		const updated = await moveTask({ taskId: task.id, projectId: project.id, newStatus: "completed" });
-		return { approved: true, task: updated };
-	},
+	"task.requestCompletion": async (params) => requestDestructiveApproval("complete", params),
 
 	// Agent-initiated request to CANCEL a task — an agent cleaning up a task it
 	// should not have created. Same approval model as `task.requestCompletion`,
@@ -2046,36 +2184,21 @@ const handlers: Record<string, Handler> = {
 	// work away, and the dialog asking for it must not look like the other one.
 	// Never auto-approved (no `autoApproveAfterMs`) — nobody loses a worktree to
 	// a dialog they never saw.
-	"task.requestCancellation": async (params) => {
-		const { project, task } = await resolveTaskFromParams(params);
-		if (task.status === "completed" || task.status === "cancelled") {
-			throw new Error(`Task is already ${task.status}`);
-		}
-		const push = getPushMessage();
-		if (!push) {
-			throw new Error("No app window is connected — cannot ask the user for approval");
-		}
+	"task.requestCancellation": async (params) => requestDestructiveApproval("cancel", params),
 
-		const dialog = {
-			taskTitle: getTaskTitle(task),
-			subject: buildTaskDialogSubject(task, project),
-		};
-		const { requestId, decision } = createAgentRequest("cancel", task.id, project.id, { dialog });
-		// Pushed on EVERY attempt, joined retries included. A retry used to push
-		// nothing, so once a client lost the original dialog — it was never
-		// connected, its transport dropped, the window reloaded mid-flight — the
-		// request became unreachable from the CLI side: every further attempt
-		// blocked the full ten minutes with nothing on screen, and only a NEW
-		// client connecting replayed it (h0x91b/dev-3.0#1669). Clients dedup by
-		// `requestId`, so a dialog already on screen is untouched.
-		push("agentCancellationRequested", { requestId, taskId: task.id, projectId: project.id, ...dialog });
+	// `dev3 task move --status todo`. A task that needs a reset (active, or still
+	// owning a worktree) is reset only after the user approves it in the app —
+	// from any caller, task context or not. Never auto-approved; a request whose
+	// run ends first is voided, not approved. Anything else is a plain move.
+	"task.requestReset": async (params) => requestDestructiveApproval("reset", params),
 
-		const { approved } = await decision;
-		if (!approved) {
-			return { approved: false };
-		}
-		const updated = await moveTask({ taskId: task.id, projectId: project.id, newStatus: "cancelled" });
-		return { approved: true, task: updated };
+	// Read-only: where a completion/cancellation request stands. Never creates,
+	// joins or answers one — it is what a CLI asks after its wait timed out.
+	"approval.status": async (params) => {
+		const kind = params.kind;
+		if (kind !== "complete" && kind !== "cancel" && kind !== "reset") throw new Error('kind must be "complete", "cancel" or "reset"');
+		const { task } = await resolveTaskFromParams(params);
+		return approvalStatusOf(kind, task);
 	},
 
 	// UI control: surface an in-app toast (or native OS notification) from the CLI.
@@ -2243,72 +2366,35 @@ const handlers: Record<string, Handler> = {
 		const subject = requireMessageSubject(params.subject, text);
 		const source = await resolveAgentMessageSource(params, task.id);
 		const updated = await scheduleMessageCore(project, task, { text, at, source, subject });
-		return { taskId: task.id, projectId: project.id, at, pending: (updated.scheduledMessages ?? []).length };
+		const queue = updated.scheduledMessages ?? [];
+		// Appended under the tasks-file lock, so the returned queue ends with ours.
+		const messageId = queue[queue.length - 1]?.id;
+		return { taskId: task.id, projectId: project.id, at, pending: queue.length, messageId };
+	},
+
+	// `dev3 message --list`: the target task's pending scheduled messages, earliest first.
+	"message.scheduled.list": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params, { variantIndex: messageVariantIndex(params) });
+		return {
+			taskId: task.id,
+			projectId: project.id,
+			seq: task.seq,
+			messages: toScheduledMessageListing(task.scheduledMessages ?? []),
+		};
+	},
+
+	// `dev3 message --cancel <id>`: drop one pending message without delivering it.
+	"message.scheduled.cancel": async (params) => {
+		const { project, task } = await resolveTaskFromParams(params, { variantIndex: messageVariantIndex(params) });
+		const { message } = await cancelScheduledMessageByRef(project, task.id, String(params.messageId ?? ""));
+		return { taskId: task.id, projectId: project.id, cancelled: toScheduledMessageListing([message])[0] };
 	},
 
 	// UI control: surface images (screenshots, renders, QA captures) an agent wants
 	// the human to look at, bound to the task and kept as a clickable history.
-	"ui.show-image": async (params) => {
-		const { project, task } = await resolveTaskFromParams(params);
-		if ((await loadSettings()).focusMode) setFocusMode(true);
-		// Preferred shape: images: [{ path, caption? }] — one note per image.
-		// Back-compat: paths: string[] + a single caption applied to all.
-		const items: { path: string; caption?: string }[] = [];
-		if (Array.isArray(params.images)) {
-			for (const raw of params.images as unknown[]) {
-				if (!raw || typeof raw !== "object") continue;
-				const rec = raw as { path?: unknown; caption?: unknown };
-				if (typeof rec.path !== "string" || rec.path.length === 0) continue;
-				const caption = typeof rec.caption === "string" && rec.caption.trim() ? rec.caption.trim() : undefined;
-				items.push({ path: rec.path, caption });
-			}
-		} else {
-			const rawPaths = Array.isArray(params.paths) ? (params.paths as unknown[]) : [];
-			const caption = typeof params.caption === "string" && params.caption.trim() ? params.caption.trim() : undefined;
-			for (const p of rawPaths) {
-				if (typeof p === "string" && p.length > 0) items.push({ path: p, caption });
-			}
-		}
-		if (items.length === 0) throw new Error("At least one image path is required");
-
-		// Copy every file into the worktree first — fail fast (usage error) if any
-		// path is invalid, so the agent gets a clear signal and nothing half-lands.
-		let incoming: SharedImage[];
-		try {
-			incoming = items.map((it) => saveSharedImage(project.path, it.path, it.caption));
-		} catch (err) {
-			if (err instanceof SharedImageError) throw err;
-			throw new Error(`Failed to store image: ${err instanceof Error ? err.message : String(err)}`);
-		}
-
-		// Append inside the file lock. The history is uncapped — the stored files
-		// live in the worktree and die with it.
-		const { task: updated } = await data.updateTaskWith<void>(project, task.id, (current) => {
-			return { updates: { sharedImages: [...(current.sharedImages ?? []), ...incoming] }, result: undefined };
-		});
-
-		// Persist to state everywhere (badge + history) regardless of focus mode.
-		getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
-
-		const payload = {
-			taskId: task.id,
-			projectId: project.id,
-			images: updated.sharedImages ?? [],
-			newCount: incoming.length,
-			taskSeq: task.seq,
-			taskTitle: getTaskTitle(task),
-			projectName: project.name,
-		};
-		if (isNotificationSuppressed()) {
-			pushCliShowImage(payload);
-			return { delivered: true, queued: true, stored: incoming.length, taskId: task.id };
-		}
-
-		const push = getPushMessage();
-		if (!push) return { delivered: false, stored: incoming.length, taskId: task.id };
-		push("cliShowImage", payload);
-		return { delivered: true, stored: incoming.length, taskId: task.id };
-	},
+	"ui.show-image": (params) => showSharedMedia(params, "image"),
+	// Same history and viewer for MP4/WebM clips (`dev3 show-video`).
+	"ui.show-video": (params) => showSharedMedia(params, "video"),
 
 	"ui.show-artifact": async (params) => {
 		const { project, task } = await resolveTaskFromParams(params);

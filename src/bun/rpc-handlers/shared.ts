@@ -187,6 +187,8 @@ export interface TerminalFocusImagePayload {
 	projectId: string;
 	images: SharedImage[];
 	newCount: number;
+	/** What the new arrivals are — picks the toast and badge wording. Absent = images. */
+	newKind?: "image" | "video";
 	taskSeq?: number;
 	taskTitle?: string;
 	projectName?: string;
@@ -212,6 +214,10 @@ export interface AgentMessagePayload {
 	fromTitle?: string;
 	/** Sending task's project, gated alongside the receiver's (see {@link pushAgentMessage}). */
 	fromProjectId?: string;
+	/** Sending task — the toast's link to the sender. */
+	fromTaskId?: string;
+	fromVariantIndex?: number;
+	toVariantIndex?: number;
 	preview: string;
 }
 

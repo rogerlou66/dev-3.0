@@ -83,7 +83,7 @@ function sanitizeRemoteTunnel(raw: unknown): GlobalSettings["remoteTunnel"] {
 
 const DEFAULT_SETTINGS: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
-	defaultConfigId: "claude-auto-opus5-medium",
+	defaultConfigId: "claude-auto-opus55-medium",
 	taskSortOrder: "oldest-first",
 	updateChannel: DEFAULT_UPDATE_CHANNEL,
 };
@@ -176,6 +176,8 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 				: undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		dimInactivePanes: d.dimInactivePanes === false ? false : undefined,
+		shellPrompt: typeof d.shellPrompt === "string" && d.shellPrompt ? d.shellPrompt : undefined,
+		shellPromptCustom: typeof d.shellPromptCustom === "string" && d.shellPromptCustom ? d.shellPromptCustom : undefined,
 		focusMode: d.focusMode === true ? true : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		agentRateLimitTracking: d.agentRateLimitTracking === false ? false : undefined,

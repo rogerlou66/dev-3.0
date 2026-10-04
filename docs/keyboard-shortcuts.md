@@ -14,7 +14,7 @@ this page and the website all read from it.
 
 | Action | macOS | Linux |
 |---|---|---|
-| Go to project (quick switch) | ⌘K | Ctrl+K |
+| Go to project (quick switch) | ⇧⌘K | Ctrl+Shift+K |
 | Open the all-project Kanban | ⌘` | Ctrl+` |
 | Zoom out to the space board | ⇧⌘U | Ctrl+Shift+U |
 | Command palette | ⇧⌘P / ⇧⌘Space | Ctrl+Shift+P / Ctrl+Shift+Space |
@@ -48,7 +48,7 @@ this page and the website all read from it.
 
 **Escape never leaves a task view.** Inside a task, Esc belongs to whatever runs in the terminal —
 it is how you interrupt the agent — so the app does not step back to the board on it. Modals,
-popovers and menus opened on top of a task still close on Esc, as everywhere else. Use ⌘K, `G`
+popovers and menus opened on top of a task still close on Esc, as everywhere else. Use ⇧⌘K, `G`
 then `D`/`P`, or the breadcrumb to leave a task.
 
 ### In a browser (`dev3 remote`)

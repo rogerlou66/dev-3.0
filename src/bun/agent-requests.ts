@@ -1,4 +1,4 @@
-import type { AgentLaunchChoice, TaskDialogSubject } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, TaskDialogSubject } from "../shared/types";
 import { createLogger } from "./logger";
 import { getPushMessage } from "./rpc-handlers/shared-pure";
 
@@ -8,12 +8,14 @@ const log = createLogger("agent-requests");
  * Agent-initiated actions that need the user's explicit go-ahead before they
  * happen. Each kind blocks the requesting CLI until the user answers in the app.
  */
-export type AgentRequestKind = "complete" | "cancel" | "launch";
+export type AgentRequestKind = "complete" | "cancel" | "reset" | "launch";
 
 export interface AgentRequestDecision {
 	approved: boolean;
 	/** Present only for approved `launch` requests. */
 	launch?: AgentLaunchChoice;
+	/** Set when nobody answered: the run the request was about ended first. */
+	stale?: boolean;
 }
 
 /**
@@ -35,6 +37,7 @@ interface PendingAgentRequest {
 	resolve: (decision: AgentRequestDecision) => void;
 	/** Present when the caller supplied one; absent kinds are not replayable. */
 	dialog?: AgentRequestDialog;
+	launchDialog?: AgentLaunchRequest;
 	/** Auto-approval timer, when the request was created with a deadline. */
 	autoApproveTimer?: ReturnType<typeof setTimeout>;
 	/** Epoch ms the timer fires at; mirrored to the dialog for its countdown. */
@@ -51,6 +54,34 @@ interface PendingAgentRequest {
 
 const pendingByRequestId = new Map<string, PendingAgentRequest>();
 const requestIdByKey = new Map<string, string>();
+
+/**
+ * How long an answer stays readable after it settled a request. A CLI whose
+ * socket dropped mid-wait asks within seconds; the window only has to outlive
+ * that re-attach, not become a history.
+ */
+export const AGENT_REQUEST_OUTCOME_TTL_MS = 15 * 60 * 1000;
+
+interface AgentRequestOutcome {
+	requestId: string;
+	approved: boolean;
+	resolvedAt: number;
+	/** Voided because its run ended — nobody answered. */
+	stale?: boolean;
+}
+
+const recentOutcomeByKey = new Map<string, AgentRequestOutcome>();
+
+/**
+ * What the app knows about a task's request of one kind — the authority a CLI
+ * that lost its socket asks instead of guessing. `none` covers both "never
+ * asked" and "asked before this app process started": requests live in memory
+ * and do not survive a restart.
+ */
+export type AgentRequestState =
+	| { state: "pending"; requestId: string }
+	| { state: "answered"; requestId: string; approved: boolean; resolvedAt: number; stale?: boolean }
+	| { state: "none" };
 
 function dedupKey(kind: AgentRequestKind, taskId: string): string {
 	return `${kind}:${taskId}`;
@@ -90,6 +121,7 @@ export function createAgentRequest(
 		}
 	}
 
+	recentOutcomeByKey.delete(key);
 	const requestId = crypto.randomUUID();
 	let resolve!: (decision: AgentRequestDecision) => void;
 	const decision = new Promise<AgentRequestDecision>((r) => {
@@ -214,15 +246,70 @@ export function listPendingAgentRequests(
 	return out;
 }
 
-/** Resolve a pending request with the user's decision. Returns false if the request is unknown/expired. */
-export function resolveAgentRequest(requestId: string, decision: AgentRequestDecision): boolean {
+export function setAgentLaunchDialog(request: AgentLaunchRequest): void {
+	const entry = pendingByRequestId.get(request.requestId);
+	if (entry?.kind === "launch") entry.launchDialog = request;
+}
+
+export function pendingAgentLaunchDialogs(): AgentLaunchRequest[] {
+	return [...pendingByRequestId.values()].flatMap((entry) => {
+		if (!entry.launchDialog) return [];
+		const request = { ...entry.launchDialog, autoApproveAt: entry.autoApproveAt };
+		if (request.spawn && entry.launchChoice?.variants[0]) request.spawn = { ...request.spawn, choice: entry.launchChoice.variants[0] };
+		return [request];
+	});
+}
+
+/** The pending request, or the answer that settled it recently, for one task and kind. */
+export function getAgentRequestState(kind: AgentRequestKind, taskId: string, now = Date.now()): AgentRequestState {
+	const key = dedupKey(kind, taskId);
+	const pendingId = requestIdByKey.get(key);
+	if (pendingId && pendingByRequestId.has(pendingId)) return { state: "pending", requestId: pendingId };
+	const outcome = recentOutcomeByKey.get(key);
+	if (outcome && now - outcome.resolvedAt <= AGENT_REQUEST_OUTCOME_TTL_MS) return { state: "answered", ...outcome };
+	if (outcome) recentOutcomeByKey.delete(key);
+	return { state: "none" };
+}
+
+/**
+ * Join the live request for a task without ever creating one. A CLI re-attaching
+ * after a dropped socket must not turn "the app restarted" into a brand-new
+ * dialog the agent never decided to open — that is a second ask, not a retry.
+ */
+export function joinAgentRequest(
+	kind: AgentRequestKind,
+	taskId: string,
+): { requestId: string; decision: Promise<AgentRequestDecision> } | null {
+	const pendingId = requestIdByKey.get(dedupKey(kind, taskId));
+	const entry = pendingId ? pendingByRequestId.get(pendingId) : undefined;
+	if (!entry) return null;
+	log.info("Re-attaching to agent request", { kind, taskId: taskId.slice(0, 8), requestId: entry.requestId });
+	return { requestId: entry.requestId, decision: entry.decision };
+}
+
+/**
+ * Resolve a pending request with the user's decision. Returns false if the
+ * request is unknown/expired — or of another kind than the dialog answering it,
+ * so a "yes" drawn for one dialog can never settle a different request.
+ */
+export function resolveAgentRequest(requestId: string, decision: AgentRequestDecision, expectedKind?: AgentRequestKind): boolean {
 	const entry = pendingByRequestId.get(requestId);
 	if (!entry) {
 		log.debug("resolveAgentRequest: unknown requestId", { requestId });
 		return false;
 	}
+	if (expectedKind && entry.kind !== expectedKind) {
+		log.warn("resolveAgentRequest: answer for the wrong kind ignored", { requestId, kind: entry.kind, expectedKind });
+		return false;
+	}
 	pendingByRequestId.delete(requestId);
 	requestIdByKey.delete(dedupKey(entry.kind, entry.taskId));
+	recentOutcomeByKey.set(dedupKey(entry.kind, entry.taskId), {
+		requestId,
+		approved: decision.approved,
+		resolvedAt: Date.now(),
+		...(decision.stale ? { stale: true } : {}),
+	});
 	if (entry.autoApproveTimer) clearTimeout(entry.autoApproveTimer);
 	entry.resolve(decision);
 	// The dialog was broadcast to every connected client (windows + remote
@@ -243,10 +330,23 @@ export function resolveAgentRequest(requestId: string, decision: AgentRequestDec
 	return true;
 }
 
+/**
+ * The task's run ended (reset, completed, cancelled), so a pending request about
+ * THAT run must not be answerable any more — an approval arriving later would
+ * apply to a different run. Resolved as declined + stale, never approved.
+ */
+export function voidAgentRequest(kind: AgentRequestKind, taskId: string): boolean {
+	const pendingId = requestIdByKey.get(dedupKey(kind, taskId));
+	if (!pendingId) return false;
+	log.info("Voiding agent request — its run ended", { kind, taskId: taskId.slice(0, 8), requestId: pendingId });
+	return resolveAgentRequest(pendingId, { approved: false, stale: true });
+}
+
 export function _resetAgentRequestsForTests(): void {
 	for (const entry of pendingByRequestId.values()) {
 		if (entry.autoApproveTimer) clearTimeout(entry.autoApproveTimer);
 	}
 	pendingByRequestId.clear();
 	requestIdByKey.clear();
+	recentOutcomeByKey.clear();
 }

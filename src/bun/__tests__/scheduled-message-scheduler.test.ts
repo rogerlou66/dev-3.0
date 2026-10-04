@@ -41,6 +41,7 @@ import {
 	fireScheduledMessage,
 	scheduleMessage,
 	cancelScheduledMessage,
+	cancelScheduledMessageByRef,
 	sendScheduledMessageNow,
 	sendMessageImmediately,
 } from "../scheduled-message-scheduler";
@@ -281,6 +282,24 @@ describe("cancel / send-now / immediate", () => {
 		expect(pushFn).toHaveBeenCalledWith("taskUpdated", expect.anything());
 	});
 
+	it("cancelScheduledMessageByRef removes exactly the message its prefix names", async () => {
+		const task = makeTask({ scheduledMessages: [makeMessage({ id: "abc-111" }), makeMessage({ id: "def-222" })] });
+		mockUpdateTaskWith(task);
+		const { task: updated, message } = await cancelScheduledMessageByRef(project, task.id, "ABC");
+		expect(message.id).toBe("abc-111");
+		expect((updated.scheduledMessages ?? []).map((m) => m.id)).toEqual(["def-222"]);
+		expect(pushFn).toHaveBeenCalledWith("taskUpdated", expect.anything());
+	});
+
+	it("cancelScheduledMessageByRef refuses a missing (already fired) or ambiguous id without writing", async () => {
+		const task = makeTask({ scheduledMessages: [makeMessage({ id: "abc-111" }), makeMessage({ id: "abc-222" })] });
+		mockUpdateTaskWith(task);
+		await expect(cancelScheduledMessageByRef(project, task.id, "zzz")).rejects.toThrow(/may have fired already/);
+		await expect(cancelScheduledMessageByRef(project, task.id, "abc")).rejects.toThrow(/ambiguous/);
+		await expect(cancelScheduledMessageByRef(project, task.id, "  ")).rejects.toThrow(/required/);
+		expect(pushFn).not.toHaveBeenCalled();
+	});
+
 	// "Send now" on the chip is a click, so it types at once — the same reason the
 	// review comment's "Send to agent" does. A hold here looked like a dead button.
 	it("sendScheduledMessageNow delivers at once and removes the item", async () => {
@@ -378,8 +397,24 @@ describe("cancel / send-now / immediate", () => {
 			fromSeq: 7,
 			fromTitle: "Coordinator",
 			fromProjectId: "proj-9",
+			fromTaskId: "other",
 			preview: "check the payload",
 		});
+	});
+
+	// The toast links both ends by id, and `#21-2` must name the exact attempt:
+	// a seq alone is ambiguous inside a variant group.
+	it("carries the sender's id and both variant indices for the toast's links", async () => {
+		const task = makeTask({ variantIndex: 3 });
+		await sendMessageImmediately(task as never, "check the payload", null, {
+			taskId: "sender-id",
+			seq: 7,
+			variantIndex: 2,
+		});
+		expect(pushFn).toHaveBeenCalledWith(
+			"agentMessage",
+			expect.objectContaining({ fromTaskId: "sender-id", fromVariantIndex: 2, toVariantIndex: 3 }),
+		);
 	});
 
 	it("stays silent for a message the human sent", async () => {

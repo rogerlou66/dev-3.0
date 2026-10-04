@@ -24,6 +24,11 @@ export function cliBuildPlan(platform: NodeJS.Platform): CliBuildPlan {
 	return { outfile, shellSteps: ["scripts/stage-bundled-tmux.sh", "scripts/sign-cli-binaries.sh"] };
 }
 
+export const WORKER_ENTRIES = [
+	"src/bun/workers/conversation-handoff-worker.ts",
+	"src/bun/workers/clonefile-worker.ts",
+];
+
 function runOrExit(command: string[], label: string): void {
 	const result = Bun.spawnSync(command, {
 		cwd: resolve(import.meta.dir, ".."),
@@ -56,6 +61,15 @@ function main(): void {
 		// electrobun copy rule still requires a `dist/tmux` source to exist.
 		mkdirSync(resolve(import.meta.dir, "../dist/tmux"), { recursive: true });
 		console.log("[build-cli] no shell available: dist/tmux stays empty, CLI signing skipped");
+	}
+
+	// Worker threads cannot import from the repository in a packaged app, so each
+	// worker ships as one self-contained bundle (copied as `workers`).
+	for (const entry of WORKER_ENTRIES) {
+		runOrExit(
+			[process.execPath, "build", entry, "--target", "bun", "--outdir", "dist/workers"],
+			`worker bundle ${entry}`,
+		);
 	}
 
 	runOrExit([process.execPath, "scripts/build-native.ts"], "native build");

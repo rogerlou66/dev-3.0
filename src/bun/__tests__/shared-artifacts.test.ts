@@ -4,8 +4,9 @@ import { inflateRawSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { SharedArtifact } from "../../shared/types";
-import { MAX_SHARED_ARTIFACT_VIDEO_BYTES } from "../../shared/types";
+import { MAX_SHARED_ARTIFACT_MEDIA_BYTES } from "../../shared/types";
 import { TINY_MP4, TINY_WEBM } from "./fixtures/tiny-clips";
+import { TINY_MP3, TINY_WAV } from "./fixtures/tiny-audio";
 
 const TEST_HOME = vi.hoisted(() => `${process.env.DEV3_TEST_ROOT}/shared-artifacts`);
 
@@ -53,6 +54,13 @@ describe("injectArtifactThemeContract", () => {
 		expect(once).toContain("--dev3-surface-base");
 		expect(once).toContain("prefers-color-scheme: light");
 		expect(twice).toBe(once);
+	});
+
+	it("treats only a real shell tag as already themed, not a mention of it in the text", () => {
+		const mention = "<html><head></head><body><pre>&lt;style data-dev3-artifact-shell&gt;</pre></body></html>";
+		expect(injectArtifactThemeContract(mention)).toContain("--dev3-surface-base");
+		const template = '<html><head><link rel="stylesheet" href="app.css" data-dev3-artifact-shell></head><body></body></html>';
+		expect(injectArtifactThemeContract(template)).toBe(template);
 	});
 });
 
@@ -246,6 +254,94 @@ describe("saveSharedArtifact", () => {
 		expect(importedCss).not.toContain("../images/texture.png");
 	});
 
+	it("renders Markdown into a stored HTML page where raw HTML and unsafe links stay inert", () => {
+		const md = join(SRC_DIR, "daily.md");
+		writeFileSync(md, [
+			"# Daily <report>",
+			"",
+			"<script>window.ran = true</script>",
+			"",
+			"| Task | State |",
+			"|---|---|",
+			"| 1991 | done |",
+			"",
+			"[docs](https://dev3.h0x91b.com) [bad](javascript:alert(1)) ![shot](shots/a.png)",
+		].join("\n"));
+
+		const saved = saveSharedArtifact("/my/project", md, []);
+		const stored = readFileSync(saved.storedPath, "utf8");
+
+		expect(saved).toMatchObject({ kind: "html", name: "daily.html", title: "daily", originalPath: md, isUnread: true, assets: [] });
+		expect(saved.bundlePath).toBeUndefined();
+		expect(basename(saved.storedPath)).toBe("daily.html");
+		expect(stored).toContain("data-dev3-artifact-shell");
+		expect(stored).toContain('<h1 id="daily-report">Daily &lt;report&gt;</h1>');
+		expect(stored).toContain("<td>1991</td>");
+		expect(stored).toContain('<a href="https://dev3.h0x91b.com" target="_blank" rel="noopener">docs</a>');
+		expect(stored).toContain("&lt;script&gt;window.ran = true&lt;/script&gt;");
+		expect(stored).not.toContain("<script>window.ran");
+		expect(stored).not.toContain("javascript:");
+		expect(stored).not.toContain("shots/a.png");
+		expect(loadSharedArtifactContent(saved).html).toBe(stored);
+	});
+
+	it("lays Markdown tables and code out as keyboard-scrollable wide blocks, keeping column alignment", () => {
+		const md = join(SRC_DIR, "layout.md");
+		writeFileSync(md, [
+			"Mentions `data-dev3-artifact-shell` in prose.",
+			"",
+			"| Metric | Value |",
+			"|---|--:|",
+			"| cost | $1 |",
+			"",
+			"```ts",
+			"const a = 1 < 2;",
+			"```",
+		].join("\n"));
+
+		const stored = readFileSync(saveSharedArtifact("/my/project", md, []).storedPath, "utf8");
+
+		expect(stored).toContain("<style data-dev3-artifact-shell>");
+		expect(stored).toContain("<style data-dev3-text-artifact>");
+		expect(stored).toMatch(/<div class="dev3-wide dev3-table" role="region" aria-label="Table" tabindex="0"><table>[\s\S]*<\/table>\n<\/div>/);
+		expect(stored).toContain('<td align="right">$1</td>');
+		expect(stored).toContain('<pre class="dev3-wide" tabindex="0"><code class="language-ts"><span class="dev3-line">const a = 1 &lt; 2;\n</span></code></pre>');
+	});
+
+	it("gives headings GitHub-style ids so in-page links land on them", () => {
+		const md = join(SRC_DIR, "anchors.md");
+		writeFileSync(md, ["[Jump](#plan--risks)", "", "## Plan & **risks**", "", "## Plan & risks", "", "## Шаг 1: план"].join("\n"));
+
+		const stored = readFileSync(saveSharedArtifact("/my/project", md, []).storedPath, "utf8");
+
+		expect(stored).toContain('<a href="#plan--risks">Jump</a>');
+		expect(stored).toContain('<h2 id="plan--risks">Plan &amp; <strong>risks</strong></h2>');
+		expect(stored).toContain('<h2 id="plan--risks-1">Plan &amp; risks</h2>');
+		expect(stored).toContain('<h2 id="шаг-1-план">Шаг 1: план</h2>');
+	});
+
+	it("keeps a plain-text file verbatim and escaped, titled by --title", () => {
+		const txt = join(SRC_DIR, "notes.txt");
+		writeFileSync(txt, "Line 1\n  indented <b>not bold</b> & more\n");
+		const saved = saveSharedArtifact("/my/project", txt, [], "Night notes");
+		const stored = readFileSync(saved.storedPath, "utf8");
+		expect(saved.title).toBe("Night notes");
+		expect(saved.name).toBe("notes.html");
+		expect(stored).toContain("<title>Night notes</title>");
+		expect(stored).toContain('<pre class="dev3-plain">Line 1\n  indented &lt;b&gt;not bold&lt;/b&gt; &amp; more\n</pre>');
+	});
+
+	it("refuses assets beside a text artifact and any other source type", () => {
+		const md = join(SRC_DIR, "with-assets.md");
+		const image = join(SRC_DIR, "with-assets.png");
+		const pdf = join(SRC_DIR, "report.pdf");
+		writeFileSync(md, "# Hi");
+		writeFileSync(image, "PNGDATA");
+		writeFileSync(pdf, "%PDF");
+		expect(() => saveSharedArtifact("/my/project", md, [image])).toThrow(/takes no --assets/);
+		expect(() => saveSharedArtifact("/my/project", pdf, [])).toThrow(/\.html, \.md or \.txt/);
+	});
+
 	it("rejects assets outside the HTML directory instead of creating a broken bundle", () => {
 		const htmlDir = join(SRC_DIR, "contained");
 		mkdirSync(htmlDir, { recursive: true });
@@ -360,12 +456,12 @@ describe("bundled video assets", () => {
 		writeFileSync(html, "<!doctype html>");
 
 		const huge = join(root, "huge.mp4");
-		writeFileSync(huge, Buffer.alloc(MAX_SHARED_ARTIFACT_VIDEO_BYTES + 1));
+		writeFileSync(huge, Buffer.alloc(MAX_SHARED_ARTIFACT_MEDIA_BYTES + 1));
 		expect(() => saveSharedArtifact("/my/project", html, [huge])).toThrow(/huge\.mp4 is 16 MB \(max 16 MB per clip\)/);
-		expect(() => saveSharedArtifact("/my/project", html, [huge])).toThrow(/re-encode at a lower bitrate/);
+		expect(() => saveSharedArtifact("/my/project", html, [huge])).toThrow(/re-encode it at a lower bitrate/);
 
 		// A clip stays under the per-file cap while the set blows the combined one.
-		const each = Buffer.alloc(MAX_SHARED_ARTIFACT_VIDEO_BYTES - 1);
+		const each = Buffer.alloc(MAX_SHARED_ARTIFACT_MEDIA_BYTES - 1);
 		const paths = ["a", "b", "c", "d"].map((name) => {
 			const path = join(root, `${name}.webm`);
 			writeFileSync(path, each);
@@ -382,5 +478,92 @@ describe("bundled video assets", () => {
 		writeFileSync(html, "<!doctype html>");
 		writeFileSync(mov, TINY_MP4);
 		expect(() => saveSharedArtifact("/my/project", html, [mov])).toThrow(/Unsupported artifact asset type "mov"/);
+	});
+});
+
+describe("bundled audio assets", () => {
+	beforeEach(() => rmSync(TEST_HOME, { recursive: true, force: true }));
+
+	function audioDir(name: string, body: string): { root: string; html: string } {
+		const root = join(SRC_DIR, name);
+		mkdirSync(join(root, "audio"), { recursive: true });
+		const html = join(root, "index.html");
+		writeFileSync(html, `<!doctype html><html><head></head><body>${body}</body></html>`);
+		return { root, html };
+	}
+
+	const PLAYER = [
+		'<audio controls preload="metadata"><source src="audio/A.mp3" type="audio/mpeg"></audio>',
+		'<a href="audio/A.mp3" download>Download A</a>',
+		'<audio controls src="audio/tone.wav"></audio>',
+	].join("");
+
+	it("stores MP3/M4A/WAV/OGG byte-exact with their MIME types, as data URLs and inside the ZIP", () => {
+		const { root, html } = audioDir("audio-store", PLAYER);
+		const mp3 = join(root, "audio", "A.mp3");
+		const wav = join(root, "audio", "tone.wav");
+		const m4a = join(root, "audio", "tone.m4a");
+		const ogg = join(root, "audio", "tone.ogg");
+		writeFileSync(mp3, TINY_MP3);
+		writeFileSync(wav, TINY_WAV);
+		writeFileSync(m4a, "M4A");
+		writeFileSync(ogg, "OGG");
+		const saved = saveSharedArtifact("/my/project", html, [mp3, wav, m4a, ogg], "Audio report");
+
+		expect(saved.assets.map((asset) => [asset.name, asset.mime])).toEqual([
+			["audio/A.mp3", "audio/mpeg"],
+			["audio/tone.wav", "audio/wav"],
+			["audio/tone.m4a", "audio/mp4"],
+			["audio/tone.ogg", "audio/ogg"],
+		]);
+		const content = loadSharedArtifactContent(saved);
+		const track = content.assets.find((asset) => asset.name === "audio/A.mp3")!;
+		expect(track.dataUrl.startsWith("data:audio/mpeg;base64,")).toBe(true);
+		expect(Buffer.from(track.dataUrl.split(",")[1], "base64").equals(TINY_MP3)).toBe(true);
+		const entries = unzipEntries(readFileSync(saved.bundlePath!));
+		expect(entries.get("audio/A.mp3")!.equals(TINY_MP3)).toBe(true);
+		expect(entries.get("audio/tone.wav")!.equals(TINY_WAV)).toBe(true);
+	});
+
+	it("puts audio under the media caps, not the generic asset cap", () => {
+		const { root, html } = audioDir("audio-limits", "");
+		const huge = join(root, "audio", "long.wav");
+		writeFileSync(huge, Buffer.alloc(MAX_SHARED_ARTIFACT_MEDIA_BYTES + 1));
+		expect(() => saveSharedArtifact("/my/project", html, [huge])).toThrow(/long\.wav is 16 MB \(max 16 MB per clip\)/);
+
+		const each = Buffer.alloc(MAX_SHARED_ARTIFACT_MEDIA_BYTES - 1);
+		const paths = ["a.mp3", "b.mp3", "c.wav", "d.webm"].map((name) => {
+			const path = join(root, "audio", name);
+			writeFileSync(path, each);
+			return path;
+		});
+		expect(() => saveSharedArtifact("/my/project", html, paths)).toThrow(/video and audio total .* \(max 48 MB combined\)/);
+	});
+
+	it("refuses a report whose player points at a track that was not bundled, and stores nothing", () => {
+		const { html } = audioDir("audio-missing", PLAYER);
+		expect(() => saveSharedArtifact("/my/project", html, [])).toThrow(/audio\/A\.mp3: not bundled — .*publish the directory, or pass it after --assets/);
+		expect(existsSync(`${TEST_HOME}/worktrees`)).toBe(false);
+	});
+
+	it("names the conversion for an unsupported format instead of publishing a dead player", () => {
+		const { root, html } = audioDir("audio-flac", '<audio controls src="audio/take.flac"></audio>');
+		writeFileSync(join(root, "audio", "take.flac"), "FLAC");
+		expect(() => saveSharedArtifact("/my/project", html, [])).toThrow(/\.flac is not a supported artifact media type .* ffmpeg -i "audio\/take\.flac" "audio\/take\.mp3"/);
+	});
+
+	it("leaves data:, http(s) and blob media alone and does not check Markdown", () => {
+		const { html } = audioDir("audio-remote", [
+			'<audio controls src="data:audio/mpeg;base64,AAAA"></audio>',
+			'<audio controls src="https://example.com/a.mp3"></audio>',
+			'<a href="//cdn.example.com/b.wav" download>b</a>',
+			"<script>const a = '<audio src=\"audio/built-at-runtime.mp3\">';</script>",
+			'<!-- <audio src="audio/commented.mp3"> -->',
+		].join(""));
+		expect(() => saveSharedArtifact("/my/project", html, [])).not.toThrow();
+
+		const md = join(SRC_DIR, "audio-remote", "notes.md");
+		writeFileSync(md, '<audio src="audio/A.mp3"></audio>');
+		expect(() => saveSharedArtifact("/my/project", md, [])).not.toThrow();
 	});
 });

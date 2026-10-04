@@ -21,6 +21,12 @@ const mocks = vi.hoisted(() => ({
 	getSessionSocket: vi.fn(() => "dev3"),
 }));
 
+vi.mock("../../task-workspace-guard", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../task-workspace-guard")>()),
+	// Fixture worktree paths do not exist on disk; the guard has its own tests.
+	assertTaskWorkspacePresent: (_project: unknown, path: string | null | undefined) => path ?? "",
+	worktreeAccessState: () => "present",
+}));
 vi.mock("../../data", () => ({
 	getProject: mocks.getProject,
 	getTask: mocks.getTask,
@@ -42,6 +48,8 @@ vi.mock("../../agents", () => ({
 	resolveCommandForAgent: mocks.resolveCommandForAgent,
 	resolveCommandForProject: vi.fn(),
 	ensureClaudeTrust: vi.fn(),
+	ensureClaudeConfigDir: vi.fn(),
+	isClaudeCommand: vi.fn(() => false),
 	ensureCodexTrust: vi.fn(),
 	ensureGeminiTrust: vi.fn(),
 	supportsPreAssignedSessionId: vi.fn(() => false),

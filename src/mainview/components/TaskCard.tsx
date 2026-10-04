@@ -3,6 +3,7 @@ import { toast } from "../toast";
 import { createPortal } from "react-dom";
 import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
 import { ACTIVE_STATUSES, getAllowedTransitions, getPreparingStageProgress, getTaskOverview, getTaskTitle, isCoordinatorTask, isTaskDisconnected, projectDisplayName } from "../../shared/types";
+import { earlierPullRequests } from "../../shared/task-pull-requests";
 import { getTaskOpenMode, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { confirm } from "../confirm";
@@ -28,6 +29,8 @@ import TaskBlockAction from "./TaskBlockAction";
 import { isTaskBlocked } from "../../shared/task-blocking";
 import StatusMenuPortal from "./StatusMenuPortal";
 import { useStatusMenu } from "../hooks/useStatusMenu";
+import { useContextMenu } from "../hooks/useContextMenu";
+import TaskContextMenu from "./TaskContextMenu";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useIsControlHidden } from "../hooks/useIsControlHidden";
 import { useMobile } from "../hooks/useMobile";
@@ -157,9 +160,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const portsPopoverRef = useRef<HTMLDivElement>(null);
 	const portsAnchorRef = useRef<HTMLButtonElement>(null);
 
-	// Context menu ("Open in...") state
+	// "Open in..." menu, opened from the action strip. Right-click opens the full
+	// task menu instead (`contextMenu`).
 	const [ctxMenuOpen, setCtxMenuOpen] = useState(false);
 	const [ctxMenuPos, setCtxMenuPos] = useState({ top: 0, left: 0 });
+	const contextMenu = useContextMenu(task.shuttingDown);
 
 	const isPreparing = task.preparing === true;
 	// Transient teardown window pushed by the server while completing/cancelling
@@ -344,7 +349,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				taskId: task.id,
 				projectId: project.id,
 			});
-			dispatch({ type: "removeTask", taskId: task.id });
+			dispatch({ type: "removeTask", taskId: task.id, projectId: project.id });
 		} catch (err) {
 			toast.error(t("task.failedDelete", { error: String(err) }), { taskId: task.id });
 		}
@@ -399,6 +404,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const preparingStageLabel = t(PREPARING_STAGE_LABELS[preparingStage]);
 
 	function handleClick() {
+		if (contextMenu.swallowClick()) return;
 		if (Date.now() < suppressOpenUntilRef.current) return;
 		closeSummaryPreview();
 		// A still-preparing task is `isDisabled` (no drag, dimmed) but must remain
@@ -440,6 +446,10 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 	function openTaskFromDialog() {
 		setDetailOpen(false);
+		if (onOpenWorkspaceTask) {
+			onOpenWorkspaceTask(task, project, cardRef.current);
+			return;
+		}
 		const openMode = getTaskOpenMode();
 		if (openMode === "fullscreen") {
 			navigate({ screen: "task", projectId: project.id, taskId: task.id });
@@ -450,13 +460,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 
 	function handleContextMenu(e: React.MouseEvent) {
 		if (isShuttingDown) return;
-		if (!task.worktreePath) return;
-		e.preventDefault();
-		e.stopPropagation();
 		preview.close();
 		closeSummaryPreview();
-		setCtxMenuPos({ top: e.clientY, left: e.clientX });
-		setCtxMenuOpen(true);
+		contextMenu.handlers.onContextMenu(e);
 	}
 
 	function handleDragStart(e: React.DragEvent) {
@@ -492,7 +498,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// PR signals — the same cluster the Active Tasks sidebar renders, extracted so
 	// the two surfaces cannot drift.
 	const prBadges = prInfo ? (
-		<TaskPrBadges prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} />
+		<TaskPrBadges prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} />
 	) : null;
 
 	function handleShowDescription(e: React.MouseEvent) {
@@ -821,6 +827,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				draggable={!isDisabled && !detailOpen && !isHibernated}
 				onDragStart={handleDragStart}
 				onDragEnd={handleDragEnd}
+				{...contextMenu.handlers}
 				onContextMenu={handleContextMenu}
 				onMouseEnter={handleCardMouseEnter}
 				onMouseLeave={handleCardMouseLeave}
@@ -948,6 +955,16 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						</>
 					)}
 				</StatusMenuPortal>
+			<TaskContextMenu
+				task={task}
+				project={project}
+				dispatch={dispatch}
+				pos={contextMenu.pos}
+				onClose={contextMenu.close}
+				onOpenTask={openTaskFromDialog}
+				onOpenDetails={() => setDetailOpen(true)}
+				testId={`card-task-menu-${task.id}`}
+			/>
 				{ctxMenuOpen && task.worktreePath && <OpenInMenu position={ctxMenuPos} path={task.worktreePath} taskId={task.id} onClose={() => setCtxMenuOpen(false)} />}
 				{scheduleMsgOpen && createPortal(<ScheduleMessageModal task={task} project={project} dispatch={dispatch} onClose={() => setScheduleMsgOpen(false)} />, document.body)}
 				{summaryPreviewPos && createPortal(
@@ -972,7 +989,8 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				draggable={!isDisabled && !detailOpen && !isHibernated}
 				onDragStart={handleDragStart}
 				onDragEnd={handleDragEnd}
-			onContextMenu={handleContextMenu}
+			{...contextMenu.handlers}
+				onContextMenu={handleContextMenu}
 			onMouseEnter={handleCardMouseEnter}
 			onMouseLeave={handleCardMouseLeave}
 			className={`group relative flex flex-col overflow-hidden glass-card rounded-xl transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out border ${isDraft ? "border-dashed border-edge-active" : isActiveInSplit ? "border-accent ring-2 ring-accent/70 shadow-lg shadow-accent/20" : isCoordinator ? "border-dashed task-card-coordinator" : "border-transparent"} ${
@@ -1507,7 +1525,18 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				document.body
 			)}
 
-			{/* Context menu — "Open in..." */}
+			<TaskContextMenu
+				task={task}
+				project={project}
+				dispatch={dispatch}
+				pos={contextMenu.pos}
+				onClose={contextMenu.close}
+				onOpenTask={openTaskFromDialog}
+				onOpenDetails={() => setDetailOpen(true)}
+				testId={`card-task-menu-${task.id}`}
+			/>
+
+			{/* Action-strip "Open in..." — the right-click menu is TaskContextMenu. */}
 			{ctxMenuOpen && task.worktreePath && (
 				<OpenInMenu
 					position={ctxMenuPos}

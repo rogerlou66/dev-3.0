@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../../i18n";
 import ActiveTasksSidebar from "../ActiveTasksSidebar";
@@ -240,6 +240,141 @@ function makeTask(overrides?: Partial<Task>): Task {
 		expect(localStorage.getItem("dev3-sidebar-show-hidden")).toBeNull();
 	});
 
+	describe("hibernated tasks", () => {
+		function renderTasks(tasks: Task[]) {
+			const props = {
+				project, dispatch: vi.fn(), navigate: vi.fn(), agents: [claudeAgent],
+				bellCounts: new Map<string, number>(), taskPorts: new Map<string, never[]>(),
+			};
+			const view = render(
+				<I18nProvider>
+					<ActiveTasksSidebar {...props} tasks={tasks} />
+				</I18nProvider>,
+			);
+			const rerenderTasks = (next: Task[]) => view.rerender(
+				<I18nProvider>
+					<ActiveTasksSidebar {...props} tasks={next} />
+				</I18nProvider>,
+			);
+			return { ...view, rerenderTasks };
+		}
+
+		it("leaves hibernated tasks out by default and brings them back with the eye", async () => {
+			const { api } = await import("../../rpc");
+			vi.mocked(api.request.setTaskHidden).mockClear();
+			const user = userEvent.setup();
+			renderTasks([
+				makeTask({ id: "live", title: "Live task", groupId: null, variantIndex: null }),
+				makeTask({ id: "sleep", title: "Sleeping task", groupId: null, variantIndex: null, hibernated: true }),
+			]);
+
+			expect(screen.getByText("Live task")).toBeInTheDocument();
+			expect(screen.queryByText("Sleeping task")).not.toBeInTheDocument();
+			const eye = screen.getByTestId("sidebar-show-hidden");
+			expect(eye).toHaveAttribute("aria-pressed", "false");
+
+			await user.click(eye);
+			expect(screen.getByText("Sleeping task")).toBeInTheDocument();
+			expect(screen.getByTestId("sidebar-hibernated-badge")).toBeInTheDocument();
+			// Visibility only: revealing never writes anything about the task.
+			expect(api.request.setTaskHidden).not.toHaveBeenCalled();
+		});
+
+		it("shows a woken task again without the eye", () => {
+			const sleeping = makeTask({ id: "sleep", title: "Sleeping task", groupId: null, variantIndex: null, hibernated: true });
+			const { rerenderTasks } = renderTasks([makeTask({ title: "Live task", groupId: null, variantIndex: null }), sleeping]);
+			expect(screen.queryByText("Sleeping task")).not.toBeInTheDocument();
+
+			rerenderTasks([makeTask({ title: "Live task", groupId: null, variantIndex: null }), { ...sleeping, hibernated: false }]);
+			expect(screen.getByText("Sleeping task")).toBeInTheDocument();
+			expect(screen.queryByTestId("sidebar-show-hidden")).not.toBeInTheDocument();
+		});
+
+		it("keeps review-waiting, question and custom-column tasks in the list", () => {
+			renderTasks([
+				makeTask({ id: "review", title: "Waiting for review", groupId: null, variantIndex: null, status: "review-by-user" }),
+				makeTask({ id: "questions", title: "Has questions", groupId: null, variantIndex: null, status: "user-questions" }),
+				makeTask({ id: "custom", title: "On hold", groupId: null, variantIndex: null, customColumnId: "col-1" }),
+			]);
+
+			expect(screen.getByText("Waiting for review")).toBeInTheDocument();
+			expect(screen.getByText("Has questions")).toBeInTheDocument();
+			expect(screen.getByText("On hold")).toBeInTheDocument();
+			expect(screen.queryByTestId("sidebar-show-hidden")).not.toBeInTheDocument();
+		});
+
+		it("treats a disconnected task like a hibernated one: out by default, back with the eye or is:hibernated", async () => {
+			const user = userEvent.setup();
+			const dead = makeTask({
+				id: "dead", title: "Dead session", groupId: null, variantIndex: null,
+				runtimeState: { runtime: "idle", updatedAt: 0 },
+			});
+			const { rerenderTasks } = renderTasks([makeTask({ id: "live", title: "Live task", groupId: null, variantIndex: null }), dead]);
+
+			expect(screen.queryByText("Dead session")).not.toBeInTheDocument();
+			await user.type(screen.getByPlaceholderText("Search tasks..."), "is:hibernated");
+			expect(await screen.findByText("Dead session")).toBeInTheDocument();
+			expect(screen.queryByText("Live task")).not.toBeInTheDocument();
+			await user.clear(screen.getByPlaceholderText("Search tasks..."));
+
+			await user.click(screen.getByTestId("sidebar-show-hidden"));
+			expect(screen.getByText("Dead session")).toBeInTheDocument();
+			await user.click(screen.getByTestId("sidebar-show-hidden"));
+
+			// Recovered: a running runtime makes it an ordinary row again.
+			rerenderTasks([makeTask({ id: "live", title: "Live task", groupId: null, variantIndex: null }), { ...dead, runtimeState: { runtime: "running", updatedAt: 1 } }]);
+			expect(screen.getByText("Dead session")).toBeInTheDocument();
+		});
+
+		it("counts hidden and hibernated tasks apart on the eye", async () => {
+			renderTasks([
+				makeTask({ id: "live", title: "Live task", groupId: null, variantIndex: null }),
+				makeTask({ id: "parked", title: "Parked task", groupId: null, variantIndex: null, hidden: true }),
+				makeTask({ id: "sleep-1", title: "Sleeping one", groupId: null, variantIndex: null, hibernated: true }),
+				makeTask({ id: "sleep-2", title: "Sleeping two", groupId: null, variantIndex: null, hibernated: true }),
+				// Both at once counts once, as hidden.
+				makeTask({ id: "both", title: "Both", groupId: null, variantIndex: null, hidden: true, hibernated: true }),
+			]);
+
+			fireEvent.mouseEnter(screen.getByTestId("sidebar-show-hidden"));
+			expect(await screen.findByText("2 hidden tasks · 2 hibernated or disconnected tasks")).toBeInTheDocument();
+		});
+
+		it("flags a hibernated task that waits on the user and says when everything is out", () => {
+			renderTasks([makeTask({ id: "sleep", title: "Sleeping review", status: "review-by-user", hibernated: true })]);
+
+			expect(screen.getByTestId("sidebar-hidden-attention-dot")).toBeInTheDocument();
+			expect(screen.getByText("All active tasks are hidden")).toBeInTheDocument();
+		});
+
+		it("reveals only hibernated tasks from the is:hibernated token without touching the eye", async () => {
+			const user = userEvent.setup();
+			renderTasks([
+				makeTask({ id: "live", title: "Live task", groupId: null, variantIndex: null }),
+				makeTask({ id: "parked", title: "Parked task", groupId: null, variantIndex: null, hidden: true }),
+				makeTask({ id: "sleep", title: "Sleeping task", groupId: null, variantIndex: null, hibernated: true }),
+			]);
+
+			await user.type(screen.getByPlaceholderText("Search tasks..."), "is:hibernated");
+			expect(await screen.findByText("Sleeping task")).toBeInTheDocument();
+			expect(screen.queryByText("Parked task")).not.toBeInTheDocument();
+			expect(screen.queryByText("Live task")).not.toBeInTheDocument();
+			expect(screen.getByTestId("sidebar-show-hidden")).toHaveAttribute("aria-pressed", "false");
+		});
+
+		it("keeps is:hidden about tasks the user hid, not hibernated ones", async () => {
+			const user = userEvent.setup();
+			renderTasks([
+				makeTask({ id: "parked", title: "Parked task", groupId: null, variantIndex: null, hidden: true }),
+				makeTask({ id: "sleep", title: "Sleeping task", groupId: null, variantIndex: null, hibernated: true }),
+			]);
+
+			await user.type(screen.getByPlaceholderText("Search tasks..."), "is:hidden");
+			expect(await screen.findByText("Parked task")).toBeInTheDocument();
+			expect(screen.queryByText("Sleeping task")).not.toBeInTheDocument();
+		});
+	});
+
 	it("shows teardown feedback and blocks a shutting-down task", async () => {
 		const user = userEvent.setup();
 		const navigate = vi.fn();
@@ -267,7 +402,9 @@ function makeTask(overrides?: Partial<Task>): Task {
 		expect(navigate).not.toHaveBeenCalled();
 	});
 
-	it("marks a task whose session died and sinks it under the live ones", () => {
+	it("marks a task whose session died and sinks it under the live ones once revealed", () => {
+		// Disconnected rows are out of the default list; the eye brings them back.
+		localStorage.setItem("dev3-sidebar-show-hidden", "true");
 		render(
 			<I18nProvider>
 				<ActiveTasksSidebar
@@ -902,6 +1039,56 @@ function makeTask(overrides?: Partial<Task>): Task {
 		expect((parkedRail.getAttribute("style") ?? "").toLowerCase()).toContain("#abcdef");
 	});
 
+	describe("status filter with a custom column (issue #1804)", () => {
+		const projectWithCol: Project = {
+			...project,
+			customColumns: [{ id: "col-wait", name: "Waiting on Others", color: "#abcdef", llmInstruction: "" }],
+		};
+		const statusTasks = [
+			makeTask({ id: "plain", status: "review-by-user", title: "Plain review task", groupId: null as unknown as string, variantIndex: null }),
+			makeTask({ id: "working", status: "in-progress", title: "Working task", groupId: null as unknown as string, variantIndex: null }),
+			makeTask({ id: "parked", status: "review-by-user", customColumnId: "col-wait", title: "Parked task", groupId: null as unknown as string, variantIndex: null }),
+		];
+
+		function renderWithStatusTasks() {
+			render(
+				<I18nProvider>
+					<ActiveTasksSidebar project={projectWithCol} tasks={statusTasks} activeTaskId="none" dispatch={vi.fn()} navigate={vi.fn()} agents={[claudeAgent]} bellCounts={new Map()} taskPorts={new Map()} />
+				</I18nProvider>,
+			);
+			return screen.getByPlaceholderText("Search tasks...");
+		}
+
+		it("hides a custom-column task when only built-in statuses are selected", async () => {
+			const user = userEvent.setup();
+			await user.type(renderWithStatusTasks(), "status:review-by-user status:in-progress");
+
+			expect(screen.queryByText("Parked task")).not.toBeInTheDocument();
+			expect(screen.getByText("Plain review task")).toBeInTheDocument();
+			expect(screen.getByText("Working task")).toBeInTheDocument();
+		});
+
+		it("shows a custom-column task only when its column is selected", async () => {
+			const user = userEvent.setup();
+			await user.type(renderWithStatusTasks(), 'status:"Waiting on Others"');
+
+			expect(screen.getByText("Parked task")).toBeInTheDocument();
+			expect(screen.queryByText("Plain review task")).not.toBeInTheDocument();
+		});
+
+		it("restores every task once the status filter is cleared", async () => {
+			const user = userEvent.setup();
+			const input = renderWithStatusTasks();
+			await user.type(input, "status:in-progress");
+			expect(screen.queryByText("Parked task")).not.toBeInTheDocument();
+
+			await user.clear(input);
+			for (const title of ["Plain review task", "Working task", "Parked task"]) {
+				expect(screen.getByText(title)).toBeInTheDocument();
+			}
+		});
+	});
+
 	it("orders tasks within a group oldest-first by movedAt (longest-waiting on top)", () => {
 		render(
 			<I18nProvider>
@@ -1014,6 +1201,42 @@ function makeTask(overrides?: Partial<Task>): Task {
 		// The Your Review token now filters the list to the review task only.
 		expect(screen.getByText("Beta task")).toBeInTheDocument();
 		expect(screen.queryByText("Alpha task")).not.toBeInTheDocument();
+	});
+
+	it("keeps an unchecked custom column's tasks out of a built-in status selection (#1804)", async () => {
+		const user = userEvent.setup();
+		const projectWithCol: Project = {
+			...project,
+			customColumns: [{ id: "col-wait", name: "Waiting on Others", color: "#abcdef", llmInstruction: "" }],
+		};
+		render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					project={projectWithCol}
+					tasks={[
+						makeTask({ id: "a", title: "Alpha task", description: "Alpha", status: "in-progress", groupId: null as unknown as string, variantIndex: null }),
+						makeTask({ id: "b", title: "Beta task", description: "Beta", status: "review-by-user", groupId: null as unknown as string, variantIndex: null }),
+						makeTask({ id: "w", title: "Waiting task", description: "Waiting", status: "review-by-user", customColumnId: "col-wait", groupId: null as unknown as string, variantIndex: null }),
+					]}
+					activeTaskId="none"
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+
+		await user.click(screen.getByTestId("filter-funnel-button"));
+		await user.click(screen.getByRole("checkbox", { name: "Your Review" }));
+		await user.click(screen.getByRole("checkbox", { name: "Agent is Working" }));
+		expect(screen.getByText("Alpha task")).toBeInTheDocument();
+		expect(screen.getByText("Beta task")).toBeInTheDocument();
+		expect(screen.queryByText("Waiting task")).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("checkbox", { name: "Waiting on Others" }));
+		expect(screen.getByText("Waiting task")).toBeInTheDocument();
 	});
 
 	it("resets the filter on unmount (ephemeral, component state)", async () => {
@@ -1345,6 +1568,25 @@ describe("ActiveTasksSidebar — space scope", () => {
 		expect(screen.queryByText("Hidden sibling")).not.toBeInTheDocument();
 		await userEvent.click(screen.getByRole("button", { name: "Show hidden tasks" }));
 		expect(screen.getByText("Hidden sibling")).toBeInTheDocument();
+	});
+
+	it.each(["global", "space"])("leaves hibernated cross-project tasks out until revealed in %s scope", async (scope) => {
+		const { api } = await import("../../rpc");
+		localStorage.setItem("dev3-sidebar-scope", scope);
+		vi.mocked(api.request.getSpaces).mockResolvedValue(mockSpaces([["p1", "p2"]]));
+		vi.mocked(api.request.getAllProjectTasks).mockResolvedValue([
+			{ projectId: "p1", todoCount: 0, tasks: [makeTask()] },
+			{ projectId: "p2", todoCount: 0, tasks: [
+				makeTask({ id: "sleeping-sibling", projectId: "p2", title: "Sleeping sibling", hibernated: true }),
+				makeTask({ id: "awake-sibling", projectId: "p2", title: "Awake sibling" }),
+			] },
+		]);
+		renderSidebarWith([project, otherProject]);
+
+		expect(await screen.findByText("Awake sibling")).toBeInTheDocument();
+		expect(screen.queryByText("Sleeping sibling")).not.toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Show hidden tasks" }));
+		expect(screen.getByText("Sleeping sibling")).toBeInTheDocument();
 	});
 
 	it("shows tasks only from projects sharing a space with the current one", async () => {
@@ -1815,5 +2057,47 @@ describe("ActiveTasksSidebar — revealing the selected task", () => {
 
 		expect(list().querySelector('[data-task-id="t1"]')).not.toBeNull();
 		expect(list().querySelector("[data-sidebar-tier] [data-sidebar-tier-header]")).not.toBeNull();
+	});
+});
+
+describe("ActiveTasksSidebar — row context menu", () => {
+	function renderRow(task: Task = makeTask()) {
+		return render(
+			<I18nProvider>
+				<ActiveTasksSidebar
+					project={project}
+					tasks={[task]}
+					activeTaskId="t1"
+					dispatch={vi.fn()}
+					navigate={vi.fn()}
+					agents={[claudeAgent]}
+					bellCounts={new Map()}
+					taskPorts={new Map()}
+				/>
+			</I18nProvider>,
+		);
+	}
+
+	it("opens the task menu on right-click and closes the terminal preview", async () => {
+		renderRow();
+		fireEvent.contextMenu(screen.getByTestId("sidebar-identity-t1"), { clientX: 30, clientY: 40 });
+
+		expect(await screen.findByTestId("sidebar-task-menu-t1")).toBeInTheDocument();
+		expect(screen.getByTestId("task-menu-labels")).toBeInTheDocument();
+		expect(terminalPreview.close).toHaveBeenCalled();
+	});
+
+	it("opens the same menu from the keyboard (Shift+F10)", async () => {
+		renderRow();
+		fireEvent.keyDown(screen.getByRole("button", { name: "Привет! как сам?" }), { key: "F10", shiftKey: true });
+
+		expect(await screen.findByTestId("sidebar-task-menu-t1")).toBeInTheDocument();
+	});
+
+	it("never opens on a task that is shutting down", () => {
+		renderRow(makeTask({ shuttingDown: true }));
+		fireEvent.contextMenu(screen.getByTestId("sidebar-identity-t1"), { clientX: 30, clientY: 40 });
+
+		expect(screen.queryByTestId("sidebar-task-menu-t1")).not.toBeInTheDocument();
 	});
 });

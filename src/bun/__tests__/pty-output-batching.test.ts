@@ -24,9 +24,11 @@ vi.mock("node:fs", async (importOriginal) => {
 vi.mock("../spawn", () => ({ spawn: vi.fn(), spawnSync: vi.fn() }));
 
 import { spawn, spawnSync } from "../spawn";
+import { ptyOutputRecorder } from "../freeze-diagnostics/pty-output";
 
 interface WsHandlers {
 	open(ws: unknown): void;
+	close(ws: unknown): void;
 }
 
 let wsHandlers: WsHandlers;
@@ -103,5 +105,34 @@ describe("PTY output batching", () => {
 
 		vi.advanceTimersByTime(BATCH_MS);
 		expect(client.sent).toEqual(["abc"]);
+	});
+});
+
+describe("freeze capture recording", () => {
+	afterEach(() => ptyOutputRecorder.setEnabled(false));
+
+	it("keeps no terminal output while freeze capture is off", () => {
+		startSession("task-freeze-off-1");
+		emit("private output");
+		vi.advanceTimersByTime(BATCH_MS);
+		expect(ptyOutputRecorder.snapshot()).toEqual([]);
+	});
+
+	it("records exactly the frames a viewer was sent, in order, and forgets the viewer on close", () => {
+		ptyOutputRecorder.setEnabled(true);
+		const client = startSession("task-freeze-rec-1");
+		for (let i = 0; i < 20; i++) {
+			emit(`chunk${i}|`);
+			vi.advanceTimersByTime(5);
+		}
+		vi.advanceTimersByTime(BATCH_MS);
+
+		const [record] = ptyOutputRecorder.snapshot();
+		expect(client.sent.length).toBeGreaterThan(1);
+		expect(record!.chunks.map((chunk) => chunk.text)).toEqual(client.sent);
+		expect(record!.sessionKey).toBe("task-freeze-rec-1");
+
+		wsHandlers.close(client);
+		expect(ptyOutputRecorder.snapshot()).toEqual([]);
 	});
 });

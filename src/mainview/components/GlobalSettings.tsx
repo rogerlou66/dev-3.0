@@ -486,6 +486,24 @@ function GlobalSettings({
 		[persistSettingChange],
 	);
 
+	const handleShellPromptChange = useCallback(
+		(choice: string) => {
+			persistSettingChange(
+				{ shellPrompt: choice },
+			);
+		},
+		[persistSettingChange],
+	);
+
+	const handleShellPromptCustomSave = useCallback(
+		(source: string) => {
+			persistSettingChange(
+				{ shellPrompt: "custom", shellPromptCustom: source },
+			);
+		},
+		[persistSettingChange],
+	);
+
 	const handleTerminalShellChange = useCallback(
 		(shell: ShellFlavor | undefined) => {
 			persistSettingChange(
@@ -843,6 +861,10 @@ function GlobalSettings({
 						terminalShell={globalSettings.terminalShell}
 						shellAvailability={shellAvailability}
 						dimInactivePanes={globalSettings.dimInactivePanes}
+						shellPrompt={globalSettings.shellPrompt}
+						shellPromptCustom={globalSettings.shellPromptCustom}
+						onShellPromptChange={handleShellPromptChange}
+						onShellPromptCustomSave={handleShellPromptCustomSave}
 						onNewTaskTerminalBackendChange={handleNewTaskTerminalBackendChange}
 						onTerminalPathOpenModeChange={handleTerminalPathOpenModeChange}
 						onTerminalShellChange={handleTerminalShellChange}

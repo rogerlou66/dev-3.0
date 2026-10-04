@@ -51,9 +51,11 @@ function ctx(overrides: Partial<TaskQueryContext> = {}): TaskQueryContext {
 		agentName: null,
 		statusValues: [],
 		priorityValue: "",
+		taskType: "standard",
 		spaceNames: [],
 		hasPort: false,
 		isHidden: false,
+		isHibernated: false,
 		isAttention: false,
 		prNumber: null,
 		...overrides,
@@ -175,6 +177,21 @@ describe("matchesTaskQuery — free text (substring/identifier)", () => {
 		expect(matchesTaskQuery(task, "https://github.com/h0x91b/dev-3.0/pull/1488", ctx())).toBe(true);
 		expect(matchesTaskQuery(task, "https://github.com/h0x91b/dev-3.0/pull/1489", ctx())).toBe(false);
 	});
+
+	it("still finds a task by a finished PR its follow-up replaced", () => {
+		const task = blankTask({
+			prNumber: 1500,
+			prUrl: "https://github.com/h0x91b/dev-3.0/pull/1500",
+			pullRequests: [
+				{ number: 1488, url: "https://github.com/h0x91b/dev-3.0/pull/1488", state: "MERGED", firstSeenAt: "2026-09-28T00:00:00Z" },
+				{ number: 1500, url: "https://github.com/h0x91b/dev-3.0/pull/1500", state: "OPEN", firstSeenAt: "2026-09-29T00:00:00Z" },
+			],
+		});
+		expect(matchesTaskQuery(task, "#1488", ctx())).toBe(true);
+		expect(matchesTaskQuery(task, "https://github.com/h0x91b/dev-3.0/pull/1488", ctx())).toBe(true);
+		expect(matchesTaskQuery(task, "https://github.com/other/repo/pull/1488", ctx())).toBe(false);
+		expect(matchesTaskQuery(task, "#1500", ctx())).toBe(true);
+	});
 });
 
 describe("parseTaskQuery", () => {
@@ -234,6 +251,13 @@ describe("matchesTaskQuery — facets", () => {
 		expect(matchesTaskQuery(makeTask(), "status:done", statusCtx)).toBe(false);
 		const parkedCtx = ctx({ statusValues: ["On Hold", "review-by-user", "Your Review"] });
 		expect(matchesTaskQuery(makeTask(), 'status:"on hold"', parkedCtx)).toBe(true);
+	});
+
+	it("is:hibernated matches only a hibernated task, never a hidden one", () => {
+		expect(matchesTaskQuery(makeTask(), "is:hibernated", ctx({ isHibernated: true }))).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "is:hibernated", ctx({ isHibernated: false }))).toBe(false);
+		expect(matchesTaskQuery(makeTask(), "is:hibernated", ctx({ isHidden: true }))).toBe(false);
+		expect(matchesTaskQuery(makeTask(), "is:hidden", ctx({ isHibernated: true }))).toBe(false);
 	});
 
 	it("is:hidden matches only a task hidden from the sidebar", () => {
@@ -433,5 +457,26 @@ describe("is:home flag", () => {
 
 	it("ANDs with the space facet to mean an impossible set", () => {
 		expect(matchesTaskQuery(makeTask(), "is:home space:Labs", ctx({ spaceNames: [] }))).toBe(false);
+	});
+});
+
+describe("matchesTaskQuery — type facet", () => {
+	it("matches the task's type, substring, case-insensitive", () => {
+		const coordinator = ctx({ taskType: "coordinator" });
+		expect(matchesTaskQuery(makeTask(), "type:coordinator", coordinator)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "type:Coord", coordinator)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "type:pr-review", coordinator)).toBe(false);
+		expect(matchesTaskQuery(makeTask(), "type:review", ctx({ taskType: "pr-review" }))).toBe(true);
+	});
+
+	it("ORs repeated type tokens and ANDs with other facets", () => {
+		const review = ctx({ taskType: "pr-review", priorityValue: "p1" });
+		expect(matchesTaskQuery(makeTask(), "type:standard type:pr-review", review)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "type:pr-review priority:P0", review)).toBe(false);
+	});
+
+	it("counts as a facet token, not free text", () => {
+		expect(parseTaskQuery("type:coordinator login").facets.type).toEqual(["coordinator"]);
+		expect(countActiveFacetTokens("type:coordinator login")).toBe(1);
 	});
 });

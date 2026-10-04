@@ -6,6 +6,11 @@ describe("resolveModelRate", () => {
 		expect(rate).toEqual({ input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.25 });
 	});
 
+	it("prices Opus 5.5 at $4/$20 with $0.20 cache reads", () => {
+		const rate = resolveModelRate("claude-opus-5-5[1m]");
+		expect(rate).toEqual({ input: 4, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2 });
+	});
+
 	it("prices Opus 5 at the current Opus tier via the generic opus fallback", () => {
 		expect(resolveModelRate("claude-opus-5")).toMatchObject({ input: 5, output: 25 });
 		expect(resolveModelRate("claude-opus-5[1m]")).toMatchObject({ input: 5, output: 25 });
@@ -55,6 +60,12 @@ describe("resolveModelRate", () => {
 		expect(resolveModelRate("openai/gpt-5.2-codex")).toMatchObject({ input: 1.75, output: 14, cacheRead: 0.175 });
 		expect(resolveModelRate("gpt-5.1-codex-max")).toMatchObject({ input: 1.25, output: 10, cacheRead: 0.125 });
 		expect(resolveModelRate("gpt-5-codex")).toMatchObject({ input: 1.25, output: 10, cacheRead: 0.125 });
+	});
+
+	it("prices the GPT-6 lineup at its short-context API rates", () => {
+		expect(resolveModelRate("gpt-6-astra")).toMatchObject({ input: 10, output: 50, cacheWrite5m: 12.5, cacheRead: 1 });
+		expect(resolveModelRate("gpt-6-sol")).toMatchObject({ input: 2, output: 10, cacheWrite5m: 2.5, cacheRead: 0.2 });
+		expect(resolveModelRate("gpt-6-luna")).toMatchObject({ input: 0.1, output: 0.5, cacheWrite5m: 0.125, cacheRead: 0.01 });
 	});
 
 	it("leaves unpriced Codex preview models unresolved", () => {

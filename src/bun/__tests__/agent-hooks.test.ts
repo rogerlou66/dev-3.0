@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -11,6 +11,7 @@ import {
 	writeCodexHooks,
 } from "../agent-hooks";
 import type { MatcherGroup } from "../../shared/agent-hooks";
+import { getPrimaryStopTarget, isStatusGuardBlocked, type TaskStatus } from "../../shared/types";
 import {
 	CODEX_DEV3_HOOK_COMMAND,
 	DEV3_BASH_PERMISSION,
@@ -39,7 +40,18 @@ describe("buildClaudeHooks", () => {
 		expect(hooks.PreToolUse).toHaveLength(1);
 		expect(hooks.PostToolUse).toHaveLength(1);
 		expect(hooks.PermissionRequest).toHaveLength(1);
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
+	});
+
+	it("SessionStart only injects recent notes, on fresh conversations, and never moves status", () => {
+		const hooks = buildClaudeHooks();
+		expect(hooks.SessionStart).toHaveLength(1);
+		const group = hooks.SessionStart[0];
+		expect(group.matcher).toBe("startup|clear|compact");
+		expect(group.hooks).toEqual([
+			{ type: "command", command: `${DEV3_CLI} hook claude-session-start`, timeout: 5 },
+		]);
+		expect(group.hooks[0].command).not.toContain("task move");
 	});
 
 	it("UserPromptSubmit hook moves to in-progress with --if-status-not guard", () => {
@@ -105,12 +117,34 @@ describe("buildClaudeHooks", () => {
 	it("Stop hook defaults to review-by-user with --if-status in-progress guard", () => {
 		const hooks = buildClaudeHooks();
 
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 		const cmd = hooks.Stop[0].hooks[0].command;
 		expect(cmd).toContain(DEV3_CLI);
 		expect(cmd).toContain("--status review-by-user");
 		expect(cmd).toContain("--if-status in-progress");
 		expect(cmd).not.toContain("--codex-stop-hook");
+	});
+
+	// #1803: AI Review started by hand while automatic review is off. The reviewer
+	// shares the worktree hooks, so its Stop must still leave review-by-ai.
+	it("Stop hook finishes a manual AI Review when automatic review is off", () => {
+		const hooks = buildClaudeHooks({ stopTarget: "review-by-user" });
+
+		expect(hooks.Stop).toHaveLength(2);
+		expect(hooks.Stop[1].hooks[0].command).toBe(
+			`${DEV3_CLI} task move --status review-by-user --if-status review-by-ai || [ $? -eq 2 ]`,
+		);
+	});
+
+	it("Stop hook from the primary pane only ever leaves in-progress", () => {
+		for (const stopTarget of ["review-by-user", "review-by-ai"] as const) {
+			const commands = buildClaudeHooks({ stopTarget }).Stop.map((g) => g.hooks[0].command);
+			// Every Stop move is guarded, and none targets anything past review-by-user.
+			expect(commands.every((c) => /--if-status (in-progress|review-by-ai) /.test(c))).toBe(true);
+			expect(commands.filter((c) => c.includes("--if-status in-progress"))).toEqual([
+				`${DEV3_CLI} task move --status ${stopTarget} --if-status in-progress || [ $? -eq 2 ]`,
+			]);
+		}
 	});
 
 	it("Stop hook with review-by-ai stopTarget creates two matcher groups (primary + review)", () => {
@@ -178,7 +212,7 @@ describe("buildClaudeHooks", () => {
 				for (const entry of group.hooks) {
 					// Either "dev3 task move --status X" or a "dev3 hook <name>" adapter
 					// that reads the event from stdin — never a UUID either way.
-					expect(entry.command).toMatch(/task move --status|hook claude-stop-failure|hook claude-prompt/);
+					expect(entry.command).toMatch(/task move --status|hook claude-stop-failure|hook claude-prompt|hook claude-session-start/);
 					expect(entry.command).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
 				}
 			}
@@ -234,6 +268,50 @@ describe("buildClaudeHooks", () => {
 	});
 });
 
+// Plays generated Stop commands against the real status guard, in the given
+// order — Claude runs a hook event's groups in parallel, so both orders count.
+function replayStop(commands: string[], status: TaskStatus): TaskStatus {
+	for (const command of commands) {
+		const flag = (name: string) => command.match(new RegExp(`--${name} (\\S+)`))?.[1];
+		const target = flag("status") as TaskStatus;
+		if (!isStatusGuardBlocked(status, { ifStatus: flag("if-status"), ifStatusNot: flag("if-status-not") })) {
+			status = target;
+		}
+	}
+	return status;
+}
+
+describe("Claude Stop hooks replayed against the status guard (#1803)", () => {
+	const orders = (autoReview: boolean) => {
+		const commands = buildClaudeHooks({ stopTarget: getPrimaryStopTarget(autoReview) }).Stop
+			.map((group) => group.hooks[0].command);
+		return [commands, [...commands].reverse()];
+	};
+
+	it.each([false, true])("a reviewer finishing in review-by-ai lands in review-by-user (auto review %s)", (autoReview) => {
+		for (const commands of orders(autoReview)) {
+			expect(replayStop(commands, "review-by-ai")).toBe("review-by-user");
+		}
+	});
+
+	// Auto review on is left out on purpose: its two groups chain when replayed in
+	// sequence, and it leans on Claude running them concurrently instead
+	// (decisions/2026/03/14/ai-review-split-pane.md, Risks).
+	it("the primary agent finishing in-progress lands in review-by-user (auto review off)", () => {
+		for (const commands of orders(false)) {
+			expect(replayStop(commands, "in-progress")).toBe("review-by-user");
+		}
+	});
+
+	it.each([false, true])("a Stop in any other column leaves the task alone (auto review %s)", (autoReview) => {
+		for (const status of ["todo", "user-questions", "review-by-user", "completed", "cancelled"] as const) {
+			for (const commands of orders(autoReview)) {
+				expect(replayStop(commands, status)).toBe(status);
+			}
+		}
+	});
+});
+
 describe("mergeClaudeHooks", () => {
 	it("adds hooks to empty settings", () => {
 		const result = mergeClaudeHooks({});
@@ -245,7 +323,7 @@ describe("mergeClaudeHooks", () => {
 		expect(hooks.PreToolUse).toHaveLength(1);
 		expect(hooks.PostToolUse).toHaveLength(1);
 		expect(hooks.PermissionRequest).toHaveLength(1);
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 	});
 
 	it("preserves existing non-hook settings", () => {
@@ -271,7 +349,7 @@ describe("mergeClaudeHooks", () => {
 		expect(hooks.PostToolUse[1].hooks[0].command).toContain("--status in-progress");
 		expect(hooks.PreToolUse).toHaveLength(1);
 		expect(hooks.PermissionRequest).toHaveLength(1);
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 	});
 
 	it("preserves non-dev3 matcher groups on the same events", () => {
@@ -286,7 +364,8 @@ describe("mergeClaudeHooks", () => {
 
 		// Original matcher groups preserved + dev3 groups appended
 		expect(hooks.PermissionRequest).toHaveLength(2);
-		expect(hooks.Stop).toHaveLength(2);
+		expect(hooks.Stop).toHaveLength(3);
+		expect(hooks.Stop[0].hooks[0].command).toBe("echo done");
 	});
 
 	it("is idempotent — running twice does not duplicate dev3 hooks", () => {
@@ -298,7 +377,7 @@ describe("mergeClaudeHooks", () => {
 		expect(hooks.UserPromptSubmit).toHaveLength(2);
 		expect(hooks.PreToolUse).toHaveLength(1);
 		expect(hooks.PermissionRequest).toHaveLength(1);
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 	});
 
 	it("is idempotent with review-by-ai stopTarget (two Stop groups)", () => {
@@ -504,7 +583,7 @@ describe("writeClaudeHooks", () => {
 
 		// Two entries: the status move, plus the recorder that reads the prompt.
 		expect(hooks.UserPromptSubmit).toHaveLength(2);
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 		expect(hooks.Stop[0].hooks[0].command).toContain("task move --status");
 		expect(content.permissions.allow).toContain(DEV3_BASH_PERMISSION);
 	});
@@ -552,26 +631,32 @@ describe("writeClaudeHooks", () => {
 		expect(hooks.UserPromptSubmit[0].hooks[0].command).not.toContain("review-by-user");
 	});
 
-	it("adds permission to settings.json when settings.local.json does not exist", () => {
+	it("never writes the committed settings.json, even when it is the only settings file", () => {
 		const claudeDir = join(tmp, ".claude");
 		mkdirSync(claudeDir, { recursive: true });
-		writeFileSync(
-			join(claudeDir, "settings.json"),
-			JSON.stringify({ permissions: { allow: ["Read(*)"] } }),
-		);
+		const shared = JSON.stringify({ permissions: { allow: ["Read(*)"] } });
+		writeFileSync(join(claudeDir, "settings.json"), shared);
 
 		writeClaudeHooks(tmp);
 
-		// Permission goes to settings.json (existing file)
-		const shared = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
-		expect(shared.permissions.allow).toContain("Read(*)");
-		expect(shared.permissions.allow).toContain(DEV3_BASH_PERMISSION);
-
-		// Hooks go to settings.local.json (always)
+		expect(readFileSync(join(claudeDir, "settings.json"), "utf-8")).toBe(shared);
 		const local = JSON.parse(readFileSync(join(claudeDir, "settings.local.json"), "utf-8"));
 		expect(local.hooks).toBeDefined();
-		// settings.local.json should NOT have the permission (it went to settings.json)
-		expect(local.permissions).toBeUndefined();
+		expect(local.permissions.allow).toContain(DEV3_BASH_PERMISSION);
+	});
+
+	it("keeps defaultMode and the permission out of the committed settings.json", () => {
+		const claudeDir = join(tmp, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		const shared = JSON.stringify({ permissions: { allow: ["Read(*)"] } });
+		writeFileSync(join(claudeDir, "settings.json"), shared);
+
+		writeClaudeHooks(tmp, { permissionMode: "acceptEdits" });
+
+		expect(readFileSync(join(claudeDir, "settings.json"), "utf-8")).toBe(shared);
+		const local = JSON.parse(readFileSync(join(claudeDir, "settings.local.json"), "utf-8"));
+		expect(local.permissions.defaultMode).toBe("acceptEdits");
+		expect(local.permissions.allow).toContain(DEV3_BASH_PERMISSION);
 	});
 
 	it("adds permission to settings.local.json when both files exist", () => {
@@ -621,7 +706,7 @@ describe("writeClaudeHooks", () => {
 
 		const content = JSON.parse(readFileSync(join(claudeDir, "settings.local.json"), "utf-8"));
 		const hooks = content.hooks as Record<string, MatcherGroup[]>;
-		expect(hooks.Stop).toHaveLength(1);
+		expect(hooks.Stop).toHaveLength(2);
 	});
 
 	// A settings.local.json Claude Code wrote itself carries permissions.allow and
@@ -643,6 +728,7 @@ describe("writeClaudeHooks", () => {
 		const content = JSON.parse(readFileSync(join(claudeDir, "settings.local.json"), "utf-8"));
 		const hooks = content.hooks as Record<string, MatcherGroup[]>;
 		expect(Object.keys(hooks)).toEqual([
+			"SessionStart",
 			"UserPromptSubmit",
 			"PreToolUse",
 			"PostToolUse",
@@ -677,7 +763,7 @@ describe("writeClaudeHooks", () => {
 		writeClaudeHooks(tmp);
 
 		const content = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(content.hooks?.Stop).toHaveLength(1);
+		expect(content.hooks?.Stop).toHaveLength(2);
 		expect(content.enabledMcpjsonServers).toEqual(["playwright"]);
 	});
 
@@ -730,24 +816,6 @@ describe("writeClaudeHooks", () => {
 			readFileSync(join(tmp, ".claude", "settings.local.json"), "utf-8"),
 		);
 		expect(content.permissions?.defaultMode).toBeUndefined();
-	});
-
-	it("keeps defaultMode in settings.local.json even when permission goes to settings.json", () => {
-		const claudeDir = join(tmp, ".claude");
-		mkdirSync(claudeDir, { recursive: true });
-		// Only settings.json exists → dev3 permission lands there, not in local.
-		writeFileSync(
-			join(claudeDir, "settings.json"),
-			JSON.stringify({ permissions: { allow: ["Read(*)"] } }),
-		);
-
-		writeClaudeHooks(tmp, { permissionMode: "acceptEdits" });
-
-		// defaultMode must be local-scoped (gitignored), never the committed file.
-		const local = JSON.parse(readFileSync(join(claudeDir, "settings.local.json"), "utf-8"));
-		expect(local.permissions.defaultMode).toBe("acceptEdits");
-		const shared = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
-		expect(shared.permissions.defaultMode).toBeUndefined();
 	});
 
 	it("preserves an existing defaultMode-bearing file's other keys", () => {
@@ -1034,6 +1102,7 @@ describe("mergeClaudeHooks with malformed settings", () => {
 	const hookEvents = (result: unknown) =>
 		Object.keys((result as { hooks: Record<string, unknown> }).hooks);
 	const DEV3_EVENTS = [
+		"SessionStart",
 		"UserPromptSubmit",
 		"PreToolUse",
 		"PostToolUse",
@@ -1079,7 +1148,7 @@ describe("mergeClaudeHooks with malformed settings", () => {
 		}) as { hooks: Record<string, MatcherGroup[]> };
 
 		expect(merged.hooks.PreToolUse[0]).toEqual(userHook);
-		expect(merged.hooks.Stop).toHaveLength(1);
+		expect(merged.hooks.Stop).toHaveLength(2);
 	});
 
 	it("leaves an unrelated event alone even when its value is malformed", () => {
@@ -1104,7 +1173,7 @@ describe("mergeClaudeHooks with malformed settings", () => {
 			hooks: { Stop: [{ hooks: [{ type: "command", command: 42 }] }, { hooks: [null] }] },
 		}) as { hooks: Record<string, unknown[]> };
 
-		expect(merged.hooks.Stop).toHaveLength(3);
+		expect(merged.hooks.Stop).toHaveLength(4);
 	});
 
 	it("replaces an old dev3 hook stored in the legacy flat format", () => {
@@ -1112,7 +1181,7 @@ describe("mergeClaudeHooks with malformed settings", () => {
 			hooks: { Stop: [{ type: "command", command: `${DEV3_CLI} task move --status review-by-user` }] },
 		}) as { hooks: Record<string, unknown[]> };
 
-		expect(merged.hooks.Stop).toHaveLength(1);
+		expect(merged.hooks.Stop).toHaveLength(2);
 	});
 });
 
@@ -1188,6 +1257,64 @@ describe("ensureDevPermission / ensureDefaultMode with malformed settings", () =
 	});
 });
 
+describe("worktree config writes refuse to follow a symlink", () => {
+	let tmp: string;
+	let kit: string;
+	const KIT_CONTENT = JSON.stringify({ permissions: { allow: ["Read(*)"] } });
+
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "dev3-hooks-symlink-"));
+		kit = mkdtempSync(join(tmpdir(), "dev3-hooks-kit-"));
+		writeFileSync(join(kit, "settings.json"), KIT_CONTENT);
+	});
+
+	afterEach(() => {
+		rmSync(tmp, { recursive: true, force: true });
+		rmSync(kit, { recursive: true, force: true });
+	});
+
+	it("leaves a symlinked settings.json alone and writes settings.local.json", () => {
+		mkdirSync(join(tmp, ".claude"));
+		symlinkSync(join(kit, "settings.json"), join(tmp, ".claude", "settings.json"));
+
+		const result = writeClaudeHooks(tmp, { permissionMode: "auto" });
+
+		expect(result).toEqual({ written: true, skippedSymlink: null });
+		expect(readFileSync(join(kit, "settings.json"), "utf-8")).toBe(KIT_CONTENT);
+		const local = JSON.parse(readFileSync(join(tmp, ".claude", "settings.local.json"), "utf-8"));
+		expect(local.permissions.allow).toContain(DEV3_BASH_PERMISSION);
+	});
+
+	it("skips a symlinked settings.local.json and reports the link", () => {
+		mkdirSync(join(tmp, ".claude"));
+		const link = join(tmp, ".claude", "settings.local.json");
+		symlinkSync(join(kit, "settings.json"), link);
+
+		expect(writeClaudeHooks(tmp)).toEqual({ written: false, skippedSymlink: link });
+		expect(readFileSync(join(kit, "settings.json"), "utf-8")).toBe(KIT_CONTENT);
+	});
+
+	it("skips when the .claude directory itself is a symlink", () => {
+		symlinkSync(kit, join(tmp, ".claude"));
+
+		expect(writeClaudeHooks(tmp)).toEqual({ written: false, skippedSymlink: join(tmp, ".claude") });
+		expect(existsSync(join(kit, "settings.local.json"))).toBe(false);
+	});
+
+	it("skips a dangling .claude symlink instead of throwing", () => {
+		symlinkSync(join(kit, "missing"), join(tmp, ".claude"));
+
+		expect(writeClaudeHooks(tmp).skippedSymlink).toBe(join(tmp, ".claude"));
+	});
+
+	it("skips a symlinked .codex directory for Codex hooks", () => {
+		symlinkSync(kit, join(tmp, ".codex"));
+
+		expect(writeCodexHooks(tmp)).toBe(join(tmp, ".codex"));
+		expect(existsSync(join(kit, "hooks.json"))).toBe(false);
+	});
+});
+
 describe("writeClaudeHooks with a hostile file on disk", () => {
 	let tmp: string;
 
@@ -1212,7 +1339,7 @@ describe("writeClaudeHooks with a hostile file on disk", () => {
 		writeClaudeHooks(tmp);
 
 		const content = read();
-		expect(content.hooks?.Stop).toHaveLength(1);
+		expect(content.hooks?.Stop).toHaveLength(2);
 		expect(content.permissions.allow).toEqual(["Bash(gh:*)", ...dev3BashPermissions()]);
 	});
 
@@ -1235,7 +1362,7 @@ describe("writeClaudeHooks with a hostile file on disk", () => {
 		writeClaudeHooks(tmp);
 
 		const content = read();
-		expect(content.hooks?.Stop).toHaveLength(1);
+		expect(content.hooks?.Stop).toHaveLength(2);
 		expect(content["0"]).toBeUndefined();
 	});
 
@@ -1244,7 +1371,7 @@ describe("writeClaudeHooks with a hostile file on disk", () => {
 
 		writeClaudeHooks(tmp);
 
-		expect(read().hooks?.Stop).toHaveLength(1);
+		expect(read().hooks?.Stop).toHaveLength(2);
 	});
 
 	it("does not write the dev3 permission into a malformed shared settings.json", () => {
@@ -1252,9 +1379,9 @@ describe("writeClaudeHooks with a hostile file on disk", () => {
 
 		writeClaudeHooks(tmp);
 
-		const shared = JSON.parse(readFileSync(join(tmp, ".claude", "settings.json"), "utf-8"));
-		expect(shared.permissions.allow).toEqual(dev3BashPermissions());
-		expect(read().hooks?.Stop).toHaveLength(1);
+		expect(readFileSync(join(tmp, ".claude", "settings.json"), "utf-8")).toBe("null");
+		expect(read().permissions.allow).toEqual(dev3BashPermissions());
+		expect(read().hooks?.Stop).toHaveLength(2);
 	});
 });
 
@@ -1274,8 +1401,8 @@ describe("writeClaudeHooks write suppression", () => {
 	const settingsPath = () => join(tmp, ".claude", "settings.local.json");
 
 	it("reports a write on the first install and none on the second", () => {
-		expect(writeClaudeHooks(tmp)).toBe(true);
-		expect(writeClaudeHooks(tmp)).toBe(false);
+		expect(writeClaudeHooks(tmp).written).toBe(true);
+		expect(writeClaudeHooks(tmp).written).toBe(false);
 	});
 
 	it("leaves the file untouched when nothing changed", () => {
@@ -1291,29 +1418,23 @@ describe("writeClaudeHooks write suppression", () => {
 		writeClaudeHooks(tmp);
 		writeFileSync(settingsPath(), JSON.stringify({ permissions: { allow: ["Bash(gh:*)"] } }));
 
-		expect(writeClaudeHooks(tmp)).toBe(true);
-		expect(JSON.parse(readFileSync(settingsPath(), "utf-8")).hooks?.Stop).toHaveLength(1);
+		expect(writeClaudeHooks(tmp).written).toBe(true);
+		expect(JSON.parse(readFileSync(settingsPath(), "utf-8")).hooks?.Stop).toHaveLength(2);
 	});
 
 	it("writes again when the stop target changes", () => {
 		writeClaudeHooks(tmp, { stopTarget: "review-by-user" });
-		expect(writeClaudeHooks(tmp, { stopTarget: "review-by-ai" })).toBe(true);
+		expect(writeClaudeHooks(tmp, { stopTarget: "review-by-ai" }).written).toBe(true);
 	});
 
-	// With only a shared settings.json present, the permission lands there and the
-	// hooks create settings.local.json. From the second run on, the local file
-	// exists and owns the permission too, so that run still writes — the third is
-	// the first quiet one.
-	it("settles after the shared settings.json hands the permission over to the local one", () => {
+	it("settles on the second run when a shared settings.json is present", () => {
 		mkdirSync(join(tmp, ".claude"), { recursive: true });
-		writeFileSync(join(tmp, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: [] } }));
+		const shared = JSON.stringify({ permissions: { allow: [] } });
+		writeFileSync(join(tmp, ".claude", "settings.json"), shared);
 
-		expect(writeClaudeHooks(tmp)).toBe(true);
-		expect(writeClaudeHooks(tmp)).toBe(true);
-		expect(writeClaudeHooks(tmp)).toBe(false);
-
-		const shared = JSON.parse(readFileSync(join(tmp, ".claude", "settings.json"), "utf-8"));
-		expect(shared.permissions.allow).toEqual(dev3BashPermissions());
+		expect(writeClaudeHooks(tmp).written).toBe(true);
+		expect(writeClaudeHooks(tmp).written).toBe(false);
+		expect(readFileSync(join(tmp, ".claude", "settings.json"), "utf-8")).toBe(shared);
 	});
 });
 
@@ -1347,4 +1468,14 @@ describe("generated hook commands stay instance-neutral", () => {
 		}
 		expect(CODEX_DEV3_HOOK_COMMAND).toContain("~/.dev3.0/bin/dev3");
 	});
+});
+
+describe("getAgentHookTargetStatus on a To Do task", () => {
+	// An agent that outlived a reset must never start the fresh card again.
+	it.each(["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "Interrupt", "SessionEnd"] as const)(
+		"%s → no move", (event) => {
+			expect(getAgentHookTargetStatus(event, "todo", true)).toBeNull();
+			expect(getAgentHookTargetStatus(event, "todo", false)).toBeNull();
+		},
+	);
 });

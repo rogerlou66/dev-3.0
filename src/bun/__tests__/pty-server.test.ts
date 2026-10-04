@@ -52,7 +52,7 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "../spawn";
 import { DEV3_HOME } from "../paths";
 import { _resetUserShellCacheForTests } from "../shell-env";
-import { TmuxSpawnError, TMUX_CONF_DARK_PATH } from "../tmux";
+import { TmuxMissingCwdError, TmuxSpawnError, tmuxConfigPath } from "../tmux";
 import {
 	cwdExists,
 	createSession,
@@ -72,6 +72,9 @@ import {
 	setOnOsc52Copy,
 	_resetTmuxBinaryLoggedForTests,
 	noteHumanTerminalInput,
+	applyTmuxTheme,
+	syncTmuxTaskTitle,
+	tmuxTaskTitleValue,
 } from "../pty-server";
 import { readFileSync } from "node:fs";
 import {
@@ -79,6 +82,7 @@ import {
 	holdAgentMessage,
 	pendingAgentMessageHoldCount,
 	resetAgentMessageHolds,
+	type HeldDeliveryResult,
 } from "../agent-message-hold";
 import {
 	AGENT_MESSAGE_HOLD_CEILING_MS,
@@ -232,7 +236,7 @@ describe("pty-server", () => {
 			expect(tmuxCall![0]).toContain("-L");
 			expect(tmuxCall![0]).toContain("my-socket");
 			expect(tmuxCall![0]).toContain("-f");
-			expect(tmuxCall![0]).toContain(TMUX_CONF_DARK_PATH);
+			expect(tmuxCall![0]).toContain(tmuxConfigPath("dark", true));
 		});
 
 		it("uses the user shell when tmuxCommand is empty", () => {
@@ -251,18 +255,15 @@ describe("pty-server", () => {
 			expect(tmuxCall![0][tmuxCall![0].length - 1]).toBe("/bin/zsh");
 		});
 
-		it("logs a warning when cwd does not exist but still spawns (fork will fail)", () => {
-			// The pre-flight `existsSync(cwd)` check was removed (it was sync I/O
-			// in the hot path). A missing cwd now manifests as a failed fork —
-			// the child exits non-zero and `proc.exited` fires onPtyDied via the
-			// normal exit path. The synchronous early-return was the bottleneck.
+		it("refuses to start a session in a cwd that does not exist — tmux would open it in $HOME", () => {
+			// tmux `new-session -c <missing dir>` exits 0 and starts the pane in the
+			// user's home directory; it never fails the fork. The tmux client refuses
+			// instead (TmuxMissingCwdError), so no session is retained.
 			mockExistsSync.mockReturnValue(false);
 			const id = track("task-nocwd-01");
-			expect(() => createSession(id, "proj-1", "/tmp/nonexistent", "bash", {})).not.toThrow();
-			// spawn was still attempted (fork would fail in production, but the
-			// mocked spawn returns a healthy proc — so no onPtyDied callback fires
-			// here unless we wire up an actually-exiting proc, which other tests do).
-			expect(mockSpawn).toHaveBeenCalled();
+			expect(() => createSession(id, "proj-1", "/tmp/nonexistent", "bash", {})).toThrow(TmuxMissingCwdError);
+			expect(hasSession(id)).toBe(false);
+			expect(mockSpawn.mock.calls.some(([cmd]) => Array.isArray(cmd) && cmd.includes("new-session"))).toBe(false);
 		});
 
 		it("propagates a tmux spawn failure and does not retain a dead session", () => {
@@ -1025,7 +1026,7 @@ describe("pty-server", () => {
 			expect(sourceCall).toBeDefined();
 			expect(sourceCall![0]).toContain("-L");
 			expect(sourceCall![0]).toContain("conf-socket");
-			expect(sourceCall![0]).toContain(TMUX_CONF_DARK_PATH);
+			expect(sourceCall![0]).toContain(tmuxConfigPath("dark", true));
 
 			vi.useRealTimers();
 		});
@@ -1359,7 +1360,7 @@ describe("noteHumanTerminalInput", () => {
 	const session = { taskId: TASK } as any;
 
 	function heldMessage() {
-		const item = { deliver: vi.fn<() => boolean>(() => true), bytes: 0, submit: vi.fn<() => void>() };
+		const item = { text: "", deliver: vi.fn<() => HeldDeliveryResult>(() => "landed"), bytes: 0, submit: vi.fn<() => HeldDeliveryResult>(() => "landed") };
 		holdAgentMessage(agentMessageHoldKey("tmux", TASK, "%1"), item, {});
 		return item;
 	}
@@ -1426,5 +1427,61 @@ describe("noteHumanTerminalInput", () => {
 		for (const write of writes) {
 			expect(write[1]).toContain("noteHumanTerminalInput(session, ws, data)");
 		}
+	});
+});
+
+// Every dev3 instance shares the tmux server, so the dimming choice lives there:
+// only an explicit toggle may set it, and it must land before the re-source that
+// derives the pane styles from it.
+describe("applyTmuxTheme pane dimming", () => {
+	const tmuxArgs = () => mockSpawn.mock.calls.map((c) => c[0] as string[]).filter((a) => Array.isArray(a));
+	const dimSet = (args: string[]) => args.includes("set-option") && args.includes("@dev3_pane_dimming");
+
+	it("sets the server-wide choice on an explicit toggle, before sourcing", async () => {
+		mockSpawn.mockClear();
+		await applyTmuxTheme("dark", { paneDimming: false });
+		const calls = tmuxArgs();
+		const setIdx = calls.findIndex(dimSet);
+		const sourceIdx = calls.findIndex((a) => a.includes("source-file"));
+		expect(setIdx).toBeGreaterThanOrEqual(0);
+		expect(calls[setIdx]).toEqual(expect.arrayContaining(["-L", "dev3", "set-option", "-g", "@dev3_pane_dimming", "off"]));
+		expect(sourceIdx).toBeGreaterThan(setIdx);
+	});
+
+	it("leaves the server-wide choice alone on a plain theme apply", async () => {
+		mockSpawn.mockClear();
+		await applyTmuxTheme("dark");
+		const calls = tmuxArgs();
+		expect(calls.some((a) => a.includes("source-file"))).toBe(true);
+		expect(calls.some(dimSet)).toBe(false);
+	});
+});
+
+describe("tmux task title", () => {
+	const titleSets = () =>
+		mockSpawn.mock.calls.map((c) => c[0] as string[]).filter((a) => Array.isArray(a) && a.includes("@dev3_task_title"));
+
+	it("flattens the title to one line and defuses tmux style markup", () => {
+		expect(tmuxTaskTitleValue("  Fix\n the   #[fg=red]bar \t")).toBe("Fix the # [fg=red]bar");
+	});
+
+	it("writes the title into the task's own session, exactly targeted", async () => {
+		const id = "title-sync-task-0001";
+		createSession(id, "proj-1", "/tmp/test-cwd", "bash", {});
+		mockSpawn.mockClear();
+		await syncTmuxTaskTitle(id, "Move tmux window bar to top");
+		expect(titleSets()).toEqual([
+			expect.arrayContaining(["-L", "dev3", "set-option", "-t", `=${getSessionTmuxName(id)}:`, "@dev3_task_title", "Move tmux window bar to top"]),
+		]);
+		destroySession(id);
+	});
+
+	it("does nothing for a task with no open terminal or a project terminal", async () => {
+		createSession("title-sync-project-0001", "proj-1", "/tmp/test-cwd", "bash", {}, "dev3", "project");
+		mockSpawn.mockClear();
+		await syncTmuxTaskTitle("no-such-task", "x");
+		await syncTmuxTaskTitle("title-sync-project-0001", "x");
+		expect(titleSets()).toEqual([]);
+		destroySession("title-sync-project-0001");
 	});
 });

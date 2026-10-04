@@ -8,12 +8,12 @@ import { api } from "../rpc";
 import { toast } from "../toast";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
-import { moveTaskToStatus } from "../utils/moveTaskToStatus";
+import { moveTaskToStatus, resetTaskToTodoWithConsent } from "../utils/moveTaskToStatus";
 import { sortTasksForColumn } from "./sortTasks";
 import { canBlockTask, effectiveTaskColumn, isTaskBlocked, type TaskBoardColumn } from "../../shared/task-blocking";
 import { setTaskBlocked } from "../utils/setTaskBlocked";
 import { matchesTaskQuery } from "../utils/taskSearch";
-import { isAttentionTask } from "../utils/taskFacets";
+import { isAttentionTask, isTaskNotRunning, taskStatusValues, taskTypeValue } from "../utils/taskFacets";
 import HelpSpot from "./HelpSpot";
 import TaskCard from "./TaskCard";
 import PriorityBadge from "./PriorityBadge";
@@ -141,7 +141,9 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		return !normalizedQuery || matchesTaskQuery({ ...task, description: `${project.name} ${task.description}` }, normalizedQuery, {
 			labelNames: (project.labels ?? []).filter((label) => task.labelIds?.includes(label.id)).map((label) => label.name),
 			agentName: agents.find((agent) => agent.id === task.agentId)?.name ?? null,
-			statusValues: [task.status, t(statusKey(task.status)), ...(task.customColumnId ? (project.customColumns ?? []).filter((column) => column.id === task.customColumnId).map((column) => column.name) : [])],
+			statusValues: isTaskBlocked(task) ? ["blocked", t("task.blocked")] : taskStatusValues(task, project.customColumns?.find((column) => column.id === task.customColumnId), t(statusKey(task.status))),
+			taskType: taskTypeValue(task),
+			isHibernated: isTaskNotRunning(task),
 			priorityValue: task.priority?.toLowerCase() ?? "p3", hasPort: false, isHidden: task.hidden === true, isAttention: isAttentionTask(task), spaceNames: null,
 		});
 	}
@@ -238,10 +240,19 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		return sortTasksForColumn(tasks, globalSettings.taskSortOrder, column === "custom" || column === "blocked" ? undefined : column);
 	}
 
+	async function openLaunchModal(project: Project, task: Task, targetStatus: TaskStatus) {
+		if (task.status === "todo" && task.worktreePath) {
+			const outcome = await resetTaskToTodoWithConsent({ task, project, dispatch: localDispatch, t });
+			if (outcome !== "reset") return;
+			task = { ...task, worktreePath: null, branchName: null };
+		}
+		setLaunchModal({ task, project, targetStatus });
+	}
+
 	async function moveTask(project: Project, task: Task, targetStatus: TaskStatus) {
 		if (task.status === targetStatus && !task.customColumnId && !isTaskBlocked(task)) return;
-		if (task.status === "todo" && targetStatus !== "todo" && !task.worktreePath) {
-			setLaunchModal({ task, project, targetStatus });
+		if (task.status === "todo" && ACTIVE_STATUSES.includes(targetStatus)) {
+			await openLaunchModal(project, task, targetStatus);
 			return;
 		}
 		await moveTaskToStatus({
@@ -342,7 +353,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				dispatch={localDispatch}
 				navigate={navigate}
 				agents={agents}
-				onLaunchVariants={(candidate, targetStatus) => setLaunchModal({ task: candidate, project, targetStatus })}
+				onLaunchVariants={(candidate, targetStatus) => { void openLaunchModal(project, candidate, targetStatus); }}
 				onAddAttempts={(candidate) => setLaunchModal({ task: candidate, project, targetStatus: candidate.status, mode: "addAttempts" })}
 				onDragStart={(taskId) => setDragged({ projectId: project.id, taskId, status: task.status })}
 				bellCount={bellCounts.get(task.id) ?? 0}

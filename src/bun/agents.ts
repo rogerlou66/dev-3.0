@@ -24,14 +24,16 @@ import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { ensureAgentSystemPromptFile } from "./agent-system-prompt-file";
-import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv } from "./agent-accounts";
+import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv, listClaudeAccountDirs } from "./agent-accounts";
 import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
 export { claudeModelFamily } from "../shared/agent-accounts";
 import { codexModelCatalogArgs, modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
 import { writeCodexModelCatalog } from "./codex-model-catalog";
 import { loadModelCatalog } from "./model-catalog-store";
 import { ensureModelSidecar, preflightModelRoles } from "./model-sidecar";
-import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY } from "./agent-skills";
+import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, installClaudeConfigDir } from "./agent-skills";
+import { launchClaudeConfigLocation } from "../shared/claude-config-dir";
+import { rememberPinnedClaudeConfigDir } from "./claude-config-dirs";
 import { getAgentAdapter, agentKey } from "../shared/agent-adapters/registry";
 import { autoAgentFamily, isKnownAgentCommand } from "../shared/agent-adapters/families";
 import type { AdapterLaunchOptions, CodexLaunchRuntime } from "../shared/agent-adapters/types";
@@ -42,6 +44,7 @@ import type { TemplateContext } from "../shared/agent-adapters/template";
 // still import them from here.
 export { shellEscape, quoteIfUnsafe } from "../shared/agent-adapters/shell";
 import { commandToken } from "../shared/agent-adapters/shell";
+import { symlinkOnWritePath } from "../shared/symlink-write-guard";
 export { interpolateTemplate } from "../shared/agent-adapters/template";
 export type { TemplateContext } from "../shared/agent-adapters/template";
 
@@ -113,6 +116,8 @@ const DEPRECATED_CONFIG_IDS = new Set([
 	// Luna now starts at Medium; Low did not provide a useful trade-off.
 	"codex-5.6-luna-low-bypass",
 	"codex-5.6-luna-low",
+	// Duplicate of `codex-default` now that Astra Bypass Medium is the default again.
+	"codex-6-astra-medium-bypass",
 ]);
 
 /** A model slug dev3 once shipped on a built-in Cursor preset, which the Cursor
@@ -247,7 +252,7 @@ function mergeAgentWithDefault(
  *  to warrant a one-time resync of already-onboarded users' stored order
  *  (mergeWithDefaults otherwise preserves stored order forever). See
  *  decisions/ for the write-up. */
-export const AGENTS_LAYOUT_REVISION = 12;
+export const AGENTS_LAYOUT_REVISION = 15;
 
 /** One-time reorder of each built-in agent's configurations to match the
  *  current DEFAULT_AGENTS declared order. Custom (non-default) configs are
@@ -373,7 +378,7 @@ export async function saveAllAgents(agents: CodingAgent[]): Promise<void> {
  * Claude-based agents. Since the working directory is guaranteed to be inside
  * a dev-3.0 managed worktree, we inline the full skill body directly into the
  * system prompt instead of asking the agent to invoke `/dev3` first. The skill
- * file in `~/.claude/skills/dev3/SKILL.md` remains for manual `/dev3` use, but
+ * file in `<claude config dir>/skills/dev3/SKILL.md` remains for manual `/dev3` use, but
  * is no longer required for the rules to take effect.
  */
 export const DEV3_SYSTEM_PROMPT = CLAUDE_SKILL_BODY;
@@ -458,7 +463,7 @@ async function codexLaunchRuntime(): Promise<CodexLaunchRuntime> {
 
 export interface CommandOptions {
 	/** When true, resume the previous session instead of starting a new one.
-	 *  Supported agents: Claude (--continue), Codex (resume --last),
+	 *  Supported agents: Claude (--continue), Codex (resume <id>; never --last),
 	 *  Gemini (--resume latest), Antigravity (--continue), Cursor Agent (--continue). */
 	resume?: boolean;
 	/** Specific session ID to resume or pre-assign. When resuming, agents that
@@ -1216,8 +1221,6 @@ export async function ensureCodexTrust(dirPath: string): Promise<void> {
 
 // ---- Claude Trust ----
 
-const CLAUDE_JSON = `${homedir()}/.claude.json`;
-
 const TRUST_ENTRY = {
 	allowedTools: [],
 	hasTrustDialogAccepted: true,
@@ -1232,9 +1235,10 @@ const TRUST_ENTRY = {
 };
 
 /**
- * Ensure a directory is marked as trusted in ~/.claude.json so that
- * `claude` CLI skips the "Do you trust this folder?" dialog.
- * Resolves symlinks (e.g. /tmp → /private/tmp on macOS).
+ * Ensure a directory is marked as trusted in the `.claude.json` the launched
+ * agent reads - `$CLAUDE_CONFIG_DIR/.claude.json` when `launchEnv` (or the
+ * server's env) pins one, ~/.claude.json otherwise - so `claude` skips the
+ * "Do you trust this folder?" dialog. Resolves symlinks (e.g. /tmp → /private/tmp on macOS).
  *
  * If `projectPath` is provided and the worktree contains a `.mcp.json`,
  * also pre-approves the project's MCP servers by writing
@@ -1243,12 +1247,21 @@ const TRUST_ENTRY = {
  * approvals/rejections from `<projectPath>/.claude/settings.local.json` or
  * `<projectPath>/.claude/settings.json` are preserved.
  */
-export async function ensureClaudeTrust(dirPath: string, projectPath?: string, accountId?: string | null): Promise<void> {
+export async function ensureClaudeTrust(
+	dirPath: string,
+	projectPath?: string,
+	accountId?: string | null,
+	launchEnv?: Record<string, string>,
+): Promise<void> {
 	try {
 		// Resolve symlinks so the path matches what claude sees
 		const resolved = await realpath(dirPath);
+		const location = launchClaudeConfigLocation(launchEnv, process.env, homedir(), dirPath);
 
-		await writeClaudeTrustEntry(CLAUDE_JSON, resolved);
+		await writeClaudeTrustEntry(location.claudeJson, resolved);
+		if (location.pinned && !listClaudeAccountDirs().includes(location.dir)) {
+			rememberPinnedClaudeConfigDir(location.dir);
+		}
 
 		// A managed account (agent account switcher) reads trust from ITS OWN
 		// .claude.json inside the CLAUDE_CONFIG_DIR we inject — register there too,
@@ -1271,6 +1284,23 @@ export async function ensureClaudeTrust(dirPath: string, projectPath?: string, a
 		ensureClaudeMcpApproved(dirPath, projectPath);
 	} catch (err) {
 		log.warn("Failed to pre-approve Claude MCP servers", { error: String(err) });
+	}
+}
+
+/**
+ * Give a launch's pinned Claude config dir (`CLAUDE_CONFIG_DIR` from project or
+ * agent-config env) the dev3 skills and settings that startup installs into
+ * ~/.claude. The default dir and managed account dirs are already covered at
+ * startup, so they are skipped. `cwd` is the agent's working dir, which a relative
+ * pin resolves against. Never throws.
+ */
+export function ensureClaudeConfigDir(launchEnv: Record<string, string> | undefined, cwd: string): void {
+	try {
+		const location = launchClaudeConfigLocation(launchEnv, process.env, homedir(), cwd);
+		if (!location.pinned || listClaudeAccountDirs().includes(location.dir)) return;
+		installClaudeConfigDir(location.dir);
+	} catch (err) {
+		log.warn("Failed to provision pinned Claude config dir (non-fatal)", { error: String(err) });
 	}
 }
 
@@ -1319,12 +1349,19 @@ async function writeClaudeTrustEntry(claudeJsonPath: string, resolvedPath: strin
  *      trust dialog bypass.
  *   3. Merge into the worktree's existing `.claude/settings.local.json`
  *      (if any) and write back.
+ *
+ * Exported for unit testing.
  */
-function ensureClaudeMcpApproved(worktreePath: string, projectPath?: string): void {
+export function ensureClaudeMcpApproved(worktreePath: string, projectPath?: string): void {
 	const mcpJsonPath = join(worktreePath, ".mcp.json");
 	if (!existsSync(mcpJsonPath)) return;
 
 	const localSettingsPath = join(worktreePath, ".claude", "settings.local.json");
+	const symlink = symlinkOnWritePath(worktreePath, localSettingsPath);
+	if (symlink) {
+		log.warn("MCP servers not pre-approved: settings path is a symlink", { worktreePath, symlink });
+		return;
+	}
 	const projectSources: Array<string | undefined> = projectPath
 		? [join(projectPath, ".claude", "settings.json"), join(projectPath, ".claude", "settings.local.json")]
 		: [];

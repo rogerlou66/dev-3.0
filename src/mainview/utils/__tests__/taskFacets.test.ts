@@ -2,10 +2,12 @@ import type { CodingAgent, Label, Task } from "../../../shared/types";
 import {
 	isAttentionTask,
 	taskQueryContext,
+	taskStatusValues,
 	buildFilterGroups,
 	type FacetResolver,
 	type FilterFunnelOption,
 } from "../taskFacets";
+import { matchesTaskQuery } from "../taskSearch";
 
 const claude: CodingAgent = {
 	id: "builtin-claude",
@@ -89,6 +91,45 @@ describe("taskQueryContext", () => {
 	});
 });
 
+describe("taskStatusValues", () => {
+	const waiting = { name: "Waiting on Others" };
+	const builtInQuery = "status:review-by-user status:review-by-colleague status:in-progress status:review-by-ai";
+	const matches = (task: Task, column: { name: string } | undefined, query: string) =>
+		matchesTaskQuery(task, query, taskQueryContext(task, {
+			agents: [],
+			labelsFor: () => [],
+			statusValuesFor: (t) => taskStatusValues(t, column, "Your Review"),
+			priorityFor: () => "P3",
+			hasPortFor: () => false,
+			isAttentionFor: () => false,
+		}));
+
+	it("gives a custom-column task only its column name", () => {
+		expect(taskStatusValues(makeTask({ status: "review-by-user" }), waiting, "Your Review")).toEqual(["Waiting on Others"]);
+	});
+
+	it("gives a built-in task its status id and label", () => {
+		expect(taskStatusValues(makeTask({ status: "review-by-user" }), undefined, "Your Review")).toEqual(["review-by-user", "Your Review"]);
+	});
+
+	it("keeps a custom-column task out of built-in status selections (#1804)", () => {
+		const parked = makeTask({ status: "review-by-user", customColumnId: "col-wait" });
+		expect(matches(parked, waiting, builtInQuery)).toBe(false);
+		expect(matches(parked, waiting, 'status:"Your Review"')).toBe(false);
+	});
+
+	it("matches a custom-column task by its column, and with no status filter", () => {
+		const parked = makeTask({ status: "review-by-user", customColumnId: "col-wait" });
+		expect(matches(parked, waiting, `${builtInQuery} status:"Waiting on Others"`)).toBe(true);
+		expect(matches(parked, waiting, "")).toBe(true);
+	});
+
+	it("falls back to the underlying status when the custom column no longer exists", () => {
+		const dangling = makeTask({ status: "review-by-user", customColumnId: "deleted" });
+		expect(matches(dangling, undefined, builtInQuery)).toBe(true);
+	});
+});
+
 describe("buildFilterGroups", () => {
 	const statusCandidates: FilterFunnelOption[] = [
 		{ facet: "status", value: "in-progress", label: "Agent is Working" },
@@ -102,7 +143,7 @@ describe("buildFilterGroups", () => {
 		{ facet: "priority", value: "P3", label: "P3 — Low" },
 		{ facet: "priority", value: "P4", label: "P4 — Lowest" },
 	];
-	const candidates = { priorityCandidates, statusCandidates, flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar" } };
+	const candidates = { priorityCandidates, statusCandidates, flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated" }, typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review" } };
 
 	function resolverFor(): FacetResolver {
 		const labelsById: Record<string, Label[]> = {
@@ -114,7 +155,7 @@ describe("buildFilterGroups", () => {
 			agents: [claude, codex],
 			labelsFor: (task) => labelsById[task.id] ?? [],
 			statusValuesFor: (task) =>
-				task.customColumnId === "col" ? ["On Hold", task.status, "Your Review"] : [task.status, "Agent is Working"],
+				task.customColumnId === "col" ? taskStatusValues(task, { name: "On Hold" }, "Your Review") : taskStatusValues(task, undefined, "Agent is Working"),
 			priorityFor: (task) => task.priority ?? "P2",
 			hasPortFor: (task) => ports.has(task.id),
 		isAttentionFor: (task) => isAttentionTask(task),
@@ -150,6 +191,43 @@ describe("buildFilterGroups", () => {
 		expect(groups.find((g) => g.id === "status")?.options.map((o) => o.value)).toEqual(["in-progress"]);
 	});
 
+	it("offers is:hibernated only while a hibernated task is in the pool", () => {
+		const flagsOf = (tasks: Task[]) => buildFilterGroups(tasks, resolverFor(), candidates)
+			.find((g) => g.id === "flags")?.options.map((o) => `${o.facet}:${o.value}`) ?? [];
+		expect(flagsOf([makeTask({ id: "awake", status: "in-progress" })])).not.toContain("is:hibernated");
+		expect(flagsOf([makeTask({ id: "sleep", status: "in-progress", hibernated: true })])).toEqual(["is:hibernated"]);
+		const dead = makeTask({ id: "dead", status: "in-progress", worktreePath: "/tmp/wt", runtimeState: { runtime: "idle", updatedAt: 0 } });
+		expect(flagsOf([dead])).toEqual(["is:hibernated"]);
+		expect(taskQueryContext(dead, resolverFor()).isHibernated).toBe(true);
+	});
+
+	it("drops the TYPES group when every task is standard", () => {
+		const groups = buildFilterGroups([makeTask({ id: "working" })], resolverFor(), candidates);
+		expect(groups.map((g) => g.id)).not.toContain("types");
+	});
+
+	it("lists present task types after STATUS, standard first, then the TASK_TYPES order", () => {
+		const tasks = [
+			makeTask({ id: "a", taskType: "pr-review" }),
+			makeTask({ id: "b" }),
+			makeTask({ id: "c", taskType: "coordinator" }),
+		];
+		const groups = buildFilterGroups(tasks, resolverFor(), candidates);
+		const ids = groups.map((g) => g.id);
+		expect(ids.indexOf("types")).toBe(ids.indexOf("status") + 1);
+		const types = groups.find((g) => g.id === "types")!.options;
+		expect(types.map((o) => `${o.facet}:${o.value}`)).toEqual(["type:standard", "type:coordinator", "type:pr-review"]);
+		expect(types.map((o) => o.label)).toEqual(["Standard", "Coordinator", "PR review"]);
+	});
+
+	it("puts an untyped task in the query context as standard, so type:standard finds it", () => {
+		const untyped = makeTask({ id: "b" });
+		expect(taskQueryContext(untyped, resolverFor()).taskType).toBe("standard");
+		expect(matchesTaskQuery(untyped, "type:standard", taskQueryContext(untyped, resolverFor()))).toBe(true);
+		const coord = makeTask({ id: "c", taskType: "coordinator" });
+		expect(matchesTaskQuery(coord, "type:standard", taskQueryContext(coord, resolverFor()))).toBe(false);
+	});
+
 	it("returns no groups for an empty task list", () => {
 		expect(buildFilterGroups([], resolverFor(), candidates)).toEqual([]);
 	});
@@ -167,7 +245,8 @@ describe("buildFilterGroups — SPACES group", () => {
 	const spaceCandidates = {
 		priorityCandidates: [{ facet: "priority" as const, value: "P2", label: "P2 — Normal" }],
 		statusCandidates: [{ facet: "status" as const, value: "in-progress", label: "Agent is Working" }],
-		flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar" },
+		flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated" },
+		typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review" },
 	};
 
 	it("lists every space present in the pool, alphabetically, after STATUS", () => {

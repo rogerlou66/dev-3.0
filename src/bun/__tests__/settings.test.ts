@@ -285,7 +285,7 @@ describe("saveSettings", () => {
 
 	it("falls back to the current default for a dangling builtin-looking id with no remap entry", async () => {
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ defaultConfigId: "claude-some-preset-that-never-existed" }), null, 2), "utf-8");
-		expect((await loadSettings()).defaultConfigId).toBe("claude-auto-opus5-medium");
+		expect((await loadSettings()).defaultConfigId).toBe("claude-auto-opus55-medium");
 	});
 
 	it("leaves a non-builtin (custom) defaultConfigId untouched", async () => {
@@ -361,6 +361,8 @@ describe("saveSettings", () => {
 			terminalPathOpenMode: "reveal",
 			terminalShell: "sh",
 			dimInactivePanes: false,
+			shellPrompt: "minimal",
+			shellPromptCustom: "PROMPT='> '",
 			theme: "light",
 			analyticsDistinctId: "11111111-2222-3333-4444-555555555555",
 			resolvedTheme: "light",

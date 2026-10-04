@@ -4,10 +4,10 @@ import {
 	MAX_SHARED_ARTIFACT_ASSET_BYTES,
 	MAX_SHARED_ARTIFACT_ASSETS,
 	MAX_SHARED_ARTIFACT_HTML_BYTES,
-	MAX_SHARED_ARTIFACT_VIDEO_BYTES,
-	MAX_SHARED_ARTIFACT_VIDEO_TOTAL_BYTES,
+	MAX_SHARED_ARTIFACT_MEDIA_BYTES,
+	MAX_SHARED_ARTIFACT_MEDIA_TOTAL_BYTES,
 	SHARED_ARTIFACT_ASSET_EXTS,
-	SHARED_VIDEO_EXTS,
+	SHARED_MEDIA_EXTS,
 } from "../../shared/types";
 import { resolveValue } from "../args";
 import { expandShortId, resolveProjectId, type CliContext } from "../context";
@@ -15,9 +15,10 @@ import { exitError, exitUsage } from "../output";
 import { sendRequest } from "../socket-client";
 
 const ASSET_EXTS = new Set(SHARED_ARTIFACT_ASSET_EXTS);
-const VIDEO_EXTS = new Set(SHARED_VIDEO_EXTS);
+const MEDIA_EXTS = new Set(SHARED_MEDIA_EXTS);
 const VALUE_FLAGS = new Set(["title", "task", "task-id", "project", "artifact-id"]);
 const BOOL_FLAGS = new Set(["new"]);
+const TEXT_EXTS = new Set([".md", ".markdown", ".txt"]);
 
 /** "16 MB" / "2.7 MB" — the unit a size error has to speak to be actionable. */
 function mb(bytes: number): string {
@@ -32,8 +33,8 @@ function nextValue(argv: string[], index: number, flag: string): { value: string
 }
 
 /**
- * A report directory publishes as a unit: every CSS, classic JavaScript, raster
- * and MP4/WebM file under it is an asset, so the author names one path instead
+ * A report directory publishes as a unit: every CSS, classic JavaScript, raster,
+ * MP4/WebM video and MP3/M4A/WAV/OGG audio file under it is an asset, so the author names one path instead
  * of five. Only a directory is walked — a bare `.html` in a worktree root must
  * not slurp the repository around it.
  */
@@ -54,7 +55,9 @@ function collectDirectoryAssets(dir: string, htmlPath: string): string[] {
 /**
  * `dev3 show-artifact ./report-dir --title "Report"` publishes `index.html` plus
  * every asset under the directory; `dev3 show-artifact report.html --assets
- * app.css chart.png` names them by hand.
+ * app.css chart.png` names them by hand. A `.md` or `.txt` file publishes as
+ * text into the same viewer — the exception, for an explicit request for that
+ * format; the template directory is the default for any human-facing report.
  */
 export async function handleShowArtifact(argv: string[], socketPath: string, context: CliContext | null): Promise<void> {
 	let html = "";
@@ -97,7 +100,7 @@ export async function handleShowArtifact(argv: string[], socketPath: string, con
 		else exitUsage(`Unexpected path: ${token}. Put local assets after --assets.`);
 	}
 
-	if (!html) exitUsage('Usage: dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]');
+	if (!html) exitUsage('Usage: dev3 show-artifact <report-dir | file.html | notes.md | notes.txt> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]');
 	let htmlPath = resolvePath(process.cwd(), html);
 	if (existsSync(htmlPath) && statSync(htmlPath).isDirectory()) {
 		const indexPath = join(htmlPath, "index.html");
@@ -105,30 +108,32 @@ export async function handleShowArtifact(argv: string[], socketPath: string, con
 		if (!assets.length) assets.push(...collectDirectoryAssets(htmlPath, indexPath));
 		htmlPath = indexPath;
 	}
-	if (!existsSync(htmlPath) || !statSync(htmlPath).isFile()) exitUsage(`HTML file not found: ${html}`);
-	if (extname(htmlPath).toLowerCase() !== ".html") exitUsage(`Artifact must be an .html file: ${html}`);
-	if (statSync(htmlPath).size > MAX_SHARED_ARTIFACT_HTML_BYTES) exitUsage("HTML artifact is too large (max 5 MB)");
+	if (!existsSync(htmlPath) || !statSync(htmlPath).isFile()) exitUsage(`Artifact file not found: ${html}`);
+	const sourceExt = extname(htmlPath).toLowerCase();
+	if (sourceExt !== ".html" && !TEXT_EXTS.has(sourceExt)) exitUsage(`Artifact must be an .html, .md or .txt file: ${html}`);
+	if (TEXT_EXTS.has(sourceExt) && assets.length) exitUsage("A Markdown or text artifact takes no --assets — publish an .html report to bundle files.");
+	if (statSync(htmlPath).size > MAX_SHARED_ARTIFACT_HTML_BYTES) exitUsage("Artifact file is too large (max 5 MB)");
 	if (assets.length > MAX_SHARED_ARTIFACT_ASSETS) exitUsage(`Too many assets: ${assets.length} (max ${MAX_SHARED_ARTIFACT_ASSETS}). Publish the .html file with an explicit --assets list.`);
 
-	let videoBytes = 0;
+	let mediaBytes = 0;
 	const assetPaths = assets.map((path) => {
 		const absolute = resolvePath(process.cwd(), path);
 		if (!existsSync(absolute) || !statSync(absolute).isFile()) exitUsage(`Asset file not found: ${path}`);
 		const ext = extname(absolute).replace(/^\./, "").toLowerCase();
 		if (!ASSET_EXTS.has(ext)) exitUsage(`Unsupported artifact asset type "${ext || "(none)"}": ${path}`);
 		const size = statSync(absolute).size;
-		if (VIDEO_EXTS.has(ext)) {
-			videoBytes += size;
-			if (size > MAX_SHARED_ARTIFACT_VIDEO_BYTES) {
-				exitUsage(`Artifact video is too large: ${path} is ${mb(size)} (max ${mb(MAX_SHARED_ARTIFACT_VIDEO_BYTES)} per clip). Shorten it, drop the resolution, or re-encode at a lower bitrate.`);
+		if (MEDIA_EXTS.has(ext)) {
+			mediaBytes += size;
+			if (size > MAX_SHARED_ARTIFACT_MEDIA_BYTES) {
+				exitUsage(`Artifact media file is too large: ${path} is ${mb(size)} (max ${mb(MAX_SHARED_ARTIFACT_MEDIA_BYTES)} per clip). Shorten it, or re-encode it at a lower bitrate or resolution.`);
 			}
 		} else if (size > MAX_SHARED_ARTIFACT_ASSET_BYTES) {
 			exitUsage(`Artifact asset is too large: ${path} is ${mb(size)} (max ${mb(MAX_SHARED_ARTIFACT_ASSET_BYTES)})`);
 		}
 		return absolute;
 	});
-	if (videoBytes > MAX_SHARED_ARTIFACT_VIDEO_TOTAL_BYTES) {
-		exitUsage(`Artifact videos total ${mb(videoBytes)} (max ${mb(MAX_SHARED_ARTIFACT_VIDEO_TOTAL_BYTES)} combined). Publish fewer clips, or keep one format instead of both MP4 and WebM.`);
+	if (mediaBytes > MAX_SHARED_ARTIFACT_MEDIA_TOTAL_BYTES) {
+		exitUsage(`Artifact video and audio total ${mb(mediaBytes)} (max ${mb(MAX_SHARED_ARTIFACT_MEDIA_TOTAL_BYTES)} combined). Publish fewer clips, or keep one format per clip instead of several.`);
 	}
 
 	const rawTaskId = flags.task || flags["task-id"] || context?.taskId;

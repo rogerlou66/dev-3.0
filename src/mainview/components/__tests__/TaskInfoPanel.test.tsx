@@ -21,7 +21,7 @@ vi.mock("../../rpc", () => ({
 			restartDevServer: vi.fn(),
 			getDevServerStatus: vi.fn(),
 			getBranchStatus: vi.fn(),
-			refreshTaskPrStatus: vi.fn().mockResolvedValue(undefined),
+			refreshTaskPrStatus: vi.fn().mockResolvedValue({ outcome: "updated" }),
 			prepareMergeCompletionPrompt: vi.fn(),
 			dismissMergeCompletionPrompt: vi.fn(),
 			setTaskManualCompletion: vi.fn(),
@@ -170,6 +170,7 @@ const defaultBranchStatus: BranchStatus = {
 	diffFileStats: [],
 	prNumber: null,
 	prUrl: null,
+	prState: null,
 	mergeCompletionFingerprint: null,
 	hasRemote: true,
 	remoteIsGitHub: true,
@@ -1616,7 +1617,21 @@ describe("TaskInfoPanel", () => {
 			expect(btn).not.toBeDisabled();
 		});
 
-		it("skips resolve when task has no worktreePath", async () => {
+		// The backend resolves the task itself, so the config cascade is the same
+		// one a start uses — including the main checkout's gitignored
+		// config.local.json, which a worktree never has a copy of.
+		it("resolves by taskId, not by worktree path", async () => {
+			await act(async () => {
+				renderPanel(makeTask({ id: "task-9" }), { project: { ...project, devScript: "bun run dev" } });
+			});
+
+			expect(mockedApi.request.getResolvedProject).toHaveBeenCalledWith({
+				projectId: project.id,
+				taskId: "task-9",
+			});
+		});
+
+		it("still resolves when the task has no worktreePath yet", async () => {
 			await act(async () => {
 				renderPanel(
 					makeTask({ worktreePath: null }),
@@ -1624,7 +1639,7 @@ describe("TaskInfoPanel", () => {
 				);
 			});
 
-			expect(mockedApi.request.getResolvedProject).not.toHaveBeenCalled();
+			expect(mockedApi.request.getResolvedProject).toHaveBeenCalled();
 		});
 	});
 
@@ -2704,6 +2719,165 @@ describe("TaskInfoPanel", () => {
 			expect(screen.queryByText("PR")).not.toBeInTheDocument();
 		});
 
+		// A finished PR is history, not the branch's live PR: its badge stays, but it
+		// must neither hide Create PR for the follow-up nor route Merge through it.
+		it.each(["MERGED", "CLOSED"])("brings Create PR back beside the badge of a %s PR", async (prState) => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState,
+			});
+
+			await act(async () => {
+				renderPanel(makeTask());
+			});
+
+			expect(screen.getAllByText(/PR #42/).length).toBeGreaterThanOrEqual(1);
+			expect(screen.getAllByText("PR").length).toBeGreaterThanOrEqual(1);
+			expect(screen.queryByText("Merge PR")).not.toBeInTheDocument();
+		});
+
+		it.each([
+			["MERGED", "text-pr-merged", "Merged"],
+			["CLOSED", "text-danger", "Closed"],
+			["OPEN", "text-success", "Open"],
+		])("tints every PR #42 badge by the branch's %s state and names it", async (prState, cls, label) => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState,
+			});
+
+			await act(async () => {
+				renderPanel(makeTask());
+			});
+
+			const badges = screen.getAllByText(/PR #42/).map((node) => node.closest("button")!);
+			expect(badges.length).toBeGreaterThanOrEqual(1);
+			for (const badge of badges) {
+				expect(badge.className).toContain(cls);
+				expect(badge).toHaveTextContent(`PR #42 — ${label}`);
+			}
+		});
+
+		it("keeps the PR #42 badge neutral while nothing reports its state", async () => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState: null,
+			});
+
+			await act(async () => {
+				renderPanel(makeTask());
+			});
+
+			for (const node of screen.getAllByText(/PR #42/)) {
+				expect(node.closest("button")!.className).not.toMatch(/success|pr-merged|danger/);
+			}
+		});
+
+		it("tints the PR #42 badge from the task's stored cache while GitHub gives no state", async () => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState: null,
+			});
+
+			await act(async () => {
+				renderPanel(makeTask({
+					prNumber: 42,
+					prUrl: "https://github.com/test/repo/pull/42",
+					prStatusCache: {
+						number: 42,
+						url: "https://github.com/test/repo/pull/42",
+						ciStatus: null,
+						reviewState: null,
+						unresolvedCount: 0,
+						mergeState: { mergeable: null, status: null, state: "MERGED" },
+						checks: [],
+						prTitle: null,
+						isDraft: false,
+						cachedAt: "2026-10-01T00:00:00.000Z",
+					},
+				}));
+			});
+
+			for (const node of screen.getAllByText(/PR #42/)) {
+				expect(node.closest("button")!.className).toContain("text-pr-merged");
+			}
+		});
+
+		it("opens the git-bar PR popover on the stored merged status, not Unknown, when no push arrived", async () => {
+			mockedApi.request.refreshTaskPrStatus.mockResolvedValue({ outcome: "unavailable" });
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState: "MERGED",
+			});
+
+			await act(async () => {
+				renderPanel(makeTask({
+					prNumber: 42,
+					prUrl: "https://github.com/test/repo/pull/42",
+					prStatusCache: {
+						number: 42, url: "https://github.com/test/repo/pull/42", ciStatus: "success", reviewState: null,
+						unresolvedCount: 0, mergeState: { mergeable: "UNKNOWN", status: "UNKNOWN", state: "MERGED" },
+						checks: [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: null }],
+						prTitle: "Merged change", isDraft: false, cachedAt: "2026-10-01T00:00:00.000Z",
+					},
+				}));
+			});
+
+			await userEvent.hover(screen.getAllByText(/PR #42/)[0].closest("button")!);
+			const popover = await screen.findByTestId("pr-status-popover");
+			expect(within(popover).getByText("PR status").nextElementSibling).toHaveTextContent("Merged");
+			expect(within(popover).getByTestId("pr-popover-finished-note")).toBeInTheDocument();
+			expect(within(popover).queryByText("Unknown")).not.toBeInTheDocument();
+			expect(within(popover).getByText("build")).toBeInTheDocument();
+			mockedApi.request.refreshTaskPrStatus.mockResolvedValue({ outcome: "updated" });
+		});
+
+		it("reads a merged PR from the task's cache when GitHub gives no state", async () => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				unpushed: 0,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState: null,
+			});
+
+			await act(async () => {
+				renderPanel(makeTask({
+					prNumber: 42,
+					prUrl: "https://github.com/test/repo/pull/42",
+					prStatusCache: {
+						number: 42, url: "https://github.com/test/repo/pull/42", ciStatus: null, reviewState: null,
+						unresolvedCount: 0, mergeState: { mergeable: "UNKNOWN", status: "UNKNOWN", state: "MERGED" },
+						checks: [], prTitle: null, isDraft: false, cachedAt: "2026-09-29T00:00:00.000Z",
+					},
+				}));
+			});
+
+			expect(screen.getAllByText("PR").length).toBeGreaterThanOrEqual(1);
+			expect(screen.queryByText("Merge PR")).not.toBeInTheDocument();
+		});
+
 		it("shows PR badge even when ahead=0", async () => {
 			mockedApi.request.getBranchStatus.mockResolvedValue({
 				...defaultBranchStatus,
@@ -3086,6 +3260,19 @@ describe("TaskInfoPanel", () => {
 				projectId: "p1",
 				activeTaskId: "t1",
 			});
+		});
+
+		it("puts the panel-restore toggle at the left edge of the git row", async () => {
+			await act(async () => {
+				renderPanel(makeTask(), { isFullPage: true });
+			});
+
+			const toggle = screen.getByTestId("show-active-tasks");
+			const gitBar = document.querySelector('[data-help-id="inspector.git-bar"]')!;
+			const gitRow = gitBar.parentElement!;
+			expect(gitRow.contains(toggle)).toBe(true);
+			expect(gitRow.firstElementChild?.contains(toggle)).toBe(true);
+			expect(screen.getByTestId("branch-chip").compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 		});
 
 		it("omits the panel-restore toggle in split view", async () => {
@@ -4059,6 +4246,26 @@ describe("TaskInfoPanel — virtual (Operations) tasks", () => {
 			expect(within(sheet).getByText("Create PR")).toBeInTheDocument();
 			expect(within(sheet).getByText("PR + auto-merge")).toBeInTheDocument();
 			expect(within(sheet).getByText("Merge")).toBeInTheDocument();
+		});
+
+		it("keeps Open PR and offers Create PR in the sheet once the PR merged", async () => {
+			mockedApi.request.getBranchStatus.mockResolvedValue({
+				...defaultBranchStatus,
+				ahead: 3,
+				prNumber: 42,
+				prUrl: "https://github.com/test/repo/pull/42",
+				prState: "MERGED",
+			});
+			await act(async () => {
+				renderPanel(makeTask());
+			});
+			await act(async () => {
+				fireEvent.click(screen.getByTestId("task-actions-kebab"));
+			});
+			const sheet = screen.getByTestId("task-actions-sheet");
+			expect(within(sheet).getByText("Open PR #42")).toBeInTheDocument();
+			expect(within(sheet).getByText("Create PR")).toBeInTheDocument();
+			expect(within(sheet).queryByText("Merge PR")).not.toBeInTheDocument();
 		});
 
 		it("triggers Create PR and dismisses the sheet", async () => {

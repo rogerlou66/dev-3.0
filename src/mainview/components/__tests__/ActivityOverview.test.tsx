@@ -887,16 +887,20 @@ describe("ActivityOverview — dragging a project collapses the list", () => {
 		});
 	});
 
-	function startDragging(projectName: string) {
+	function gripOf(projectName: string) {
 		const row = screen.getByText(projectName).closest('[data-help-id="dashboard.project-row"]')!;
-		const grip = row.querySelector('[title="Drag to reorder project"]')!;
-		fireEvent.dragStart(grip, { dataTransfer: { setData: vi.fn(), effectAllowed: "" } });
+		return row.querySelector('[title="Drag to reorder project"]')!;
+	}
+
+	async function startDragging(projectName: string) {
+		fireEvent.dragStart(gripOf(projectName), { dataTransfer: { setData: vi.fn(), setDragImage: vi.fn(), effectAllowed: "" } });
+		await waitFor(() => expect(screen.getByText(projectName).closest("[data-compact]")).not.toBeNull());
 	}
 
 	it("drops the task rows and the board footer for the duration of the drag", async () => {
 		renderWithProjects([mockProject, second]);
 		expect(await screen.findByText(getTaskTitle(mockTask))).toBeInTheDocument();
-		startDragging("My Project");
+		await startDragging("My Project");
 		expect(screen.queryByText(getTaskTitle(mockTask))).not.toBeInTheDocument();
 		expect(screen.queryByTestId("project-open-board-p1")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("project-open-board-p2")).not.toBeInTheDocument();
@@ -908,19 +912,47 @@ describe("ActivityOverview — dragging a project collapses the list", () => {
 	it("hides the path so the row is a single line", async () => {
 		renderWithProjects([mockProject, second]);
 		expect(await screen.findByTitle("/home/user/my-project")).toBeInTheDocument();
-		startDragging("My Project");
+		await startDragging("My Project");
 		expect(screen.queryByTitle("/home/user/my-project")).not.toBeInTheDocument();
 	});
 
 	it("restores the full rows when the drag ends", async () => {
 		renderWithProjects([mockProject, second]);
 		expect(await screen.findByText(getTaskTitle(mockTask))).toBeInTheDocument();
-		const row = screen.getByText("My Project").closest('[data-help-id="dashboard.project-row"]')!;
-		const grip = row.querySelector('[title="Drag to reorder project"]')!;
-		fireEvent.dragStart(grip, { dataTransfer: { setData: vi.fn(), effectAllowed: "" } });
-		fireEvent.dragEnd(grip);
+		await startDragging("My Project");
+		fireEvent.dragEnd(gripOf("My Project"));
 		expect(screen.getByText(getTaskTitle(mockTask))).toBeInTheDocument();
 		expect(screen.getByTestId("project-open-board-p1")).toBeInTheDocument();
+	});
+
+	// Collapsing inside dragstart is what broke the drag: Chromium ends it on the
+	// spot and WebKit turns the gesture into a text selection.
+	it("does not touch the list inside dragstart itself", async () => {
+		renderWithProjects([mockProject, second]);
+		expect(await screen.findByText(getTaskTitle(mockTask))).toBeInTheDocument();
+		const setData = vi.fn();
+		const setDragImage = vi.fn();
+		fireEvent.dragStart(gripOf("My Project"), { dataTransfer: { setData, setDragImage, effectAllowed: "" } });
+		expect(setData).toHaveBeenCalledWith("text/plain", "space-project:sp_a:p1");
+		expect(setDragImage.mock.calls[0][0]).toHaveAttribute("data-project-row-header");
+		expect(screen.getByText(getTaskTitle(mockTask))).toBeInTheDocument();
+		await waitFor(() => expect(screen.queryByText(getTaskTitle(mockTask))).not.toBeInTheDocument());
+	});
+
+	it("never collapses a drag the browser cancelled before the collapse landed", async () => {
+		renderWithProjects([mockProject, second]);
+		expect(await screen.findByText(getTaskTitle(mockTask))).toBeInTheDocument();
+		fireEvent.dragStart(gripOf("My Project"), { dataTransfer: { setData: vi.fn(), setDragImage: vi.fn(), effectAllowed: "" } });
+		fireEvent.dragEnd(gripOf("My Project"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(screen.getByText(getTaskTitle(mockTask))).toBeInTheDocument();
+		expect(document.querySelector("[data-compact]")).toBeNull();
+	});
+
+	it("keeps the reorder controls out of text selection", async () => {
+		renderWithProjects([mockProject, second]);
+		await screen.findByText(getTaskTitle(mockTask));
+		expect(gripOf("My Project").parentElement).toHaveClass("select-none");
 	});
 });
 
@@ -961,5 +993,99 @@ describe("ActivityOverview — the board footer", () => {
 		renderWithProjects([mockProject], navigate);
 		await user.click(await screen.findByTestId("project-open-board-p1"));
 		expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1" });
+	});
+});
+
+// Coordinators are what the user opens to talk to a project, so the dashboard
+// pins every active one above the attention rows whatever its status.
+describe("ActivityOverview — coordinator rows", () => {
+	const coordinator = (id: string, seq: number, title: string, extra: Partial<Task> = {}): Task => ({
+		...mockTask,
+		id,
+		seq,
+		title,
+		description: title,
+		taskType: "coordinator",
+		worktreePath: null,
+		...extra,
+	});
+	const ordinary = (id: string, seq: number, title: string, status: Task["status"]): Task => ({
+		...mockTask,
+		id,
+		seq,
+		title,
+		description: title,
+		status,
+	});
+
+	function mockTasks(tasks: Task[]) {
+		mockedApi.request.getAllProjectTasks.mockResolvedValue([{ projectId: "p1", tasks, todoCount: 0 }]);
+	}
+
+	const rows = () => screen.queryAllByTestId("dashboard-coordinator-row");
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	it("keeps the Blocked label on a pinned coordinator instead of advertising Your Review", async () => {
+		mockTasks([coordinator("c-held", 10, "Waiting on an external answer", { status: "review-by-user", blocked: true })]);
+		renderActivityOverview();
+		await screen.findByText("Waiting on an external answer");
+		const row = screen.getByTestId("dashboard-coordinator-row");
+		expect(within(row).getByText("Blocked")).toBeInTheDocument();
+		expect(within(row).queryByText("Your Review")).not.toBeInTheDocument();
+	});
+
+	it("shows a working coordinator as its own row instead of folding it into the footer count", async () => {
+		mockTasks([coordinator("c1", 10, "Run the migration", { status: "in-progress" }), ordinary("t2", 2, "Port ledger", "in-progress")]);
+		renderActivityOverview();
+		await screen.findByText("Run the migration");
+		expect(rows()).toHaveLength(1);
+		expect(rows()[0].textContent).toContain("Agent is Working");
+		// Only the ordinary working task is left in the footer.
+		expect(screen.getByText("1 agent working")).toBeInTheDocument();
+	});
+
+	it("lists a waiting coordinator once, above the ordinary attention rows, with no Complete check", async () => {
+		mockTasks([ordinary("t2", 2, "Copy pass", "user-questions"), coordinator("c1", 10, "Lead onboarding", { status: "user-questions" })]);
+		renderActivityOverview();
+		await screen.findByText("Lead onboarding");
+		expect(screen.getAllByText("Lead onboarding")).toHaveLength(1);
+		const group = screen.getByRole("group", { name: "Coordinators" });
+		expect(within(group).queryByTestId("activity-row-complete")).toBeNull();
+		expect(group.compareDocumentPosition(screen.getByText("Copy pass")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	it("renders nothing extra for a project without coordinators", async () => {
+		mockTasks([ordinary("t2", 2, "Copy pass", "user-questions")]);
+		renderActivityOverview();
+		await screen.findByText("Copy pass");
+		expect(screen.queryByRole("group", { name: "Coordinators" })).toBeNull();
+	});
+
+	it("lists every coordinator: live first, then disconnected, then hibernated", async () => {
+		mockTasks([
+			coordinator("c-hib", 1, "Infra lead", { status: "in-progress", hibernated: true }),
+			coordinator("c-lost", 2, "Research lead", { status: "in-progress", worktreePath: "/tmp/wt", runtimeState: { runtime: "idle", updatedAt: 0 } }),
+			coordinator("c-live", 3, "Release lead", { status: "in-progress" }),
+			coordinator("c-wait", 4, "Docs lead", { status: "review-by-user" }),
+		]);
+		renderActivityOverview();
+		await screen.findByText("Infra lead");
+		expect(rows().map((r) => r.getAttribute("data-coordinator-state"))).toEqual(["live", "live", "disconnected", "hibernated"]);
+		const hibernated = rows()[3];
+		expect(hibernated.textContent).toContain("Hibernated");
+		// A parked coordinator must not claim an agent is working.
+		expect(hibernated.textContent).not.toContain("Agent is Working");
+	});
+
+	it("opens the coordinator's task on click and never moves it", async () => {
+		const navigate = vi.fn();
+		mockTasks([coordinator("c-hib", 1, "Infra lead", { status: "in-progress", hibernated: true })]);
+		renderActivityOverview(navigate);
+		await userEvent.setup().click(await screen.findByText("Infra lead"));
+		expect(navigate).toHaveBeenCalledWith({ screen: "project", projectId: "p1", activeTaskId: "c-hib" });
+		expect(mockedMove).not.toHaveBeenCalled();
 	});
 });

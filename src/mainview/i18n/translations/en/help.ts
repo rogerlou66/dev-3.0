@@ -44,13 +44,13 @@ const help = {
 	// ── Board chrome ──
 	"help.board.filterBar.title": "Search & filters",
 	"help.board.filterBar.body":
-		"One box searches and filters the board. Type free text to fuzzy-match titles/descriptions, or filter with tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:blocked is:home is:hidden has:port. The P0–P4 priority chips, the label chips and the funnel dropdown all edit these same tokens, so typing and clicking never disagree. The × clears everything. Manage labels in Project Settings → Labels.",
+		"One box searches and filters the board. Type free text to fuzzy-match titles/descriptions, or filter with tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" is:attention is:blocked is:home is:hidden is:hibernated has:port. The P0–P4 priority chips, the label chips and the funnel dropdown all edit these same tokens, so typing and clicking never disagree. The × clears everything. Manage labels in Project Settings → Labels.",
 	"help.board.priorityFilter.title": "Priority filter",
 	"help.board.priorityFilter.body":
 		"Every task has a priority P0 (highest) … P4 (lowest, default P3). Columns always sort by it, so the most important work stays on top. Click a chip to show only that priority; drag a card into another band to re-prioritize it.",
 	"help.filters.dsl.title": "Search & filters",
 	"help.filters.dsl.body":
-		"Type to fuzzy-match titles and descriptions, or filter with tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review space:\"Client X\" is:attention is:blocked is:home is:hidden has:port. Quote multi-word values. Combine facets (AND); repeat one facet to broaden (OR). The P0–P4 chips, label chips and the funnel all edit these same tokens. Manage labels in Project Settings → Labels.",
+		"Type to fuzzy-match titles and descriptions, or filter with tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" is:attention is:blocked is:home is:hidden is:hibernated has:port. Quote multi-word values. Combine facets (AND); repeat one facet to broaden (OR). The P0–P4 chips, label chips and the funnel all edit these same tokens. Manage labels in Project Settings → Labels.",
 	"help.board.taskCard.title": "Task card",
 	"help.board.taskCard.body":
 		"The colored dots are parallel agent variants (each in its own worktree), the bell means the agent is calling you, and the #123 badge is the task's PR with its CI and review state. Right-click the card for every task action.",
@@ -202,7 +202,7 @@ const help = {
 		"Drop a second agent into this task's existing session — same worktree, same terminal. Useful to hand off to a different model or run a helper alongside the main agent.",
 	"help.modal.taskDetail.title": "Task details",
 	"help.modal.taskDetail.body":
-		"Edit everything about the task: title, description (the agent's prompt), labels, priority, and status. Changes apply across the whole variant group. The terminal backend row overrides tmux/native for this task's next launch, and is locked while its terminal is live.",
+		"Edit everything about the task: title, description (the agent's prompt), labels, priority, and status. The terminal backend row overrides tmux/native for this task's next launch, and is locked while its terminal is live.",
 	"help.modal.automation.title": "Automation",
 	"help.modal.automation.body":
 		"A schedule that fires an agent on a recurring cadence. Pick the cadence, timezone, prompt, and agent — each run creates an ordinary task on the board.",
@@ -216,7 +216,7 @@ const help = {
 	// ── Viewers & workspace ──
 	"help.viewer.images.title": "Shared images",
 	"help.viewer.images.body":
-		"Screenshots and renders an agent surfaced with `dev3 show-image`, newest first. Step through the history, download an image (also on right-click), copy its path, or reveal the original file on disk.",
+		"Screenshots and renders an agent surfaced with `dev3 show-image`, newest first. Step through the history, download an image (also on right-click), copy its path, or reveal the original file on disk. A video shared with `dev3 show-video` plays in place: play, pause, seek and volume are on the player, and it never starts on its own.",
 	"help.viewer.artifact.title": "Artifact",
 	"help.viewer.artifact.body":
 		"An interactive HTML report an agent built with `dev3 show-artifact`, sandboxed and opened as a popup over the task — the same way images open. Go fullscreen, step through past artifacts, or download it as HTML (or a ZIP when it bundles images). Escape closes it.",
@@ -264,7 +264,7 @@ const help = {
 		"Three glyphs, three sizes of list. The folder shows only this project's tasks. The ring shows every project in the same space, and is struck through when this project is in none of them. The globe shows every task on the machine, which is how you find work you left running somewhere else.",
 	"help.sidebar.showHidden.title": "Tasks you hid from this list",
 	"help.sidebar.showHidden.body":
-		"Hiding a task drops its whole variant group out of Active Tasks and nothing else: it keeps working, keeps notifying, and stays on the board. This eye sits by the filter funnel, appears only while something is hidden, and brings those rows back, dimmed and marked, until you press it again. A red dot on it means one of them is asking for you. The funnel's is:hidden token does the same from the filter.",
+		"Hiding a task drops its whole variant group out of Active Tasks and nothing else: it keeps working, keeps notifying, and stays on the board. This eye sits by the filter funnel, appears only while something is hidden, and brings those rows back, dimmed and marked, until you press it again. A red dot on it means one of them is asking for you. The funnel's is:hidden token does the same from the filter, for the tasks you hid. Hibernated and disconnected tasks are left out too and come back with this eye or the is:hibernated token; waking or recovering one puts it back in the list.",
 	"help.tips.card.title": "Did you know?",
 	"help.tips.card.body":
 		"One short pointer at a time towards something dev3 does that no button on screen announces — a shortcut, a drag, a CLI command. Dismiss it and it never returns; there is a switch in Settings if you would rather have none of them.",

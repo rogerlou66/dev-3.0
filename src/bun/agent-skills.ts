@@ -1,15 +1,24 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { createLogger } from "./logger";
 import { ensureCodexConfigFile } from "./codex-config";
 import {
 	AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS,
 	AGENT_MESSAGE_HOLD_IDLE_SECONDS,
 } from "../shared/agent-message-hold-timing";
-import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY } from "../shared/agent-skill-content";
+import {
+	ARTIFACT_AUTHORING_STEPS,
+	ARTIFACT_FORMAT_RULES,
+	CLAUDE_SKILL_BODY,
+	CODEX_SKILL_BODY,
+	GENERIC_SKILL_BODY,
+	OMP_SKILL_BODY,
+} from "../shared/agent-skill-content";
 import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
 import { applyLowBattery } from "./low-battery";
+import { claudeConfigLocation } from "../shared/claude-config-dir";
+import { COORDINATOR_PROMPT } from "../shared/types";
 
 // Re-exported for backward-compat: agents.ts and other callers import the
 // composed skill bodies from here. The section constants that compose them now
@@ -62,12 +71,36 @@ The full protocol is already in your system prompt (the "dev3 — Task Lifecycle
 \\\`\\\`\\\`
 !\`${dialect.cli} current --brief\`
 \\\`\\\`\\\`
+
+## Recent notes on this task
+
+!\`${dialect.cli} note recent${captureStderr}\`
 `;
 }
 
 // ---- Codex and generic skills (no command injection support) ----
 
-export function buildCodexSkillContent(dialect: HookCliDialect = hookCliDialect()): string {
+const COMPACT_SKILL_DESCRIPTION = "Dev3 task lifecycle in ~/.dev3.0/worktrees/. Follow the injected dev3 Task Lifecycle Protocol when present; otherwise load this skill for the full reference.";
+
+function buildCompactSkillContent(dialect: HookCliDialect): string {
+	return `---
+name: dev3
+description: "${COMPACT_SKILL_DESCRIPTION}"
+user-invocable: true
+---
+
+# dev3 protocol reference
+
+If your context already includes the full "dev3 — Task Lifecycle Protocol" from your launch, follow that protocol, including its agent-specific status rules. No additional skill read or startup command is needed just to load the same instructions again.
+
+Otherwise, read PROTOCOL.md in this skill's directory before working in a dev3 managed worktree. That file is the complete fallback, including startup instructions, and remains available whenever you need to inspect the full reference. Run \`${dialect.cli} --help\` when you need the CLI reference.
+
+To recover this task's context, run \`${dialect.cli} note recent\`: the 5 newest task notes, size-bounded, with the commands to read the rest.
+`;
+}
+
+export function buildCodexSkillContent(dialect: HookCliDialect = hookCliDialect(), compact = false): string {
+	if (compact) return buildCompactSkillContent(dialect);
 	return `---
 name: dev3
 description: "${SKILL_DESCRIPTION}"
@@ -83,10 +116,13 @@ Run these two commands to learn about available CLI commands and your current ta
 - \`${dialect.cli} current\` — see your current project, task, and status
 
 Then begin working. Do not move the task status on session start; the injected \`SessionStart\` hook already owns that transition.
+
+On a fresh startup that hook also hands you this task's 5 newest notes. After \`/clear\`, a resume, or whenever you need them again, run \`${dialect.cli} note recent\` yourself — nothing re-injects them.
 `;
 }
 
-export function buildOmpSkillContent(dialect: HookCliDialect = hookCliDialect()): string {
+export function buildOmpSkillContent(dialect: HookCliDialect = hookCliDialect(), compact = false): string {
+	if (compact) return buildCompactSkillContent(dialect);
 	return `---
 name: dev3
 description: "${SKILL_DESCRIPTION}"
@@ -105,7 +141,8 @@ Then begin working. Do not move the task status on session start; the dev3 statu
 `;
 }
 
-export function buildGenericSkillContent(dialect: HookCliDialect = hookCliDialect()): string {
+export function buildGenericSkillContent(dialect: HookCliDialect = hookCliDialect(), compact = false): string {
+	if (compact) return buildCompactSkillContent(dialect);
 	return `---
 name: dev3
 description: "${SKILL_DESCRIPTION}"
@@ -123,9 +160,6 @@ Run these two commands to learn about available CLI commands and your current ta
 Then set \`in-progress\` and begin working.
 `;
 }
-
-/** Claude Code skill directory (supports !`command` injection). */
-const CLAUDE_SKILL_DIR = ".claude/skills/dev3";
 
 /** Codex skill directory (hook-aware, but no command injection support). */
 const CODEX_SKILL_DIR = ".codex/skills/dev3";
@@ -184,7 +218,7 @@ is genuinely ambiguous (e.g., multiple possible dev servers, unclear base branch
    | \`setupScript\` | Package manager install command. Detect from lockfile: \`bun.lockb\` → \`bun install\`, \`pnpm-lock.yaml\` → \`pnpm install\`, \`yarn.lock\` → \`yarn\`, \`package-lock.json\` → \`npm install\`. For Python: \`pip install -e .\` or \`poetry install\`. For Rust: \`cargo build\`. Chain multiple steps with \`&&\` if needed. |
    | \`devScript\` | The dev server command. Check \`package.json\` scripts for \`dev\`, \`start\`, \`serve\`. Use the full command: \`bun run dev\`, \`npm run dev\`, etc. If no dev server exists, leave empty. |
    | \`devServers\` | Additional dev servers, by name, when the project is several processes (an API, a worker, a back office). \`{ "api": { "script": "bun run api", "ports": ["api"] } }\` — each entry may also carry \`env\`, \`cwd\` (relative to the worktree) and \`title\`. Leave it out for a single-process project: \`devScript\` alone already declares the server named \`dev\`, and declaring \`dev\` here as well is an error. |
-   | \`cleanupScript\` | Teardown hook that runs before the task worktree is removed — on \`completed\` / \`cancelled\`, when an active task is deleted (\`$DEV3_TASK_STATUS\` = \`deleted\`), or when task preparation is cancelled (\`$DEV3_TASK_STATUS\` = \`todo\`). Useful for copy-back, exports, cache cleanup, and tearing down per-worktree containers. Inside the script you can branch on \`$DEV3_TASK_STATUS\`, \`$DEV3_TASK_FROM_STATUS\`, and \`$DEV3_TASK_TO_STATUS\`, plus the workspace env vars from step 3b. |
+   | \`cleanupScript\` | Teardown hook that runs before the task worktree is removed — on \`completed\` / \`cancelled\`, when an active task is deleted (\`$DEV3_TASK_STATUS\` = \`deleted\`), or when a task goes back to To Do — preparation cancelled, or a consented reset of a running task (\`$DEV3_TASK_STATUS\` = \`todo\` for both). Useful for copy-back, exports, cache cleanup, and tearing down per-worktree containers. Inside the script you can branch on \`$DEV3_TASK_STATUS\`, \`$DEV3_TASK_FROM_STATUS\`, and \`$DEV3_TASK_TO_STATUS\`, plus the workspace env vars from step 3b. |
    | \`clonePaths\` | Directories **and individual files** CoW-cloned from the project root into every new worktree instead of being re-downloaded or lost. Heavy dirs: \`node_modules\`, \`.venv\`, \`target\`, \`.next\`, \`build\`. Single files matter just as much: a git-ignored \`.npmrc\`, \`.env\`, or a personal instruction file reaches the worktree only through here. Glob patterns are expanded. A path missing from the project root is skipped silently; a path that exists but fails to copy is logged as an error and shown on the task. |
    | \`defaultBaseBranch\` | Check \`git symbolic-ref refs/remotes/origin/HEAD\` or look at common branches. Usually \`main\` or \`master\`. |
    | \`defaultCompareRefMode\` | Default diff comparison target. Use \`"remote"\` for \`origin/<baseBranch>\` (recommended default) or \`"local"\` for the local base branch. |
@@ -718,18 +752,18 @@ const BUG_HUNTER_OPENAI_YAML = `interface:
 
 // ---- dev3-coordinator skill (promote THIS task mid-conversation) ----
 //
-// The skill carries no copy of the coordinator brief. `dev3 task update --type
-// coordinator --print-role` resolves the effective one (project override, then
-// the Settings one, then the built-in COORDINATOR_PROMPT) and prints it, so the
-// startup preamble and this skill can never drift apart and an override is
-// honoured here too. Nothing in this file may promote a task on its own: the
-// body has no `!`-injected command, and installing it writes a file and nothing
-// else.
+// The skill carries the WHOLE built-in brief, interpolated from COORDINATOR_PROMPT,
+// so invoking it hands the agent every rule even if the CLI cannot print one — and
+// there is still one source, because the file is regenerated from that constant on
+// every launch. A project or Settings override cannot be known at install time:
+// `--print-role` prints the effective brief plus its source, and the skill says the
+// printed text wins. Nothing here promotes a task on its own: no `!`-injected
+// command, and installing it writes a file and nothing else.
 
 const COORDINATOR_SKILL_DESCRIPTION =
 	// No double quotes in here: it is interpolated into a double-quoted YAML scalar,
 	// where a nested quote ends the string and the harness falls back to the H1.
-	"Turn the CURRENT dev3 task into a coordinator in the middle of its conversation, keeping all work, history, branch and identity. Use ONLY when the user explicitly invokes it — /dev3-coordinator, 'make this task a coordinator', 'switch me to coordinator mode'. Never run it on your own initiative, and never to promote a different task.";
+	"Turn the CURRENT dev3 task into a coordinator in the middle of its conversation, keeping all work, history, branch and identity, and carry the full coordinator brief. Use ONLY when the user explicitly invokes it — /dev3-coordinator, 'make this task a coordinator', 'switch me to coordinator mode'. Never run it on your own initiative, and never to promote a different task.";
 
 const COORDINATOR_SKILL_CONTENT = `---
 name: dev3-coordinator
@@ -741,9 +775,11 @@ user-invocable: true
 
 Invoking this skill IS the user's explicit request to change **this** task's role. It is the only thing that may trigger it: never promote a task because the work looks coordination-shaped, because a skill was installed, or because you read this description while looking for something else.
 
-## What it does
+This file is complete on its own: the full built-in coordinator brief is at the bottom. The command below makes the role real on the board and tells you whether a custom brief replaces that text.
 
-One command. Run it in this worktree, with no task selector — it must land on the task you are already in:
+## Step 1 — switch the role
+
+Run it in this worktree, with no task selector — it must land on the task you are already in:
 
 \`\`\`bash
 dev3 task update --type coordinator --print-role
@@ -753,15 +789,29 @@ It does three things:
 
 1. Sets the board type, so the card becomes a coordinator: dashed green, above every priority band, never auto-completed.
 2. Rewrites this task's description so the role brief is in it — that is what a future session of this task reads at launch.
-3. Prints the canonical coordinator brief to stdout. **That printed text is your standing instruction from that moment on**, and it replaces any earlier instruction about what this task is. Read it in full and follow it.
+3. Prints the effective coordinator brief to stdout, under a \`Brief source:\` line.
 
 The brief is printed rather than typed into your pane precisely because you are the agent being promoted: a delivery would arrive as a second copy in a second turn and look like the role changed twice.
+
+## Step 2 — pick the brief that governs you
+
+One brief governs, never a blend of two. Precedence is the same everywhere in dev3: the project's override (Project Settings), then the app-wide one (Settings → Tasks & Board), then the built-in default.
+
+| \`Brief source:\` says | What governs you |
+|---|---|
+| \`built-in default\` | The brief at the bottom of this file. The printed copy is the same text |
+| \`project override\` or \`app-wide override\` | **Only the printed text.** The user wrote it on purpose; ignore the built-in copy below and never merge rules back in from it |
+| No \`Brief source:\` line, brief printed | An older CLI. Follow the printed text |
+
+Never edit, reset or "update" a custom brief to match the built-in one — an override is the user's to change, in Settings.
+
+From then on the governing brief is your standing instruction, and it replaces any earlier instruction about what this task is.
 
 ## What does NOT change
 
 Your conversation, your context, your finished work, the branch, the worktree, the task's id and number, its title, labels and priority — all of it stays exactly as it is. This is a role change, not a restart, and nothing here asks you to redo or abandon work already done.
 
-Permissions do not change either. Everything the user has and has not authorised in this session stays exactly as it was: becoming a coordinator authorises no push, no pull request, no merge, no publication, no completion.
+Permissions do not change either. Everything the user has and has not authorised in this session stays exactly as it was: becoming a coordinator authorises no push, no pull request, no merge, no publication, no completion. A full brief is not a wider mandate — launching a task still goes through its approval dialog, and priority and task type stay the user's call.
 
 ## Re-running it
 
@@ -769,7 +819,7 @@ Harmless, by design. On a task that is already a coordinator nothing on the boar
 
 ## When the command fails
 
-Report the failure exactly as it happened and say the role did **not** change. A non-zero exit means the board still calls this task whatever it called it before; do not start behaving as a coordinator on a failed promotion, and do not claim the type changed.
+Report the failure exactly as it happened and say the role did **not** change. A non-zero exit means the board still calls this task whatever it called it before; do not start behaving as a coordinator on a failed promotion, and do not claim the type changed. The brief below stays here to read — it is not an authorisation to act on.
 
 Two answers you may see, neither of them a failure:
 
@@ -784,11 +834,15 @@ Two answers you may see, neither of them a failure:
 dev3 task update --type coordinator
 \`\`\`
 
-Same promotion, same preserved conversation — the only difference is that the brief is then typed into your pane as a message rather than printed here, so it arrives a few seconds later as its own turn. Tell the user which of the two ran.
+Same promotion, same preserved conversation — the only difference is that the brief is then typed into your pane as a message rather than printed here, so it arrives a few seconds later as its own turn. Tell the user which of the two ran. Until it arrives, the built-in brief below governs; if the delivered one differs, it is an override and wins.
 
 ## Going back
 
 \`dev3 task update --type standard --print-role\` clears the role and prints the one line saying so. Same rule: only on the user's explicit word.
+
+## The built-in coordinator brief (full text)
+
+${COORDINATOR_PROMPT}
 `;
 
 const COORDINATOR_OPENAI_YAML = `interface:
@@ -827,7 +881,7 @@ A **flow** is a path through dev3's features. Most work travels one **main flow*
    **Review blocked by an external dependency?** Drag a settled **Your Review** or **PR Review** task into **Blocked**, or choose **Move to Blocked** in its status menu. It leaves Inbox and Needs You while its workspace and underlying review stage remain intact. Use **Unblock task** or drag it back when ready; agent updates cannot silently unblock it. Search with \`is:blocked\` or \`status:blocked\`.
 7. **How the agent reaches you → it pings, you don't poll.** It raises an attention badge when it needs help, fires toasts / desktop notifications on milestones, and moves the task into the **User questions** status when it needs an answer. Subscribe to any task for watch notifications.
 8. **Review the changes → Show Diff, and comment on artifacts too.** On the card, *Show Diff* lets you hide test noise and leave inline comments — each one has its own **Send to agent** so a fix can start the moment you spot it, or ship the whole batch at the end. An HTML artifact has the same thing: the speech-bubble toggle in its header turns on comment mode, click any element, comment beside it, send. Comments live on the task (the same list on desktop, phone and for the agent); sent ones stay greyed until the agent closes them with \`dev3 review resolve <id> --reply "…"\` — the reply shows under your comment and the pin turns green. \`dev3 review list\` is the agent's to-do list. Turn on **AI Review** so a machine pass (the AI review column) pre-chews the diff before your human pass.
-9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. An agent does the same in one command, and should reach for it before raw \`gh\`: \`dev3 pr create --title "..." --description "..." [--auto-merge]\` pushes the branch, opens the PR and targets the base branch the task was created from — and refuses with exit 23 before pushing anything if \`gh\` is missing or logged out. Auto-merge on a PR that is already open is \`dev3 pr auto-merge [--strategy squash|merge|rebase]\`, and \`--off\` clears it.
+9. **Get it shipped → PR from the task.** Push & create the PR straight from the task, enable auto-merge, and let the task auto-complete when the PR merges. An agent does the same in one command, and should reach for it before raw \`gh\`: \`dev3 pr create --title "..." --description "..." [--auto-merge]\` pushes the branch, opens the PR and targets the base branch the task was created from — and refuses with exit 23 before pushing anything if \`gh\` is missing or logged out. Auto-merge on a PR that is already open is \`dev3 pr auto-merge [--strategy squash|merge|rebase]\`, and \`--off\` clears it. **The PR merged but the task is not done?** Keep going in the same task and open the next PR the same way — Create PR comes back once the previous PR is merged or closed, commits made after a merge do not ask to complete the task, and the finished PRs stay listed under **Earlier pull requests** in the PR badge's popover and in the archived task. A task follows one PR at a time: two PRs open at once belong in two tasks. A plan that ships as several PRs in a row wants \`dev3 task update --manual-completion on\` up front.
 10. **What completing does → the worktree is destroyed, notes survive.** Finishing a task removes its worktree and branch checkout, but its **notes** persist as project memory that future agents find via search. So durable findings belong in notes, not just the chat. Completion is guarded: dev3 warns about uncommitted changes, unpushed commits, and unmerged branches before destroying anything — and it auto-saves a diff snapshot on every branch refresh, so work is recoverable even if a worktree gets wiped.
 11. **Changed your mind → reopen or restart.** Reopening a completed or cancelled task resumes the previous agent conversation instead of starting fresh. Want a truly clean slate? Move the task to Cancelled and back to Todo — fresh worktree, clean agent session.
 
@@ -837,7 +891,7 @@ A starting situation that generates work, then merges onto the main flow.
 
 - **A bug report arrived** → make it a task with the repro as the description; the fix then flows through review and PR like any feature. Don't know where the bug lives? → **bug-hunter swarm**: a multi-variant task where each agent runs \`/dev3-bug-hunter\` with a seeded strategy, so different agents start from different corners of the codebase.
 - **"Review this PR"** → create a **PR review task**: paste the GitHub PR URL straight into the Create Task modal — dev3 fetches the branch into a worktree and the agent reviews the actual diff — runnable code, not a GitHub-tab skim. Such a task is marked **someone else's code** (eye glyph on the card, \`Code\` row in the inspector): dev3 will not run that branch's own \`.dev3\` setup/dev/cleanup scripts, env vars, MCP servers or agent hooks, using the project's own config instead. Nothing is read-only — edit, commit and push as usual — and one click in the inspector hands the branch its trust back if you deliberately want its scripts. In the diff, a file dev3 executes by itself wears a **RUNS** badge; read its commands rather than skimming.
-- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: manage other tasks, delegate anything that touches the repository, create a task and ask to launch it in the same breath rather than asking twice, and report a self-contained status every time — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. Mid-conversation, ask the agent you are already talking to for \`/dev3-coordinator\`: it promotes its OWN task and reads the brief out of the command's output, so the conversation, the work already done, the branch, the title, the labels and the priority all stay exactly as they are. From the CLI you can also start it that way in one command: \`dev3 task create --title "..." --description "..." --type coordinator\` writes the same role brief above your text at creation; a review task is \`dev3 task create --pr <number> --title "..."\`, where \`--pr\` both implies \`pr-review\` and starts the worktree on the pull request's own branch (without it the task lands on the base branch with nothing to review). A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, each one's priority, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
+- **"I want an agent that runs the other agents"** → pick **Coordinator** in the Create Task modal's **Task type** row (under the description). It puts a built-in brief above your own text: own a checkable outcome, delegate and trust the implementers instead of reviewing their code, create a task and ask to launch it in the same breath rather than asking twice, message a child only to change or unblock its own work, and report a short self-contained status — the user never sees a coordinator's conversations with its children. Your own instruction goes below the separator, and the whole thing is ordinary description text, so edit it before starting. The brief is overridable in Settings → Tasks & Board and per project. A coordinator needs no branch, so it works on a virtual board too. An existing task becomes one (or stops being one) with \`dev3 task update --type coordinator|pr-review|standard\` — that rewrites the role preamble in the description AND tells the running agent, so the badge never claims a role its agent was not given. Mid-conversation, ask the agent you are already talking to for \`/dev3-coordinator\`: it promotes its OWN task, carries the full built-in brief itself, and the command's output says when a project or Settings override replaces that brief, so the conversation, the work already done, the branch, the title, the labels and the priority all stay exactly as they are. From the CLI you can also start it that way in one command: \`dev3 task create --title "..." --description "..." --type coordinator\` writes the same role brief above your text at creation; a review task is \`dev3 task create --pr <number> --title "..."\`, where \`--pr\` both implies \`pr-review\` and starts the worktree on the pull request's own branch (without it the task lands on the base branch with nothing to review). A coordinator card is dashed green, sorts above every priority, and always completes by hand. Every message dev3 delivers to a coordinator ends with a \`<dev3-board>\` snapshot — every task not parked in To Do, everything finished in the last 24 hours, each one's priority, and how long each one has been sitting in its column — so a child reporting in also tells it what else moved meanwhile, and it answers from the live board instead of spending a turn on \`dev3 task list\`. Your own typing does not carry one, so its brief tells it to re-read the board when you speak to it after a silence.
 - **"Continue what we did in that other task"** → past conversations are searchable: the agent runs \`dev3 conversations search\` and reads the old task's notes and transcript. This is *why* notes matter — they are weighted highest in that search.
 - **"What did every task record since I last looked?"** → \`dev3 events\`. One feed of the notes written by EVERY task on the board AND of every board movement — created, a status change (completed and cancelled included), a custom-column move — finished tasks included — a live task can still message you, a completed one cannot, and its notes are all that outlived its worktree. It is addressed by a **position, not a time window**: each run ends with a \`Cursor:\` line — one compact instant such as \`2026-08-28T20:22:22.303\` — plus the exact next command, and passing it back returns only what happened since. \`--from\` also takes an event id straight from the ID column (\`8eb2da3d\`) — the shortest form to carry, though a deleted or evicted note makes it exit 19 rather than pretend the board was quiet — or a plain date (\`2026-08-01\`) or a duration (\`2h\`, \`3d\`) when you deliberately want a window. Keep the cursor yourself; the app remembers nothing per caller, so the same cursor always gives the same answer. A bare \`dev3 events\` shows the last 24 hours and tells you, as a number, how many events are older than that window — so a lost cursor is visible instead of silent. \`--kind note\` or \`--kind move\` narrows it, and a cursor from a filtered run covers that kind only — the run says so. Movements are recorded from the version that shipped them onward; nothing older exists and none is invented. One line per event; \`dev3 note show <id> --task <seq>\` prints a note's full body.
 - **A new codebase** → add the project from a folder or clone it from a URL, then run \`/dev3-project-config\` to auto-detect its setup / dev / cleanup scripts, ports, and clone paths.
@@ -882,7 +936,7 @@ Under the hood the agent uses \`dev3 pane run\` / \`dev3 pane logs\` (either bac
 
 Several agents at once is the normal case here. Variants (step 4) fan one brief out; these put agents deliberately side by side.
 
-- **More hands on the same task → spawn an extra agent.** Another agent in the *same* worktree, opened in a new pane with a fresh session — zero extra setup. Two agents, one branch, side by side.
+- **More hands on the same task → spawn an extra agent.** Use **+ Agent**, or \`dev3 agent spawn --task seq:N --prompt "instructions"\`: a fresh agent pane in the same worktree, no extra task or setup. From a task worktree the CLI asks the user to approve and pick the agent; \`dev3 agent list\` supplies IDs for \`--agent\` / \`--config\` model-and-effort presets. The chosen harness's default account is used unless the user changes it in the approval dialog; preset-defined credentials and provider routing still apply. \`--handoff\` adds the latest conversation retelling. The command returns the pane ID; give the helper its brief with \`--prompt\`, since messages address tasks, not individual panes.
 - **The same work, a different agent → hand the conversation over.** In the same **+ Agent** dialog, tick **Continue this task's conversation**: dev3 writes a retelling of the session so far — your prompts and the agent's replies verbatim, its tool calls reduced to what they did — next to the task's other files, and points the new agent at it. Start in Claude Code and finish in Codex, or the reverse, in the same worktree. It is a retelling, never a resume: agents cannot read each other's sessions, and the file says so on its first line. Offered only when the task has a parseable transcript; from a terminal the same text comes out of \`dev3 conversations handoff\`.
 - **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N --subject "<about 6 words>" "text"\` types a message straight into another task's live agent. \`--subject\` is required (one line, 80 characters at most, rejected rather than shortened if longer): it is stored with the message and it is the line the agent-traffic view (\`⇧⌘M\`) shows for it, so say what happened (\`"PR 1577 merged, main green"\`) and never who is speaking (\`"Seq 1722 -> Coordinator: ..."\` — the row already shows the pair). \`seq:N\` is the small number on its card. Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. A task on a different project needs \`--project <id>\` too: the command defaults to the sender's own board. A live variant group shares one seq, so \`seq:N\` alone is rejected as ambiguous there — add \`--variant <i>\` (the card's \`<seq>-<i>\` suffix) instead of hunting for the UUID. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel. Nothing is typed on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing into that pane, and lands instantly when they press Enter — so a burst of messages from several peers lands as ONE turn instead of interrupting the receiver three times, nothing is ever mixed into a half-written human line, and a reply takes about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds to start.
 - **A task an agent started already knows how to report back.** When a peer launches a task (\`dev3 task move --task seq:N --status in-progress\`, or \`dev3 task create --scratch --run\`), the child's first message tells it who started it, that its description is the brief, and — with no flag and no setup — to write progress and results as a file under its own task directory and message back only that path. Long bodies typed into a pane can lose their head; a path cannot. So a coordinator does **not** repeat that instruction by hand after every launch. Standing rules of its own go in a file it passes as \`--handoff-file <path>\`, appended under the default rather than replacing it.
@@ -915,7 +969,7 @@ Point, don't dig. Name where to look and stop — deep diagnosis is \`/diagnosin
 Off the main flow entirely.
 
 - **Focus on one task → focus mode (⇧⌘F).** With many tasks running in parallel, focus is the scarcest resource. Press ⇧⌘F (or F11, or the button above the board on the right) and the current task's terminal zooms to the full window while all notifications are muted — just you and the tmux, nothing else pulling at you. Press it again to surface back to the board.
-- **Move around fast** — command palette (⇧⌘P) and go-to-project (⌘K); ⌥Tab cycles recent tasks; \`/\` focuses search, which understands filter tokens; ⌘/ shows every shortcut.
+- **Move around fast** — command palette (⇧⌘P) and go-to-project (⇧⌘K); ⌥Tab cycles recent tasks; \`/\` focuses search, which understands filter tokens; ⌘/ shows every shortcut.
 - **Open the worktree in your tools** — right-click any active task card to open its worktree in Finder, VS Code, Cursor, and friends.
 - **"What is this screen?" → help mode.** Click the \`?\` in the header (or press ⇧⌘/) — every zone on screen gets an (i) badge; click one to learn what it does.
 - **A quick shell at the repo root → Project Terminal (⌘\\\`).** Next to it, the **Git Pull** button pulls the project's main worktree without touching a terminal — a blue dot on it means origin has new commits.
@@ -925,8 +979,8 @@ Off the main flow entirely.
 - **Machine running out of RAM → hibernate a task.** The header shows how many gigabytes are still free; hover it for the breakdown of who ate the rest, dev3's own tasks included. **Hibernate**, on the open task's session bar, stops that task's agent, terminal, and dev server and frees its ports, while the worktree, your uncommitted changes, notes, and PR state stay untouched. It asks for confirmation first, and spells out the one thing that does not survive: the terminal scrollback. The card greys out and sinks below the live tasks; waking is explicit — open its terminal and pick a plain shell or a resume of the agent's conversation.
 - **Rate limit closing in → hot-swap the account.** The header carries live Claude/Codex rate-limit usage and yellows near the cap; click it to land in **Settings → Agent Accounts**, where several logins per agent CLI sit side by side and the active one switches without a re-login (add one by running the login command dev3 hands you, then verify — or import the login you already have). The switch applies to every *new* agent session dev3 launches — new tasks, spawned agents, bug hunters, auto-review — while running sessions keep theirs, and each launch can pick a non-default account. An **API profile** replaces the subscription login entirely: the Anthropic API, an Anthropic-compatible gateway (OpenRouter, a LiteLLM proxy), or Bedrock, with per-model overrides.
 - **Too many projects to scan → group them into Spaces.** Once the project list stops being scannable, a **Space** groups projects: a rail on the dashboard lists every space with its project count, and picking one filters the overview to it — it never navigates away, so nothing gains a second board. Membership is **many-to-many** (a shared service can sit in both \`infra\` and \`client-x\`), and a project that belongs to several renders under each of them, carrying a chip for its other spaces. Create one from **+ New space**, the last entry of the rail's space list — the overview header offers the same button only while the rail is off screen (a narrow window, or your very first space, when there is no rail yet); edit which projects belong from **Edit projects…** in a space's **…** menu — every project is listed with the members ticked, so one dialog both adds and removes (it searches, and can start a brand-new project already linked); change one project's memberships from the row's **Spaces…** action or Project Settings → Spaces. Rename, delete and reorder live in the same **…** menu, which every space carries twice over: on its rail row and on its dashboard group header — deleting only removes the grouping, never a project. Projects in no space collect under a computed **Home** group; **Home is not a real space** — it is not stored, cannot be renamed, and never appears in a membership picker. The rail appears when the dashboard's own column is at least 1024px wide — not the window, so app chrome and a browser tab count against it; below that width the same filter opens as a sheet from the control beside the dashboard's search field, and whatever you had filtered stays filtered. The overview row above the spaces is **Everything** — it covers the whole list, spaces included. A space can also be marked **Hide on camera** from its **…** menu: in streamer mode its name blurs everywhere it appears (rail, filter sheet, group header, row chips, pickers) — independent of whether any member project is marked sensitive. **Space order:** drag a row in the rail, or use **Move up** / **Move down** in the space header's **…** menu (the path that works by touch and keyboard, where drag does not). Projects reorder by drag within their space — while you drag, every row in that space collapses to its name so the whole list fits on one screen. Neither ever changes membership. With zero spaces the dashboard is exactly the screen it always was.
-- **Work a whole space on ONE kanban.** A space can be the SUBJECT of the board itself, not just a dashboard filter. On a project's board, the button right of the project switcher (⇧⌘U) zooms out to that project's space — one click when it belongs to one space, a two-row menu when it belongs to several, and no button at all when it belongs to none. ⌘K lists spaces alongside projects. The space board shows every member project's tasks on one set of columns and is a board you WORK in: drag moves a card, and the move only ever changes status in that card's own repository; **+ New task** leads with a project field limited to the space's members and remembering the last one you used there; the label bar and every search token work as usual. Columns are the union across member projects — same-named custom columns merge into one lane (case- and spacing-insensitive) that says how many projects it covers, and a lane your card's project has no column in is dimmed while you drag rather than refusing you after the drop. Each card names its own project. Two deliberate limits: per-project column renames are ignored there (dev3's canonical status names are used, because two projects' renames cannot be reconciled), and adding, renaming or reordering a column stays on a project's own board. **A project's own board is untouched** — this is an additional view, never a replacement.
-- **Filter and search by space.** ⌘K matches space names as well as project names, the dashboard has its own field over projects + spaces, and the task funnel grows a **Spaces** group — \`space:"Client X"\` filters tasks anywhere task search runs, and \`is:home\` catches the projects in no space. The active-tasks sidebar gains a **space** scope (every project sharing a space with the current one). It lives in the task workspace, not on the dashboard — the dashboard's project rows already list every task waiting on you, so a panel beside them was showing the same rows twice; for cross-project task search, open any project and switch that sidebar to the globe scope.
+- **Work a whole space on ONE kanban.** A space can be the SUBJECT of the board itself, not just a dashboard filter. On a project's board, the button right of the project switcher (⇧⌘U) zooms out to that project's space — one click when it belongs to one space, a two-row menu when it belongs to several, and no button at all when it belongs to none. ⇧⌘K lists spaces alongside projects. The space board shows every member project's tasks on one set of columns and is a board you WORK in: drag moves a card, and the move only ever changes status in that card's own repository; **+ New task** leads with a project field limited to the space's members and remembering the last one you used there; the label bar and every search token work as usual. Columns are the union across member projects — same-named custom columns merge into one lane (case- and spacing-insensitive) that says how many projects it covers, and a lane your card's project has no column in is dimmed while you drag rather than refusing you after the drop. Each card names its own project. Two deliberate limits: per-project column renames are ignored there (dev3's canonical status names are used, because two projects' renames cannot be reconciled), and adding, renaming or reordering a column stays on a project's own board. **A project's own board is untouched** — this is an additional view, never a replacement.
+- **Filter and search by space.** ⇧⌘K matches space names as well as project names, the dashboard has its own field over projects + spaces, and the task funnel grows a **Spaces** group — \`space:"Client X"\` filters tasks anywhere task search runs, and \`is:home\` catches the projects in no space. The active-tasks sidebar gains a **space** scope (every project sharing a space with the current one). It lives in the task workspace, not on the dashboard — the dashboard's project rows already list every task waiting on you, so a panel beside them was showing the same rows twice; for cross-project task search, open any project and switch that sidebar to the globe scope.
 - **Terminals start in the wrong shell, or not at all → Settings → Terminal → Shell.** dev3 follows your login shell by default and falls back to whichever of zsh, bash or sh is installed, which is what makes a minimal Linux box (no zsh, sometimes no bash) work at all. Pin it to \`zsh\`, \`bash\` or \`sh\` when the detected one is not the one you want; a shell that is not installed says so under the picker and names the one actually running. Windows runs PowerShell and ignores the setting.
 - **Stats** — productivity and token-cost dashboards across projects.
 - **Automations** — recurring scheduled agent runs on a cron.
@@ -938,6 +992,7 @@ Off the main flow entirely.
 - **\`/dev3-project-config\`** — analyze a repo and write its \`.dev3/config.json\`.
 - **\`/dev3-tmux\`** — full tmux reference: panes, windows, capturing output.
 - **\`/dev3-bug-hunter\`** — seeded, review-only bug hunting; shines in multi-variant swarms.
+- **\`/dev3-artifact\`** — make, publish and revise an HTML report inside dev3 (the task's artifact starter + \`dev3 show-artifact\`).
 - **\`/dev3-share-artifact\`** — publish an HTML report as a gist and hand back a verified preview URL.
 - **\`/dev3-coordinator\`** — turn the task you are already in into a coordinator, keeping its conversation and work.
 
@@ -957,6 +1012,73 @@ const ASK_DEV3_OPENAI_YAML = `interface:
   display_name: "Ask dev3"
   short_description: "Ask which dev3 feature or flow fits your situation"
   default_prompt: "Use $ask-dev3 to learn how something is done in dev3 and which flow fits the situation."
+`;
+
+// ---- dev3-artifact skill (make and publish a report in the app) ----
+// The rules and steps are the protocol's own fragments, so the two can never disagree;
+// this file adds only what the protocol leaves to a pointer.
+
+const ARTIFACT_SKILL_DESCRIPTION =
+	"Make, publish and revise a dev3 HTML artifact: copy the task's artifact starter, follow its AUTHORING.md, edit index.html and report.js, then publish or add a version with dev3 show-artifact. Use it inside a dev3 task whenever a human will read the result — a report, summary, daily brief, review readout, dashboard, comparison or analysis page — even when the user only says 'write it up', 'make a report' or 'show me', or names a .md path for where to save it; also to update an artifact already published. Not for Claude Artifacts, CI/build artifacts or package outputs. Sharing a report as a link outside the app is /dev3-share-artifact.";
+
+const ARTIFACT_SKILL_CONTENT = `---
+name: dev3-artifact
+description: "${ARTIFACT_SKILL_DESCRIPTION}"
+user-invocable: true
+---
+
+# dev3 HTML artifacts — make, publish, revise
+
+A dev3 artifact is an HTML report shown inside the dev3 app, bound to the task that published it.
+This skill is the same workflow the dev3 protocol carries in its \`## dev3 HTML artifacts\` section,
+plus the parts that section only points at. It changes nothing about the starter, its shell, or
+\`dev3 show-artifact\`.
+
+## When a report becomes an artifact
+
+${ARTIFACT_FORMAT_RULES}
+## The workflow
+
+${ARTIFACT_AUTHORING_STEPS}
+## Getting the starter
+
+| Situation | Do |
+|---|---|
+| \`$DEV3_ARTIFACT_TEMPLATE_DIR\` is set | \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\` |
+| It is unset (older session, a shell that never inherited it) | \`dev3 artifact-template\` — provisions the starter, copies it into \`./dev3-artifact-report\`, prints the path |
+| You already have an edited copy | Keep working in it. Re-running \`dev3 artifact-template\` copies every starter file over it, \`index.html\` and \`report.js\` included, and your edits are gone |
+
+Never edit the pristine starter itself, and never swap in another template.
+
+## Writing it
+
+The copied \`AUTHORING.md\` is the authoring card: shell classes, color tokens, charts, the
+template contract, and when a browser pass is due. Read it once per report — this skill does not
+repeat it. Its last table says which \`REFERENCE.md\` section to open for charts, controls,
+menus, dense tables, media, print, or a form that answers back to the agent.
+
+## Publishing and updating
+
+- **Publish the directory**, not \`index.html\`: every CSS, classic JS, image, video and audio file
+  under it rides along. A file outside the directory goes after \`--assets\`.
+- **Revise in place.** Edit the same copy and re-run \`dev3 show-artifact\` with the same
+  \`--title\` (or the same \`--artifact-id <slug>\`, so re-wording the title does not fork it) — the
+  viewer shows it as a new version of one artifact. \`--new\` only for a genuinely different report.
+- **Limits and exact flags:** \`dev3 show-artifact --help\`, and \`REFERENCE.md\` § Publishing and
+  assets / § Bundled media.
+
+## In the app versus a link outside it
+
+| The user wants | Use |
+|---|---|
+| To read the report in dev3 | \`dev3 show-artifact\` — this skill |
+| A URL to open elsewhere — phone, another machine, an issue, a colleague | \`/dev3-share-artifact\`, a separate step that publishes a GitHub gist. Run it only when they ask for a link |
+`;
+
+const ARTIFACT_OPENAI_YAML = `interface:
+  display_name: "dev3 Artifact"
+  short_description: "Make and publish an HTML report inside dev3"
+  default_prompt: "Use \$dev3-artifact to write this up as a dev3 HTML artifact and publish it with dev3 show-artifact."
 `;
 
 // ---- dev3-share-artifact skill (publish an artifact as a link) ----
@@ -1151,6 +1273,10 @@ const SHARE_ARTIFACT_OPENAI_YAML = `interface:
   default_prompt: "Use \$dev3-share-artifact to publish a local HTML report as a gist and verify its preview URL."
 `;
 
+export function getArtifactSkillContent(): string {
+	return ARTIFACT_SKILL_CONTENT;
+}
+
 export function getShareArtifactSkillContent(): string {
 	return SHARE_ARTIFACT_SKILL_CONTENT;
 }
@@ -1195,9 +1321,6 @@ export function getGenericSkillContent(): string {
 	return buildGenericSkillContent();
 }
 
-/** Claude Code project-config skill directory. */
-const CLAUDE_PROJECT_CONFIG_DIR = ".claude/skills/dev3-project-config";
-
 /** Generic agent project-config skill directories. */
 const GENERIC_PROJECT_CONFIG_DIRS = [
 	".cursor/skills/dev3-project-config",
@@ -1208,9 +1331,6 @@ const GENERIC_PROJECT_CONFIG_DIRS = [
 	".config/opencode/skills/dev3-project-config",
 	".omp/agent/skills/dev3-project-config",
 ];
-
-/** Claude Code tmux skill directory. */
-const CLAUDE_TMUX_DIR = ".claude/skills/dev3-tmux";
 
 /** Generic agent tmux skill directories. */
 const GENERIC_TMUX_DIRS = [
@@ -1224,7 +1344,6 @@ const GENERIC_TMUX_DIRS = [
 ];
 
 const BUG_HUNTER_SKILL_DIRS = [
-	".claude/skills/dev3-bug-hunter",
 	".cursor/skills/dev3-bug-hunter",
 	".agents/skills/dev3-bug-hunter",
 	".gemini/config/skills/dev3-bug-hunter",
@@ -1235,7 +1354,6 @@ const BUG_HUNTER_SKILL_DIRS = [
 ];
 
 const ASK_DEV3_SKILL_DIRS = [
-	".claude/skills/ask-dev3",
 	".cursor/skills/ask-dev3",
 	".agents/skills/ask-dev3",
 	".gemini/config/skills/ask-dev3",
@@ -1246,7 +1364,6 @@ const ASK_DEV3_SKILL_DIRS = [
 ];
 
 const COORDINATOR_SKILL_DIRS = [
-	".claude/skills/dev3-coordinator",
 	".cursor/skills/dev3-coordinator",
 	".agents/skills/dev3-coordinator",
 	".codex/skills/dev3-coordinator",
@@ -1255,8 +1372,16 @@ const COORDINATOR_SKILL_DIRS = [
 	".omp/agent/skills/dev3-coordinator",
 ];
 
+const ARTIFACT_SKILL_DIRS = [
+	".cursor/skills/dev3-artifact",
+	".agents/skills/dev3-artifact",
+	".codex/skills/dev3-artifact",
+	".opencode/skills/dev3-artifact",
+	".config/opencode/skills/dev3-artifact",
+	".omp/agent/skills/dev3-artifact",
+];
+
 const SHARE_ARTIFACT_SKILL_DIRS = [
-	".claude/skills/dev3-share-artifact",
 	".cursor/skills/dev3-share-artifact",
 	".agents/skills/dev3-share-artifact",
 	".codex/skills/dev3-share-artifact",
@@ -1265,22 +1390,51 @@ const SHARE_ARTIFACT_SKILL_DIRS = [
 	".omp/agent/skills/dev3-share-artifact",
 ];
 
+/** Claude Code skills by name, installed under `<claude config dir>/skills/`. */
+const CLAUDE_SKILL_NAMES = [
+	"dev3",
+	"dev3-project-config",
+	"dev3-tmux",
+	"dev3-bug-hunter",
+	"ask-dev3",
+	"dev3-artifact",
+	"dev3-share-artifact",
+	"dev3-coordinator",
+] as const;
+
+/**
+ * Files per Claude skill. dev3's own SKILL.md is short (the protocol lives in the
+ * system prompt); PROTOCOL.md carries the full body for sessions started outside
+ * the dev3 launcher.
+ */
+function claudeSkillFiles(): Record<(typeof CLAUDE_SKILL_NAMES)[number], Record<string, string>> {
+	return {
+		dev3: { "SKILL.md": getClaudeSkillContent(), "PROTOCOL.md": CLAUDE_SKILL_BODY },
+		"dev3-project-config": { "SKILL.md": CLAUDE_PROJECT_CONFIG_SKILL },
+		"dev3-tmux": { "SKILL.md": CLAUDE_TMUX_SKILL },
+		"dev3-bug-hunter": { "SKILL.md": BUG_HUNTER_SKILL_CONTENT },
+		"ask-dev3": { "SKILL.md": ASK_DEV3_SKILL_CONTENT },
+		"dev3-artifact": { "SKILL.md": ARTIFACT_SKILL_CONTENT },
+		"dev3-share-artifact": { "SKILL.md": SHARE_ARTIFACT_SKILL_CONTENT },
+		"dev3-coordinator": { "SKILL.md": COORDINATOR_SKILL_CONTENT },
+	};
+}
+
 /**
  * Every managed skill file this installer writes, relative to the home directory.
  * `dev3 install-skills` prints this list, so it must stay derived from the dirs
  * above rather than re-listed by hand.
  */
 export const MANAGED_SKILL_FILES = [
-	CLAUDE_SKILL_DIR,
+	...CLAUDE_SKILL_NAMES.map((name) => `.claude/skills/${name}`),
 	CODEX_SKILL_DIR,
 	OMP_SKILL_DIR,
 	...GENERIC_SKILL_DIRS,
-	CLAUDE_PROJECT_CONFIG_DIR,
 	...GENERIC_PROJECT_CONFIG_DIRS,
-	CLAUDE_TMUX_DIR,
 	...GENERIC_TMUX_DIRS,
 	...BUG_HUNTER_SKILL_DIRS,
 	...ASK_DEV3_SKILL_DIRS,
+	...ARTIFACT_SKILL_DIRS,
 	...SHARE_ARTIFACT_SKILL_DIRS,
 	...COORDINATOR_SKILL_DIRS,
 ].map((dir) => `${dir}/SKILL.md`);
@@ -1305,6 +1459,10 @@ const SHARED_SKILL_OPENAI_CONFIGS = [
 	{
 		dir: ".agents/skills/ask-dev3",
 		content: ASK_DEV3_OPENAI_YAML,
+	},
+	{
+		dir: ".agents/skills/dev3-artifact",
+		content: ARTIFACT_OPENAI_YAML,
 	},
 	{
 		dir: ".agents/skills/dev3-share-artifact",
@@ -1348,7 +1506,14 @@ const LOW_BATTERY_ALWAYS_ON = `
 Load the \`low-battery\` skill (\`~/.agents/skills/low-battery/SKILL.md\`) before composing any substantial answer, and follow it. It is the answer format this machine expects: header block first, decision last, tables over prose. Skip it only when the Low Battery output style is already active — they are the same rules.
 `;
 
-function agentsMdBlock(lowBattery: boolean): string {
+function agentsMdBlock(lowBattery: boolean, compact = false): string {
+	if (compact) return `${AGENTS_MD_MARKER_START}
+## dev-3.0 Managed Worktree
+
+Inside \`~/.dev3.0/worktrees/\`, follow the full "dev3 — Task Lifecycle Protocol" already injected by your launch. If it is absent, load the \`/dev3\` skill (or \`~/.agents/skills/dev3/SKILL.md\`) before working. Use that protocol's agent-specific status rules; hook-owned lifecycle transitions need no manual status commands.
+
+**Codex shell note:** For \`exec_command\` calls, always set \`shell="/bin/bash"\` and \`login=false\`. The sandbox may block homebrew zsh.
+${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
 	return `${AGENTS_MD_MARKER_START}
 ## dev-3.0 Managed Worktree
 
@@ -1370,8 +1535,8 @@ ${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
  * Creates the file if missing; replaces an existing block if present;
  * appends if the file exists but has no dev3 block.
  */
-function installAgentsMd(lowBattery: boolean): void {
-	const block = agentsMdBlock(lowBattery);
+function installAgentsMd(lowBattery: boolean, compact = false): void {
+	const block = agentsMdBlock(lowBattery, compact);
 	const agentsDir = `${homedir()}/.agents`;
 	const agentsFile = `${agentsDir}/AGENTS.md`;
 
@@ -1419,7 +1584,8 @@ export function claudeBashPermission(dialect: HookCliDialect = hookCliDialect())
  * The dev3 exception dev3 declares for Claude Code's auto-mode classifier.
  *
  * The classifier is a second gate that runs after the permission rules, and it
- * reads its `autoMode` config ONLY from `~/.claude/settings.json`, managed
+ * reads its `autoMode` config ONLY from the user `settings.json` (`~/.claude` or
+ * `$CLAUDE_CONFIG_DIR`), managed
  * settings, or `--settings` — never from a repo's `.claude/settings*.json`, so a
  * checked-in file cannot grant itself exceptions. A worktree-scoped rule
  * therefore cannot clear it, and without this entry `dev3 task move --status
@@ -1500,22 +1666,23 @@ export function applyClaudeSettings(settings: Record<string, unknown>, socketsPa
 }
 
 /**
- * Read, patch, and write ~/.claude/settings.json so the dev3 CLI is auto-approved
- * and the dev3 socket directory is allow-listed in the Claude Code sandbox.
- * Non-fatal on any error. Note: the seatbelt profile is compiled when `claude`
- * starts, so a freshly-launched Claude Code session is required for a new
- * allowUnixSockets entry to take effect (resume/--continue does not rebuild it).
+ * Read, patch, and write `<claude config dir>/settings.json` so the dev3 CLI is
+ * auto-approved and the dev3 socket directory is allow-listed in the Claude Code
+ * sandbox. Non-fatal on any error. A file that exists but does not parse is left
+ * alone: it is the user's, and rewriting it would drop everything in it. Note: the
+ * seatbelt profile is compiled when `claude` starts, so a freshly-launched session
+ * is required for a new allowUnixSockets entry to take effect.
  */
-function ensureClaudeSettings(home: string): void {
-	const settingsPath = `${home}/.claude/settings.json`;
-	const socketsPath = `${home}/.dev3.0/sockets`;
+function ensureClaudeSettings(settingsPath: string, socketsPath: string): void {
 	try {
 		let settings: Record<string, unknown> = {};
-		try {
-			const raw = readFileSync(settingsPath, "utf-8");
-			settings = JSON.parse(raw) as Record<string, unknown>;
-		} catch {
-			// File doesn't exist or is invalid — start fresh
+		if (existsSync(settingsPath)) {
+			try {
+				settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+			} catch {
+				log.warn("Claude settings.json does not parse, leaving it alone", { path: settingsPath });
+				return;
+			}
 		}
 
 		if (!applyClaudeSettings(settings, socketsPath)) {
@@ -1532,6 +1699,37 @@ function ensureClaudeSettings(home: string): void {
 			error: String(err),
 		});
 	}
+}
+
+/** Write only when the bytes differ - this runs on every Claude launch into a pinned dir. */
+function writeIfChanged(path: string, content: string): boolean {
+	try {
+		if (readFileSync(path, "utf-8") === content) return false;
+	} catch {
+		// missing - write below
+	}
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, content, "utf-8");
+	return true;
+}
+
+/**
+ * Install dev3's Claude skills and settings into one Claude Code config dir:
+ * ~/.claude by default, or whatever `CLAUDE_CONFIG_DIR` names for a launch.
+ * Idempotent and non-fatal per file.
+ */
+export function installClaudeConfigDir(configDir: string, home: string = homedir()): void {
+	for (const [name, files] of Object.entries(claudeSkillFiles())) {
+		for (const [file, content] of Object.entries(files)) {
+			const path = join(configDir, "skills", name, file);
+			try {
+				if (writeIfChanged(path, content)) log.info("Claude skill installed", { path });
+			} catch (err) {
+				log.warn("Failed to install Claude skill (non-fatal)", { path, error: String(err) });
+			}
+		}
+	}
+	ensureClaudeSettings(join(configDir, "settings.json"), `${home}/.dev3.0/sockets`);
 }
 
 function cleanupLegacyGeminiSkillDuplicates(home: string): void {
@@ -1595,22 +1793,17 @@ export interface InstallAgentSkillsOptions {
 
 export async function installAgentSkills(options: InstallAgentSkillsOptions = {}): Promise<void> {
 	const home = homedir();
+	// Installation-wide experiment: managed accounts also discover the shared .agents skill.
+	const compact = process.env.DEV3_COMPACT_AGENT_SKILLS === "1";
 
-	// Install Claude-specific skill (with command injection). SKILL.md is short
-	// (the protocol lives in the system prompt); PROTOCOL.md carries the full
-	// body as a fallback for sessions started outside the dev3 launcher.
-	const claudeSkillDir = `${home}/${CLAUDE_SKILL_DIR}`;
-	const claudeSkillFile = `${claudeSkillDir}/SKILL.md`;
-	try {
-		mkdirSync(claudeSkillDir, { recursive: true });
-		writeFileSync(claudeSkillFile, getClaudeSkillContent(), "utf-8");
-		writeFileSync(`${claudeSkillDir}/PROTOCOL.md`, CLAUDE_SKILL_BODY, "utf-8");
-		log.info("Claude skill installed", { path: claudeSkillFile });
-	} catch (err) {
-		log.warn("Failed to install Claude skill (non-fatal)", {
-			path: claudeSkillFile,
-			error: String(err),
-		});
+	// ~/.claude always: managed accounts symlink its skills and settings, and an
+	// unpinned launch reads it. A pin on the server's own env is what launches inherit.
+	const defaultClaudeDir = claudeConfigLocation({}, home).dir;
+	installClaudeConfigDir(defaultClaudeDir, home);
+	// A relative pin names a different dir per worktree, so only launches can provision it.
+	const serverClaude = claudeConfigLocation(process.env, home);
+	if (serverClaude.pinned && isAbsolute(serverClaude.dir) && serverClaude.dir !== defaultClaudeDir) {
+		installClaudeConfigDir(serverClaude.dir, home);
 	}
 
 	// Install Codex-specific skill (hook-aware + shell note)
@@ -1618,7 +1811,8 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 	const codexSkillFile = `${codexSkillDir}/SKILL.md`;
 	try {
 		mkdirSync(codexSkillDir, { recursive: true });
-		writeFileSync(codexSkillFile, getCodexSkillContent(), "utf-8");
+		if (compact) writeFileSync(`${codexSkillDir}/PROTOCOL.md`, getCodexSkillContent(), "utf-8");
+		writeFileSync(codexSkillFile, buildCodexSkillContent(hookCliDialect(), compact), "utf-8");
 		log.info("Codex skill installed", { path: codexSkillFile });
 	} catch (err) {
 		log.warn("Failed to install Codex skill (non-fatal)", {
@@ -1632,7 +1826,8 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 	const ompSkillFile = `${ompSkillDir}/SKILL.md`;
 	try {
 		mkdirSync(ompSkillDir, { recursive: true });
-		writeFileSync(ompSkillFile, getOmpSkillContent(), "utf-8");
+		if (compact) writeFileSync(`${ompSkillDir}/PROTOCOL.md`, getOmpSkillContent(), "utf-8");
+		writeFileSync(ompSkillFile, buildOmpSkillContent(hookCliDialect(), compact), "utf-8");
 		log.info("omp skill installed", { path: ompSkillFile });
 	} catch (err) {
 		log.warn("Failed to install omp skill (non-fatal)", {
@@ -1647,7 +1842,8 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 		const skillFile = `${skillDir}/SKILL.md`;
 		try {
 			mkdirSync(skillDir, { recursive: true });
-			writeFileSync(skillFile, getGenericSkillContent(), "utf-8");
+			if (compact) writeFileSync(`${skillDir}/PROTOCOL.md`, getGenericSkillContent(), "utf-8");
+			writeFileSync(skillFile, buildGenericSkillContent(hookCliDialect(), compact), "utf-8");
 			log.info("Agent skill installed", { path: skillFile });
 		} catch (err) {
 			log.warn("Failed to install agent skill (non-fatal)", {
@@ -1655,20 +1851,6 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 				error: String(err),
 			});
 		}
-	}
-
-	// Install Claude-specific project-config skill
-	const claudeProjectConfigDir = `${home}/${CLAUDE_PROJECT_CONFIG_DIR}`;
-	const claudeProjectConfigFile = `${claudeProjectConfigDir}/SKILL.md`;
-	try {
-		mkdirSync(claudeProjectConfigDir, { recursive: true });
-		writeFileSync(claudeProjectConfigFile, CLAUDE_PROJECT_CONFIG_SKILL, "utf-8");
-		log.info("Claude project-config skill installed", { path: claudeProjectConfigFile });
-	} catch (err) {
-		log.warn("Failed to install Claude project-config skill (non-fatal)", {
-			path: claudeProjectConfigFile,
-			error: String(err),
-		});
 	}
 
 	// Install generic project-config skill for all other agents
@@ -1685,20 +1867,6 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 				error: String(err),
 			});
 		}
-	}
-
-	// Install Claude-specific tmux skill
-	const claudeTmuxDir = `${home}/${CLAUDE_TMUX_DIR}`;
-	const claudeTmuxFile = `${claudeTmuxDir}/SKILL.md`;
-	try {
-		mkdirSync(claudeTmuxDir, { recursive: true });
-		writeFileSync(claudeTmuxFile, CLAUDE_TMUX_SKILL, "utf-8");
-		log.info("Claude tmux skill installed", { path: claudeTmuxFile });
-	} catch (err) {
-		log.warn("Failed to install Claude tmux skill (non-fatal)", {
-			path: claudeTmuxFile,
-			error: String(err),
-		});
 	}
 
 	// Install generic tmux skill for all other agents
@@ -1747,6 +1915,21 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 		}
 	}
 
+	for (const dir of ARTIFACT_SKILL_DIRS) {
+		const skillDir = `${home}/${dir}`;
+		const skillFile = `${skillDir}/SKILL.md`;
+		try {
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(skillFile, ARTIFACT_SKILL_CONTENT, "utf-8");
+			log.info("artifact skill installed", { path: skillFile });
+		} catch (err) {
+			log.warn("Failed to install artifact skill (non-fatal)", {
+				path: skillFile,
+				error: String(err),
+			});
+		}
+	}
+
 	for (const dir of SHARE_ARTIFACT_SKILL_DIRS) {
 		const skillDir = `${home}/${dir}`;
 		const skillFile = `${skillDir}/SKILL.md`;
@@ -1783,8 +1966,7 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 
 	cleanupLegacyGeminiSkillDuplicates(home);
 	installOpenAiMetadata(home);
-	installAgentsMd(options.lowBattery === true);
-	ensureClaudeSettings(home);
+	installAgentsMd(options.lowBattery === true, compact);
 	if (options.configureCodex !== false) {
 		await ensureCodexConfigFile(home);
 	}

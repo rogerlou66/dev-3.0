@@ -1,10 +1,11 @@
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
-import type { PRCheckInfo, TaskPRBadgeInfo } from "../../shared/types";
+import type { PRCheckInfo, RefreshTaskPrStatusResult, TaskPRBadgeInfo, TaskPullRequestRecord } from "../../shared/types";
 import { summarizeMergeability, type PRMergeabilityReason } from "../../shared/pr-status";
 import { api } from "../rpc";
 import { useT } from "../i18n";
 import { toast } from "../toast";
+import { prDisplayState, prStateTone, type PRDisplayState } from "../utils/prStateTone";
 import { computeAnchoredPosition, type RectLike } from "../utils/popoverPosition";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
@@ -17,7 +18,22 @@ interface TaskPrStatusPopoverProps {
 	/** When provided, the "N unresolved comments" row becomes a deep link that
 	 * opens the diff review at the first unresolved GitHub thread. */
 	onShowUnresolved?: () => void;
+	/** Finished PRs a follow-up replaced, newest first (`earlierPullRequests`). */
+	earlierPullRequests?: TaskPullRequestRecord[];
+	/**
+	 * The PR's lifecycle as the badge resolved it (push, branch check, stored
+	 * cache). Defaults to the state inside `prInfo`, so the popover never reads
+	 * a PR the badge already colours merged as merely "unknown".
+	 */
+	displayState?: PRDisplayState;
 	children: ReactElement;
+}
+
+type RefreshNotice = Extract<RefreshTaskPrStatusResult["outcome"], "unavailable" | "not-found">;
+
+function prStateMeta(state: PRDisplayState, t: ReturnType<typeof useT>): { label: string; className: string } | null {
+	const tone = prStateTone(state);
+	return tone.labelKey ? { label: t(tone.labelKey), className: tone.text } : null;
 }
 
 type CheckState = "failure" | "pending" | "success" | "unknown";
@@ -146,13 +162,14 @@ function anchorRect(element: HTMLElement): RectLike {
 	};
 }
 
-export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowUnresolved, children }: TaskPrStatusPopoverProps) {
+export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowUnresolved, earlierPullRequests, displayState, children }: TaskPrStatusPopoverProps) {
 	const t = useT();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const [open, setOpen] = useState(false);
 	const [sheetOpen, setSheetOpen] = useState(false);
 	const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
 	const [refreshing, setRefreshing] = useState(false);
+	const [refreshNotice, setRefreshNotice] = useState<RefreshNotice | null>(null);
 	const triggerRef = useRef<HTMLSpanElement>(null);
 	const popoverRef = useRef<HTMLDivElement>(null);
 	const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -183,7 +200,10 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 		openRef.current = false;
 		setOpen(false);
 		setPosition(null);
+		setRefreshNotice(null);
 	}, [cancelAutoRefresh, cancelHide]);
+
+	useEffect(() => setRefreshNotice(null), [prInfo.number]);
 
 	const show = useCallback(() => {
 		cancelHide();
@@ -206,8 +226,11 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 		refreshingRef.current = true;
 		setRefreshing(true);
 		try {
-			await api.request.refreshTaskPrStatus({ taskId, projectId });
+			const result = await api.request.refreshTaskPrStatus({ taskId, projectId });
+			const outcome = result?.outcome;
+			setRefreshNotice(outcome === "unavailable" || outcome === "not-found" ? outcome : null);
 		} catch (error) {
+			setRefreshNotice(null);
 			toast.error(t("task.prRefreshFailed", { error: String(error) }), { taskId });
 		} finally {
 			refreshingRef.current = false;
@@ -281,6 +304,13 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 	}, [refresh, sheetOpen]);
 
 	const checks = sortedChecks(prInfo.checks ?? []);
+	const lifecycle = displayState ?? prDisplayState(prInfo.mergeState?.state, prInfo.isDraft);
+	// Mergeability and auto-merge describe a PR that can still be merged. GitHub
+	// answers UNKNOWN for both once a PR is merged or closed, which is not an error.
+	const finished = lifecycle === "merged" || lifecycle === "closed";
+	// No merge state at all means nothing has polled this PR yet — "Unknown" there
+	// would read as a GitHub failure, and "No checks" as a fact we never fetched.
+	const loaded = prInfo.mergeState != null;
 	const mergeability = summarizeMergeability(prInfo.mergeState);
 	const autoMergeLabel = prInfo.autoMergeEnabled === true
 		? t("task.prEnabled")
@@ -292,21 +322,17 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 		? t("task.prMergeableYes")
 		: mergeability.state === "not_mergeable"
 			? t("task.prMergeableNo")
-			: t("task.prMergeableUnknown");
+			: prInfo.mergeState?.mergeable === "UNKNOWN"
+				? t("task.prMergeableChecking")
+				: t("task.prMergeableUnknown");
 	const mergeabilityClass = mergeability.state === "mergeable"
 		? "text-success"
 		: mergeability.state === "not_mergeable"
 			? "text-danger"
 			: "text-fg-3";
-	const mergeReasons = mergeability.state === "not_mergeable" ? mergeReasonDetails(prInfo, mergeability, t) : [];
-	const prState = prInfo.mergeState?.state?.toUpperCase();
-	const prStateMeta = prState === "OPEN"
-		? { label: t("task.prStatusOpen"), className: "text-fg-3" }
-		: prState === "MERGED"
-			? { label: t("task.prStatusMerged"), className: "text-success" }
-			: prState === "CLOSED"
-				? { label: t("task.prStatusClosed"), className: "text-danger" }
-				: null;
+	const mergeReasons = !finished && mergeability.state === "not_mergeable" ? mergeReasonDetails(prInfo, mergeability, t) : [];
+	const currentStateMeta = prStateMeta(lifecycle, t);
+	const earlier = earlierPullRequests ?? [];
 
 	// Shared body between the desktop hover popover and the mobile bottom sheet.
 	// `sheet` relaxes the density: no header row (the sheet has its own title),
@@ -319,13 +345,13 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 						<div className="font-semibold text-fg">{t("task.prStatusPopover", { number: String(prInfo.number) })}</div>
 						{prInfo.prTitle && <div className="mt-0.5 truncate text-fg-3" title={prInfo.prTitle}>{prInfo.prTitle}</div>}
 					</div>
-					{prInfo.isDraft && <span className="flex-shrink-0 rounded bg-warning/10 px-1.5 py-0.5 font-medium text-warning-strong">{t("task.prDraft")}</span>}
+					{prInfo.isDraft && <span className="flex-shrink-0 rounded bg-fg-3/10 px-1.5 py-0.5 font-medium text-fg-2">{t("task.prDraft")}</span>}
 				</div>
 			)}
 			{sheet && (prInfo.prTitle || prInfo.isDraft) && (
 				<div className="flex items-start justify-between gap-3">
 					{prInfo.prTitle && <div className="min-w-0 break-words text-fg-3">{prInfo.prTitle}</div>}
-					{prInfo.isDraft && <span className="flex-shrink-0 rounded bg-warning/10 px-1.5 py-0.5 font-medium text-warning-strong">{t("task.prDraft")}</span>}
+					{prInfo.isDraft && <span className="flex-shrink-0 rounded bg-fg-3/10 px-1.5 py-0.5 font-medium text-fg-2">{t("task.prDraft")}</span>}
 				</div>
 			)}
 
@@ -354,7 +380,7 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 				)
 			)}
 
-			{prInfo.mergeState?.mergeable === "CONFLICTING" && (
+			{!finished && prInfo.mergeState?.mergeable === "CONFLICTING" && (
 				<div className="mt-2 flex items-center gap-1.5 text-danger">
 					<span className="leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{""}</span>
 					<span>{t("task.prConflict")}</span>
@@ -364,20 +390,24 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 			<div className="mt-3">
 				<div className="mb-1.5 font-medium text-fg-2">{t("task.prMergeStatus")}</div>
 				<dl className="space-y-1">
-					{prStateMeta && (
+					{currentStateMeta && (
 						<div className="flex items-center justify-between gap-3">
 							<dt className="text-fg-3">{t("task.prStatusLabel")}</dt>
-							<dd className={`font-medium ${prStateMeta.className}`}>{prStateMeta.label}</dd>
+							<dd className={`font-medium ${currentStateMeta.className}`}>{currentStateMeta.label}</dd>
 						</div>
 					)}
-					<div className="flex items-center justify-between gap-3">
-						<dt className="text-fg-3">{t("task.prAutoMerge")}</dt>
-						<dd className={`font-medium ${autoMergeClass}`}>{autoMergeLabel}</dd>
-					</div>
-					<div className="flex items-center justify-between gap-3">
-						<dt className="text-fg-3">{t("task.prMergeable")}</dt>
-						<dd className={`font-medium ${mergeabilityClass}`}>{mergeabilityLabel}</dd>
-					</div>
+					{!finished && loaded && (
+						<>
+							<div className="flex items-center justify-between gap-3">
+								<dt className="text-fg-3">{t("task.prAutoMerge")}</dt>
+								<dd className={`font-medium ${autoMergeClass}`}>{autoMergeLabel}</dd>
+							</div>
+							<div className="flex items-center justify-between gap-3">
+								<dt className="text-fg-3">{t("task.prMergeable")}</dt>
+								<dd className={`font-medium ${mergeabilityClass}`}>{mergeabilityLabel}</dd>
+							</div>
+						</>
+					)}
 					{mergeReasons.length > 0 && (
 						<div className="flex items-start justify-between gap-3">
 							<dt className="flex-shrink-0 text-fg-3">{t("task.prMergeReason")}</dt>
@@ -389,12 +419,20 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 						</div>
 					)}
 				</dl>
+				{finished && (
+					<div className="mt-1 text-fg-3" data-testid="pr-popover-finished-note">
+						{t(lifecycle === "merged" ? "task.prMergedNote" : "task.prClosedNote")}
+					</div>
+				)}
+				{!finished && !loaded && (
+					<div className="mt-1 text-fg-muted" data-testid="pr-popover-not-loaded">{t("task.prNotLoaded")}</div>
+				)}
 			</div>
 
 			<div className="mt-3">
 				<div className="mb-1.5 font-medium text-fg-2">{t("task.prChecks")}</div>
 				{checks.length === 0 ? (
-					<div className="text-fg-muted">{t("task.prNoChecks")}</div>
+					<div className="text-fg-muted">{t(loaded ? "task.prNoChecks" : "task.prNotLoaded")}</div>
 				) : (
 					<ul
 						data-testid="pr-check-list"
@@ -431,6 +469,38 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 				)}
 			</div>
 
+			{earlier.length > 0 && (
+				<div className="mt-3" data-testid="pr-popover-earlier">
+					<div className="mb-1.5 font-medium text-fg-2">{t("task.prEarlier")}</div>
+					<ul className="space-y-1">
+						{earlier.map((pr) => {
+							const stateMeta = prStateMeta(prDisplayState(pr.state), t);
+							return (
+								<li key={pr.number}>
+									<a
+										href={pr.url}
+										target="_blank"
+										rel="noreferrer"
+										className={`flex min-w-0 items-center gap-2 rounded hover:bg-elevated-hover focus:ring-1 focus:ring-accent ${sheet ? "px-1 py-2" : "px-1 py-1"}`}
+										aria-label={t("task.openPR", { number: String(pr.number) })}
+									>
+										<span className="flex-shrink-0 font-mono font-medium text-fg-2">{t("task.prNumber", { number: String(pr.number) })}</span>
+										<span className="min-w-0 flex-1 truncate text-fg-3" title={pr.title ?? undefined}>{pr.title}</span>
+										{stateMeta && <span className={`flex-shrink-0 ${stateMeta.className}`}>{stateMeta.label}</span>}
+									</a>
+								</li>
+							);
+						})}
+					</ul>
+				</div>
+			)}
+
+			{refreshNotice && (
+				<div role="status" className="mt-3 text-warning-strong" data-testid="pr-popover-refresh-notice">
+					{t(refreshNotice === "unavailable" ? "task.prRefreshUnavailable" : "task.prRefreshNotFound")}
+				</div>
+			)}
+
 			<button
 				type="button"
 				onClick={() => void refresh()}
@@ -465,7 +535,10 @@ export default function TaskPrStatusPopover({ prInfo, projectId, taskId, onShowU
 				{children}
 				<BottomSheet
 					open={sheetOpen}
-					onClose={() => setSheetOpen(false)}
+					onClose={() => {
+						setSheetOpen(false);
+						setRefreshNotice(null);
+					}}
 					title={t("task.prStatusPopover", { number: String(prInfo.number) })}
 					testId="pr-status-sheet"
 				>

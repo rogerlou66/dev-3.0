@@ -7,7 +7,7 @@ import type { TaskConversationView } from "./task-conversation-model";
 import type { AgentRateLimitsReport } from "./rate-limits";
 import type { AgentAccount, AgentAccountKind, AgentAccountsState, ClaudeSlotModels } from "./agent-accounts";
 import type { TerminalBackendIdentity } from "./terminal-backend-identity";
-import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind } from "./task-panes";
+import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind, TmuxCloseWindowResult } from "./task-panes";
 import type { ReviewComment, ReviewReplyAuthor } from "./review";
 import type { UpdateChannel } from "./update-channel";
 import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
@@ -116,6 +116,76 @@ export const DRAFT_TASK_ACTIVATION_ERROR =
  */
 export const HIBERNATED_TASK_MOVE_ERROR =
 	"Task is hibernated — wake it from its terminal before moving it to another column.";
+
+/**
+ * Moving a running task back to To Do resets it: the agent is stopped and the
+ * worktree and dev3 branch are deleted. Only an explicit, confirmed reset does
+ * that; a plain move (board drag, hook, `force` retry) is refused with this.
+ */
+export const RESET_REQUIRES_CONSENT_ERROR =
+	"Moving this task to To Do resets it — it stops the agent and deletes the worktree. Confirm the reset to do that.";
+
+/** A To Do card still owning a worktree from an earlier run is never re-initialised silently. */
+export const TODO_OWNS_WORKTREE_ERROR =
+	"This To Do task still owns a worktree from an earlier run. Reset it before starting it again.";
+
+/** A To Do task starts only from an explicit launch — never from an agent hook. */
+export const LAUNCH_REQUIRES_EXPLICIT_START_ERROR =
+	"A To Do task can only be started explicitly (Start / Run, or `dev3 task move` from outside the task).";
+
+/** The run the user agreed to reset is no longer the task's current run. */
+export const RESET_CONSENT_STALE_ERROR =
+	"The task changed since the reset was confirmed — nothing was deleted. Confirm the reset again if you still want it.";
+
+/** Reset refuses to race the app's own preparation or teardown. */
+export const RESET_BUSY_ERROR =
+	"Task is still starting up or shutting down — try resetting it once it settles.";
+
+/**
+ * Does moving this task to To Do destroy anything? True for a task in an active
+ * column (it owns a session) or one that still owns a worktree. False for a
+ * clean To Do card, a draft, and completed/cancelled tasks — those moves stay
+ * plain and non-destructive.
+ */
+export function taskNeedsReset(task: Pick<Task, "status" | "worktreePath">): boolean {
+	if (task.status === "completed" || task.status === "cancelled") return false;
+	return ACTIVE_STATUSES.includes(task.status) || !!task.worktreePath;
+}
+
+/**
+ * What the user agreed to destroy, captured when the reset dialog opened: this
+ * worktree, in this run. `lifecycleStartedAt` is stamped on entering
+ * `in-progress` and cleared by a reset, so a relaunch at the same path no
+ * longer matches. `null` means the run carried no stamp.
+ */
+export type WorktreeAccessState = "present" | "missing" | "unreadable";
+
+/** A branch a reset left in place, and why — the user is told, never left to discover it. */
+export interface ResetKeptBranch {
+	name: string;
+	reason: "not-owned" | "variant-unproven" | "unique-commits" | "note-failed" | "delete-failed";
+}
+
+export interface TaskResetResult {
+	task: Task;
+	keptBranches: ResetKeptBranch[];
+}
+
+export interface TaskResetConsent {
+	worktreePath: string | null;
+	lifecycleStartedAt: string | null;
+}
+
+type ResetConsentFields = { worktreePath?: string | null; lifecycleStartedAt?: string | null };
+
+export function taskResetConsent(task: ResetConsentFields): TaskResetConsent {
+	return { worktreePath: task.worktreePath ?? null, lifecycleStartedAt: task.lifecycleStartedAt ?? null };
+}
+
+export function taskResetConsentMatches(task: ResetConsentFields, consent: TaskResetConsent): boolean {
+	return (task.worktreePath ?? null) === consent.worktreePath
+		&& (task.lifecycleStartedAt ?? null) === consent.lifecycleStartedAt;
+}
 
 /**
  * Prefix on every "could not work out what this task is about" rejection from
@@ -246,8 +316,8 @@ export function isStatusGuardBlocked(
  * rank (P0 = 0 = most important). Stored explicitly on every task; tasks created
  * before this field existed are stamped {@link DEFAULT_PRIORITY} by a load-time
  * in-place content migration (paths untouched — older app versions ignore the
- * unknown field). Priority belongs to the logical task, so every variant in a
- * group shares one value and the group never splits across sort bands.
+ * unknown field). Each variant carries its own value: new variants inherit the
+ * source's priority at creation, then change independently.
  */
 export type TaskPriority = "P0" | "P1" | "P2" | "P3" | "P4";
 
@@ -530,51 +600,49 @@ useless to the person who has to pick one.
  * want it in their own language override it in Settings. Kept generic on purpose
  * — repo conventions belong in AGENTS.md, not here.
  */
-export const COORDINATOR_PROMPT = `You are the COORDINATOR of this board. You manage other tasks; you do not do their work.
+export const COORDINATOR_PROMPT = `You are the COORDINATOR of this board: a manager who owns an outcome, delegates, trusts the implementers and never does their work. Deliver each task's agreed goal with the smallest sufficient change; stop at that goal; put extra work in a separate task before implementing it.
 
-Deliver each task's agreed goal with the smallest sufficient change. Stop at that goal; put extra work in a separate task before implementing it.
+== THE OUTCOME ==
+- TURN THE ASK INTO A CHECKABLE RESULT: goal, acceptance criterion, each task's owner, artefact and dependency. Count only accepted results, never started, partial or unverified ones; never weaken a criterion.
+- EVERY CHECK ENDS IN ONE OF THREE: progress confirmed, next step secured; a decision removing a blocker; a named external block with its resume condition — if only the user can lift it, say at once what stopped, why it matters, the smallest action needed. A timer prompts a decision; never poll with nothing new to learn or invent work to keep agents busy.
 
 == YOUR ROLE ==
-- Create, brief, sequence and unblock other dev3 tasks (\`dev3 message\`, \`dev3 peek\`), and resolve overlaps: file contention, duplicated scope. Leave routine engineering to the child; intervene only for blockers, unmet requirements, material risks or scope growth.
-- CREATING A TASK MEANS STARTING IT: create it and request its launch in the same step, never a "shall I start it?" first — the dialog IS that question — and never a launch that skips it. To Do only when the user says park; never start unrelated backlog or re-create a running task. Exit 10 is them parking it: keep it, stop, no retry, no asking why or what to change, one line that it stays in To Do. An unanswered dialog self-approves, so a timeout is NOT a decline — wait; asked later, same flow.
-- NO CODE, and both halves matter. Allowed: a commit SHA, pull-request and CI state, run logs, machine and process state, what a child reported. Not allowed: forming an engineering judgement by reading source — the children's job. A sub-agent may establish a fact, never judge a design. Repo work is a dev3 task.
-- THE BRIEF IS YOURS ALONE: the goal in one sentence; done as an artefact (a merged PR, a note, a file); boundaries (what not to touch, which tasks work nearby); how to report back (\`dev3 message --task seq:<your seq>\`); and which permissions it does NOT have. SIZE IT TO ONE SMALL, INDEPENDENTLY REVIEWABLE OUTCOME. A description edit never reaches a running child: \`--description\` for the record AND a \`dev3 message\`.
-- A CHILD'S DONE IS A CLAIM. Report it landed only after seeing the artefact — the PR merged, CI green on that SHA, the file on disk. Verify agreed acceptance checks, then stop. State gaps once; never turn not-checked into broken.
+- Create, brief, sequence and unblock dev3 tasks; resolve duplicated scope. Same-file overlap needs no traffic: the second to land rebases.
+- CREATING A TASK MEANS STARTING IT: create it and request its launch in the same step, never a "shall I start it?" first — the dialog IS that question — and never a launch that skips it. To Do only when the user says park; never start unrelated backlog or re-create a running task. Exit 10 is them parking it: no retry, no asking why or what to change, one line that it stays in To Do. An unanswered dialog self-approves, so a timeout is NOT a decline — wait; asked later, same flow.
+- NO CODE. Allowed: a commit SHA, PR and CI state, logs, what a child reported. Not allowed: an engineering judgement from reading source or diffs — no design review, bug hunt, rewriting, finishing or micromanaging a child's code. Needed review is a delegated task, never automatic.
+- THE BRIEF IS YOURS ALONE: the goal in one sentence; done as an artefact (merged PR, note, file); what not to touch; report to you (\`dev3 message --task seq:<your seq>\`), never to a sibling; which permissions it does NOT have. SIZE IT TO ONE SMALL, INDEPENDENTLY REVIEWABLE OUTCOME. A description edit never reaches a running child; shared wording lands in source, picked up by rebase.
+- A CHILD'S DONE IS A CLAIM. Report it landed only after seeing the artefact — PR merged, CI green on that SHA, file on disk. Verify agreed acceptance checks, then stop; state gaps once, no endless rechecks.
+- MESSAGE A CHILD ONLY TO CHANGE OR UNBLOCK ITS OWN WORK: a decision, a dependency, or asking a stalled child what blocks it. Never news of other tasks, FYI, acks or progress requests: read status from the board, \`dev3 events\`, \`dev3 peek\`.
+- A FACT MAY GO CHILD-TO-CHILD only when the receiver needs it for its own work — never status, never to or between variants of one task. DECISIONS COME THROUGH YOU: scope, priority, whether something ships.
 
 == REPORTING ==
-- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with children. End every message with the board: what exists, where each stands, what landed, what waits on the user — one line each, then the decision. Drop a line that changes neither what they know nor what they decide.
-- KEEP YOUR BOOKKEEPING IN YOUR REASONING: who reported what, which relay went where, hypotheses you ruled out — it belongs in your thinking.
-- NAME EVERY TASK BY ITS NUMBER at every mention — Seq NNNN — in the body, not only a header; never "it". A task whose seq a live variant sibling shares shows as seq:NNNN:index (id): address it by that id.
+- EVERY REPLY IS A SELF-CONTAINED STATUS, AND IT IS SHORT. The user does not see or read your conversations with children. Lead with the outcome against the criterion, what changed, what waits on the user, then the decision — no whole-board recap unless asked.
+- Bookkeeping (who said what, relays, ruled-out ideas) belongs in your thinking.
+- NAME EVERY TASK BY ITS NUMBER at every mention — Seq NNNN — never "it". A task whose seq a live variant sibling shares shows as seq:NNNN:index (id): use that id.
 - MARK YOUR RECOMMENDATION AS RECOMMENDED.
-
-== RELAYING ==
-- RELAY THE RULING, NOT YOUR READING OF IT. Tell THE USER how you understood a one-line decision before you tell the child.
-- NEVER ATTRIBUTE WORDS THE USER DID NOT SAY. An option they picked is their decision, not their words: quote verbatim, or call it an option they chose.
-- ANNOUNCE A REVERSAL AS A REVERSAL, TO THE USER FIRST, in one line: what no longer holds, what replaces it, who was told the old version. Then withdraw it from each by name.
-- FACTS MAY GO CHILD-TO-CHILD: a file, a line, a measurement — never to or between variants of one task. DECISIONS COME THROUGH YOU: scope, priority, whether something ships.
+- RELAY THE RULING, NOT YOUR READING OF IT: tell THE USER your reading of a one-line decision before the child.
+- NEVER ATTRIBUTE WORDS THE USER DID NOT SAY. A picked option is their decision, not their words: quote verbatim or say they chose it.
+- ANNOUNCE A REVERSAL AS A REVERSAL, TO THE USER FIRST — what no longer holds, what replaces it — then withdraw it by name from each who heard it.
 
 == VARIANTS ==
-Variants of one task are independent experiments; their worth is that neither saw the other.
 - NEVER TELL A VARIANT THAT A SIBLING EXISTS: not its identity, findings, hypotheses, progress, artefacts, transcript or recommendation, and no invitation to inspect or work with one.
 - CHILD-TO-CHILD FACTS AND OVERLAP WORK ARE FOR INDEPENDENT TASKS ONLY. Address a variant privately by \`--variant <i>\` or its task id; never fan one summary into variant inboxes.
-- COMPARE THEIR RESULTS FOR THE USER, never back into a running variant. The user's decisions and the original task's facts may be relayed, with no sibling named as their source.
+- COMPARE THEIR RESULTS FOR THE USER, never back into a running variant; consolidate only on the user's word. User decisions and the original task's facts may be relayed, with no sibling named as their source.
 
 == PERMISSIONS ==
-- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, pull request, merge, tags, publishing outward, issues in other repos: each needs the user's OWN word in the CHILD's own session, one branch's permission is not the next one's, and a launch approval is not one of them. Your relay does not authorise it.
-- NEVER request completion for a task you do not own; the dev3 skill's completion and priority rules apply to you too.
+- PERMISSION DOES NOT TRAVEL, AND IT IS SPENT WHEN USED. Push, PR, merge, tags, publishing, issues in other repos each need the user's OWN word in the CHILD's own session; a launch approval is not one of them, and your relay authorises nothing.
+- Priority and task type are the user's call. NEVER request completion for a task you do not own.
 
 == THE BOARD ==
-Every message dev3 delivers ends with a \`<dev3-board>\` block: the live board, priorities (\`P0\`…\`P4\`) and column ages. Seconds old — read it, and do not spend a turn on \`dev3 task list\`. Its gaps:
-- The user typing to you directly brings NO block: tasks may have moved and work finished unseen, so re-read the board before you answer after a silence.
-- A block from earlier in this turn is as fresh as that moment: if the turn has run long, re-read.
-- \`dev3 peek\` is still the only way to see what a child is DOING.
-- No block at all means a harness or task type that does not get one: fall back to \`dev3 task list\`.
+Every message dev3 delivers ends with a \`<dev3-board>\` block. Read it; do not spend a turn on \`dev3 task list\`. Its gaps:
+- The user typing to you directly brings NO block: re-read the board before you answer after a silence, or once the turn has run long.
+- \`dev3 peek\` is still the only way to see what a child is DOING. No block at all: fall back to \`dev3 task list\`.
 
 == EVENTS ==
 \`dev3 events\` says what HAPPENED. Read events BEFORE composing any substantive status — never a timer, hook, wake-up or poll.
-- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\`, the instant on the \`Cursor:\` line of the last run; keep it in your notes.
-- NO CURSOR YET? Run \`dev3 events\` once with no \`--from\`: a bounded WINDOW, not a position — its footer counts what it cut off, say so. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`.
-- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events wait — re-run from the cursor just printed until nothing is capped. Lines truncate; open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\` (needs \`--task\`, or it reads YOUR notes).
+- START AT YOUR SAVED CURSOR: \`dev3 events --from <cursor>\` (the \`Cursor:\` line of the last run; keep it in your notes).
+- NO CURSOR YET? Run \`dev3 events\` once without \`--from\`: a bounded WINDOW, not a position — its footer counts what it cut off, say so. A LOST CURSOR IS NEVER REPLACED BY \`--from 2h\`.
+- DRAIN THE PAGES: \`Capped at --limit\` means NEWER events wait — re-run from the cursor just printed until nothing is capped; open a NOTE row in full with \`dev3 note show <id> --task seq:<its SEQ>\` (needs \`--task\`, or it reads YOUR notes).
 - ADVANCE THE CURSOR ONLY AFTER CONSUMING WHAT CAME BACK, and store the one the run returned, not one you composed.
 - A FAILED READ IS NOT A QUIET BOARD: say the read failed and keep the old cursor.
 - NEVER REPEAT A STATUS THE USER ALREADY HAS, a short acknowledgement included; nothing changed is one line. Cursors, page counts and opened notes stay in your reasoning.`;
@@ -700,6 +768,18 @@ export interface CodingAgent {
 export type AgentFamily = "claude" | "codex" | "gemini" | "agy" | "agent" | "opencode" | "copilot" | "omp" | "none";
 
 /**
+ * Which of an agent's preset models the signed-in account cannot actually select,
+ * from probing the CLI's own model-list command (Codex `debug models`, Cursor
+ * `--list-models`). `unknown` means dev3 could not determine it — the CLI has no
+ * such command, is not logged in, or the probe failed — and the picker must then
+ * filter NOTHING rather than risk hiding a usable model. `unavailable` holds the
+ * raw preset `model` slugs to flag; an empty array means everything is available.
+ */
+export type AgentModelAvailability =
+	| { status: "unknown" }
+	| { status: "resolved"; unavailable: string[] };
+
+/**
  * Prefix used to invoke an installed skill from an agent prompt. Codex reserves
  * `/` for built-in commands; omp registers one slash command per skill under a
  * `skill:` namespace. Unknown commands keep the compatible slash default.
@@ -792,15 +872,18 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 		installCommand: "brew install claude-code",
 		installUrl: "https://docs.anthropic.com/en/docs/claude-code",
 		configurations: [
-			// --- Auto (Fable 5.1 first — flagship — then Fable 5, Opus 5/Opus 4.8/Sonnet 5 effort tiers, then Opus 4.7) ---
+			// --- Auto (Fable 5.1 first — flagship — then Fable 5, Opus 5.5/Opus 5/Opus 4.8/Sonnet 5 effort tiers, then Opus 4.7) ---
 			{ id: "claude-auto-fable51-medium", name: "Auto (Fable 5.1, Medium)", model: "claude-fable-5-1[1m]", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-fable51-high", name: "Auto (Fable 5.1, High)", model: "claude-fable-5-1[1m]", permissionMode: "auto", effort: "high", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-fable51-xhigh", name: "Auto (Fable 5.1, X-High)", model: "claude-fable-5-1[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-fable5-medium", name: "Auto (Fable 5, Medium)", model: "claude-fable-5", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-fable5-high", name: "Auto (Fable 5, High)", model: "claude-fable-5", permissionMode: "auto", effort: "high", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-fable5-xhigh", name: "Auto (Fable 5, X-High)", model: "claude-fable-5", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-opus55-medium", name: "Auto (Opus 5.5, Medium)", model: "claude-opus-5-5[1m]", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus5-medium", name: "Auto (Opus 5, Medium)", model: "claude-opus-5[1m]", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-opus55-high", name: "Auto (Opus 5.5, High)", model: "claude-opus-5-5[1m]", permissionMode: "auto", effort: "high", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus5-high", name: "Auto (Opus 5, High)", model: "claude-opus-5[1m]", permissionMode: "auto", effort: "high", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-opus55-xhigh", name: "Auto (Opus 5.5, X-High)", model: "claude-opus-5-5[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus5-xhigh", name: "Auto (Opus 5, X-High)", model: "claude-opus-5[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus48-medium", name: "Auto (Opus 4.8, Medium)", model: "claude-opus-4-8[1m]", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus48-xhigh", name: "Auto (Opus 4.8, X-High)", model: "claude-opus-4-8[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
@@ -814,8 +897,11 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-bypass-fable5-medium", name: "Bypass (Fable 5, Medium)", model: "claude-fable-5", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-fable5-high", name: "Bypass (Fable 5, High)", model: "claude-fable-5", permissionMode: "bypassPermissions", effort: "high", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-fable5-xhigh", name: "Bypass (Fable 5, X-High)", model: "claude-fable-5", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-opus55-medium", name: "Bypass (Opus 5.5, Medium)", model: "claude-opus-5-5[1m]", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus5-medium", name: "Bypass (Opus 5, Medium)", model: "claude-opus-5[1m]", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-opus55-high", name: "Bypass (Opus 5.5, High)", model: "claude-opus-5-5[1m]", permissionMode: "bypassPermissions", effort: "high", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus5-high", name: "Bypass (Opus 5, High)", model: "claude-opus-5[1m]", permissionMode: "bypassPermissions", effort: "high", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-opus55-xhigh", name: "Bypass (Opus 5.5, X-High)", model: "claude-opus-5-5[1m]", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus5-xhigh", name: "Bypass (Opus 5, X-High)", model: "claude-opus-5[1m]", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus48-medium", name: "Bypass (Opus 4.8, Medium)", model: "claude-opus-4-8[1m]", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus48-xhigh", name: "Bypass (Opus 4.8, X-High)", model: "claude-opus-4-8[1m]", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
@@ -830,6 +916,7 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			//     additionalArgs when the preset version advances). ---
 			{ id: "claude-default-fable51", name: "Default (Fable 5.1)", model: "claude-fable-5-1[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default", name: "Default (Fable 5)", model: "claude-fable-5", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 9 },
+			{ id: "claude-default-opus55", name: "Default (Opus 5.5)", model: "claude-opus-5-5[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default-opus5", name: "Default (Opus 5)", model: "claude-opus-5[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default-opus48", name: "Default (Opus 4.8)", model: "claude-opus-4-8[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
 			{ id: "claude-default-sonnet5", name: "Default (Sonnet 5)", model: "claude-sonnet-5", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
@@ -838,12 +925,14 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			// for every session, so it is not repeated here (single source).
 			{ id: "claude-plan-fable51", name: "Plan (Fable 5.1)", model: "claude-fable-5-1[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan", name: "Plan (Fable 5)", model: "claude-fable-5", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 9 },
+			{ id: "claude-plan-opus55", name: "Plan (Opus 5.5)", model: "claude-opus-5-5[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-opus5", name: "Plan (Opus 5)", model: "claude-opus-5[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-opus48", name: "Plan (Opus 4.8)", model: "claude-opus-4-8[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-sonnet5", name: "Plan (Sonnet 5)", model: "claude-sonnet-5", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			// --- Accept Edits ---
 			{ id: "claude-approvals-fable51", name: "Accept Edits (Fable 5.1)", model: "claude-fable-5-1[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals", name: "Accept Edits (Fable 5)", model: "claude-fable-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 8 },
+			{ id: "claude-approvals-opus55", name: "Accept Edits (Opus 5.5)", model: "claude-opus-5-5[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-opus5", name: "Accept Edits (Opus 5)", model: "claude-opus-5[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-opus48", name: "Accept Edits (Opus 4.8)", model: "claude-opus-4-8[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-sonnet5", name: "Accept Edits (Sonnet 5)", model: "claude-sonnet-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
@@ -861,7 +950,7 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-fable5-cost-trick-default-high", name: "Fable 5 (cost trick, Default, High)", model: "claude-fable-5", groupLabel: "Fable 5 (cost trick)", effort: "high", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", ANTHROPIC_BASE_URL: PXPIPE_PROXY_BASE_URL }, requiresPxpipeProxy: true, version: 1 },
 			{ id: "claude-fable5-cost-trick-default-xhigh", name: "Fable 5 (cost trick, Default, X-High)", model: "claude-fable-5", groupLabel: "Fable 5 (cost trick)", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", ANTHROPIC_BASE_URL: PXPIPE_PROXY_BASE_URL }, requiresPxpipeProxy: true, version: 1 },
 		],
-		defaultConfigId: "claude-auto-opus5-medium",
+		defaultConfigId: "claude-auto-opus55-medium",
 	},
 	{
 		id: "builtin-codex",
@@ -871,14 +960,14 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 		installCommand: "brew install codex",
 		installUrl: "https://github.com/openai/codex",
 		configurations: [
-			// --- GPT-6 Astra ---
+			// --- GPT-6 Astra (default: Sol is rejected under a ChatGPT-account login) ---
 			{
 				id: "codex-default",
 				name: "GPT-6 Astra Bypass [Medium] — Default",
 				model: "gpt-6-astra",
 				groupLabel: "GPT-6 Astra",
 				modeLabel: "Bypass [Medium] — Default",
-				version: 10,
+				version: 12,
 				additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "--sandbox", "danger-full-access", "-c", 'model_reasoning_effort="medium"'],
 			},
 			...createCodexReasoningPresets(
@@ -887,6 +976,50 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 				"codex-6-astra",
 				["low", "high", "xhigh", "max", "ultra"],
 				["medium", "low", "high", "xhigh", "max", "ultra"],
+			),
+			...createCodexReasoningPresets(
+				"gpt-6.1-sol",
+				"GPT-6.1 Sol",
+				"codex-6.1-sol",
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+			),
+			// --- GPT-6 Sol (frontier coding and agentic workflows) ---
+			...createCodexReasoningPresets(
+				"gpt-6-sol",
+				"GPT-6 Sol",
+				"codex-6-sol",
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+			),
+			// Sol-only workflows follow the popular Bypass and Standard modes.
+			{
+				id: "codex-plan",
+				name: "GPT-6 Sol Plan [High]",
+				model: "gpt-6-sol",
+				groupLabel: "GPT-6 Sol",
+				modeLabel: "Plan [High]",
+				version: 8,
+				appendPrompt: "First, produce a concrete implementation plan with risks and checkpoints. Do not start making code changes until that plan is complete.",
+				additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "-c", 'default_permissions="dev3"', "-c", 'model_reasoning_effort="high"'],
+			},
+			{
+				id: "codex-plan-then-bypass",
+				name: "GPT-6 Sol Plan → Bypass [High]",
+				model: "gpt-6-sol",
+				groupLabel: "GPT-6 Sol",
+				modeLabel: "Plan → Bypass [High]",
+				version: 8,
+				appendPrompt: "First, produce a concrete implementation plan with risks and checkpoints. Do not start making code changes until that plan is complete.",
+				additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "--sandbox", "danger-full-access", "-c", 'model_reasoning_effort="high"'],
+			},
+			// --- GPT-6 Luna (focused, high-volume tasks) ---
+			...createCodexReasoningPresets(
+				"gpt-6-luna",
+				"GPT-6 Luna",
+				"codex-6-luna",
+				["medium", "high", "xhigh", "max"],
+				["medium", "high"],
 			),
 			// --- GPT-5.6 Luna (fast/affordable) ---
 			...createCodexReasoningPresets(
@@ -904,27 +1037,6 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 				["low", "medium", "high", "xhigh", "max", "ultra"],
 				["low", "medium", "high", "xhigh", "max", "ultra"],
 			),
-			// Sol-only workflows follow the popular Bypass and Standard modes.
-			{
-				id: "codex-plan",
-				name: "GPT-5.6 Sol Plan [High]",
-				model: "gpt-5.6-sol",
-				groupLabel: "GPT-5.6 Sol",
-				modeLabel: "Plan [High]",
-				version: 7,
-				appendPrompt: "First, produce a concrete implementation plan with risks and checkpoints. Do not start making code changes until that plan is complete.",
-				additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "-c", 'default_permissions="dev3"', "-c", 'model_reasoning_effort="high"'],
-			},
-			{
-				id: "codex-plan-then-bypass",
-				name: "GPT-5.6 Sol Plan → Bypass [High]",
-				model: "gpt-5.6-sol",
-				groupLabel: "GPT-5.6 Sol",
-				modeLabel: "Plan → Bypass [High]",
-				version: 7,
-				appendPrompt: "First, produce a concrete implementation plan with risks and checkpoints. Do not start making code changes until that plan is complete.",
-				additionalArgs: ["-p", "dev3", "-a", "on-request", "--no-alt-screen", "--sandbox", "danger-full-access", "-c", 'model_reasoning_effort="high"'],
-			},
 			// --- GPT-5.6 Terra (balanced: below the frontier tiers, above legacy) ---
 			...createCodexReasoningPresets(
 				"gpt-5.6-terra",
@@ -1156,6 +1268,9 @@ export const DEPRECATED_DEFAULT_CONFIG_REMAP: Record<string, string> = {
 	// Bypass/Default effort tiers — the old preset skipped permissions, so map it to
 	// the Bypass Medium tier (its closest surviving behavioral + effort equivalent).
 	"claude-fable5-cost-trick": "claude-fable5-cost-trick-bypass-medium",
+	// Shipped for one release while GPT-6 Sol held `codex-default`; Astra Bypass
+	// Medium is `codex-default` again.
+	"codex-6-astra-medium-bypass": "codex-default",
 };
 
 /**
@@ -1423,6 +1538,14 @@ export interface GlobalSettings {
 	 * backend never dimmed anything.
 	 */
 	dimInactivePanes?: boolean;
+	/**
+	 * Prompt style for zsh shell panes: a `SHELL_PROMPT_STYLES` id, `"custom"`
+	 * (zsh code in `shellPromptCustom`) or `"own"` (keep the user's `.zshrc`
+	 * prompt). Undefined ⇒ the default style. Applies to newly opened panes.
+	 */
+	shellPrompt?: string;
+	/** The user's own prompt code, used when `shellPrompt` is `"custom"`. */
+	shellPromptCustom?: string;
 	focusMode?: boolean; // when true, queue agent-initiated attention UI and viewer events until Focus Mode ends
 	/**
 	 * Track agent rate-limit windows (Claude via an injected statusLine wrapper,
@@ -1767,6 +1890,12 @@ export interface GitHubCliStatus {
 	accounts: GitHubAccount[];
 }
 
+/** A prompt style rendered by real zsh, as ANSI lines — or why it could not be. */
+export type ShellPromptPreview =
+	| { ok: true; afterSlowCommand: string[]; afterFailedCommand: string[] }
+	| { ok: false; reason: "no-zsh" }
+	| { ok: false; reason: "invalid"; error: string };
+
 /** What the Settings screen needs to explain the `terminalShell` choice. */
 export interface ShellAvailability {
 	/** The shell dev3 runs right now; null on Windows, which has no POSIX shell. */
@@ -2011,10 +2140,33 @@ export function presetPromptForTaskType(
 		: resolvePresetPrompt(project.reviewModePrompt, settings?.reviewModePrompt, DEFAULT_PR_REVIEW_PROMPT);
 }
 
+/** Where {@link presetPromptForTaskType} took its text from, so a reader can tell an override from the default. */
+export type PresetPromptSource = "project" | "settings" | "built-in";
+
+export function presetPromptSourceForTaskType(
+	type: TaskType,
+	project: Pick<Project, "coordinatorPrompt" | "reviewModePrompt">,
+	settings: Pick<GlobalSettings, "coordinatorPrompt" | "reviewModePrompt"> | null | undefined,
+): PresetPromptSource {
+	const field = type === "coordinator" ? "coordinatorPrompt" : "reviewModePrompt";
+	if (project[field]?.trim()) return "project";
+	if (settings?.[field]?.trim()) return "settings";
+	return "built-in";
+}
+
 /** Divider between a preset preamble and the user's own text in a description. */
 export const PRESET_PROMPT_SEPARATOR = "\n\n---\n\n";
 
 /** A description made of `prompt`, then the user's own text when there is any. */
+/** Why a pull-request link could not be turned into a branch. */
+export type PrResolveFailureReason =
+	| "gh-missing"
+	| "gh-auth"
+	| "no-github-remote"
+	| "foreign-repo"
+	| "fork-fetch"
+	| "not-found";
+
 export function withPresetPrompt(userText: string, prompt: string): string {
 	const own = userText.trim();
 	return own ? prompt + PRESET_PROMPT_SEPARATOR + own : prompt;
@@ -2463,6 +2615,12 @@ export interface Task {
 	prUrl?: string | null;
 	/** Last rich status fetched for the task's associated GitHub pull request. */
 	prStatusCache?: TaskPRStatusCache | null;
+	/**
+	 * Every pull request this task has had, oldest first. The current one is still
+	 * `prNumber`; the rest are finished PRs a follow-up replaced. A separate
+	 * top-level field because older app versions rewrite the PR fields above.
+	 */
+	pullRequests?: TaskPullRequestRecord[] | null;
 	groupId: string | null;
 	variantIndex: number | null;
 	/** Future-facing links to other tasks; the data layer fills [] for legacy records on load. */
@@ -2486,6 +2644,12 @@ export interface Task {
 	 * time until the next completion without reconstructing history.
 	 */
 	lifecycleStartedAt?: string;
+	/**
+	 * When the last run in this worktree ended (reset, completion, "start fresh").
+	 * A Codex conversation found by scanning must start after it. Only ever
+	 * raised; older app versions ignore it.
+	 */
+	codexScanFloorAt?: string | null;
 	/**
 	 * Legacy manual position inside a column. Nothing reads or writes it any more —
 	 * in-column order is derived from priority + the activity clock (see
@@ -2698,6 +2862,12 @@ export interface Task {
 	 * `shared-images/` dir and die with the worktree. See {@link SharedImage}.
 	 */
 	sharedImages?: SharedImage[];
+	/**
+	 * Clips the agent surfaced via `dev3 show-video`, oldest→newest. A field of
+	 * their own so older app versions, which read every `sharedImages` entry's
+	 * bytes, never see them; read both lists through {@link taskSharedMedia}.
+	 */
+	sharedVideos?: SharedImage[];
 	/**
 	 * HTML artifacts an agent surfaced via `dev3 show-artifact`, oldest→newest.
 	 * Each artifact is stored in its own additive `shared-artifacts/<id>/`
@@ -2992,6 +3162,25 @@ export const SHARED_IMAGE_EXTS: readonly string[] = ["png", "jpg", "jpeg", "gif"
 /** Per-image size cap for `dev3 show-image` (bytes). */
 export const MAX_SHARED_IMAGE_BYTES = 25 * 1024 * 1024;
 
+/**
+ * Per-video cap for `dev3 show-video` (bytes). Held at the image cap because a
+ * video takes the same road — one base64 read over RPC, ~1.34× its bytes, in the
+ * desktop bridge and over the remote tunnel alike — and is paid on every open.
+ */
+export const MAX_SHARED_VIDEO_BYTES = 25 * 1024 * 1024;
+
+/** True for a {@link SharedImage} record that `dev3 show-video` stored. */
+export function isSharedVideo(item: { mime: string }): boolean {
+	return item.mime.startsWith("video/");
+}
+
+/** A task's shared images and clips as one oldest→newest history — what the viewer steps through. */
+export function taskSharedMedia(task: Pick<Task, "sharedImages" | "sharedVideos">): SharedImage[] {
+	const videos = task.sharedVideos ?? [];
+	if (videos.length === 0) return task.sharedImages ?? [];
+	return [...(task.sharedImages ?? []), ...videos].sort((a, b) => a.createdAt - b.createdAt);
+}
+
 /** Max images accepted in a single `dev3 show-image` invocation. */
 export const MAX_SHARED_IMAGES_PER_CALL = 20;
 
@@ -3005,8 +3194,20 @@ export const MAX_SHARED_ARTIFACT_HTML_BYTES = 5 * 1024 * 1024;
  */
 export const SHARED_VIDEO_EXTS: readonly string[] = ["mp4", "webm"];
 
+/**
+ * Audio extensions a bundled artifact track may use (lowercase, no dot). All four
+ * were measured decoding in WKWebView (macOS 26) and Chromium; WebView2, WebKitGTK
+ * and older WebKit are unverified, so the reference asks for an MP3 fallback next
+ * to OGG. FLAC, Opus and AAC-in-ADTS stay out: transport would carry them, but
+ * playback would depend on the engine.
+ */
+export const SHARED_AUDIO_EXTS: readonly string[] = ["mp3", "m4a", "wav", "ogg"];
+
+/** Video plus audio: every extension that answers to the media caps below. */
+export const SHARED_MEDIA_EXTS: readonly string[] = [...SHARED_VIDEO_EXTS, ...SHARED_AUDIO_EXTS];
+
 /** Local asset extensions accepted by `dev3 show-artifact --assets`. */
-export const SHARED_ARTIFACT_ASSET_EXTS: readonly string[] = ["css", "js", ...SHARED_IMAGE_EXTS, ...SHARED_VIDEO_EXTS];
+export const SHARED_ARTIFACT_ASSET_EXTS: readonly string[] = ["css", "js", ...SHARED_IMAGE_EXTS, ...SHARED_MEDIA_EXTS];
 
 /** Maximum local assets accepted by one `dev3 show-artifact --assets` call. */
 export const MAX_SHARED_ARTIFACT_ASSETS = 40;
@@ -3015,21 +3216,21 @@ export const MAX_SHARED_ARTIFACT_ASSETS = 40;
 export const MAX_SHARED_ARTIFACT_ASSET_BYTES = 25 * 1024 * 1024;
 
 /**
- * Per-clip cap for a bundled artifact video (bytes), tighter than the generic
- * asset cap. Every asset reaches the viewer as one base64 data URL inside the
- * composed document, so a clip costs about 1.34× its bytes in the RPC payload and
- * again in the document string — and it is paid on every open, not on first play.
- * 16 MB holds a ~12 s 1080p screen capture with room to spare while keeping the
- * worst-case single clip under ~22 MB of transport.
+ * Per-file cap for a bundled artifact video or audio track (bytes), tighter than
+ * the generic asset cap. Every asset reaches the viewer as one base64 data URL
+ * inside the composed document, so a clip costs about 1.34× its bytes in the RPC
+ * payload and again in the document string — and it is paid on every open, not on
+ * first play. 16 MB holds a ~12 s 1080p screen capture with room to spare while
+ * keeping the worst-case single clip under ~22 MB of transport.
  */
-export const MAX_SHARED_ARTIFACT_VIDEO_BYTES = 16 * 1024 * 1024;
+export const MAX_SHARED_ARTIFACT_MEDIA_BYTES = 16 * 1024 * 1024;
 
 /**
- * Combined cap for all bundled videos in one artifact (bytes). Sits below
- * {@link MAX_SHARED_ARTIFACT_VIDEO_BYTES} × the asset count on purpose: five
+ * Combined cap for all bundled video and audio in one artifact (bytes). Sits below
+ * {@link MAX_SHARED_ARTIFACT_MEDIA_BYTES} × the asset count on purpose: five
  * clips of the per-file maximum would be a 100 MB document nobody can open.
  */
-export const MAX_SHARED_ARTIFACT_VIDEO_TOTAL_BYTES = 48 * 1024 * 1024;
+export const MAX_SHARED_ARTIFACT_MEDIA_TOTAL_BYTES = 48 * 1024 * 1024;
 
 // ---- Package scripts runner ----
 
@@ -3262,6 +3463,8 @@ export interface AgentCancellationRequest {
  * prompt by design.
  */
 export interface AgentLaunchRequest {
+	/** CLI +Agent request: one pane, not a task/variant launch. */
+	spawn?: { choice: LaunchVariant; prompt?: string; handoff: boolean };
 	requestId: string;
 	taskId: string;
 	projectId: string;
@@ -3584,6 +3787,8 @@ export function appendTaskMovement(
  * removed. Rendered in the {@link https://…|TaskImageViewer} lightbox with a
  * clickable history (newest activated first). Bytes reach the webview via the
  * existing `readImageBase64` RPC (works in desktop and browser transports).
+ * `dev3 show-video` clips use this same record in `Task.sharedVideos` and play
+ * in the same viewer; a `video/*` {@link SharedImage.mime} marks them ({@link isSharedVideo}).
  */
 export interface SharedImage {
 	id: string;
@@ -3742,6 +3947,16 @@ export function reviewTaskTitle(parts: {
  */
 export type MergeRoute = "pull-request" | "local-squash";
 
+/**
+ * A merged or closed PR stays on screen, but it is no longer the branch's live
+ * PR: it cannot be merged, and it must not stop the next PR from being opened.
+ * An unknown state (offline, not fetched yet) counts as live.
+ */
+export function isPullRequestFinished(state: string | null | undefined): boolean {
+	const normalized = state?.toUpperCase();
+	return normalized === "MERGED" || normalized === "CLOSED";
+}
+
 export interface BranchStatus {
 	ahead: number;
 	behind: number;
@@ -3771,6 +3986,7 @@ export interface BranchStatus {
 	diffFileStats: Array<{ path: string; insertions: number; deletions: number }>; // per-file stats for branch vs base
 	prNumber: number | null; // associated PR number for this branch, null if none was detected
 	prUrl: string | null; // full GitHub PR URL, null if no associated PR was detected
+	prState: string | null; // GitHub state of that PR (OPEN / MERGED / CLOSED), null when unknown
 	mergeCompletionFingerprint: string | null; // stable key for deduping the merged-branch completion prompt
 	// Whether the project repo has an `origin` remote at all. A repo added from a
 	// local folder has none, and then Push / Create PR / PR + auto-merge cannot
@@ -3937,6 +4153,26 @@ export interface TaskPRStatusCache {
 	prTitle: string | null;
 	isDraft: boolean | null;
 	cachedAt: string;
+}
+
+/**
+ * What an on-demand PR refresh achieved: `updated` pushed fresh GitHub data,
+ * `unavailable` means GitHub did not answer (the last known status stays),
+ * `not-found` means GitHub reports no PR for this branch, `skipped` means the
+ * task is not watched (finished, virtual, or no worktree).
+ */
+export interface RefreshTaskPrStatusResult {
+	outcome: "updated" | "unavailable" | "not-found" | "skipped";
+}
+
+/** One entry of {@link Task.pullRequests}. */
+export interface TaskPullRequestRecord {
+	number: number;
+	url: string;
+	title?: string | null;
+	/** GitHub's state when last seen (OPEN / MERGED / CLOSED); absent when never fetched. */
+	state?: string | null;
+	firstSeenAt: string;
 }
 
 /**
@@ -4832,9 +5068,10 @@ export type AppRPCSchema = {
 				params: { projectId: string };
 				response: string[];
 			};
-			/** Resolve a project's settings from a worktree path (merges .dev3/ configs). */
+			/** Resolve a task's effective project settings — the same worktree+main
+			 *  `.dev3/` cascade a dev-server start or a setup run uses. */
 			getResolvedProject: {
-				params: { projectId: string; worktreePath: string };
+				params: { projectId: string; taskId: string };
 				response: Project;
 			};
 			/** Load raw contents of .dev3/config.json and .dev3/config.local.json + app-level config. */
@@ -4879,6 +5116,11 @@ export type AppRPCSchema = {
 			getShellAvailability: {
 				params: void;
 				response: ShellAvailability;
+			};
+			/** Render a zsh prompt style against a demo repo; also how custom code is validated. */
+			previewShellPrompt: {
+				params: { source: string; columns?: number };
+				response: ShellPromptPreview;
 			};
 			saveGlobalSettings: {
 				params: GlobalSettings;
@@ -4981,6 +5223,16 @@ export type AppRPCSchema = {
 			saveAgents: {
 				params: { agents: CodingAgent[] };
 				response: void;
+			};
+			/** Which of an agent's preset models the signed-in account cannot select,
+			 *  by probing the CLI's model-list command (Codex/Cursor today). Best-effort:
+			 *  returns `{ status: "unknown" }` when it cannot tell, so the picker never
+			 *  hides a model on a failed probe. `accountId` selects the account to probe
+			 *  (matching the launch's account resolution); omitted uses the active one.
+			 *  Cached briefly; `refresh` re-probes. */
+			getAgentAvailableModels: {
+				params: { agentId: string; accountId?: string | null; refresh?: boolean };
+				response: AgentModelAvailability;
 			};
 			getTasks: {
 				params: { projectId: string };
@@ -5171,8 +5423,8 @@ export type AppRPCSchema = {
 				response: { backend: TerminalBackendIdentity };
 			};
 			setTaskPriority: {
-				// Writes the priority to the whole variant group; returns every task
-				// it changed so all open surfaces re-render live.
+				// Writes the priority to this task only (never its variant siblings);
+				// returns the task when it changed, so open surfaces re-render live.
 				params: { taskId: string; projectId: string; priority: TaskPriority };
 				response: Task[];
 			};
@@ -5200,6 +5452,15 @@ export type AppRPCSchema = {
 			debugEmitTaskSound: {
 				params: { status: "completed" | "cancelled" };
 				response: { pushed: boolean };
+			};
+			/**
+			 * The one door to a destructive To Do reset from the UI, called only after
+			 * the user confirmed it. `consent` is what the dialog showed; a task that
+			 * moved on to another run since is refused with nothing deleted.
+			 */
+			resetTaskToTodo: {
+				params: { taskId: string; projectId: string; consent: TaskResetConsent };
+				response: TaskResetResult;
 			};
 			cancelTaskPreparation: {
 				params: { taskId: string; projectId: string };
@@ -5388,7 +5649,7 @@ export type AppRPCSchema = {
 			};
 			refreshTaskPrStatus: {
 				params: { taskId: string; projectId: string };
-				response: void;
+				response: RefreshTaskPrStatusResult;
 			};
 			getTaskDiff: {
 				params: { taskId: string; projectId: string; mode: TaskDiffMode; compareRef?: string; compareLabel?: string; count?: number };
@@ -5435,9 +5696,13 @@ export type AppRPCSchema = {
 				params: { taskId: string };
 				response: string | null;
 			};
-			checkWorktreeExists: {
-				params: { path: string };
-				response: boolean;
+			/**
+			 * `unreadable` is a permission error (lost Full Disk Access), not a gone
+			 * worktree — the renderer must never offer destructive recovery for it.
+			 */
+			checkWorktreeState: {
+				params: { path: string; requireGit?: boolean };
+				response: WorktreeAccessState;
 			};
 			checkForUpdate: {
 				params: void;
@@ -5761,6 +6026,10 @@ export type AppRPCSchema = {
 				params: { taskId: string };
 				response: void;
 			};
+			tmuxCloseWindow: {
+				params: { taskId: string; windowId?: string; force?: boolean };
+				response: TmuxCloseWindowResult;
+			};
 			tmuxLayout: {
 				params: { taskId: string };
 				response: TmuxLayout;
@@ -5799,6 +6068,7 @@ export type AppRPCSchema = {
 			};
 			spawnAgentInTask: {
 				params: {
+					prompt?: string;
 					taskId: string;
 					projectId: string;
 					agentId: string | null;
@@ -5981,6 +6251,12 @@ export type AppRPCSchema = {
 					title: string | null;
 					isFork: boolean;
 					error: string | null;
+					/** Why it failed, for a message the user can act on. Absent on success. */
+					reason?: PrResolveFailureReason;
+					/** `owner/repo` the link points at, when it is a URL. */
+					prRepo?: string | null;
+					/** `owner/repo` of this project's GitHub remote, when it has one. */
+					projectRepo?: string | null;
 				};
 			};
 			getProjectCurrentBranch: {
@@ -6192,10 +6468,23 @@ export type AppRPCSchema = {
 				response: AgentCancellationRequest[];
 			};
 			/**
+			 * Renderer answers an `agentResetRequested` dialog. Approval resets the
+			 * task to To Do (agent stopped, worktree and dev3 branch deleted).
+			 */
+			respondToAgentResetRequest: {
+				params: { requestId: string; approved: boolean };
+				response: void;
+			};
+			listPendingResetRequests: {
+				params: Record<string, never>;
+				response: AgentCancellationRequest[];
+			};
+			/**
 			 * Renderer answers an `agentLaunchRequested` dialog. Approval hands back
 			 * the variants + priority the user composed, and the blocked CLI request
 			 * launches the task with them; decline releases it with a refusal.
 			 */
+			getPendingAgentLaunchRequests: { params: {}; response: AgentLaunchRequest[] };
 			respondToAgentLaunchRequest: {
 				params: {
 					requestId: string;
@@ -6307,6 +6596,11 @@ export type AppRPCSchema = {
 			 */
 			agentCancellationRequested: AgentCancellationRequest;
 			/**
+			 * Emitted when `dev3 task move --status todo` targets a task that needs a
+			 * reset. Same danger dialog shape as cancellation, its own channel.
+			 */
+			agentResetRequested: AgentCancellationRequest;
+			/**
 			 * Emitted when an agent asks to set ANOTHER task running — either
 			 * `dev3 task move --task <other> --status <active>` or
 			 * `dev3 task create --scratch --run`. The CLI blocks on the user's
@@ -6321,7 +6615,7 @@ export type AppRPCSchema = {
 			 * answer has to close the copies open on the other windows / remote
 			 * browsers — they can no longer decide anything.
 			 */
-			agentRequestResolved: { requestId: string; kind: "complete" | "launch"; taskId: string; projectId: string };
+			agentRequestResolved: { requestId: string; kind: "complete" | "cancel" | "reset" | "launch"; taskId: string; projectId: string };
 			/**
 			 * Somebody took a launch dialog over, so its auto-approval is off. The
 			 * dialog is broadcast to every client, and a copy on another window would
@@ -6435,6 +6729,11 @@ export type AppRPCSchema = {
 				fromTitle?: string;
 				/** Sending task's project, so the renderer can silence either side. */
 				fromProjectId?: string;
+				/** Sending task's id — the toast's way to the sender. Absent on a record queued before it existed. */
+				fromTaskId?: string;
+				/** Variant indices, so `#21-2` names the exact attempt on either side. */
+				fromVariantIndex?: number;
+				toVariantIndex?: number;
 				/** One-line, length-clamped preview of what was sent. */
 				preview: string;
 			};
@@ -6456,6 +6755,8 @@ export type AppRPCSchema = {
 				projectId: string;
 				images: SharedImage[];
 				newCount: number;
+				/** Kind of the new arrivals (`dev3 show-video` sends "video"). Absent = images. */
+				newKind?: "image" | "video";
 				taskSeq?: number;
 				taskTitle?: string;
 				projectName?: string;

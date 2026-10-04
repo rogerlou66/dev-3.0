@@ -41,6 +41,7 @@ import { applyFullShellEnvToProcess, getShellRcFiles, getUserShell, resolveShell
 import { startSocketServer, stopSocketServer } from "./cli-socket-server";
 import { writeSystemClipboard } from "./system-clipboard";
 import { stopTunnel } from "./cloudflare-tunnel";
+import { killModelSidecarNow } from "./model-sidecar";
 import { installAgentSkills } from "./agent-skills";
 import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { ensureCodexConfigFile } from "./codex-config";
@@ -49,6 +50,8 @@ import { makeTitle } from "./app-utils";
 import { buildApplicationMenu, getMenuContext, MENU_ACTIONS, onMenuContextChange } from "../shared/application-menu";
 import { openLogsDirectory } from "./menu-actions";
 import { startLoopMonitor } from "./loop-monitor";
+import { configureHandoffWorker } from "./conversation-handoff-runner";
+import { configureClonefileWorker } from "./cow-clone";
 import { shouldActivateLaunchWindow } from "./fresh-start";
 import { createAppWindow, focusFocusedWindow, getFocusedWindow, getWindowCount, handleDisplayConfigurationChange, loadWindowSession, sendToFocusedWindow, setOpenNewWindow, flushWindowState } from "./window-manager";
 import type { WindowState } from "./window-state";
@@ -400,6 +403,8 @@ async function getMainViewUrl(): Promise<string> {
 
 const url = await getMainViewUrl();
 log.info("Loading URL", { url });
+configureHandoffWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "conversation-handoff-worker.js"));
+configureClonefileWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "clonefile-worker.js"));
 configureFreezeDiagnostics({
 	workerPath: resolve(PATHS.VIEWS_FOLDER, "..", "freeze-diagnostics", "worker.ts"),
 	version: APP_VERSION, build: lastBuildTime,
@@ -543,7 +548,7 @@ setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
 writeTmuxConfigs();
 const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
-await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, initialAppearance.appearancePreset);
+await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: initialAppearance.appearancePreset });
 
 // `exposedPortsChanged` rides its own hook because port-tunnels lives below
 // rpc-handlers — same broadcast target as above.
@@ -803,7 +808,7 @@ function runGlobalQuitCleanup(): void {
 	try { stopTunnel(); } catch (err) { log.warn("stopTunnel failed", { error: String(err) }); }
 	// The model-catalog proxy dies with the app — an orphan would keep holding a
 	// loopback port and the user's provider keys in memory.
-	import("./model-sidecar").then(({ stopModelSidecar }) => stopModelSidecar()).catch(() => { /* shutdown — best-effort */ });
+	try { killModelSidecarNow(); } catch (err) { log.warn("killModelSidecarNow failed", { error: String(err) }); }
 }
 
 // Terminal/OS signals (Ctrl+C in `bun run dev`, kill, shutdown) bypass the

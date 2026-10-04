@@ -1,13 +1,13 @@
 import { existsSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
-import type { AgentFamily, ColumnAgentConfig, DevServerEntry, DevServerStatus, PaneSessionEntry, PermissionMode, PortInfo, Project, PtyThroughputStats, Task, TmuxLayout, TmuxSessionInfo } from "../../shared/types";
+import { assertTaskWorkspacePresent, worktreeAccessState } from "../task-workspace-guard";
+import type { AgentFamily, ColumnAgentConfig, DevServerEntry, DevServerStatus, PaneSessionEntry, PermissionMode, PortInfo, Project, PtyThroughputStats, Task, TmuxLayout, TmuxSessionInfo, WorktreeAccessState } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
 import * as pty from "../pty-server";
 import * as agents from "../agents";
 import { codexAccountIdForHome } from "../agent-accounts";
-import { resolveCodexResumeHome } from "../codex-resume-home";
+import { chooseTaskCodexConversations } from "../codex-task-selection";
 import { getAgentAdapter } from "../../shared/agent-adapters/registry";
 import { agentKey } from "../../shared/agent-adapters/families";
 import { evaluateCodexModelSupport } from "../../shared/agent-model-cli-requirements";
@@ -58,6 +58,7 @@ import {
 	SESSION_OVERVIEW_FORMAT,
 	ALT_CLICK_PANE_FORMAT,
 	altClickIneligibleReason,
+	clientCellToWindowCell,
 	computeAltClickKeys,
 	findAltClickPane,
 	validAltClickPanes,
@@ -781,6 +782,8 @@ async function persistInitialAgentPaneId(
 
 /**
  * Register worktree trust for the resolved agent's CLI before spawning it.
+ * `launchEnv` is the env the agent will be launched with, so Claude trust and the
+ * dev3 skills land in the config dir its `CLAUDE_CONFIG_DIR` names, if any.
  * Claude trust (with MCP pre-approval) is always ensured; Codex/Gemini trust
  * only for their respective CLIs. Codex trust also re-patches ~/.codex/config.toml
  * — stripping the legacy `[profiles.dev3-*]` tables / top-level `profile = "..."`
@@ -800,7 +803,14 @@ async function ensureAgentTrust(
 	accountId?: string | null,
 	foreignCode?: boolean,
 	family?: AgentFamily,
+	launchEnv?: Record<string, string>,
 ): Promise<void> {
+	// dev3's own skills and settings, not a grant to the branch - so foreign code gets them too.
+	try {
+		if (agents.isClaudeCommand(resolvedBaseCmd, family)) agents.ensureClaudeConfigDir(launchEnv, worktreePath);
+	} catch (err) {
+		log.warn("ensure Claude config dir failed (non-fatal)", { worktreePath, error: String(err) });
+	}
 	// A worktree standing on someone else's branch gets nothing pre-granted: its
 	// committed `.claude/settings.json` hooks and `.mcp.json` servers must face the
 	// agent's own approval prompts, which is precisely what those prompts are for.
@@ -815,7 +825,7 @@ async function ensureAgentTrust(
 	// pre-approval) for every agent — then any agent-native trust (codex/gemini).
 	for (const kind of getAgentAdapter(resolvedBaseCmd, family).trustKinds) {
 		try {
-			if (kind === "claude") await agents.ensureClaudeTrust(worktreePath, projectPath, accountId);
+			if (kind === "claude") await agents.ensureClaudeTrust(worktreePath, projectPath, accountId, launchEnv);
 			else if (kind === "codex") await agents.ensureCodexTrust(worktreePath);
 			else if (kind === "gemini") await agents.ensureGeminiTrust(worktreePath);
 			else if (kind === "antigravity") await agents.ensureAntigravityTrust(worktreePath);
@@ -944,8 +954,18 @@ export async function launchTaskPty(
 	configId?: string | null,
 	runSetup = false,
 	resume = false,
-	opts?: { sessionId?: string; skipSessionPersist?: boolean; branchName?: string; accountId?: string | null; codexHome?: string },
+	opts?: {
+		sessionId?: string;
+		skipSessionPersist?: boolean;
+		branchName?: string;
+		accountId?: string | null;
+		codexHome?: string;
+		/** Open the pane with this line instead of the agent, keeping the stored panes untouched. */
+		agentRefusal?: string;
+	},
 ): Promise<void> {
+	// First, before any trust/hook/config write: tmux would start a missing cwd in $HOME.
+	assertTaskWorkspacePresent(project, worktreePath);
 	const sessionId = opts?.sessionId;
 	const accountId = opts?.codexHome
 		? codexAccountIdForHome(opts.codexHome) ?? null
@@ -1012,7 +1032,12 @@ export async function launchTaskPty(
 			cmdOptions.sessionId = freshSessionId;
 		}
 
-		if (agentId) {
+		if (opts?.agentRefusal) {
+			// A refusal is a normal launch that runs no agent: throwing here would
+			// fail the preparation and let its cleanup remove the worktree.
+			tmuxCmd = launchDialect().print(opts.agentRefusal);
+			extraEnv = {};
+		} else if (agentId) {
 			log.info("Resolving command for agent", { agentId, configId });
 			const resolved = await agents.resolveCommandForAgent(agentId, configId ?? null, ctx, Object.keys(cmdOptions).length ? cmdOptions : undefined);
 			tmuxCmd = resolved.command;
@@ -1043,7 +1068,7 @@ export async function launchTaskPty(
 
 		// Persist session state as pane[0] for the main agent pane.
 		// Skip when reconnecting to an existing tmux session (sessionState is already correct).
-		if (!skipSessionPersist) {
+		if (!skipSessionPersist && !opts?.agentRefusal) {
 			const effectiveSessionId = resume ? sessionId
 				: (agents.supportsPreAssignedSessionId(resolvedBaseCmd, resolvedAgentFamily) ? freshSessionId : null);
 			// This write replaces pane[0] wholesale, so an origin store the resolver
@@ -1146,7 +1171,7 @@ export async function launchTaskPty(
 		}
 	}
 
-	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, accountId, task.foreignCode, resolvedAgentFamily);
+	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, accountId, task.foreignCode, resolvedAgentFamily, env);
 
 	const stopTarget = project.autoReviewEnabled ? "review-by-ai" : "review-by-user";
 	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
@@ -1316,6 +1341,7 @@ export async function launchColumnAgent(
 		log.warn("launchColumnAgent: no worktreePath, skipping", { taskId: task.id.slice(0, 8) });
 		return;
 	}
+	assertTaskWorkspacePresent(project, worktreePath);
 
 	const { agentId, configId, prompt: rawPrompt } = agentConfig;
 	const baseBranch = task.baseBranch || project.defaultBaseBranch || "main";
@@ -1362,19 +1388,19 @@ export async function launchColumnAgent(
 		log.error("launchColumnAgent: failed to resolve command", { error: String(err) });
 		throw err;
 	}
-	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, undefined, task.foreignCode, resolvedAgentFamily);
-	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
-		stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
-		permissionMode: resolvedPermissionMode,
-		family: resolvedAgentFamily,
-	});
-
 	const env = {
 		...AGENT_ENV_DEFAULTS,
 		...(await repoConfig.resolveProjectEnv(project, worktreePath, { foreignCode: task.foreignCode })),
 		...buildAgentEnv(extraEnv, task.id),
 		...ensureArtifactTemplateEnv(project, task, worktreePath),
 	};
+	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, undefined, task.foreignCode, resolvedAgentFamily, env);
+	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
+		stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
+		permissionMode: resolvedPermissionMode,
+		family: resolvedAgentFamily,
+	});
+
 	const scriptPath = dev3TaskTempPath(task.id, generatedScriptName("col-agent"));
 	await writeLaunchScript(scriptPath, buildCmdScript(tmuxCmd, env, {
 		paneTitle: options.paneTitle,
@@ -1510,7 +1536,7 @@ async function startOneDevServer(
 	opId?: string,
 ): Promise<void> {
 	const { task, project, native, socket } = ctx;
-	const worktreePath = task.worktreePath!;
+	const worktreePath = assertTaskWorkspacePresent(project, task.worktreePath);
 	// Never trust the caller: `devServer.start` is reachable from the CLI, the
 	// renderer, and any other socket client, and only the CLI validates.
 	const callerEnv = sanitizeDevServerEnv(env);
@@ -1878,6 +1904,7 @@ async function openFileBrowser(params: { taskId: string; projectId: string }): P
 		const project = await data.getProject(params.projectId);
 		const task = await data.getTask(project, params.taskId);
 		if (!task.worktreePath) throw new Error("Task has no worktree");
+		assertTaskWorkspacePresent(project, task.worktreePath);
 
 		const tmuxSession = taskSessionName(task.id);
 		const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
@@ -1941,8 +1968,8 @@ async function getTerminalPreview(params: { taskId: string }): Promise<string | 
 	return pty.capturePane(params.taskId);
 }
 
-async function checkWorktreeExists(params: { path: string }): Promise<boolean> {
-	return existsSync(params.path);
+async function checkWorktreeState(params: { path: string; requireGit?: boolean }): Promise<WorktreeAccessState> {
+	return worktreeAccessState(params.path, { requireGit: params.requireGit === true });
 }
 
 async function getPtyUrl(params: { taskId: string; resume?: boolean }) {
@@ -1994,12 +2021,15 @@ async function getPtyUrl(params: { taskId: string; resume?: boolean }) {
 			});
 			return {
 				recoverable: true as const,
-				sessionState: foundTask.sessionState ?? { panes: [] },
+				sessionState: await sessionStateOrLostCodexPane(foundProject, foundTask) ?? { panes: [] },
 				hibernated: true as const,
 			};
 		}
 
 		if (foundTask && foundProject && isActive(foundTask.status) && foundTask.worktreePath) {
+			// Neither a restore, a resume offer nor a fresh launch for a worktree that
+			// is gone or unreadable: the renderer shows why instead.
+			assertTaskWorkspacePresent(foundProject, foundTask.worktreePath);
 			const identity = taskTerminalBackendIdentity(foundTask);
 			const sessionAlive = identity === "native"
 				? await nativeTaskPanesAlive(params.taskId)
@@ -2038,6 +2068,13 @@ async function getPtyUrl(params: { taskId: string; resume?: boolean }) {
 				});
 				return { recoverable: true as const, sessionState: foundTask.sessionState };
 			} else {
+				// The pane record was lost but the Codex conversation is still on disk —
+				// offer to resume it rather than silently starting a new one.
+				const lostState = await sessionStateOrLostCodexPane(foundProject, foundTask);
+				if (lostState) {
+					log.info("Recoverable Codex conversation found without a pane record", { taskId: params.taskId.slice(0, 8) });
+					return { recoverable: true as const, sessionState: lostState };
+				}
 				// No tmux, no session state — launch fresh
 				try {
 					const resolvedProject = foundProject.kind === "virtual"
@@ -2146,37 +2183,84 @@ function resolveResumeTarget(task: Task, pane: PaneSessionEntry, label: string):
 	return target.sessionId;
 }
 
+/** The stored panes, or — when there are none — the lost Codex conversation resumeTask would reopen. Never persisted here. */
+async function sessionStateOrLostCodexPane(project: Project | null, task: Task): Promise<Task["sessionState"] | null> {
+	if (task.sessionState?.panes?.length) return task.sessionState;
+	if (!project || !task.worktreePath) return null;
+	try {
+		const resolvedProject = project.kind === "virtual" ? project : await repoConfig.resolveProjectConfig(project, task.worktreePath);
+		const lost = await lostCodexMainPane(resolvedProject, task);
+		return lost ? { panes: [lost] } : null;
+	} catch (err) {
+		log.warn("Lost Codex conversation lookup failed (non-fatal)", { taskId: task.id.slice(0, 8), error: String(err) });
+		return null;
+	}
+}
+
+/**
+ * A Codex task whose pane record was lost (pane-exit reconciliation emptied it)
+ * may still have its conversation on disk. Rebuild the main pane around the one
+ * the selection engine would resume; when the choice is unclear the pane keeps
+ * no id, so resuming it shows why instead of guessing. Null when the task is not
+ * Codex or nothing of this task was found.
+ */
+async function lostCodexMainPane(project: Project, task: Task): Promise<PaneSessionEntry | null> {
+	if (!task.worktreePath || !task.agentId) return null;
+	const agent = (await agents.getAllAgents()).find((entry) => entry.id === task.agentId);
+	if (!agent) return null;
+	const config = agents.findConfig(agent, task.configId);
+	const baseCommand = config?.baseCommandOverride || agent.baseCommand;
+	if (agentKey(baseCommand, agent.agentFamily) !== "codex") return null;
+	const pane: PaneSessionEntry = {
+		agentCmd: baseCommand,
+		sessionId: null,
+		agentId: task.agentId,
+		configId: task.configId ?? null,
+		...(agent.agentFamily ? { agentFamily: agent.agentFamily } : {}),
+	};
+	let sessionId: string | null = null;
+	try {
+		sessionId = (await chooseTaskCodexConversations(project, task, [pane], "explicit-resume", { persist: false })).get(0)?.sessionId ?? null;
+	} catch (err) {
+		// Something of this task exists but cannot be chosen: offer the resume so it explains itself.
+		if (!/No Codex conversation of this task/.test(String(err))) return pane;
+		return null;
+	}
+	if (!sessionId) return null;
+	log.warn("Codex task has no pane record — resuming the newest conversation of its worktree", {
+		taskId: task.id.slice(0, 8),
+		sessionId,
+	});
+	return { ...pane, sessionId };
+}
+
 async function resumeTask(params: { taskId: string }): Promise<string> {
 	log.info("→ resumeTask", { taskId: params.taskId.slice(0, 8) });
 	const { task, project } = await findTaskAcrossProjects(params.taskId);
 	if (!task || !project || !task.worktreePath) {
 		throw new Error(`Cannot resume: task ${params.taskId} not found or has no worktree`);
 	}
-	const panes = task.sessionState?.panes;
-	if (!panes?.length) {
-		throw new Error(`Cannot resume: task ${params.taskId} has no stored pane sessions`);
-	}
 	const resolvedProject = project.kind === "virtual"
 		? project
 		: await repoConfig.resolveProjectConfig(project, task.worktreePath);
+	const stored = task.sessionState?.panes ?? [];
+	const lost = stored.length ? null : await lostCodexMainPane(resolvedProject, task);
+	const panes = lost ? [lost] : [...stored];
+	if (!panes.length) {
+		throw new Error(`Cannot resume: task ${params.taskId} has no stored pane sessions`);
+	}
+	if (lost) task.sessionState = { panes };
+	// Every Codex pane is chosen from one snapshot and claimed before anything
+	// launches; a pane that cannot be chosen safely refuses the whole resume.
+	const codexChoices = await chooseTaskCodexConversations(resolvedProject, task, panes, "explicit-resume", { persist: true, onDisk: stored });
 	const codexHomes = new Map<number, string>();
-	const codexPanes = panes.map((pane, index) => ({ pane, index }))
-		.filter(({ pane }) => agentKey(pane.agentCmd, pane.agentFamily ?? undefined) === "codex");
-	if (codexPanes.some(({ pane }) => !pane.sessionId)) {
-		throw new Error("Cannot resume Codex: a pane has no saved conversation ID. Select its existing conversation in Codex before trying again.");
+	for (const [index, choice] of codexChoices) {
+		panes[index] = { ...panes[index], sessionId: choice.sessionId };
+		codexHomes.set(index, choice.codexHome);
 	}
-	if (codexPanes.length) {
-		const allAgents = await agents.getAllAgents();
-		const projectEnv = await repoConfig.resolveProjectEnv(resolvedProject, task.worktreePath, { foreignCode: task.foreignCode });
-		for (const { pane, index } of codexPanes) {
-			const agent = allAgents.find((entry) => entry.id === pane.agentId);
-			const config = agent ? agents.findConfig(agent, pane.configId) : undefined;
-			const homes = [config?.envVars?.CODEX_HOME, projectEnv.CODEX_HOME, process.env.CODEX_HOME]
-				.filter((value): value is string => !!value)
-				.map((value) => resolve(task.worktreePath!, value));
-			codexHomes.set(index, await resolveCodexResumeHome(pane.sessionId!, homes));
-		}
-	}
+	// launchTaskPty rewrites pane[0] and copies the rest from here, so it must
+	// carry the claimed ids, not the snapshot's.
+	if (codexChoices.size) task.sessionState = { panes };
 	await wakeIfHibernated(project, task);
 
 	// Destroy any dead session in memory
@@ -2245,7 +2329,12 @@ async function resumeTask(params: { taskId: string }): Promise<string> {
 						resumeCmd = agents.buildResumeCommand(pane.agentCmd, paneResume ?? undefined, resumeAgentFamily) ?? pane.agentCmd;
 					}
 					if (codexHome) extraEnv.CODEX_HOME = codexHome;
-					await ensureAgentTrust(task.worktreePath, project.path, resumeBaseCmd, accountId, task.foreignCode, resumeAgentFamily);
+					// The pane inherits the session's project env, so trust follows its CLAUDE_CONFIG_DIR too.
+					const paneEnv = {
+						...(await repoConfig.resolveProjectEnv(resolvedProject, task.worktreePath, { foreignCode: task.foreignCode })),
+						...extraEnv,
+					};
+					await ensureAgentTrust(task.worktreePath, project.path, resumeBaseCmd, accountId, task.foreignCode, resumeAgentFamily, paneEnv);
 					resumeCmd = await applyAgentHooksToCommand(task.worktreePath, resumeBaseCmd, resumeCmd, {
 						stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
 						family: resumeAgentFamily,
@@ -2301,8 +2390,9 @@ async function restartTask(params: { taskId: string }): Promise<string> {
 	const agentId = mainPane?.agentId ?? task.agentId;
 	const configId = mainPane?.configId ?? task.configId;
 
-	// Clear old session state — a new one will be generated by launchTaskPty
-	await data.updateTask(project, task.id, { sessionState: null });
+	// Clear old session state — a new one will be generated by launchTaskPty.
+	// The abandoned conversation stays on disk; the floor keeps a scan off it.
+	await data.updateTask(project, task.id, { sessionState: null, codexScanFloorAt: new Date().toISOString() });
 
 	const resolvedProject = project.kind === "virtual"
 		? project
@@ -2352,6 +2442,7 @@ async function rerunSetupScript(params: { taskId: string }): Promise<void> {
 	const { task, project } = await findTaskAcrossProjects(params.taskId);
 	if (!task || !project) throw new Error(`Cannot re-run setup: task ${params.taskId} not found`);
 	if (!task.worktreePath) throw new Error("Task has no worktree");
+	assertTaskWorkspacePresent(project, task.worktreePath);
 
 	const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
 	if (!resolved.setupScript.trim()) throw new Error("No setup script configured");
@@ -2984,9 +3075,9 @@ async function tmuxWindowNavigate(params: {
 async function tmuxAltClickMoveCursor(params: { taskId: string; col: number; row: number }): Promise<{ moved: boolean }> {
 	const socket = pty.getSessionSocket(params.taskId);
 	const tmuxSession = pty.getSessionTmuxName(params.taskId);
-	const x0 = Math.floor(params.col) - 1;
-	const y0 = Math.floor(params.row) - 1;
-	if (x0 < 0 || y0 < 0) return { moved: false };
+	const cell = clientCellToWindowCell(params.col, params.row, await pty.readTmuxStatusGeometry(tmuxSession, socket));
+	if (!cell) return { moved: false };
+	const { x0, y0 } = cell;
 
 	// Panes of the session's CURRENT window only (that's what the client shows).
 	let panes;
@@ -3182,6 +3273,7 @@ async function tmuxSearchCancel(params: { taskId: string; paneId: string }): Pro
 }
 
 async function spawnAgentInTask(params: {
+	prompt?: string;
 	taskId: string;
 	projectId: string;
 	agentId: string | null;
@@ -3198,6 +3290,7 @@ async function spawnAgentInTask(params: {
 	if (!task.worktreePath) {
 		throw new Error("Task has no worktree — cannot spawn agent");
 	}
+	assertTaskWorkspacePresent(project, task.worktreePath);
 
 	// Written BEFORE the split on purpose: a conversation that cannot be retold
 	// must fail with no pane opened, rather than leave a bare agent standing where
@@ -3214,7 +3307,7 @@ async function spawnAgentInTask(params: {
 	// spawned this from, so the pointer sat there until he pressed Enter (seq 1775).
 	const ctx: agents.TemplateContext = {
 		taskTitle: "",
-		taskDescription: handoff ? handoffPrompt(handoff) : "",
+		taskDescription: [handoff ? handoffPrompt(handoff) : "", params.prompt ?? ""].filter(Boolean).join("\n\n"),
 		projectName: project.name,
 		projectPath: project.path,
 		worktreePath: task.worktreePath,
@@ -3248,7 +3341,7 @@ async function spawnAgentInTask(params: {
 			task.title,
 			// A takeover replaces the brief: the retelling already carries the original
 			// request, so re-launching on the raw description would start the work twice.
-			handoff ? ctx.taskDescription : task.description,
+			handoff || params.prompt !== undefined ? ctx.taskDescription : task.description,
 			task.worktreePath,
 			undefined,
 			cmdOptions,
@@ -3265,7 +3358,13 @@ async function spawnAgentInTask(params: {
 	// Register trust / re-patch the agent's config before spawning. The primary
 	// task launch does this; without it a spawned Codex pane runs against a stale
 	// config.toml and crashes on the legacy-profile check (see ensureAgentTrust).
-	await ensureAgentTrust(task.worktreePath, project.path, resolvedBaseCmd, params.accountId, task.foreignCode, resolvedAgentFamily);
+	const env: Record<string, string> = {
+		...AGENT_ENV_DEFAULTS,
+		...(await repoConfig.resolveProjectEnv(project, task.worktreePath, { foreignCode: task.foreignCode })),
+		...buildAgentEnv(extraEnv, task.id),
+		...ensureArtifactTemplateEnv(project, task, task.worktreePath),
+	};
+	await ensureAgentTrust(task.worktreePath, project.path, resolvedBaseCmd, params.accountId, task.foreignCode, resolvedAgentFamily, env);
 	tmuxCmd = await applyAgentHooksToCommand(task.worktreePath, resolvedBaseCmd, tmuxCmd, {
 		stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
 		family: resolvedAgentFamily,
@@ -3275,13 +3374,6 @@ async function spawnAgentInTask(params: {
 		family: resolvedAgentFamily,
 		launchModel: resolvedLaunchModel,
 	});
-
-	const env: Record<string, string> = {
-		...AGENT_ENV_DEFAULTS,
-		...(await repoConfig.resolveProjectEnv(project, task.worktreePath, { foreignCode: task.foreignCode })),
-		...buildAgentEnv(extraEnv, task.id),
-		...ensureArtifactTemplateEnv(project, task, task.worktreePath),
-	};
 
 	const existingPorts = portPool.getPortAssignments(task.id);
 	if (existingPorts.length > 0) {
@@ -3371,7 +3463,7 @@ async function spawnAgentInTask(params: {
 	}
 
 	log.info("← spawnAgentInTask done", { taskId: params.taskId.slice(0, 8) });
-	return { handoff: handoffResult };
+	return { paneId: handle.paneId, backend: handle.backend, agentId: launchedAgentId, configId: launchedConfigId, handoff: handoffResult };
 }
 
 /**
@@ -3382,7 +3474,12 @@ async function spawnAgentInTask(params: {
 async function previewTaskHandoffHandler(params: { taskId: string; projectId: string }): Promise<HandoffPreview | null> {
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
-	return previewTaskHandoff(task);
+	try {
+		return await previewTaskHandoff(task);
+	} catch (error) {
+		log.warn("previewTaskHandoff failed; offering no handoff", { taskId: params.taskId.slice(0, 8), error: String(error) });
+		return null;
+	}
 }
 
 /** How long the hunter agents get to boot before their prompt is typed in. */
@@ -3447,6 +3544,7 @@ async function spawnSingleBugHunterPane(opts: {
 	accountId?: string | null;
 	split: { placement: AuxPanePlacement; size: string; tmuxTarget: string; nativeAnchor?: string };
 }): Promise<{ handle: AuxPaneHandle; baseCmd: string; agentFamily: AgentFamily | undefined }> {
+	assertTaskWorkspacePresent(opts.project, opts.worktreePath);
 	const ctx: agents.TemplateContext = {
 		taskTitle: "",
 		taskDescription: "",
@@ -3491,18 +3589,18 @@ async function spawnSingleBugHunterPane(opts: {
 
 	// Same trust/config-ensure the primary launch does — a Codex bug-hunter pane
 	// otherwise launches against a stale config.toml and crashes.
-	await ensureAgentTrust(opts.worktreePath, opts.project.path, resolvedBaseCmd, opts.accountId, opts.task.foreignCode, resolvedAgentFamily);
-	tmuxCmd = await applyAgentHooksToCommand(opts.worktreePath, resolvedBaseCmd, tmuxCmd, {
-		stopTarget: opts.project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
-		family: resolvedAgentFamily,
-	});
-
 	const env: Record<string, string> = {
 		...AGENT_ENV_DEFAULTS,
 		...(await repoConfig.resolveProjectEnv(opts.project, opts.worktreePath, { foreignCode: opts.task.foreignCode })),
 		...buildAgentEnv(extraEnv, opts.task.id),
 		...ensureArtifactTemplateEnv(opts.project, opts.task, opts.worktreePath),
 	};
+	await ensureAgentTrust(opts.worktreePath, opts.project.path, resolvedBaseCmd, opts.accountId, opts.task.foreignCode, resolvedAgentFamily, env);
+	tmuxCmd = await applyAgentHooksToCommand(opts.worktreePath, resolvedBaseCmd, tmuxCmd, {
+		stopTarget: opts.project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
+		family: resolvedAgentFamily,
+	});
+
 	const existingPorts = portPool.getPortAssignments(opts.task.id);
 	if (existingPorts.length > 0) {
 		Object.assign(env, portPool.buildPortEnv(existingPorts));
@@ -3900,7 +3998,7 @@ export const tmuxPtyHandlers = {
 	getDevServerStatus,
 	openFileBrowser,
 	getTerminalPreview,
-	checkWorktreeExists,
+	checkWorktreeState,
 	getPtyUrl,
 	getProjectPtyUrl,
 	destroyProjectTerminal,

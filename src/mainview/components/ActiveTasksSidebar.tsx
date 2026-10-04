@@ -14,7 +14,7 @@ import type { AppAction, Route } from "../state";
 import { useT } from "../i18n";
 import { getStatusLabel } from "../utils/statusLabel";
 import { isFacetTokenActive, matchesTaskQuery, toggleFacetToken } from "../utils/taskSearch";
-import { buildFilterGroups, taskQueryContext, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
+import { buildFilterGroups, taskQueryContext, taskStatusValues, isAttentionTask, isTaskNotRunning, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
 import FilterFunnel from "./FilterFunnel";
 import TipCard from "./TipCard";
 import { useTipRotation } from "../hooks/useTipRotation";
@@ -67,6 +67,12 @@ function writeShowHidden(showHidden: boolean) {
 	try {
 		localStorage.setItem(LS_SIDEBAR_SHOW_HIDDEN, String(showHidden));
 	} catch { /* ignore */ }
+}
+
+/** Out of the default list: hidden by the user, or not running (hibernated or
+ *  disconnected). The reveal eye brings both back; nothing about the task changes. */
+function isOutOfDefaultList(task: Task): boolean {
+	return task.hidden === true || isTaskNotRunning(task);
 }
 
 interface ActiveTasksSidebarProps {
@@ -196,7 +202,7 @@ function ActiveTasksSidebar({
 
 	// null = the current project is in no space → the button disables and a
 	// stored "space" scope falls back to project below. With a space on the route
-	// the pool is that one space; without one (arrived from the dashboard, ⌘K, a
+	// the pool is that one space; without one (arrived from the dashboard, ⇧⌘K, a
 	// deep link) it stays the union of the project's spaces.
 	const siblingIds = useMemo(
 		() => (project ? spaceScopeProjectIds(spaces, project.id, spaceId ?? null) : null),
@@ -301,18 +307,24 @@ function ActiveTasksSidebar({
 	if (effectiveScope === "space" && siblingIds) {
 		activeTasks = activeTasks.filter((task) => siblingIds.has(task.projectId));
 	}
-	// `is:hidden` reveals on its own: a token that selects hidden tasks must not
+	// `is:hidden` / `is:hibernated` reveal on their own: a token that selects those tasks must not
 	// search a pool they were already filtered out of.
-	const queryWantsHidden = isFacetTokenActive(searchQuery, "is", "hidden");
+	const queryWantsHidden = isFacetTokenActive(searchQuery, "is", "hidden") || isFacetTokenActive(searchQuery, "is", "hibernated");
 	const revealHidden = showHidden || queryWantsHidden;
 	// Pool BEFORE visibility filtering — feeds the funnel and the header counts.
 	const scopedTasks = activeTasks;
-	const hiddenTaskCount = scopedTasks.filter((task) => task.hidden).length;
-	const hiddenAttentionCount = scopedTasks.filter((task) => task.hidden && isAttentionTask(task)).length;
+	const manuallyHiddenCount = scopedTasks.filter((task) => task.hidden).length;
+	const hibernatedOnlyCount = scopedTasks.filter((task) => isTaskNotRunning(task) && !task.hidden).length;
+	const hiddenTaskCount = manuallyHiddenCount + hibernatedOnlyCount;
+	const hiddenAttentionCount = scopedTasks.filter((task) => isOutOfDefaultList(task) && isAttentionTask(task)).length;
 	if (!revealHidden) {
-		activeTasks = activeTasks.filter((task) => !task.hidden);
+		activeTasks = activeTasks.filter((task) => !isOutOfDefaultList(task));
 	}
 	const allTasksHidden = !revealHidden && hiddenTaskCount > 0 && activeTasks.length === 0;
+	const hiddenCountDetail = [
+		manuallyHiddenCount > 0 ? t.plural("sidebar.hiddenTaskCount", manuallyHiddenCount) : null,
+		hibernatedOnlyCount > 0 ? t.plural("sidebar.hibernatedTaskCount", hibernatedOnlyCount) : null,
+	].filter(Boolean).join(" · ");
 	// The dot exists because the row is absent. Once revealed, the row carries
 	// its own attention marker and a second one on the eye is noise.
 	const flagHiddenAttention = !revealHidden && hiddenAttentionCount > 0;
@@ -346,8 +358,7 @@ function ActiveTasksSidebar({
 		statusValuesFor: (task) => {
 			const proj = projectById.get(task.projectId);
 			const col = task.customColumnId ? proj?.customColumns?.find((c) => c.id === task.customColumnId) : undefined;
-			const label = getStatusLabel(task.status, t, proj);
-			return isTaskBlocked(task) ? ["blocked", t("task.blocked"), task.status, label] : col ? [col.name, task.status, label] : [task.status, label];
+			return isTaskBlocked(task) ? ["blocked", t("task.blocked")] : taskStatusValues(task, col, getStatusLabel(task.status, t, proj));
 		},
 		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
 		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
@@ -388,6 +399,12 @@ function ActiveTasksSidebar({
 				port: t("filter.flag.port"),
 				home: t("spaces.homeGroup"),
 				hidden: t("filter.flag.hidden"),
+				hibernated: t("filter.flag.hibernated"),
+			},
+			typeLabels: {
+				standard: t("createTask.taskTypeStandard"),
+				coordinator: t("createTask.taskTypeCoordinator"),
+				"pr-review": t("createTask.taskTypeReview"),
 			},
 		}),
 		[scopedTasks, resolver, priorityCandidates, statusCandidates, t],
@@ -728,6 +745,7 @@ function ActiveTasksSidebar({
 				    with spaces, a fifth header control truncates the "Active Tasks"
 				    title. It is the same axis as the funnel anyway — which tasks are
 				    in this list — and `is:hidden` lives one click away inside it.
+				    Hibernated and disconnected tasks are out of the list too, and come back with it.
 				    Rendered only while there is something to bring back; the dot is
 				    the sole signal that an absent task is asking for the user, since
 				    hiding never silences a task. */}
@@ -737,7 +755,7 @@ function ActiveTasksSidebar({
 						detail={
 							flagHiddenAttention
 								? t.plural("sidebar.hiddenAttentionCount", hiddenAttentionCount)
-								: t.plural("sidebar.hiddenTaskCount", hiddenTaskCount)
+								: hiddenCountDetail
 						}
 						placement="bottom"
 					>

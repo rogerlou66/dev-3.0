@@ -1,6 +1,6 @@
 {
 	"name": "electrobun-react-tailwind-vite",
-	"version": "1.54.1",
+	"version": "1.56.0",
 	"description": "Electrobun app with React, Tailwind CSS, and Vite HMR",
 	"license": "Apache-2.0",
 	"author": "Arseny Pavlenko",
@@ -84,6 +84,7 @@
 		"@headless-tree/react": "^1.6.3",
 		"@lobehub/icons": "5.16.0",
 		"@streamdown/mermaid": "1.0.2",
+		"@zkl2333/freetype-wasm": "2.14.3",
 		"bidi-js": "^1.0.3",
 		"electrobun": "1.18.1",
 		"fuzzysort": "^3.1.0",

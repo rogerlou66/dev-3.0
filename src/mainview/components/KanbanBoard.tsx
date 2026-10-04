@@ -20,10 +20,10 @@ import { canBlockTask, effectiveTaskColumn, isTaskBlocked } from "../../shared/t
 import { setTaskBlocked } from "../utils/setTaskBlocked";
 import LabelFilterBar from "./LabelFilterBar";
 import { matchesTaskQuery } from "../utils/taskSearch";
-import { buildFilterGroups, taskQueryContext, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
+import { buildFilterGroups, taskQueryContext, taskStatusValues, isAttentionTask, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
 import { useTaskPrBadges } from "../hooks/useTaskPrBadges";
 import { useTipRotation } from "../hooks/useTipRotation";
-import { moveTaskToStatus } from "../utils/moveTaskToStatus";
+import { moveTaskToStatus, resetTaskToTodoWithConsent } from "../utils/moveTaskToStatus";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useIsControlHidden } from "../hooks/useIsControlHidden";
 import { useStatusColors } from "../hooks/useStatusColors";
@@ -185,6 +185,18 @@ function KanbanBoard({
 		}
 	}
 
+	// Every launch of a To Do card funnels through here. A card still owning a
+	// worktree from an earlier run is reset (with consent) first — the lifecycle
+	// refuses to re-initialise it, so launching it as-is could only fail.
+	async function openLaunchModal(task: Task, targetStatus: TaskStatus) {
+		if (task.status === "todo" && task.worktreePath) {
+			const outcome = await resetTaskToTodoWithConsent({ task, project: projectOfTask(task), dispatch, t });
+			if (outcome !== "reset") return;
+			task = { ...task, worktreePath: null, branchName: null };
+		}
+		setLaunchModal({ task, targetStatus });
+	}
+
 	async function handleTaskDrop(taskId: string, targetStatus: TaskStatus) {
 		setDragTaskId(null);
 		setDragFromStatus(null);
@@ -205,8 +217,8 @@ function KanbanBoard({
 		if (task.status === targetStatus && !task.customColumnId && !isTaskBlocked(task)) return;
 
 		// todo → active: open LaunchVariantsModal
-		if (task.status === "todo" && ACTIVE_STATUSES.includes(targetStatus) && !task.worktreePath) {
-			setLaunchModal({ task, targetStatus });
+		if (task.status === "todo" && ACTIVE_STATUSES.includes(targetStatus)) {
+			await openLaunchModal(task, targetStatus);
 			return;
 		}
 
@@ -329,16 +341,14 @@ function KanbanBoard({
 		!!task.customColumnId && laneIdByProjectColumn.has(`${task.projectId}::${task.customColumnId}`);
 
 	// Facet resolver + funnel pool for the token-DSL filter. Custom-column tasks
-	// report the column name as their canonical status value (mirrors where they
-	// render), while still matching their underlying built-in status.
+	// match only their column name — where they render — never their underlying status.
 	const resolver: FacetResolver = useMemo(() => ({
 		agents,
 		labelsFor: (task) => (projectById.get(task.projectId)?.labels ?? []).filter((l) => task.labelIds?.includes(l.id)),
 		statusValuesFor: (task) => {
 			const ownColumns = projectById.get(task.projectId)?.customColumns ?? [];
 			const col = task.customColumnId ? ownColumns.find((c) => c.id === task.customColumnId) : undefined;
-			const label = customStatusLabels[task.status] || t(statusKey(task.status));
-			return isTaskBlocked(task) ? ["blocked", t("task.blocked"), task.status, label] : col ? [col.name, task.status, label] : [task.status, label];
+			return isTaskBlocked(task) ? ["blocked", t("task.blocked")] : taskStatusValues(task, col, customStatusLabels[task.status] || t(statusKey(task.status)));
 		},
 		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
 		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
@@ -380,6 +390,12 @@ function KanbanBoard({
 				port: t("filter.flag.port"),
 				home: t("spaces.homeGroup"),
 				hidden: t("filter.flag.hidden"),
+				hibernated: t("filter.flag.hibernated"),
+			},
+			typeLabels: {
+				standard: t("createTask.taskTypeStandard"),
+				coordinator: t("createTask.taskTypeCoordinator"),
+				"pr-review": t("createTask.taskTypeReview"),
 			},
 		}),
 		[tasks, resolver, priorityCandidates, statusCandidates, t],
@@ -598,8 +614,7 @@ function KanbanBoard({
 		navigate,
 		onAddTask: () => window.dispatchEvent(new CustomEvent("rpc:openCreateTaskModal")),
 		agents,
-		onLaunchVariants: (task: Task, targetStatus: TaskStatus) =>
-			setLaunchModal({ task, targetStatus }),
+		onLaunchVariants: (task: Task, targetStatus: TaskStatus) => { void openLaunchModal(task, targetStatus); },
 		onAddAttempts: (task: Task) =>
 			setLaunchModal({ task, targetStatus: task.status, mode: "addAttempts" }),
 		onTaskDrop: handleTaskDrop,
@@ -781,7 +796,7 @@ function KanbanBoard({
 					}}
 					onLaunchVariants={(task, targetStatus) => {
 						onCloseTaskDetail?.();
-						setLaunchModal({ task, targetStatus });
+						void openLaunchModal(task, targetStatus);
 					}}
 				/>
 			)}

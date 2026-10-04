@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { Dispatch, DragEvent } from "react";
 import type { HarnessReadinessReport, Project, Space, Task, TaskStatus } from "../../shared/types";
-import { compareTaskSortRank, getTaskTitle, isBuiltinOpsProject, isTaskDisconnected, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
+import { compareTaskSortRank, getTaskTitle, isBuiltinOpsProject, isCoordinatorTask, isTaskDisconnected, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { api } from "../rpc";
 import { deleteSpaceWithConfirm, moveSpace, renameSpace, toggleSpaceSensitive } from "../utils/spaceActions";
@@ -17,6 +17,7 @@ import { useProjectSpaceMembership } from "../useProjectSpaceMembership";
 import { lastProjectForSpace } from "../utils/spaceBoardMemory";
 import SpaceGroupedProjects, { type RowReorderCtx } from "./SpaceGroupedProjects";
 import { getStatusLabel } from "../utils/statusLabel";
+import { scheduleCompactDrag } from "../utils/compactDrag";
 import { statusKey } from "../i18n/status";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
@@ -30,6 +31,8 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { useIsControlHidden } from "../hooks/useIsControlHidden";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { isTaskBlocked } from "../../shared/task-blocking";
+import DashboardCoordinatorRows from "./DashboardCoordinatorRows";
+import { coordinatorCandidates } from "../utils/coordinatorFinder";
 
 interface ActivityOverviewProps {
 	projects: Project[];
@@ -133,6 +136,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 	const [loading, setLoading] = useState(true);
 	const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
 	const [dropTarget, setDropTarget] = useState<{ projectId: string; side: DropSide } | null>(null);
+	const cancelPendingCollapse = useRef<(() => void) | null>(null);
 	// Narrow viewport: HTML5 drag and the up/down step buttons are unusable on
 	// touch, so per-project actions + reorder collapse into a single kebab that
 	// opens this action sheet (the project whose id is set here).
@@ -463,10 +467,14 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 		// PR review) plus any task parked in a custom column. Custom-column
 		// tasks carry the column's identity, not their underlying status, and
 		// are never collapsed into the summary line below.
-		const rowTasks = tasks.filter(
+		// Coordinators get their own pinned rows whatever their status, so they are
+		// taken out of both the attention rows and the footer counts below.
+		const coordinators = coordinatorCandidates(tasks, null, []);
+		const ordinaryTasks = tasks.filter((task) => !isCoordinatorTask(task));
+		const rowTasks = ordinaryTasks.filter(
 			(task) => isTaskBlocked(task) || columnOf(task) !== null || ATTENTION_STATUSES.includes(task.status),
 		);
-		const backgroundTasks = tasks.filter(
+		const backgroundTasks = ordinaryTasks.filter(
 			(task) => !isTaskBlocked(task) && columnOf(task) === null && BACKGROUND_STATUSES.includes(task.status),
 		);
 
@@ -511,7 +519,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 				{showDropBefore && <div className="absolute top-0 left-3 right-3 h-0.5 bg-accent rounded-full z-10" />}
 				{showDropAfter && <div className="absolute bottom-0 left-3 right-3 h-0.5 bg-accent rounded-full z-10" />}
 				{/* Project header */}
-				<div className={`group flex items-center gap-2 px-3 md:px-5 ${compact ? "py-1.5" : hasActiveTasks ? "py-3" : "py-2.5"} hover:bg-raised-hover transition-colors`}>
+				<div data-project-row-header className={`group flex items-center gap-2 px-3 md:px-5 ${compact ? "py-1.5" : hasActiveTasks ? "py-3" : "py-2.5"} hover:bg-raised-hover transition-colors`}>
 					{/* Reorder cluster — desktop only. On touch, drag and the
 					    step buttons are unusable; reorder lives in the action sheet. */}
 					{/* A grouped row alone in its space has nothing to reorder. */}
@@ -524,7 +532,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 					   `opacity-0` would not. */
 					<div
 						aria-hidden={cannotReorder || undefined}
-						className={`hidden md:flex -ml-1.5 items-center gap-0.5 ${cannotReorder ? "invisible" : ""}`}
+						className={`hidden md:flex -ml-1.5 items-center gap-0.5 select-none ${cannotReorder ? "invisible" : ""}`}
 					>
 						{/* Pointer-only drag affordance. Deliberately NOT a button: it has
 						    no click or key handler, and the step buttons beside it are the
@@ -535,15 +543,21 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 							draggable={dragEnabled}
 							onDragStart={(event) => {
 								if (!dragEnabled) return;
-								if (reorder) {
-									reorder.onDragStart(event);
-									return;
-								}
-								setDraggedProjectId(project.id);
-								event.dataTransfer.setData("text/plain", `project:${project.id}`);
+								event.dataTransfer.setData("text/plain", reorder ? reorder.dragData : `project:${project.id}`);
 								event.dataTransfer.effectAllowed = "move";
+								// The default ghost is the grip glyph alone; show which project moves.
+								const header = event.currentTarget.closest<HTMLElement>("[data-project-row-header]") ?? event.currentTarget;
+								const rect = header.getBoundingClientRect();
+								event.dataTransfer.setDragImage(header, event.clientX - rect.left, event.clientY - rect.top);
+								cancelPendingCollapse.current?.();
+								cancelPendingCollapse.current = scheduleCompactDrag(
+									header,
+									reorder ? reorder.onDragStart : () => setDraggedProjectId(project.id),
+								);
 							}}
 							onDragEnd={() => {
+								cancelPendingCollapse.current?.();
+								cancelPendingCollapse.current = null;
 								if (reorder) {
 									reorder.onDragEnd();
 									return;
@@ -626,7 +640,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 						{/* The row's one navigation is into the board, so the name carries
 						    link emphasis on row hover. Without it the only cue was the
 						    background lifting one step, which reads as "row", not "link". */}
-						<span className={`truncate select-text ${locked ? "" : "group-hover:text-accent group-hover:underline decoration-accent/50 underline-offset-2"} ${privacy.maskClass(project)}`} title={locked || isBuiltinOps ? undefined : project.name}>{projectDisplayName(project, t("ops.boardName"))}</span>
+						<span className={`truncate select-text ${locked || compact ? "" : "group-hover:text-accent group-hover:underline decoration-accent/50 underline-offset-2"} ${privacy.maskClass(project)}`} title={locked || isBuiltinOps ? undefined : project.name}>{projectDisplayName(project, t("ops.boardName"))}</span>
 									{!isBuiltinOps && !compact && (
 										<ProjectSpaceChips
 											spaces={spacesFile.spaces}
@@ -696,6 +710,16 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 
 				{hasActiveTasks && !compact && (
 					<div className="border-t border-edge">
+						<DashboardCoordinatorRows
+							project={project}
+							coordinators={coordinators}
+							narrow={narrow}
+							statusColors={statusColors}
+							bellCounts={bellCounts}
+							maskClass={privacy.maskClass(project)}
+							timeAgo={(iso) => timeAgo(iso, t)}
+							onOpen={(task) => navigate({ screen: "project", projectId: project.id, activeTaskId: task.id })}
+						/>
 						{/* Attention + custom-column tasks — shown individually. On narrow
 						    each row stacks (title on its own line, meta below) so the title
 						    is readable instead of squeezed by the status + time cluster. */}
@@ -990,7 +1014,7 @@ function ActivityOverview({ projects, dispatch, navigate, bellCounts, onRemovePr
 					</div>
 				</div>
 				{/* Search over projects AND their space names — the same rule as the
-				    ⌘K palette. Only meaningful once spaces group the list. */}
+				    ⇧⌘K palette. Only meaningful once spaces group the list. */}
 				{allSpaceGroups !== null && (
 					<div className="flex items-center gap-2">
 					{/* The filter sits with the search field, not in the header beside

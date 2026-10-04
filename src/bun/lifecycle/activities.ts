@@ -3,10 +3,11 @@ import type {
 	PRInfo,
 	PRMergeState,
 	Project,
+	RefreshTaskPrStatusResult,
 	Task,
 	TaskPRStatusCache,
 } from "../../shared/types";
-import { taskCompletesManually } from "../../shared/types";
+import { resolveTaskCompareBaseBranch, taskCompletesManually } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
@@ -356,14 +357,19 @@ interface GitHubPullRequestSummary {
 	statusCheckRollup?: unknown;
 	reviewDecision?: unknown;
 	headRefName?: unknown;
+	headRefOid?: unknown;
 }
 
-const PR_STATUS_JSON_FIELDS = "number,isDraft,autoMergeRequest,url,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus,state,title,headRefName";
+const PR_STATUS_JSON_FIELDS = "number,isDraft,autoMergeRequest,url,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus,state,title,headRefName,headRefOid";
 
 interface PolledPRStatus {
 	found: boolean;
 	ciStatus: PRCIStatus | null;
+	/** True when a PR's status was read and dispatched; false when GitHub reports no PR for this branch. */
+	reported: boolean;
 }
+
+const NO_PR: PolledPRStatus = { found: false, ciStatus: null, reported: false };
 
 type FreshPRStatus = Omit<TaskPRStatusCache, "cachedAt">;
 
@@ -478,16 +484,33 @@ async function fetchUnresolvedReviewThreadCount(
 	return null;
 }
 
+/**
+ * A merged PR proves only the head it merged. Commits made after it on the same
+ * branch are unmerged follow-up work, so the completion offer waits — the same
+ * `ahead === 0` and clean-worktree gate the merge watcher applies.
+ */
+async function mergedPrCoversHead(project: Project, task: Task, pr: GitHubPullRequestSummary): Promise<boolean> {
+	const worktreePath = task.worktreePath!;
+	if (await git.isWorktreeDirty(worktreePath)) return false;
+	const headSha = await git.getHeadSha(worktreePath);
+	if (headSha && typeof pr.headRefOid === "string" && pr.headRefOid === headSha) return true;
+	const baseBranch = resolveTaskCompareBaseBranch(task, project);
+	const projectBase = project.defaultBaseBranch || "main";
+	const ref = baseBranch === projectBase ? await git.resolveCompareRef(project.path, baseBranch) : baseBranch;
+	const status = await git.getBranchStatus(worktreePath, ref);
+	return status != null && !status.baseUnreachable && status.ahead === 0;
+}
+
 async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion: boolean): Promise<PolledPRStatus | null> {
 	if (!task.worktreePath) return null;
 	const branchName = await git.getCurrentBranch(task.worktreePath);
-	if (!branchName) return null;
+	if (!branchName) return NO_PR;
 
 	const unpushed = await git.getUnpushedCount(task.worktreePath, branchName);
 	// A missing remote branch means "never pushed" only when the task has no
 	// sticky PR. After auto-merge, GitHub may delete the branch while the task
 	// still needs the exact PR fetched by number.
-	if (unpushed === -1 && task.prNumber == null) return null;
+	if (unpushed === -1 && task.prNumber == null) return NO_PR;
 
 	const ghResult = await github.runGitHub(
 		project,
@@ -538,7 +561,7 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 						log.info("Ignoring stored PR from a different branch", {
 							taskId: task.id.slice(0, 8), pr: task.prNumber, prHead: known.headRefName, branch: branchName,
 						});
-						return { found: false, ciStatus: null };
+						return NO_PR;
 					}
 					pr = known;
 					isOpenPr = typeof pr.state === "string" && pr.state.toUpperCase() === "OPEN";
@@ -546,9 +569,12 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 			} catch {
 				return null;
 			}
+		} else {
+			// GitHub did not answer for a PR we know exists: that is an outage, not "no PR".
+			return null;
 		}
 	}
-	if (!pr) return { found: false, ciStatus: null };
+	if (!pr) return NO_PR;
 
 	const prNumber = typeof pr.number === "number" ? pr.number : task.prNumber ?? null;
 	const prUrl = typeof pr.url === "string" ? pr.url : task.prUrl ?? null;
@@ -625,7 +651,7 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 		signalKey,
 		...(signalReason ? { signalReason } : {}),
 	});
-	if (mergeState.state === "MERGED") {
+	if (mergeState.state === "MERGED" && await mergedPrCoversHead(project, task, pr)) {
 		const fingerprint = await getMergeCompletionFingerprint(task, branchName);
 		await dispatchLifecycleFinding(project, task, {
 			type: "mergeDetected",
@@ -637,7 +663,7 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 		});
 	}
 
-	return { found: isOpenPr, ciStatus };
+	return { found: isOpenPr, ciStatus, reported: true };
 }
 
 
@@ -703,15 +729,21 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 	});
 }
 
-export async function refreshTaskPrStatus(params: { taskId: string; projectId: string }): Promise<void> {
-	if (!getPushMessage()) return;
+/**
+ * One on-demand poll. The outcome tells the popover whether it now shows fresh
+ * GitHub data, or still the last known status because GitHub did not answer.
+ */
+export async function refreshTaskPrStatus(params: { taskId: string; projectId: string }): Promise<RefreshTaskPrStatusResult> {
+	if (!getPushMessage()) return { outcome: "skipped" };
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
-	if (project.kind === "virtual" || !task.worktreePath || TERMINAL_TASK_STATUSES.has(task.status)) return;
+	if (project.kind === "virtual" || !task.worktreePath || TERMINAL_TASK_STATUSES.has(task.status)) return { outcome: "skipped" };
 	const settings = await loadSettings();
 	const suggestCompletion = settings.suggestCompletingTasksAfterMerge !== false;
 	const result = await pollTaskPrStatus(project, task, suggestCompletion);
 	const runtime = lifecycleActorRuntime(task.id);
 	if (result) runtime.prPending = result.found && result.ciStatus === "pending";
 	delete runtime.prNextDue;
+	if (!result) return { outcome: "unavailable" };
+	return { outcome: result.reported ? "updated" : "not-found" };
 }

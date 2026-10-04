@@ -1,4 +1,5 @@
-import type { CodingAgent, Label, Task, TaskStatus } from "../../shared/types";
+import type { CodingAgent, Label, Task, TaskStatus, TaskType } from "../../shared/types";
+import { TASK_TYPES, isTaskDisconnected } from "../../shared/types";
 import type { FacetKey, TaskQueryContext } from "./taskSearch";
 import { getTaskAgentMeta } from "./taskAgentMeta";
 import { isTaskBlocked } from "../../shared/task-blocking";
@@ -12,7 +13,7 @@ import { isTaskBlocked } from "../../shared/task-blocking";
  */
 
 /** The funnel groups. FLAGS bundles the boolean `is:`/`has:` facets. */
-export type FilterGroupId = "priority" | "status" | "spaces" | "labels" | "agents" | "flags";
+export type FilterGroupId = "priority" | "status" | "types" | "spaces" | "labels" | "agents" | "flags";
 
 export interface FilterFunnelOption {
 	facet: FacetKey;
@@ -37,6 +38,11 @@ const ATTENTION_STATUSES: TaskStatus[] = ["user-questions", "review-by-user", "r
  * queue. Single source of truth for the sidebar attention scope and the
  * `is:attention` facet. Per-task bells remain visual notifications only.
  */
+/** Hibernated or disconnected: no live session to jump to (`is:hibernated`). */
+export function isTaskNotRunning(task: Task): boolean {
+	return task.hibernated === true || isTaskDisconnected(task);
+}
+
 export function isAttentionTask(task: Task): boolean {
 	return !isTaskBlocked(task) && ATTENTION_STATUSES.includes(task.status);
 }
@@ -56,6 +62,20 @@ export interface FacetResolver {
 	prNumberFor?: (task: Task) => number | null;
 }
 
+/**
+ * `status:` match targets for a task. A task parked in an existing custom column
+ * matches ONLY that column — the column the user sees it in — never its
+ * underlying built-in status. Without a column it matches its status id + label.
+ */
+export function taskStatusValues(task: Task, column: { name: string } | undefined, statusLabel: string): string[] {
+	return column ? [column.name] : [task.status, statusLabel];
+}
+
+/** `type:` token value for a task — an untyped task is `standard`, as in the CLI. */
+export function taskTypeValue(task: Task): TaskType | "standard" {
+	return task.taskType ?? "standard";
+}
+
 /** Resolve the display agent name for a task, or null when unassigned. */
 export function taskAgentName(task: Task, agents: CodingAgent[]): string | null {
 	return getTaskAgentMeta(task, agents).agent?.name ?? null;
@@ -68,9 +88,11 @@ export function taskQueryContext(task: Task, resolver: FacetResolver): TaskQuery
 		agentName: taskAgentName(task, resolver.agents),
 		statusValues: resolver.statusValuesFor(task),
 		priorityValue: resolver.priorityFor(task).toLowerCase(),
+		taskType: taskTypeValue(task),
 		hasPort: resolver.hasPortFor(task),
 		isAttention: resolver.isAttentionFor(task),
 		isHidden: task.hidden === true,
+		isHibernated: isTaskNotRunning(task),
 		spaceNames: resolver.spaceNamesFor ? resolver.spaceNamesFor(task) : null,
 		prNumber: resolver.prNumberFor?.(task) ?? null,
 	};
@@ -81,30 +103,35 @@ export interface FilterFunnelCandidates {
 	priorityCandidates: FilterFunnelOption[];
 	/** Full ordered status vocabulary (built-in statuses + custom columns). */
 	statusCandidates: FilterFunnelOption[];
-	flagLabels: { attention: string; port: string; home: string; hidden: string };
+	flagLabels: { attention: string; port: string; home: string; hidden: string; hibernated: string };
+	typeLabels: Record<TaskType | "standard", string>;
 }
 
 /**
  * Build the funnel's grouped options from the visible task pool: only values
  * actually present, empty groups dropped. PRIORITY leads (it is the most
- * important quick filter), then STATUS, LABELS, AGENTS, FLAGS. Candidate
+ * important quick filter), then STATUS, TYPES, SPACES, LABELS, AGENTS, FLAGS.
+ * TYPES appears only when some task is not standard — a lone "Standard" option
+ * filters nothing. Candidate
  * vocabularies (priority, status) keep their given order; LABELS/AGENTS sort
  * alphabetically for stable display.
  */
 export function buildFilterGroups(
 	tasks: Task[],
 	resolver: FacetResolver,
-	{ priorityCandidates, statusCandidates, flagLabels }: FilterFunnelCandidates,
+	{ priorityCandidates, statusCandidates, flagLabels, typeLabels }: FilterFunnelCandidates,
 ): FilterFunnelGroup[] {
 	const labelByValue = new Map<string, FilterFunnelOption>();
 	const spaceByValue = new Map<string, FilterFunnelOption>();
 	const agentByValue = new Map<string, FilterFunnelOption>();
 	const presentStatus = new Set<string>();
 	const presentPriority = new Set<string>();
+	const presentType = new Set<string>();
 	let anyAttention = false;
 	let anyPort = false;
 	let anyHome = false;
 	let anyHidden = false;
+	let anyHibernated = false;
 
 	for (const task of tasks) {
 		for (const label of resolver.labelsFor(task)) {
@@ -133,13 +160,20 @@ export function buildFilterGroups(
 		const canonicalStatus = resolver.statusValuesFor(task)[0];
 		if (canonicalStatus) presentStatus.add(canonicalStatus.toLowerCase());
 		presentPriority.add(resolver.priorityFor(task).toLowerCase());
+		presentType.add(taskTypeValue(task));
 		if (resolver.isAttentionFor(task)) anyAttention = true;
 		if (resolver.hasPortFor(task)) anyPort = true;
 		if (task.hidden) anyHidden = true;
+		if (isTaskNotRunning(task)) anyHibernated = true;
 	}
 
 	const priorityOptions = priorityCandidates.filter((c) => presentPriority.has(c.value.toLowerCase()));
 	const statusOptions = statusCandidates.filter((c) => presentStatus.has(c.value.toLowerCase()));
+	const typeOptions: FilterFunnelOption[] = [...presentType].some((v) => v !== "standard")
+		? (["standard", ...TASK_TYPES] as const)
+			.filter((v) => presentType.has(v))
+			.map((v) => ({ facet: "type", value: v, label: typeLabels[v] }))
+		: [];
 	const byLabel = (a: FilterFunnelOption, b: FilterFunnelOption) => a.label.localeCompare(b.label);
 	const labelOptions = [...labelByValue.values()].sort(byLabel);
 	const agentOptions = [...agentByValue.values()].sort(byLabel);
@@ -153,10 +187,12 @@ export function buildFilterGroups(
 	// Offered from the pool BEFORE sidebar visibility filtering, so the token is
 	// reachable while the very tasks it selects are out of the list.
 	if (anyHidden) flagOptions.push({ facet: "is", value: "hidden", label: flagLabels.hidden });
+	if (anyHibernated) flagOptions.push({ facet: "is", value: "hibernated", label: flagLabels.hibernated });
 
 	const groups: FilterFunnelGroup[] = [
 		{ id: "priority", options: priorityOptions },
 		{ id: "status", options: statusOptions },
+		{ id: "types", options: typeOptions },
 		{ id: "spaces", options: spaceOptions },
 		{ id: "labels", options: labelOptions },
 		{ id: "agents", options: agentOptions },

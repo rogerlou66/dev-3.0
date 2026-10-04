@@ -16,9 +16,9 @@
  * HARD RULE: never spawn `tmux` directly outside this module — always go
  * through the `tmux` client (see AGENTS.md).
  */
-export { tmux, TmuxClient } from "./client";
+export { tmux, TmuxClient, TmuxMissingCwdError } from "./client";
 export type { TmuxClientOptions, SplitOrientation, TmuxLayoutName } from "./client";
-export { DEFAULT_TMUX_SOCKET, CAPTURE_SCROLLBACK_START_LINE } from "./constants";
+export { DEFAULT_TMUX_SOCKET, CAPTURE_SCROLLBACK_START_LINE, TMUX_AGENT_PANE_OPTION, TMUX_TASK_TITLE_OPTION } from "./constants";
 export {
 	tmuxSocketDir,
 	tmuxSocketPath,
@@ -48,6 +48,7 @@ export {
 	PANE_SWITCHER_FORMAT,
 	PEEK_PANE_FORMAT,
 	WINDOW_SWITCHER_FORMAT,
+	WINDOW_PANE_FORMAT,
 	SEARCH_STATE_FORMAT,
 	SESSION_OVERVIEW_FORMAT,
 	STATUS_GEOMETRY_FORMAT,
@@ -74,14 +75,14 @@ export type { Dev3SessionKind, ParsedDev3SessionName } from "./session-names";
 export {
 	tmuxClientCwd,
 	PANE_CWD_FORMAT,
-	TMUX_AGENT_PANE_OPTION,
 	TMUX_LAST_AGENT_PANE_OPTION,
-	TMUX_CONF_DARK_PATH,
-	TMUX_CONF_LIGHT_PATH,
+	TMUX_PANE_DIMMING_OPTION,
+	tmuxConfigPath,
 	activeTmuxConfigPath,
 	setActiveTmuxTheme,
 } from "./config";
 export {
+	clientCellToWindowCell,
 	findAltClickPane,
 	altClickIneligibleReason,
 	computeAltClickKeys,

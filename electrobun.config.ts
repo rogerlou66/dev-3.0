@@ -43,7 +43,7 @@ export default {
 	app: {
 		name: "dev-3.0",
 		identifier: "dev3.electrobun.dev",
-		version: "1.54.1",
+		version: "1.56.0",
 	},
 	runtime: {
 		// Standard macOS behavior: closing the last window does NOT quit the app —
@@ -84,6 +84,9 @@ export default {
 			[cliCopySource]: cliCopyDestination,
 			"src/assets/sounds": "sounds",
 			"src/bun/freeze-diagnostics": "freeze-diagnostics",
+			// Handoff transcript parser, bundled by scripts/build-cli.ts — see
+			// decisions/2026/09/25/parse-handoff-transcripts-off-the-host-thread.md.
+			"dist/workers": "workers",
 			"src/assets/artifact-template": "artifact-template",
 			// macOS notification-click shim (empty dir on Linux) — see decisions/2026/07/05/native-notification-click-shim.md.
 			"dist/native": "native",

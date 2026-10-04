@@ -78,6 +78,7 @@ const columns = {
 	"filter.funnelLabel": "Фильтровать задачи",
 	"filter.group.priority": "Приоритет",
 	"filter.group.status": "Статус",
+	"filter.group.types": "Тип",
 	"filter.group.spaces": "Пространства",
 	"filter.group.labels": "Метки",
 	"filter.group.agents": "Агенты",
@@ -85,6 +86,7 @@ const columns = {
 	"filter.flag.attention": "Требует внимания",
 	"filter.flag.port": "Есть открытый порт",
 	"filter.flag.hidden": "Скрыта из боковой панели",
+	"filter.flag.hibernated": "Заморожена или отключена",
 	"labels.moreLabels": "+{count} ещё",
 
 	// Notes

@@ -72,6 +72,7 @@ const columns = {
 	"filter.funnelLabel": "Filtrar tareas",
 	"filter.group.priority": "Prioridad",
 	"filter.group.status": "Estado",
+	"filter.group.types": "Tipo",
 	"filter.group.spaces": "Espacios",
 	"filter.group.labels": "Etiquetas",
 	"filter.group.agents": "Agentes",
@@ -79,6 +80,7 @@ const columns = {
 	"filter.flag.attention": "Requiere atención",
 	"filter.flag.port": "Con puerto activo",
 	"filter.flag.hidden": "Oculta de la barra lateral",
+	"filter.flag.hibernated": "Hibernada o desconectada",
 	"labels.moreLabels": "+{count} más",
 
 	// Notes

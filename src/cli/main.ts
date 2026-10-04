@@ -25,11 +25,12 @@ import { handleMessage } from "./commands/message";
 import { handlePeek } from "./commands/peek";
 import { handlePr } from "./commands/pr";
 import { handlePane } from "./commands/pane";
+import { handleAgent } from "./commands/agent";
 import { handlePaneExec } from "./commands/pane-exec";
 import { PANE_RUN_VERB } from "../bun/pane-run-store";
 import { DEV_SERVER_LOG_SINK_VERB } from "../shared/dev-server-log";
 import { handleDevServerLogSink } from "./commands/dev-server-log-sink";
-import { handleShowImage } from "./commands/show-image";
+import { handleShowImage, handleShowVideo } from "./commands/show-image";
 import { handleShowArtifact } from "./commands/show-artifact";
 import { handleArtifactTemplate } from "./commands/artifact-template";
 import { handleInlineHtml } from "./commands/inline-html";
@@ -39,6 +40,7 @@ import { handleCopilotHook } from "./commands/copilot-hook";
 import { handleAntigravityHook } from "./commands/antigravity-hook";
 import { handleOmpHook } from "./commands/omp-hook";
 import { handleClaudePrompt } from "./commands/claude-prompt";
+import { handleClaudeSessionStart, handleNoteRecent } from "./commands/recent-notes";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
 import { handleDoctor } from "./commands/doctor";
 import { handleUpdate } from "./commands/update";
@@ -53,10 +55,13 @@ const HELP = `dev3 — AI-facing CLI for the dev-3.0 Kanban board.
 Auto-detects project and task from the worktree context.
 
 Commands:
+  dev3 agent list [--json]              List agent and preset IDs for managed launches
+  dev3 agent spawn [--task <id>] [--agent <id>] [--config <id>] [--prompt <text>|-] [--handoff] [--json]
+                                         Add one managed agent to an existing task (asks for approval from a task worktree)
   dev3 current [--brief]                Show current project, task, status
                                          (--brief: hide the full description if you already have it in your prompt)
-  dev3 task show [--task <id>] [--notes] [--history]  Full task details
-                                         (always shows current overview; --notes inlines note bodies, --history shows title/overview change log)
+  dev3 task show [--task <id>] [--notes] [--history] [--json]  Full task details
+                                         (always shows current overview; --notes inlines note bodies, --history shows title/overview change log; --json prints a stable object)
   dev3 task move [--task <id>] --status <status>  Change task status
   dev3 task terminal-backend [--task <id>] [--to tmux|native]  Inspect/switch this task's terminal backend
   dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off] [--type coordinator|pr-review|standard]  Update task fields
@@ -66,6 +71,7 @@ Commands:
   dev3 note add "..." [--content "..."] [--task <id>] [--source user]  Add note to a task
   dev3 note list [--task <id>]          List notes
   dev3 note show <id> [--task <task>]   Show one note's full body (8-char prefix works)
+  dev3 note recent [--task <task>]      The 5 newest notes, size-bounded (what new sessions get)
   dev3 note delete <id> [--task <task>] Delete note (8-char prefix works)
   dev3 review list [--unresolved] [--json] [--task <id>]  The user's review comments on your diff and artifacts
   dev3 review resolve <id> [--reply "..."] [--task <id>]  Close a comment you handled (8-char prefix works)
@@ -78,7 +84,9 @@ Commands:
   dev3 label list                       List project labels
   dev3 label create "name" [--color "#hex"]  Create label
   dev3 label delete <id>                Delete label
-  dev3 label set <id> [<id>...] [--task <task>]  Assign labels to a task
+  dev3 label set <id> [<id>...] [--task <task>]  REPLACE the task's labels with exactly these
+  dev3 label add <id> [<id>...] [--task <task>]  Add labels, keeping the existing ones
+  dev3 label remove <id> [<id>...] [--task <task>]  Remove only these labels
   dev3 label set --clear [--task <id>]  Remove all labels from a task
   dev3 tasks list [--status <s>] [--label <id>] [--priority P0,P1] [--sort priority|seq] [--limit <n>] [--offset <n>]  List tasks (highest priority first, default 50)
   dev3 automations list                 List project automations (scheduled agent runs)
@@ -100,9 +108,12 @@ Commands:
   dev3 notify "msg" [--level info|success|error] [--desktop]  Show an in-app toast (or OS notification); clicking opens the task
   dev3 attention "reason" [--task <id>] Light the red attention badge on the task card (reason shows on hover)
   dev3 attention --clear [--task <id>]  Lower the attention badge and drop its accumulated reasons
-  dev3 message --subject "<about 6 words>" "text" [--in <dur> | --at <hh:mm>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later); --subject is required and stored with the message
+  dev3 message --subject "<about 6 words>" "text" [--in <dur> | --at <hh:mm[Z|±hh:mm]>] [--task <id>]  Send text to the task's live agent now, or schedule it (Send later); --subject is required and stored with the message
+  dev3 message --list [--json] [--task <id>]  Pending scheduled messages (id, due in local + UTC, sender)
+  dev3 message --cancel <id> [--task <id>]  Cancel one pending scheduled message
   dev3 show-image <path> [--caption "..."] [<path> ...]  Show images (screenshots/renders) in an in-app viewer bound to the task; each --caption annotates the preceding image
-  dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, image and MP4/WebM clip under it
+  dev3 show-video <file.mp4|file.webm> [--caption "..."] [<path> ...]  Play MP4/WebM clips (max 25 MB each) in the same viewer as show-image; never autoplays
+  dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, image, video and audio file under it
   dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
   dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
   dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane
@@ -219,6 +230,10 @@ async function main(): Promise<void> {
 	if (command === "current") {
 		return await handleCurrent(socketPath, { brief: Boolean(args.flags.brief) });
 	}
+	if (command === "note" && subcommand === "recent") {
+		// Runs as a `/dev3` skill injection, so it answers offline too (exit 0).
+		return await handleNoteRecent(args, socketPath || context?.socketPath || null, context);
+	}
 	if (command === "install-hooks") {
 		return await handleInstallHooks();
 	}
@@ -259,6 +274,15 @@ async function main(): Promise<void> {
 	}
 	if (command === "hook" && subcommand === "antigravity") {
 		return await handleAntigravityHook(args.flags.event, await Bun.stdin.text(), socketPath || context?.socketPath || null, context);
+	}
+	if (command === "hook" && subcommand === "claude-session-start") {
+		// Internal: Claude Code's SessionStart, answered with this task's recent
+		// notes as additionalContext. Always quiet and successful.
+		return await handleClaudeSessionStart(
+			await Bun.stdin.text(),
+			socketPath || context?.socketPath || null,
+			context,
+		);
 	}
 	if (command === "hook" && subcommand === "claude-prompt") {
 		// Internal: Claude Code's UserPromptSubmit, read for recording only. It
@@ -431,6 +455,8 @@ async function main(): Promise<void> {
 				// path), so hand the raw tokens straight to the handler rather than
 				// through the order-losing `parseArgs`.
 				return await handleShowImage(rawArgs.slice(1), socketPath, context);
+			case "show-video":
+				return await handleShowVideo(rawArgs.slice(1), socketPath, context);
 			case "show-artifact":
 				return await handleShowArtifact(rawArgs.slice(1), socketPath, context);
 			case "artifact-template":
@@ -439,6 +465,8 @@ async function main(): Promise<void> {
 				return await handlePeek(args, socketPath, context);
 			case "pane":
 				return await handlePane(subcommand, args, socketPath, context);
+			case "agent":
+				return await handleAgent(subcommand, args, socketPath, context);
 			case "ui":
 				return await handleUi(subcommand, args, socketPath, context);
 			default:

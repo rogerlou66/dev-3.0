@@ -176,12 +176,12 @@ ux_architecture:
       max_visible_tabs: 6
       status: "observed"
     command_palette:
-      purpose: "Keyboard-summoned palette with two modes (see surfaces.command_palette). Navigation (Cmd/Ctrl+K) complements index jumps (Cmd+1..9) and the breadcrumb dropdown; actions (Cmd/Ctrl+Shift+P) complement the native menu when you'd rather type than hunt."
-      mechanism: "Cmd/Ctrl+K = navigation (fuzzy-jump to a project, Enter navigates). Cmd/Ctrl+Shift+P = actions (fuzzy-match a command label, Enter runs it via handleMenuAction). Both fuzzy via utils/fuzzyMatch.ts on the shared PaletteShell."
+      purpose: "Keyboard-summoned palette with two modes (see surfaces.command_palette). Navigation (Cmd/Ctrl+Shift+K) complements index jumps (Cmd+1..9) and the breadcrumb dropdown; actions (Cmd/Ctrl+Shift+P) complement the native menu when you'd rather type than hunt."
+      mechanism: "Cmd/Ctrl+Shift+K = navigation (fuzzy-jump to a project, Enter navigates). Cmd/Ctrl+Shift+P = actions (fuzzy-match a command label, Enter runs it via handleMenuAction). Both fuzzy via utils/fuzzyMatch.ts on the shared PaletteShell."
       allowed: ["destination", "object_jump", "command_runner"]
       forbidden: ["destructive_action", "durable_state_without_friction"]
       status: "observed"
-      evidence: ["src/mainview/components/ProjectQuickSwitchModal.tsx", "src/mainview/components/CommandPaletteModal.tsx", "src/mainview/App.tsx (Cmd+K + Cmd+Shift+P)"]
+      evidence: ["src/mainview/components/ProjectQuickSwitchModal.tsx", "src/mainview/components/CommandPaletteModal.tsx", "src/mainview/App.tsx (Cmd+Shift+K + Cmd+Shift+P)"]
 
   surfaces:
     android_client_shell:
@@ -409,7 +409,7 @@ ux_architecture:
           comment_item:  { role: "link",         token: "bg-raised/65, accent on hover; scroll-to-comment" }
       persistence:
         store: "Task.review (src/shared/review.ts), one RPC per mutation, shared with every viewer and `dev3 review`; the old localStorage review imports once."
-        anchors: "diff-line here; artifact-element, image-region (image viewer and image previews), file-range (file preview text) and terminal-text (terminal chip) elsewhere; the export card lists all."
+        anchors: "diff-line here; artifact-element, image-region (image viewer and image previews), file-range (file preview text) elsewhere, terminal-text for stored terminal comments (no new ones: the chip is gone); the export card lists all."
         closed_by: "The agent via `dev3 review resolve <id> --reply`: reply under the bubble, Send becomes Reopen."
         cleared_by: ["reset_review button", "delete_comment"]
         rule: "Clipboard is transport, not store. Leaving the surface does NOT discard the review — no discard-on-close guard."
@@ -432,10 +432,11 @@ ux_architecture:
       observed: ["SiblingPopover", "TerminalPreviewPopover", "StuckPreparationPopover"]
       evidence: ["src/mainview/components/*Popover.tsx"]
     context_menu:
-      purpose: "Object-scoped actions on right-click (task card, terminal, sidebar)."
+      purpose: "Object-scoped actions on right-click / long-press (task card, sidebar row, terminal)."
       allowed: ["object_action", "open_in", "destructive"]
       forbidden: ["global_destination"]
-      evidence: ["src/mainview/components/OpenInMenu.tsx", "concept/changelog: open-in-context-menu, terminal context menu"]
+      task_menu: "ONE menu for the task object (TaskContextMenu), mounted by card AND sidebar row; routes to the existing picker/modal/RPC, owns no action. MAY repeat a control the surface shows — a context menu is reached blind. Narrow: BottomSheet. Shift+F10 opens it. No Copy Link."
+      evidence: ["src/mainview/components/TaskContextMenu.tsx", "src/mainview/components/OpenInMenu.tsx"]
     settings:
       purpose: "Durable configuration. GlobalSettings (app-wide) and ProjectSettings (per-project scripts, columns, labels, gh account)."
       allowed: ["configuration", "preference", "integration", "permission", "scripts"]
@@ -458,10 +459,10 @@ ux_architecture:
       evidence: ["src/mainview/components/GlobalSettings.tsx", "src/mainview/components/ProjectSettings.tsx (59.9K)", "src/mainview/components/global-settings/*"]
     sidebar:
       purpose: "Active tasks list / quick jump across running agents, with global-scope toggle."
-      allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark", "git_status_badge", "task_visibility_toggle", "reveal_hidden_mode"]
+      allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark", "git_status_badge", "task_visibility_toggle", "reveal_hidden_mode", "row_context_menu"]
       forbidden: ["durable_configuration", "permanent_header_control"]
       header_budget: "Header is FULL: scope group + collapse. Measured on a board with spaces, a fifth control truncates the 'Active Tasks' title, so the reveal-hidden eye sits in the filter row beside the funnel — same axis (which tasks are in this list) and state-gated. A new sidebar control goes to the filter row or the funnel, never the header."
-      visibility: "Task.hidden hides a variant group from THIS list only. Header eye reveals them dimmed and renders ONLY while something is hidden (the scope group owns the rest of the header); red dot when a hidden task needs the user; is:hidden reveals from the funnel. Why: decisions/2026/09/07/hide-tasks-from-active-sidebar.md."
+      visibility: "Task.hidden hides a variant group from THIS list only. Header eye reveals them dimmed and renders ONLY while something is hidden (the scope group owns the rest of the header); red dot when a hidden task needs the user; is:hidden reveals from the funnel. Hibernated/disconnected tasks are out by default too (is:hibernated); same eye reveals them. Why: decisions/2026/09/07/hide-tasks-from-active-sidebar.md."
       variant_dots: "Same capped clickable dots + SiblingPopover as task_card (see surfaces.task_card.variant_dots); placed in the card's bottom status row, mirroring the kanban card position."
       queue_policy: "NEEDS YOU (unblocked human/peer reviews, questions) → BLOCKED (hold) → custom columns → WAITING (working/AI review). Bells never alter membership."
       evidence: ["src/mainview/components/ActiveTasksSidebar.tsx"]
@@ -487,7 +488,7 @@ ux_architecture:
       anatomy:
         source_line: "WHERE IT CAME FROM, single line, truncate, text-micro font-mono text-fg-muted. Fallback order task -> project -> app area, first match wins: `#seq · project · task title`, else the project name, else a localized area label (Settings/Update/Dashboard/Terminal/Menu). `#seq` leads so the ellipsis eats the title, not the identifier. `contextDetail` appends one more segment (`dev-3.0 · Nightly digest`). Never fabricated from the app's own name — a line that carries nothing is fabrication by another route."
         message: "The sentence. break-words, never truncated."
-        two_identity_exception: "Agent-to-agent `dev3 message` is the ONE event with a sender AND a receiver: its source line is the pair `#fromSeq title -> #toSeq title` and the click target is the RECEIVER (its terminal holds the text, and the reply is typed there). Own push channel `agentMessage`, raised from the single delivery seam so an immediate send and a queued Send-later fire announce identically; dropped when EITHER side's project is sensitive in streamer mode. Silent for human-sent messages and for `not-delivered`; `unconfirmed` still announces."
+        two_identity_exception: "Agent-to-agent `dev3 message` is the ONE event with a sender AND a receiver, and the one toast with more than one destination: the source line is the pair `#from -> #to`, each an underlined link to its task (seq/variant never truncates; project names only across boards), plus ONE never-wrapping action row: paper-plane `#N` (sender) / `Agent traffic` (the only label allowed to truncate) / inbox `#N` (recipient); full role names live in aria-label + title. The card click stays Agent traffic (all projects; receiver with the beta off), decided at raise so its accessible name is true. Links/actions are siblings above the card button, never nested; acting dismisses. A gone end says so, a finished one opens as its board card, nothing resumes. Raised from the single delivery seam; dropped when EITHER side is sensitive in streamer mode; silent for human-sent and not-delivered. Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md."
         click_target: "The MOST SPECIFIC surface the toast is about (image viewer, diff, settings section). The owning task is the fallback, never an override. Task navigation honours the user's task-open-mode via openTaskFromNotification."
         dismiss: "swipe right (pointer+touch) AND the X button AND auto-timeout — swipe is never the only way (mobile_doctrine.gesture law)."
         stack_dismiss: "ONE ghost `Clear all (n)` under the stack, only at 2+ visible toasts — a stack-level dismiss, not a persistent_action: it arrives with the pile and leaves with it. Hover/focus pauses every timer so it cannot slip away. The sweep skips onTaskOverflow — that handler preserves what capacity dropped behind the user's back; badges for toasts just swept would defeat the button."
@@ -543,7 +544,7 @@ ux_architecture:
       evidence: ["UX_DECISIONS 2026-06-19", "UX_DECISIONS 2026-08-02", "src/bun/application-menu.ts (helpKeyboardShortcuts)", "src/mainview/components/TmuxCheatSheetModal.tsx"]
     keyboard_shortcuts_editor:
       purpose: "Durable rebinding of app-level shortcuts. A Settings section (Keyboard category), NOT an overlay. One row per keymap.ts entry, grouped by shortcut category, with an inline key-capture recorder."
-      slots: "Every shortcut has TWO independent slots — a primary combo and an optional alias — each recorded and cleared on its own. The alias column keeps its width even when empty (a quiet dashed +), so primary combos stay on one vertical line. Rejected: one flat list of bindings per shortcut, which made 'the second way to press it' an accident of ordering and gave the editor nothing to point at."
+      slots: "Two independent slots: primary and optional alias. The empty alias keeps its width (dashed +) to align primary combos. Reject a flat binding list: ordering cannot identify the alternate slot."
       allowed: ["configuration", "preference", "reset_to_default", "filter"]
       forbidden: ["command_runner", "object_action", "primary_navigation", "toolbar_button"]
       interaction: "The resolved combo IS the control — key chips wrapped in a button, clicked to start recording. NO per-row 'Change' button: 33 rows x one button each is button creep, and the chips already say what to click. Recording swallows every keystroke (capture phase, app shortcuts suspended), Esc cancels, a complete chord commits. A combo already owned by another shortcut shows an inline conflict warning naming the owner; committing steals it and empties ONLY the slot that held it, so taking a combo from an alias never costs the owner its primary. A shortcut left with no binding at all renders as 'Unassigned' and its owner is named in a toast."
@@ -551,7 +552,7 @@ ux_architecture:
       reset: "Per-row reset (ghost-danger icon button, only when overridden, no confirm — one click to undo) and a section-level 'Reset all shortcuts' (ghost-danger + confirm(), only when >=1 override exists). An overridden row also carries a small accent dot before its name."
       layout: "Fixed-height toolbar and a reserved reset slot on EVERY row (including read-only ones), so no combo shifts when a row gains a reset button or the toolbar gains the changed-count. The filter matches the rendered combo as well as the name."
       storage: "GlobalSettings.keyboardShortcuts — sparse Record<shortcutId, {primary?, alias?}>; a slot that is absent keeps its default and a slot set to null was deliberately emptied. Only overrides are persisted, so a changed default reaches every user who never touched that row."
-      rationale: "Settings owns durable configuration; the Cmd+/ overlay is help content and the manifest forbids configuration there. A new eighth Settings category rather than a Terminal/Appearance tenant, because 'where do I change a key' deserves one destination — the deleted iTerm2-compatibility preset folded into it as four ordinary rebindable rows, so the category consolidates rather than merely adds."
+      rationale: "Rebinding belongs in the eighth Settings category, not the Cmd+/ help overlay or Terminal/Appearance. One discoverable destination consolidates the former iTerm2 preset into four rebindable rows."
       terminal_shortcuts: "dev3's Cmd-key pane shortcuts (Cmd+D / Cmd+Shift+D / Cmd+W / Cmd+T) are registry rows in the `terminal` conflict group: the renderer dispatches them only while a terminal has focus, so they may share a combo with an app-level shortcut. Pane NAVIGATION is not a registry row — tmux owns it via prefix-free Alt+Shift+arrows; plain Alt+arrows are word motion."
       evidence: ["UX_DECISIONS 2026-08-02", "UX_DECISIONS 2026-08-03", "src/mainview/components/global-settings/KeyboardSettingsSection.tsx", "src/mainview/components/global-settings/ShortcutRow.tsx", "src/mainview/keymap.ts", "src/mainview/settings-registry.ts"]
     task_switcher:
@@ -561,10 +562,10 @@ ux_architecture:
       observed: ["TaskSwitcherOverlay (planned)"]
       evidence: ["UX_DECISIONS 2026-06-15"]
     command_palette:
-      purpose: "Transient keyboard-summoned overlay built on the shared PaletteShell (portal, fuzzy input, keyboard nav). TWO sibling modes, kept cleanly separated by intent (the navigation-vs-action question is now resolved as two-surfaces-one-shell, not one-palette-with-modes). Distinct from task_switcher, which is hold-cycle (Option+Tab) over only the active tasks — the palette is type-to-search."
+      purpose: "Two separate type-to-search overlays share PaletteShell (portal, fuzzy input, keyboard nav): navigation and actions. Unlike task_switcher (Option+Tab hold-cycle across active tasks), neither is a mode of the other."
       modes:
         navigation:
-          hotkey: "Cmd/Ctrl+K"
+          hotkey: "Cmd/Ctrl+Shift+K"
           purpose: "Type-to-find navigation. Today: fuzzy-jump to a project by name; Enter navigates to the best match."
           allowed: ["destination", "fuzzy_search", "object_jump"]
           forbidden: ["command_runner", "object_action", "durable_configuration", "dense_filters"]
@@ -576,14 +577,14 @@ ux_architecture:
           forbidden: ["destructive_action", "modal_or_inline_flow", "dense_filters"]
           forbidden_rationale: "Destructive (task delete/cancel/complete) needs friction, not a fuzzy-Enter — stays on inspector/context-menu/confirm. Modal/inline flows (rename, set-overview, add-note, spawn-variants, duplicate) keep living on their own surfaces."
           component: "CommandPaletteModal"
-      note: "No toolbar/breadcrumb button (sidesteps toolbar-button-creep), but BOTH palettes are surfaced at the top of the native View menu (Go to Project… ⌘K / Command Palette… ⇧⌘P) for discoverability — the native menu is the canonical action surface, not DOM chrome. Menu items open (not toggle) via menuRouter; no native accelerator (chords can't be bound — decision 044 — and the palettes toggle, so App.tsx keydown stays the sole shortcut owner). NOT Cmd+T: that is the universal new-tab key and the live terminal underneath (ghostty/tmux) intercepts it. The action palette dispatching through handleMenuAction also fixed several native-menu items that were previously no-op in the renderer."
+      note: "No toolbar/breadcrumb button: both palettes lead native View (Go to Project… ⇧⌘K / Command Palette… ⇧⌘P). menuRouter opens, never toggles; App.tsx keydown alone owns shortcuts, without native accelerators (chords unsupported; palettes toggle). Cmd+T is reserved for new tabs and intercepted by ghostty/tmux. Shared handleMenuAction also makes native menu actions work in the renderer."
       future:
-        - "Cmd+K grows to fuzzy-search tasks as well as projects, reusing utils/fuzzyMatch.ts (the single matcher for short UI entities; BM25 in shared/conversation-search-core.ts stays for long transcripts)."
+        - "Cmd+Shift+K grows to fuzzy-search tasks as well as projects, reusing utils/fuzzyMatch.ts (the single matcher for short UI entities; BM25 in shared/conversation-search-core.ts stays for long transcripts)."
         - "Action palette can grow to cover more menu actions by adding a registry entry in commands.ts AND a handleMenuAction case — destructive/modal flows still excluded by policy."
       observed: ["ProjectQuickSwitchModal", "CommandPaletteModal", "PaletteShell", "commands.ts", "utils/fuzzyMatch.ts"]
-      evidence: ["src/mainview/components/PaletteShell.tsx", "src/mainview/components/ProjectQuickSwitchModal.tsx", "src/mainview/components/CommandPaletteModal.tsx", "src/mainview/commands.ts", "src/mainview/menuRouter.ts", "src/mainview/App.tsx (Cmd+K + Cmd+Shift+P handlers)", "UX_DECISIONS 2026-06-18"]
+      evidence: ["src/mainview/components/PaletteShell.tsx", "src/mainview/components/ProjectQuickSwitchModal.tsx", "src/mainview/components/CommandPaletteModal.tsx", "src/mainview/commands.ts", "src/mainview/menuRouter.ts", "src/mainview/App.tsx (Cmd+Shift+K + Cmd+Shift+P handlers)", "UX_DECISIONS 2026-06-18"]
     task_image_viewer:
-      purpose: "Task-bound lightbox for images an agent surfaced via `dev3 show-image`, with a clickable history (thumbnail rail, newest first). One large image + prev/next + Esc; opened for a taskId regardless of route (closing restores position). Read/view only -- no git/lifecycle/mutation, as with the diff viewer."
+      purpose: "Task-bound lightbox for images (and, via `dev3 show-video`, MP4/WebM clips played in the same stage -- native controls, no autoplay, no comment mode) an agent surfaced via `dev3 show-image`, with a clickable history (thumbnail rail, newest first). One large image + prev/next + Esc; opened for a taskId regardless of route (closing restores position). Read/view only -- no git/lifecycle/mutation, as with the diff viewer."
       feature_class: ["overlay_viewer", "object_action", "notification"]
       reached_from: ["arrival_push (rpc:cliShowImage -- auto-open only when focused on that task + window foreground; else toast + attention badge)", "inspector:image_count_badge (Context bar, count>0, next to diff_summary_badge)", "archived_task_modal:shared-outputs row (per image)", "command_palette ⇧⌘P (Show shared images, scope task)", "application_menu.Task"]
       allowed: ["image_display", "history_nav (thumbnail rail + prev/next + arrows)", "copy_image", "download_image (header icon + own right-click menu; native WKWebView Save Image As is dead)", "reveal_original_path", "clear_images (destructive, confirm)", "comment_mode (one header toggle; drag a region or click a spot on the drawn picture -> image-region anchor, normalised 0..1; regions drawn over the picture; the same review aside as the artifact viewer)"]
@@ -769,12 +770,23 @@ ux_architecture:
       reject: ["screen:task navigation as the default", "screen:project split navigation", "new dashboard tab", "drawer", "popover", "multiple floating terminals"]
       status: "observed"
       rationale: "The cross-project board is the user's scan context. A focused modal overlay preserves that exact context while giving the terminal enough room; explicit full-page handoff remains available."
+    - id: "prompt-presets-in-one-picker-under-description"
+      when: { feature_class: "configuration", scope: "flow_step", surface: "modal.create_task" }
+      place_in: ["CreateTaskModal: one `Task type` radiogroup directly under the description textarea"]
+      reject: ["a second toggle elsewhere in the modal", "the branch block (unreachable on virtual projects, and a coordinator needs no branch)", "the footer (it holds submit actions, so a mode control there reads as create-now)"]
+      status: "observed"
+      rationale: "One preamble-rewriting field, one control beside it: a radiogroup with a visible Standard beats N switches. A preset lacking context is disabled with the reason, or absent when impossible. See decisions/2026/08/21/coordinator-task-type-preset.md."
     - id: "dashboard-task-row-single-complete"
       when: { feature_class: "object_action", scope: "single_task", surface: "dashboard.task_row" }
       place_in: ["dashboard.task_row (row end): exactly one Complete check, hover/focus-revealed on desktop (md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100), always visible >=44x44 on narrow, always alwaysConfirm, hidden while hibernated"]
       reject: ["a second dashboard row action", "dashboard row kebab or context menu", "the action repeated in dashboard chrome or the project header"]
       status: "observed"
       rationale: "The dashboard is the attention triage list; the row is the task's own surface, and clearing a finished row is that screen's job. Capped at one action so the row never needs a menu (issue #1252)."
+    - id: "dashboard-coordinator-rows"
+      when: { feature_class: "status", scope: "project", surface: "dashboard.project_row" }
+      place_in: ["a navigation-only row per active coordinator, atop its project"]
+      reject: ["a global panel", "a Complete check", "the footer count"]
+      status: "observed"
     - id: "dev-server-control-on-task-card"
       when: { feature_class: "dev_server_action", scope: "single_task", surface: "task_card" }
       place_in: ["task_card.actions (leading): exactly one split control — open the lowest dev port | stop the server; conditional on active + worktree + resolved devScript + not hibernated"]
@@ -898,7 +910,7 @@ ux_architecture:
       task_image_viewer: { narrow: "lightbox is full-bleed; filmstrip -> bottom horizontal-scroll strip; image area is live-content -> axis-arbitrated horizontal swipe + visible prev/next + dots (swipe never the only way); touch entry = inspector badge (>=44px) + palette action (native menu absent in remote). Clamp inner panels to max-w-[calc(100vw-2rem)]; prefers-reduced-motion snaps.", status: proposed }
       task_artifact_viewer: { narrow: "the docked panel is refused and the popup used -- a 360px-minimum side panel is unusable on a phone, while the card fills a small viewport and header actions stay touch reachable", status: observed, evidence: "TaskWorkspacePane.tsx" }
     navigation_touch:
-      problem: "Keyboard-first nav is DEAD on touch (Cmd+K/Cmd+Shift+P palettes, Cmd+1..9, Cmd+/ hint overlay) and the native application menu is ABSENT in remote/browser mode."
+      problem: "Keyboard-first nav is DEAD on touch (Cmd+Shift+K/Cmd+Shift+P palettes, Cmd+1..9, Cmd+/ hint overlay) and the native application menu is ABSENT in remote/browser mode."
       backbone: "breadcrumb spine stays the touch nav backbone (logo->dashboard, project->board, chevron->switcher, back/forward). Keep reachable (>=44px targets, right-0 dropdown fallback, not pushed off-screen by long task titles)."
       action_fallback: "command/action palette gains a TOUCH entry + responsive width on narrow; because the native menu is gone in remote, the action palette / per-object action sheets become the canonical action surface on mobile. This is the one sanctioned exception to 'palettes are keyboard-only / no button'."
       hard_rule: "NO feature may be touch-unreachable. If an action's only desktop path is a keyboard shortcut or the native menu, it MUST have a touch path on narrow (action sheet, palette, or inline control)."
@@ -921,7 +933,7 @@ ux_architecture:
     - id: "full-surface-swipe-over-terminal"
       description: "Hijacking full-pane horizontal swipe to change tmux panes. The terminal runs interactive TUIs (vim/htop/less) that consume touch and horizontal motion. Pane switching must use the explicit pager (optionally thin edge-swipe gutters), not a full-surface swipe. Full-surface swipe is allowed ONLY on the board, where column bodies scroll vertically."
     - id: "touch-unreachable-feature"
-      description: "An action whose only path is a keyboard shortcut (Cmd+K/Cmd+Shift+P/Cmd+1..9/hint overlay) or the native application menu. On narrow (<768) it is dead — no keyboard, and the native menu is absent in remote. Every feature needs a touch path (palette touch entry, action sheet, or inline control). See responsive.navigation_touch."
+      description: "An action whose only path is a keyboard shortcut (Cmd+Shift+K/Cmd+Shift+P/Cmd+1..9/hint overlay) or the native application menu. On narrow (<768) it is dead — no keyboard, and the native menu is absent in remote. Every feature needs a touch path (palette touch entry, action sheet, or inline control). See responsive.navigation_touch."
     - id: "fixed-width-overlay-on-narrow"
       description: "A Modal/palette/popover with a hardcoded w-[NNrem] and no max-w-[calc(100vw-2rem)] overflows a 390px phone (PaletteShell 34rem, TaskDetailModal 35rem, confirm() 26rem, diff aside 22rem). Overlays must clamp to the viewport on narrow."
     - id: "non-wrapping-toolbar-on-narrow"

@@ -1,13 +1,14 @@
 import type { Task } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
 import { isTaskBlocked } from "../../shared/task-blocking";
+import { earlierPullRequests } from "../../shared/task-pull-requests";
 
 /**
  * Token-DSL task search & filter engine.
  *
  * The search string is the SINGLE source of truth for both free-text search
  * and structured filtering. A query mixes recognized facet tokens
- * (`label:"Bug Fix" agent:Codex status:review is:attention has:port`) with
+ * (`label:"Bug Fix" agent:Codex status:review type:coordinator is:attention has:port`) with
  * ordinary free text (`login`). The same parser drives the Kanban filter bar
  * and the Active Tasks sidebar so both surfaces behave identically.
  *
@@ -22,7 +23,7 @@ import { isTaskBlocked } from "../../shared/task-blocking";
  */
 
 /** Ordered set of recognized facet keys. Extend here to add a facet. */
-export const FACET_KEYS = ["priority", "label", "agent", "status", "space", "is", "has"] as const;
+export const FACET_KEYS = ["priority", "label", "agent", "status", "type", "space", "is", "has"] as const;
 export type FacetKey = (typeof FACET_KEYS)[number];
 
 /**
@@ -35,11 +36,13 @@ export interface TaskQueryContext {
 	/** The task's resolved agent display name, or null when unassigned. */
 	agentName: string | null;
 	/**
-	 * Every value a `status:` token may substring-match: the internal status id,
-	 * the localized status label, and the custom-column name when the task is
-	 * parked in one.
+	 * Every value a `status:` token may substring-match: the internal status id
+	 * and localized status label — or only the custom-column name when the task
+	 * is parked in one (see `taskStatusValues`).
 	 */
 	statusValues: string[];
+	/** The task's type id: `standard` for an untyped task, else its `TaskType`. */
+	taskType: string;
 	/** True when the task currently has at least one allocated port. */
 	hasPort: boolean;
 	/** True when the task needs the user's attention (see `is:attention`). */
@@ -47,6 +50,8 @@ export interface TaskQueryContext {
 	isBlocked?: boolean;
 	/** True when the task is hidden from the Active Tasks sidebar (`is:hidden`). */
 	isHidden: boolean;
+	/** True while the task is hibernated or disconnected (`is:hibernated`). */
+	isHibernated: boolean;
 	/** The task's effective priority level (e.g. "p2"), lowercased. */
 	priorityValue: string;
 	/** Names of every space the task's project belongs to; [] when it is in none.
@@ -89,6 +94,11 @@ const FACET_DEFS: Record<FacetKey, FacetDef> = {
 		kind: "free",
 		match: (ctx, v) => ctx.statusValues.some((s) => s.toLowerCase().includes(v)),
 	},
+	type: {
+		key: "type",
+		kind: "free",
+		match: (ctx, v) => ctx.taskType.includes(v),
+	},
 	space: {
 		key: "space",
 		kind: "free",
@@ -97,7 +107,7 @@ const FACET_DEFS: Record<FacetKey, FacetDef> = {
 	is: {
 		key: "is",
 		kind: "flag",
-		flagValues: ["attention", "home", "blocked", "hidden"],
+		flagValues: ["attention", "home", "blocked", "hidden", "hibernated"],
 		match: (ctx, v) => {
 			if (v === "blocked") return ctx.isBlocked === true;
 			if (v === "attention") return ctx.isAttention;
@@ -105,6 +115,7 @@ const FACET_DEFS: Record<FacetKey, FacetDef> = {
 			// a flag value, so it can never collide with a real space name.
 			if (v === "home") return ctx.spaceNames !== null && ctx.spaceNames.length === 0;
 			if (v === "hidden") return ctx.isHidden;
+			if (v === "hibernated") return ctx.isHibernated;
 			return false;
 		},
 	},
@@ -142,7 +153,7 @@ function unescapeDslValue(inner: string): string {
 }
 
 function emptyFacets(): Record<FacetKey, string[]> {
-	return { priority: [], label: [], agent: [], status: [], space: [], is: [], has: [] };
+	return { priority: [], label: [], agent: [], status: [], type: [], space: [], is: [], has: [] };
 }
 
 /**
@@ -239,25 +250,29 @@ function matchesFreeText(task: Task, freeText: string, prNumber?: number | null)
 
 	if (task.id.toLowerCase().startsWith(q)) return true;
 
-	// Live PR data when the surface has it, else the task's sticky PR fields.
-	const prNumberValue = prNumber ?? task.prNumber ?? null;
+	// Live PR data when the surface has it, else the task's sticky PR fields; the
+	// finished PRs a follow-up replaced stay findable too.
+	const currentPrNumber = prNumber ?? task.prNumber ?? null;
+	const prs: Array<{ number: number; url: string | null }> = [
+		...(currentPrNumber != null ? [{ number: currentPrNumber, url: task.prUrl ?? null }] : []),
+		...earlierPullRequests(task),
+	];
 
 	const queryPrUrl = prUrlIdentity(q);
 	if (queryPrUrl) {
-		const taskPrUrl = task.prUrl ? prUrlIdentity(task.prUrl) : null;
-		if (taskPrUrl) return taskPrUrl === queryPrUrl;
-		// Repo unknown for this task: fall back to the number the link carries.
-		return prNumberValue != null && String(prNumberValue) === queryPrUrl.split("/").pop();
+		return prs.some((pr) => {
+			const taskPrUrl = pr.url ? prUrlIdentity(pr.url) : null;
+			if (taskPrUrl) return taskPrUrl === queryPrUrl;
+			// Repo unknown for this PR: fall back to the number the link carries.
+			return String(pr.number) === queryPrUrl.split("/").pop();
+		});
 	}
 
-	if (prNumberValue != null) {
-		const prStr = String(prNumberValue);
-		if (prStr.startsWith(qNormalized)) return true;
-		const bare = qNormalized.replace(/^(?:pull|pr)[\s#/-]*/, "");
-		if (bare && prStr.startsWith(bare)) return true;
-	}
-
-	return false;
+	const bare = qNormalized.replace(/^(?:pull|pr)[\s#/-]*/, "");
+	return prs.some((pr) => {
+		const prStr = String(pr.number);
+		return prStr.startsWith(qNormalized) || (bare !== "" && prStr.startsWith(bare));
+	});
 }
 
 /**

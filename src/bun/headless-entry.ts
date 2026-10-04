@@ -38,6 +38,8 @@ import { BUILD_TIME, BUILD_VERSION } from "../shared/build-info.generated";
 import { rehydrateTaskLifecycles } from "./lifecycle/rehydrate";
 import { startSelfUpdateWatch, stopSelfUpdateWatch } from "./self-update-watch";
 import { VIEWS_DIR_AUTO_ENV } from "./self-update";
+import { configureHandoffWorker } from "./conversation-handoff-runner";
+import { configureClonefileWorker } from "./cow-clone";
 
 const log = createLogger("headless");
 
@@ -173,6 +175,11 @@ if (!process.env.DEV3_VIEWS_DIR) {
 		log.warn("Could not locate dist/ with index.html", { candidates });
 	}
 }
+// Headless serves dist/ itself, and the worker bundles sit inside it.
+if (process.env.DEV3_VIEWS_DIR) {
+	configureHandoffWorker(resolve(process.env.DEV3_VIEWS_DIR, "workers", "conversation-handoff-worker.js"));
+	configureClonefileWorker(resolve(process.env.DEV3_VIEWS_DIR, "workers", "clonefile-worker.js"));
+}
 
 // ── Ensure ~/.dev3.0/bin/dev3 resolves to this binary ──
 // Agent hooks, the injected dev3 skill, and lifecycle onExit commands all call
@@ -232,6 +239,17 @@ if (shellEnv.ghConfigDir) {
 const { loadSettings } = await import("./settings");
 applyFullShellEnvToProcess(shellEnv, (await loadSettings()).importShellEnv !== false);
 
+// ── dev3 skills + agent settings, same as the GUI entry ──
+// After PATH resolution, because the Codex half probes the `codex` binary.
+{
+	try {
+		const { installAgentSkills } = await import("./agent-skills");
+		await installAgentSkills({ lowBattery: (await loadSettings()).lowBatteryEnabled });
+	} catch (err) {
+		console.error("[headless] dev3 skill install failed (non-fatal):", err);
+	}
+}
+
 // ── CLI socket server (required — CLI tool talks to the app over this) ──
 // Unlike the GUI entry, headless mode has no other control surface: `dev3 remote
 // status/url/stop` reach this process only over this transport.
@@ -280,7 +298,7 @@ setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
 writeTmuxConfigs();
 const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
-await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, initialAppearance.appearancePreset);
+await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: initialAppearance.appearancePreset });
 
 // Port-tunnels module needs the same broadcast hook for `exposedPortsChanged`
 // events so connected browsers see new public URLs appear in real time.

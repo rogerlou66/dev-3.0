@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { cloneElement, useEffect, useMemo, useRef, useState, type Dispatch, type ReactElement, type ReactNode } from "react";
 import type { BranchStatus, Project, Task, TaskPRBadgeInfo } from "../../../shared/types";
+import { earlierPullRequests } from "../../../shared/task-pull-requests";
 import type { AppAction, Route } from "../../state";
 import { useT } from "../../i18n";
 import { api } from "../../rpc";
@@ -12,6 +13,8 @@ import { toast } from "../../toast";
 import type { TaskInlineDiffRequest } from "../task-inline-diff";
 import { AutoMergeIcon, BranchIcon, CommitIcon, CreatePRIcon, MergeIcon, PushIcon, RebaseIcon, ShowDiffIcon } from "./GitIcons";
 import TaskPrStatusPopover from "../TaskPrStatusPopover";
+import { inspectorPRBadge, isLivePullRequest } from "../../utils/taskPrBadge";
+import { prBadgeDisplayState, prStateTone } from "../../utils/prStateTone";
 
 export interface TaskBranchStatusMeta {
 	/** Which task this status describes — the panel drops it once they diverge. */
@@ -192,21 +195,8 @@ export default function TaskGitActions({
 	}, [project.id, task.id]);
 
 	const prInfo = useMemo<TaskPRBadgeInfo | null>(
-		() => pushedPRStatus
-			?? (branchStatus?.prNumber != null
-				? {
-					number: branchStatus.prNumber,
-					url: branchStatus.prUrl ?? "",
-					ciStatus: null,
-					reviewState: null,
-				}
-				: task.prNumber != null
-					? {
-						number: task.prNumber,
-						url: task.prUrl ?? "",
-					}
-					: null),
-		[pushedPRStatus, branchStatus, task.prNumber, task.prUrl],
+		() => inspectorPRBadge(task, pushedPRStatus, branchStatus),
+		[pushedPRStatus, branchStatus, task],
 	);
 
 	useEffect(() => {
@@ -326,8 +316,10 @@ export default function TaskGitActions({
 		})
 		: undefined;
 
-	const prBadge = prInfo ? (
-		<TaskPrStatusPopover prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
+	const prState = prInfo ? prBadgeDisplayState(prInfo, branchStatus, task.prStatusCache) : null;
+	const prTone = prState ? prStateTone(prState) : null;
+	const prBadge = prInfo && prTone && prState ? (
+		<TaskPrStatusPopover prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} displayState={prState}>
 			<button
 				type="button"
 				onClick={(event) => {
@@ -336,10 +328,11 @@ export default function TaskGitActions({
 						window.open(prInfo.url, "_blank");
 					}
 				}}
-				className="inline-flex items-center gap-1 text-dense font-mono font-semibold text-success bg-success/10 hover:bg-success/20 px-1.5 py-0.5 rounded transition-colors flex-shrink-0"
+				className={`inline-flex items-center gap-1 text-dense font-mono font-semibold px-1.5 py-0.5 rounded transition-colors flex-shrink-0 ${prTone.chip}`}
 			>
 				<span className="text-micro leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0401}"}</span>
 				{t("task.prBadge", { number: String(prInfo.number) })}
+				{prTone.labelKey && <span className="sr-only">{` — ${t(prTone.labelKey)}`}</span>}
 				{(prInfo.unresolvedCount ?? 0) > 0 && (
 					<span className="inline-flex items-center gap-0.5 text-warning-strong" aria-label={t.plural("task.prUnresolvedComments", prInfo.unresolvedCount ?? 0)}>
 						<span className="leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF086"}</span>
@@ -417,7 +410,11 @@ export default function TaskGitActions({
 						? t(hasUncommittedChanges ? "infoPanel.pushDisabledUncommitted" : "infoPanel.pushDisabled")
 						: t("infoPanel.push");
 
-	const hasPR = prInfo !== null;
+	const hasPR = isLivePullRequest(prInfo?.number, [
+		pushedPRStatus && { number: pushedPRStatus.number, state: pushedPRStatus.mergeState?.state },
+		branchStatus && { number: branchStatus.prNumber, state: branchStatus.prState },
+		task.prStatusCache && { number: task.prStatusCache.number, state: task.prStatusCache.mergeState?.state },
+	]);
 	const createPRDisabled = hasPR
 		? !branchStatus?.prUrl
 		: (noRemote || noGitHubRemote || !branchStatus || branchStatus.ahead === 0 || creatingPR);

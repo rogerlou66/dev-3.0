@@ -18,6 +18,7 @@ const presetState = vi.hoisted(() => ({ value: "default" as "default" | "cmux" }
 vi.mock("../../../appearance-preset", () => ({ useAppearancePreset: () => presetState.value }));
 
 vi.mock("../TerminalBackendSetting", () => ({ default: () => null }));
+vi.mock("../ShellPromptGallery", () => ({ default: () => null }));
 
 const MAC: ShellAvailability = {
 	resolved: { path: "/bin/zsh", flavor: "zsh", requested: "auto", fellBack: false },
@@ -51,6 +52,10 @@ function Harness(props: {
 			onTerminalPathOpenModeChange={vi.fn()}
 			onTerminalShellChange={props.onTerminalShellChange}
 			onDimInactivePanesToggle={vi.fn()}
+			shellPrompt={undefined}
+			shellPromptCustom={undefined}
+			onShellPromptChange={vi.fn()}
+			onShellPromptCustomSave={vi.fn()}
 		/>
 	);
 }
@@ -156,6 +161,10 @@ function DimHarness({ value, onToggle }: { value: boolean | undefined; onToggle:
 			onTerminalPathOpenModeChange={vi.fn()}
 			onTerminalShellChange={vi.fn()}
 			onDimInactivePanesToggle={onToggle}
+			shellPrompt={undefined}
+			shellPromptCustom={undefined}
+			onShellPromptChange={vi.fn()}
+			onShellPromptCustomSave={vi.fn()}
 		/>
 	);
 }
@@ -189,6 +198,10 @@ function renderFontSection(family = "", size = DEFAULT_TERMINAL_FONT_SIZE) {
 				onTerminalPathOpenModeChange={vi.fn()}
 				onTerminalShellChange={vi.fn()}
 				onDimInactivePanesToggle={vi.fn()}
+				shellPrompt={undefined}
+				shellPromptCustom={undefined}
+				onShellPromptChange={vi.fn()}
+				onShellPromptCustomSave={vi.fn()}
 			/>
 		</I18nProvider>,
 	);

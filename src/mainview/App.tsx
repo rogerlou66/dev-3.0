@@ -1,7 +1,7 @@
 import { syncAppearanceSettings } from "./appearance-preset";
 import InterfaceOnboarding from "./components/InterfaceOnboarding";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useAppState, canGoBack, routeTaskId, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskOpenRoute, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
+import { useAppState, canGoBack, routeTaskId, routeShowsTaskWorkspace, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskOpenRoute, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
@@ -34,6 +34,7 @@ import AddProjectModal from "./components/AddProjectModal";
 import ImportConversationsModal from "./components/ImportConversationsModal";
 import CreateTaskModal from "./components/CreateTaskModal";
 import LaunchVariantsModal from "./components/LaunchVariantsModal";
+import { LAUNCH_REQUESTED_EVENT, type LaunchRequestedDetail } from "./utils/moveTaskToStatus";
 import ProjectView from "./components/ProjectView";
 import TaskWorkspaceView from "./components/TaskWorkspaceView";
 import ProjectTerminal from "./components/ProjectTerminal";
@@ -45,9 +46,10 @@ import GaugeDemo from "./components/gauges/GaugeDemo";
 import ProductivityStatsView from "./components/ProductivityStatsView";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
-import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
+import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastLink, type ToastOrigin } from "./toast";
 import { useSpaces } from "./useSpaces";
 import AgentTrafficScreen from "./components/agent-traffic/AgentTrafficScreen";
+import { AgentTrafficIcon } from "./components/HeaderIcons";
 import { noteTrafficArrival } from "./agent-traffic";
 import {
 	OPEN_AGENT_TRAFFIC_LOG_EVENT,
@@ -84,6 +86,7 @@ import { useTaskSwitcher } from "./hooks/useTaskSwitcher";
 import TaskSwitcherOverlay from "./components/TaskSwitcherOverlay";
 import ProjectQuickSwitchModal from "./components/ProjectQuickSwitchModal";
 import CommandPaletteModal from "./components/CommandPaletteModal";
+import CoordinatorFinderModal from "./components/CoordinatorFinderModal";
 import OpenInPickerModal from "./components/OpenInPickerModal";
 import TaskImageViewer from "./components/TaskImageViewer";
 import TaskArtifactViewer from "./components/TaskArtifactViewer";
@@ -117,6 +120,8 @@ const QR_BOX_SIZE = "w-[min(14rem,26vh)] h-[min(14rem,26vh)]";
 const QR_REFRESH_SECONDS = 60;
 
 const QUIT_AUTO_CONFIRM_SECONDS = 10;
+
+type NavPalette = "project" | "command" | "coordinator";
 
 type RemoteAccessQRData = {
 	qrDataUrl: string;
@@ -179,6 +184,41 @@ function reduceWorkspaceTasks(target: WorkspaceTaskTarget, action: AppAction): W
 
 function isRemoteTunnelActive(tunnelState?: string): boolean {
 	return tunnelState === "starting" || tunnelState === "connected";
+}
+
+/** One task an agent-message toast names, with what it needs to be opened and spoken. */
+interface AgentToastEnd {
+	taskId: string;
+	projectId: string;
+	/** `21`, or `21-2` for one attempt of a variant group. */
+	seq: string;
+	title?: string;
+	/** Set only when the message crossed boards. */
+	projectName?: string;
+}
+
+/** Paper plane: the end that sent the message (the toast itself is the envelope). */
+function SentIcon() {
+	return (
+		<svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+			<path d="M21 3 10.5 13.5" />
+			<path d="M21 3 14.5 21l-4-7.5L3 9.5 21 3Z" />
+		</svg>
+	);
+}
+
+/** Inbox tray: the end the message landed in. */
+function ReceivedIcon() {
+	return (
+		<svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+			<path d="M3 13h5l1.5 3h5L16 13h5" />
+			<path d="M5.5 5h13L21 13v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5l2.5-8Z" />
+		</svg>
+	);
+}
+
+function variantSeqLabel(seq: number, variantIndex: number | undefined): string {
+	return variantIndex != null ? `${seq}-${variantIndex}` : `${seq}`;
 }
 
 /**
@@ -470,13 +510,16 @@ function App() {
 		setImportOfferQueue((q) => (q.some((entry) => entry.project.id === project.id) ? q : [...q, { project, autoOffer }]));
 	}, []);
 	const [openAddProjectOnDashboard, setOpenAddProjectOnDashboard] = useState(false);
-	const [showProjectSwitch, setShowProjectSwitch] = useState(false);
+	// The navigation palettes (⇧⌘K, ⇧⌘P, Find coordinator) share one slot: opening one
+	// replaces whichever is open, so they can never stack.
+	const [navPalette, setNavPalette] = useState<NavPalette | null>(null);
+	const closeNavPalette = useCallback((kind: NavPalette) => setNavPalette((open) => (open === kind ? null : open)), []);
+	const toggleNavPalette = useCallback((kind: NavPalette) => setNavPalette((open) => (open === kind ? null : kind)), []);
 	const [workspaceBoardRequest, setWorkspaceBoardRequest] = useState(0);
 	const [dashboardHeaderSlot, setDashboardHeaderSlot] = useState<HTMLDivElement | null>(null);
 	const { spaces: appSpaces } = useSpaces();
 	// Cmd/Ctrl+O picker when no app is chosen yet (or the chosen one is gone).
 	const [openInPicker, setOpenInPicker] = useState<{ path: string; taskId?: string } | null>(null);
-	const [showCommandPalette, setShowCommandPalette] = useState(false);
 	// Vimium-style task hint navigation overlay (toggled with `f` on the board).
 	const [hintMode, setHintMode] = useState(false);
 	// Help mode — the "Explain this screen" overlay (bible §5.4). Entered via
@@ -499,6 +542,16 @@ function App() {
 	// The guided tour prefills its sandbox task; closing the modal clears it.
 	const [createTaskInitialText, setCreateTaskInitialText] = useState<string>("");
 	const [launchModal, setLaunchModal] = useState<{ task: Task; targetStatus: TaskStatus; project: Project } | null>(null);
+	// Surfaces that only know "move to status" (context menu, native menu) start a
+	// To Do card through the same launch modal the board uses.
+	useEffect(() => {
+		const onLaunchRequested = (e: Event) => {
+			const { task, project, targetStatus } = (e as CustomEvent<LaunchRequestedDetail>).detail;
+			setLaunchModal({ task, project, targetStatus });
+		};
+		window.addEventListener(LAUNCH_REQUESTED_EVENT, onLaunchRequested);
+		return () => window.removeEventListener(LAUNCH_REQUESTED_EVENT, onLaunchRequested);
+	}, []);
 	// Lightbox for images an agent surfaced via `dev3 show-image`, bound to a task.
 	// `newIds` freezes which images were unread at open time: opening marks them
 	// read, so without the snapshot the "these three are new" highlight would
@@ -577,15 +630,15 @@ function App() {
 	const artifactDockTaskId = artifactViewer && !artifactViewer.paneless && globalSettings.openArtifactsInPopup !== true
 		? artifactViewer.taskId
 		: null;
-	// A docked panel belongs to its task's screen. Leaving that screen used to clear
-	// the dock slot and re-host the same viewer as a centred popup over whatever
-	// board came next; instead it waits offscreen — still mounted, so the document,
-	// the version pick and an unsent draft come back with it — until the route
-	// returns to the task or the user closes it.
+	// A docked panel belongs to its task's screen. Leaving that screen — or covering
+	// it with the inline diff — used to clear the dock slot and re-host the same
+	// viewer as a centred popup; instead it waits offscreen — still mounted, so the
+	// document, the version pick and an unsent draft come back with it — until the
+	// task's workspace is on screen again or the user closes it.
 	const artifactOffscreen = artifactViewer !== null
 		&& !artifactViewer.paneless
 		&& globalSettings.openArtifactsInPopup !== true
-		&& effectiveTaskId !== artifactViewer.taskId;
+		&& !(workspaceTaskTarget?.taskId === artifactViewer.taskId || routeShowsTaskWorkspace(state.route, artifactViewer.taskId));
 	// Auth failure for browser remote access (expired/invalid session).
 	// Seeded from the transport: with a dead session the expired verdict lands
 	// BEFORE React mounts (the boot probe on localhost beats the app bootstrap),
@@ -852,7 +905,7 @@ function App() {
 	}, [state.route]);
 
 	// Single chokepoint for committing a navigation. Records a project "jump"
-	// for the Cmd+K recency list whenever the destination route lands on a
+	// for the Cmd+Shift+K recency list whenever the destination route lands on a
 	// project, so every entry point (Dashboard click, Cmd+1..9, Cmd+Shift+1..9,
 	// the palette, the `g`-prefix go-to, terminal toggles, future ones…) is
 	// covered automatically — they all funnel through here.
@@ -887,7 +940,7 @@ function App() {
 	const navigate = useCallback(
 		(route: Route) => {
 			// One guard for every entry point into a sensitive project (card, Cmd+1..9,
-			// Cmd+K, palette, deep link, notification click, hint overlay). Checked
+			// Cmd+Shift+K, palette, deep link, notification click, hint overlay). Checked
 			// before the dirty-form guard: a refused route must not prompt to save.
 			if (isRouteLocked(route)) {
 				toast.info(t("streamer.projectLocked"), { projectId: projectIdForRoute(route) ?? undefined });
@@ -960,6 +1013,41 @@ function App() {
 		[navigate, setTerminalImmersiveActive],
 	);
 
+	const projectsRef = useRef(state.projects);
+	projectsRef.current = state.projects;
+
+	// One end of an agent-message toast, looked up at click time: the toast can
+	// outlive the task. A task that is gone says so instead of opening an empty
+	// screen; one that left the active columns opens as its board card, which is
+	// where a finished task lives. Opening never wakes or resumes anything.
+	const openAgentToastEnd = useCallback(
+		async (end: AgentToastEnd) => {
+			const gone = () =>
+				toast.info(t("toast.agent.taskGone", { seq: end.seq }), {
+					context: [`#${end.seq}`, end.title].filter(Boolean).join(" "),
+				});
+			if (!projectsRef.current.some((p) => p.id === end.projectId)) {
+				gone();
+				return;
+			}
+			let tasks: Task[] | undefined;
+			try {
+				tasks = await api.request.getTasks({ projectId: end.projectId });
+			} catch {
+				tasks = undefined;
+			}
+			// No answer is not an answer: navigate as before rather than call it gone.
+			const task = Array.isArray(tasks) ? tasks.find((candidate) => candidate.id === end.taskId) : undefined;
+			if (Array.isArray(tasks) && !task) {
+				gone();
+				return;
+			}
+			const archived = task ? !ACTIVE_STATUSES.includes(task.status) : false;
+			openTaskFromNotification(end.taskId, end.projectId, { archived });
+		},
+		[openTaskFromNotification, t],
+	);
+
 
 	useEffect(() => {
 		if (terminalImmersive && !isTaskTerminalRoute(state.route) && !workspaceTaskTarget) {
@@ -991,7 +1079,7 @@ function App() {
 	// Switch to a project, preserving the current view shape the same way Cmd+1..9
 	// does: in a task view with split open-mode, land in the target's task view
 	// (no task selected); otherwise land on its Kanban board. Shared by the
-	// Cmd+1..9 index shortcuts and the Cmd+K quick-switch palette.
+	// Cmd+1..9 index shortcuts and the Cmd+Shift+K quick-switch palette.
 	const navigateToProject = useCallback(
 		(projectId: string) => {
 			const route = state.route;
@@ -1161,7 +1249,7 @@ function App() {
 		return map;
 	}, [state.projects]);
 
-	// Quick-switch (Cmd+K) data, recomputed each time the palette opens so the
+	// Quick-switch (Cmd+Shift+K) data, recomputed each time the palette opens so the
 	// recency ordering reflects the latest jumps. Rows are MRU-first (then board
 	// order); the ⌘N badge stays keyed to the stable board index.
 	const quickSwitch = useMemo(() => {
@@ -1177,10 +1265,10 @@ function App() {
 		// Pin the builtin Operations board first (consistent with the dashboard,
 		// header switcher, and sidebar), then recency, then board order.
 		const ordered = orderProjectsForDisplay(
-			showProjectSwitch ? orderByRecency(boardProjects, getRecentProjectIds()) : boardProjects,
+			navPalette === "project" ? orderByRecency(boardProjects, getRecentProjectIds()) : boardProjects,
 		);
 		return { projects: ordered, shortcutIndexById };
-	}, [state.projects, showProjectSwitch]);
+	}, [state.projects, navPalette]);
 
 	const getProjectIdForRoute = useCallback((route: Route): string | null => projectIdForRoute(route), []);
 
@@ -1230,12 +1318,12 @@ function App() {
 	// palette is a DOM mirror of the menu rather than a second command runner.
 	const runCommand = useCallback(
 		(actionId: string) => {
-			setShowCommandPalette(false);
+			closeNavPalette("command");
 			handleMenuAction(actionId, { state: effectiveMenuState, dispatch: workspaceDispatch, setLocale, t }).catch((err) => {
 				console.error("[App] runCommand failed", err);
 			});
 		},
-		[effectiveMenuState, setLocale, workspaceDispatch],
+		[effectiveMenuState, setLocale, workspaceDispatch, closeNavPalette],
 	);
 
 	// Browser-mode menu bar (`AppMenuBar`) dispatches through the same router as
@@ -1255,9 +1343,10 @@ function App() {
 		const onNewTask = () => openCreateTaskModal();
 		const onAddProject = () => openAddProject();
 		// The View-menu palette items open (not toggle) the palettes — the
-		// Cmd+K / Cmd+Shift+P keydown handlers below own the toggle behavior.
-		const onProjectSwitch = () => setShowProjectSwitch(true);
-		const onCommandPalette = () => setShowCommandPalette(true);
+		// Cmd+Shift+K / Cmd+Shift+P keydown handlers below own the toggle behavior.
+		const onProjectSwitch = () => setNavPalette("project");
+		const onCommandPalette = () => setNavPalette("command");
+		const onCoordinatorFinder = () => setNavPalette("coordinator");
 		const onImportConversations = (e: Event) => {
 			const projectId = (e as CustomEvent<{ projectId: string }>).detail?.projectId;
 			const project = state.projects.find((p) => p.id === projectId);
@@ -1268,12 +1357,14 @@ function App() {
 		window.addEventListener("menu:open-add-project", onAddProject);
 		window.addEventListener("menu:open-project-switch", onProjectSwitch);
 		window.addEventListener("menu:open-command-palette", onCommandPalette);
+		window.addEventListener("menu:open-coordinator-finder", onCoordinatorFinder);
 		return () => {
 			window.removeEventListener("menu:import-conversations", onImportConversations);
 			window.removeEventListener("menu:open-new-task", onNewTask);
 			window.removeEventListener("menu:open-add-project", onAddProject);
 			window.removeEventListener("menu:open-project-switch", onProjectSwitch);
 			window.removeEventListener("menu:open-command-palette", onCommandPalette);
+			window.removeEventListener("menu:open-coordinator-finder", onCoordinatorFinder);
 		};
 	}, [openCreateTaskModal, openAddProject, enqueueImportOffer, state.projects]);
 
@@ -1433,14 +1524,14 @@ function App() {
 				e.preventDefault();
 				e.stopPropagation();
 				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
-				setShowProjectSwitch((open) => !open);
+				toggleNavPalette("project");
 			} else if (matchesShortcut(e, "command-palette")) {
 				// The action (command) palette (VSCode convention). The navigation
 				// sibling is `go-to-project`.
 				e.preventDefault();
 				e.stopPropagation();
 				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
-				setShowCommandPalette((open) => !open);
+				toggleNavPalette("command");
 			} else if (matchesShortcut(e, "keyboard-shortcuts")) {
 				// Capture phase so the live terminal underneath can't swallow it. Bare
 				// `?` is intentionally NOT used — the terminal must still receive it.
@@ -1846,22 +1937,25 @@ function App() {
 
 	// One agent wrote into another task's agent (`dev3 message` from a worktree).
 	// Its own violet variant and a two-identity source line — the only toast whose
-	// event has a sender AND a receiver. With the traffic beta on, the click opens
-	// the traffic screen, where both identities and the full text live; with it off
-	// it falls back to the RECEIVER, where the text landed and the reply gets typed.
+	// event has a sender AND a receiver. The card's own click opens the traffic
+	// screen with the beta on, else the RECEIVER; both names in the source line and
+	// the labelled actions open each end directly (decisions/2026/10/02/agent-message-toast-names-every-destination.md).
 	useEffect(() => {
 		function onAgentMessage(e: Event) {
-			const { taskId, projectId, fromProjectId, toSeq, toTitle, fromSeq, fromTitle, preview } = (e as CustomEvent)
-				.detail as {
+			const detail = (e as CustomEvent).detail as {
 				taskId: string;
 				projectId: string;
 				fromProjectId?: string;
+				fromTaskId?: string;
+				fromVariantIndex?: number;
+				toVariantIndex?: number;
 				toSeq: number;
 				toTitle: string;
 				fromSeq: number;
 				fromTitle?: string;
 				preview: string;
 			};
+			const { taskId, projectId, fromProjectId, toSeq, toTitle, fromSeq, fromTitle, preview } = detail;
 			if (!taskId || !preview) return;
 			// This window is already showing the traffic screen, where the message
 			// lands in full — a toast previewing it would cover its own destination.
@@ -1869,33 +1963,98 @@ function App() {
 			if (isAgentTrafficVisible() && routeRef.current.screen === "agent-traffic") return;
 			// Either side sensitive on camera drops the whole toast: it names both.
 			if (isProjectSilencedForDisplay(projectId) || isProjectSilencedForDisplay(fromProjectId)) return;
-			const from = [`#${fromSeq}`, fromTitle].filter(Boolean).join(" ");
-			const to = [`#${toSeq}`, toTitle].filter(Boolean).join(" ");
+
+			const senderProjectId = fromProjectId ?? projectId;
+			// Name the projects only when the two ends live on different boards.
+			const crossProject = senderProjectId !== projectId;
+			const projectName = (id: string) => projectsRef.current.find((p) => p.id === id)?.name;
+			const recipient: AgentToastEnd = {
+				taskId,
+				projectId,
+				seq: variantSeqLabel(toSeq, detail.toVariantIndex),
+				title: toTitle,
+				projectName: crossProject ? projectName(projectId) : undefined,
+			};
+			const sender: AgentToastEnd | undefined = detail.fromTaskId
+				? {
+					taskId: detail.fromTaskId,
+					projectId: senderProjectId,
+					seq: variantSeqLabel(fromSeq, detail.fromVariantIndex),
+					title: fromTitle,
+					projectName: crossProject ? projectName(senderProjectId) : undefined,
+				}
+				: undefined;
+			const fromLabel = sender?.seq ?? variantSeqLabel(fromSeq, detail.fromVariantIndex);
+			const from = [`#${fromLabel}`, fromTitle].filter(Boolean).join(" ");
+			const to = [`#${recipient.seq}`, toTitle].filter(Boolean).join(" ");
+			const describe = (end: AgentToastEnd) =>
+				[`#${end.seq}`, end.title, end.projectName && `· ${end.projectName}`].filter(Boolean).join(" ");
+			const senderAria = sender && t("toast.agent.openSender", { task: describe(sender) });
+			const recipientAria = t("toast.agent.openRecipient", { task: describe(recipient) });
+			const link = (end: AgentToastEnd, ariaLabel: string): ToastLink => ({
+				lead: `#${end.seq}`,
+				label: end.title,
+				suffix: end.projectName ? `· ${end.projectName}` : undefined,
+				ariaLabel,
+				onClick: () => void openAgentToastEnd(end),
+			});
+
+			// Decided once, when the toast is raised, because the card's accessible name
+			// and the traffic action both say where a click goes. A beta switched OFF
+			// later leaves nothing to open, so the click then falls back to the receiver.
+			const trafficOffered = isAgentTrafficVisible();
+			const openTraffic = () => {
+				if (!trafficOffered || !isAgentTrafficVisible()) {
+					void openAgentToastEnd(recipient);
+					return;
+				}
+				// Already there — the shortcut toggles, but a toast has nothing to
+				// toggle back to, and navigating again would stack a second identical
+				// history entry and make Back a dead key.
+				if (routeRef.current.screen === "agent-traffic") return;
+				// All projects, never the board in view: the message the toast is
+				// about may belong to any board, and seeding the current one hides
+				// exactly the traffic the click was asking to see. The RECEIVER
+				// rides along as the screen's subject — the click is about one
+				// task, and it lands the same way clicking that card would.
+				openAgentTrafficLog("all-projects", { taskId, projectId });
+			};
+
 			toast.agent(t("toast.agentMessage", { preview }), {
 				context: `${from} → ${to}`,
+				contextParts: [
+					sender ? link(sender, senderAria!) : from,
+					"→",
+					link(recipient, recipientAria),
+				],
+				clickLabel: trafficOffered ? t("traffic.openLog") : recipientAria,
 				taskId,
-				// Read the flag at CLICK time, not here: a toast can outlive a toggle.
-				onClick: () => {
-					if (!isAgentTrafficVisible()) {
-						openTaskFromNotification(taskId, projectId);
-						return;
-					}
-					// Already there — the shortcut toggles, but a toast has nothing to
-					// toggle back to, and navigating again would stack a second identical
-					// history entry and make Back a dead key.
-					if (routeRef.current.screen === "agent-traffic") return;
-					// All projects, never the board in view: the message the toast is
-					// about may belong to any board, and seeding the current one hides
-					// exactly the traffic the click was asking to see. The RECEIVER
-					// rides along as the screen's subject — the click is about one
-					// task, and it lands the same way clicking that card would.
-					openAgentTrafficLog("all-projects", { taskId, projectId });
-				},
+				onClick: openTraffic,
+				actions: [
+					...(sender
+						? [{
+							label: `#${sender.seq}`,
+							icon: <SentIcon />,
+							ariaLabel: t("toast.agent.sender", { seq: sender.seq }),
+							emphasis: true,
+							onClick: () => void openAgentToastEnd(sender),
+						}]
+						: []),
+					...(trafficOffered
+						? [{ label: t("traffic.label"), icon: <AgentTrafficIcon className="h-3.5 w-3.5" />, shrink: true, onClick: openTraffic }]
+						: []),
+					{
+						label: `#${recipient.seq}`,
+						icon: <ReceivedIcon />,
+						ariaLabel: t("toast.agent.recipient", { seq: recipient.seq }),
+						onClick: () => void openAgentToastEnd(recipient),
+					},
+				],
 			});
 		}
 		window.addEventListener("rpc:agentMessage", onAgentMessage);
 		return () => window.removeEventListener("rpc:agentMessage", onAgentMessage);
-	}, [openTaskFromNotification, t]);
+	}, [openAgentToastEnd, t]);
 
 	useEffect(() => {
 		function onLogChanged(event: Event) {
@@ -1967,11 +2126,12 @@ function App() {
 	// the lightbox ONLY when the user is already looking at this task (never steal focus).
 	useEffect(() => {
 		function onCliShowImage(e: Event) {
-			const { taskId, projectId, images, newCount, taskSeq, taskTitle, projectName } = (e as CustomEvent).detail as {
+			const { taskId, projectId, images, newCount, newKind, taskSeq, taskTitle, projectName } = (e as CustomEvent).detail as {
 				taskId: string;
 				projectId: string;
 				images: SharedImage[];
 				newCount: number;
+				newKind?: "image" | "video";
 				taskSeq?: number;
 				taskTitle?: string;
 				projectName?: string;
@@ -1979,7 +2139,8 @@ function App() {
 			if (!taskId || !images?.length) return;
 
 			// Attention badge (the reducer self-suppresses it when already viewing the task).
-			addBellUnlessFocused(taskId, t.plural("showImage.attention", newCount ?? 1));
+			const noun = newKind === "video" ? "showVideo" : "showImage";
+			addBellUnlessFocused(taskId, t.plural(`${noun}.attention`, newCount ?? 1));
 
 			const viewingThisTask = effectiveTaskId === taskId;
 			const autoOpen = localStorage.getItem("dev3-auto-open-shared-images") !== "off";
@@ -1994,7 +2155,7 @@ function App() {
 			// Elsewhere: don't steal focus automatically — a clickable toast both
 			// navigates to the owning task and opens the viewer (honoring open-mode).
 			const context = taskToastContext(taskSeq, projectName, taskTitle);
-			toast.info(t.plural("showImage.toast", newCount ?? 1), {
+			toast.info(t.plural(`${noun}.toast`, newCount ?? 1), {
 				context,
 				onClick: () => {
 					openTaskFromNotification(taskId, projectId);
@@ -2035,7 +2196,7 @@ function App() {
 			};
 			if (!taskId || !artifacts?.length) return;
 			addBellUnlessFocused(taskId, t.plural("showArtifact.attention", newCount ?? 1));
-			const viewingThisTask = effectiveTaskId === taskId;
+			const viewingThisTask = workspaceTaskTargetRef.current?.taskId === taskId || routeShowsTaskWorkspace(routeRef.current, taskId);
 			const foreground = typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
 			// A viewer waiting offscreen is not "already open" — republishing into it
 			// would update a panel nobody can see and swallow the toast that is the
@@ -2082,10 +2243,10 @@ function App() {
 			};
 			if (!taskId || !projectId || !artifacts?.length) return;
 			markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
-			// Opened for a task that is not on screen? Then no pane will ever offer a
-			// slot for it, so it lives as a popup — only a viewer that started docked
-			// may later hide itself when the route walks away from its task.
-			const noPane = paneless === true || effectiveTaskId !== taskId;
+			// Opened for a task that is not on screen, or from over its diff? Then no
+			// pane offers a slot for it, so it lives as a popup — only a viewer that
+			// started docked may later hide itself when the route walks away from it.
+			const noPane = paneless === true || !(workspaceTaskTargetRef.current?.taskId === taskId || routeShowsTaskWorkspace(routeRef.current, taskId));
 			setArtifactViewer({ taskId, projectId, taskStatus, artifacts, index: index ?? artifacts.length - 1, paneless: noPane });
 		}
 		window.addEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
@@ -2328,7 +2489,7 @@ function App() {
 		};
 	}, [dispatch, navigate, t]);
 
-	// Agent-initiated CANCELLATION requests. Same blocked-CLI contract as the
+	// Agent-initiated CANCELLATION and RESET requests. Same blocked-CLI contract as the
 	// completion effect above, deliberately its own dialog: cancelling throws the
 	// worktree and everything uncommitted in it away, so the prompt is red from
 	// border to badge, Cancel is autofocused, and the local git check is streamed
@@ -2336,8 +2497,27 @@ function App() {
 	// past a warning that has not arrived yet.
 	useEffect(() => {
 		const showing = cancellationDialogsShowingRef.current;
+		// Cancellation and reset both destroy the worktree, so they share this
+		// red dialog; each keeps its own channel, copy and answer RPC.
+		const kinds = [
+			{
+				event: "rpc:agentCancellationRequested",
+				toStatus: "cancelled" as const,
+				copy: { title: "app.agentCancellationTitle", message: "app.agentCancellationMessage", confirm: "app.agentCancellationConfirm", cancel: "app.agentCancellationCancel" } as const,
+				listPending: () => api.request.listPendingCancellationRequests({}),
+				respond: (params: { requestId: string; approved: boolean }) => api.request.respondToAgentCancellationRequest(params),
+			},
+			{
+				event: "rpc:agentResetRequested",
+				toStatus: "todo" as const,
+				copy: { title: "app.agentResetTitle", message: "app.agentResetMessage", confirm: "app.agentResetConfirm", cancel: "app.agentResetCancel" } as const,
+				listPending: () => api.request.listPendingResetRequests({}),
+				respond: (params: { requestId: string; approved: boolean }) => api.request.respondToAgentResetRequest(params),
+			},
+		];
+		type DialogKind = (typeof kinds)[number];
 
-		async function showCancellationDialog(request: {
+		async function showDestructiveDialog(kind: DialogKind, request: {
 			requestId: string;
 			taskId: string;
 			projectId: string;
@@ -2352,11 +2532,11 @@ function App() {
 			try {
 				const unsaved = api.request.getUnsavedWork({ taskId, projectId });
 				approved = await confirm({
-					title: t("app.agentCancellationTitle"),
-					message: t("app.agentCancellationMessage"),
+					title: t(kind.copy.title),
+					message: t(kind.copy.message),
 					info: taskDialogInfoFromSubject(taskTitle, subject),
-					confirmLabel: t("app.agentCancellationConfirm"),
-					cancelLabel: t("app.agentCancellationCancel"),
+					confirmLabel: t(kind.copy.confirm),
+					cancelLabel: t(kind.copy.cancel),
 					danger: true,
 					tone: "danger",
 					agentInitiated: true,
@@ -2369,7 +2549,7 @@ function App() {
 					signal: abort.signal,
 				});
 			} catch (err) {
-				console.error("[App] confirm (agent-cancellation) failed:", err);
+				console.error(`[App] confirm (${kind.event}) failed:`, err);
 			} finally {
 				abort.cleanup();
 				showing.delete(requestId);
@@ -2383,28 +2563,31 @@ function App() {
 				if (dest) navigate(dest);
 				dispatch({ type: "clearBell", taskId });
 			}
-			api.request.respondToAgentCancellationRequest({ requestId, approved }).catch((err) =>
-				console.error("respondToAgentCancellationRequest failed:", err),
+			kind.respond({ requestId, approved }).catch((err) =>
+				console.error(`[App] answering ${kind.event} failed:`, err),
 			);
 		}
 
-		function onAgentCancellationRequested(e: Event) {
-			void showCancellationDialog((e as CustomEvent).detail);
-		}
-		window.addEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
+		const listeners = kinds.map((kind) => {
+			const onRequested = (e: Event) => { void showDestructiveDialog(kind, (e as CustomEvent).detail); };
+			window.addEventListener(kind.event, onRequested);
+			return { kind, onRequested };
+		});
 
 		// Replayed on connect AND on every reconnect, for the same reason as the
 		// completion dialogs: the push is one-shot, so a transport that dropped
 		// while the request was created leaves nothing on screen.
 		function replayPending() {
-			api.request.listPendingCancellationRequests({}).then(async (pending) => {
-				if (pending.length === 0) return;
-				if (!await whenConfirmHostMounted()) {
-					console.error("[App] pending cancellation dialogs skipped — ConfirmHost never mounted");
-					return;
-				}
-				for (const request of pending) void showCancellationDialog(request);
-			}).catch((err) => console.error("listPendingCancellationRequests failed:", err));
+			for (const kind of kinds) {
+				kind.listPending().then(async (pending) => {
+					if (pending.length === 0) return;
+					if (!await whenConfirmHostMounted()) {
+						console.error(`[App] pending ${kind.event} dialogs skipped — ConfirmHost never mounted`);
+						return;
+					}
+					for (const request of pending) void showDestructiveDialog(kind, request);
+				}).catch((err) => console.error(`listPending (${kind.event}) failed:`, err));
+			}
 		}
 		replayPending();
 		const onRpcStatus = (e: Event) => {
@@ -2413,7 +2596,7 @@ function App() {
 		window.addEventListener(RPC_STATUS_EVENT, onRpcStatus);
 
 		return () => {
-			window.removeEventListener("rpc:agentCancellationRequested", onAgentCancellationRequested);
+			for (const { kind, onRequested } of listeners) window.removeEventListener(kind.event, onRequested);
 			window.removeEventListener(RPC_STATUS_EVENT, onRpcStatus);
 		};
 	}, [dispatch, navigate, t]);
@@ -2422,8 +2605,10 @@ function App() {
 	// agents can ask at once, and overlapping dialogs would make the user answer
 	// the wrong one. The head of the queue is on screen; the rest wait their turn.
 	useEffect(() => {
+		const resolvedRequestIds = new Set<string>();
 		function onAgentLaunchRequested(e: Event) {
 			const request = (e as CustomEvent).detail as AgentLaunchRequest;
+			if (resolvedRequestIds.has(request.requestId)) return;
 			setLaunchRequests((queue) => (
 				queue.some((r) => r.requestId === request.requestId) ? queue : [...queue, request]
 			));
@@ -2432,21 +2617,33 @@ function App() {
 		// here too, whether it is on screen or still waiting in the queue.
 		function onAgentRequestResolved(e: Event) {
 			const { requestId } = (e as CustomEvent).detail as { requestId: string };
+			resolvedRequestIds.add(requestId);
 			setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
 		}
+		let cancelled = false;
+		function restoreLaunchRequests() {
+			api.request.getPendingAgentLaunchRequests({}).then((requests) => {
+				if (!cancelled) setLaunchRequests((queue) => [...queue, ...requests.filter((r) => !resolvedRequestIds.has(r.requestId) && !queue.some((q) => q.requestId === r.requestId))]);
+			}).catch(() => {});
+		}
+		window.addEventListener(RPC_STATUS_EVENT, restoreLaunchRequests);
+		restoreLaunchRequests();
 		window.addEventListener("rpc:agentLaunchRequested", onAgentLaunchRequested);
 		window.addEventListener("rpc:agentRequestResolved", onAgentRequestResolved);
 		return () => {
+			cancelled = true;
+			window.removeEventListener(RPC_STATUS_EVENT, restoreLaunchRequests);
 			window.removeEventListener("rpc:agentLaunchRequested", onAgentLaunchRequested);
 			window.removeEventListener("rpc:agentRequestResolved", onAgentRequestResolved);
 		};
 	}, []);
 
 	const respondToLaunchRequest = useCallback((
-		requestId: string,
+		request: AgentLaunchRequest,
 		approved: boolean,
 		launch?: AgentLaunchChoice,
 	) => {
+		const { requestId } = request;
 		setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
 		api.request.respondToAgentLaunchRequest({
 			requestId,
@@ -3112,19 +3309,19 @@ function App() {
 					onExit={(completed) => finishTour(activeTour.id, completed)}
 				/>
 			)}
-			{showProjectSwitch && (
+			{navPalette === "project" && (
 				<ProjectQuickSwitchModal
 					projects={quickSwitch.projects}
 					shortcutIndexById={quickSwitch.shortcutIndexById}
 					onSelect={(projectId) => {
-						setShowProjectSwitch(false);
+						closeNavPalette("project");
 						navigateToProject(projectId);
 					}}
 					onSelectSpace={(spaceId) => {
-						setShowProjectSwitch(false);
+						closeNavPalette("project");
 						navigateToSpace(spaceId);
 					}}
-					onClose={() => setShowProjectSwitch(false)}
+					onClose={() => closeNavPalette("project")}
 				/>
 			)}
 			{openInPicker && (
@@ -3134,7 +3331,7 @@ function App() {
 					onClose={() => setOpenInPicker(null)}
 				/>
 			)}
-			{showCommandPalette && (
+			{navPalette === "command" && (
 					<CommandPaletteModal
 						context={{
 							hasProject: Boolean(effectiveProjectId),
@@ -3144,7 +3341,19 @@ function App() {
 						androidApp: isAndroidAppHost(),
 					}}
 					onRun={runCommand}
-					onClose={() => setShowCommandPalette(false)}
+					onClose={() => closeNavPalette("command")}
+				/>
+			)}
+			{navPalette === "coordinator" && (
+				<CoordinatorFinderModal
+					projectById={switcherProjectById}
+					currentTaskId={effectiveTaskId}
+					mru={state.taskMru}
+					onSelect={(task) => {
+						closeNavPalette("coordinator");
+						navigate(taskOpenRoute(task.id, task.projectId, getTaskOpenMode(), false));
+					}}
+					onClose={() => closeNavPalette("coordinator")}
 				/>
 			)}
 			{showAddProjectModal && (
@@ -3658,7 +3867,7 @@ function App() {
 				<AgentLaunchRequestModal
 					key={launchRequests[0].requestId}
 					request={launchRequests[0]}
-					onRespond={(approved, launch) => respondToLaunchRequest(launchRequests[0]!.requestId, approved, launch)}
+					onRespond={(approved, launch) => respondToLaunchRequest(launchRequests[0]!, approved, launch)}
 				/>
 			)}
 			{artifactViewer && (

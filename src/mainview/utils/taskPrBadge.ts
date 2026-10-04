@@ -1,6 +1,26 @@
-import type { Task, TaskPRBadgeInfo } from "../../shared/types";
+import { isPullRequestFinished, type Task, type TaskPRBadgeInfo } from "../../shared/types";
 
 export type PRIdentity = Pick<TaskPRBadgeInfo, "number" | "url">;
+
+interface ReportedPRState {
+	number: number | null | undefined;
+	state: string | null | undefined;
+}
+
+/**
+ * Whether the PR a surface shows is still the branch's live PR. The first source
+ * that reports a state for that same number decides; no report counts as live,
+ * so an offline inspector keeps offering exactly what it offered before.
+ */
+export function isLivePullRequest(prNumber: number | null | undefined, reports: Array<ReportedPRState | null | undefined>): boolean {
+	if (prNumber == null) return false;
+	return !isPullRequestFinished(reportedPRState(prNumber, reports));
+}
+
+/** GitHub's state for that PR number from the first source that reports one; null when none does. */
+export function reportedPRState(prNumber: number, reports: Array<ReportedPRState | null | undefined>): string | null {
+	return reports.find((report) => report?.number === prNumber && report.state)?.state ?? null;
+}
 
 export function samePRIdentity(left: TaskPRBadgeInfo | null | undefined, right: PRIdentity): boolean {
 	return left?.number === right.number && left.url === right.url;
@@ -55,6 +75,29 @@ export function mergeTaskPRBadge(
 		prTitle: existing.prTitle ?? stored.prTitle,
 		isDraft: existing.isDraft ?? stored.isDraft,
 	};
+}
+
+/**
+ * The PR an inspector shows: a live push wins; otherwise the PR the branch check
+ * (or sticky task fields) names, carrying the stored status of that same PR.
+ * Without the stored half, a merged PR read as "Unknown / no checks" until a
+ * push arrived — which a failed refresh never delivers.
+ */
+export function inspectorPRBadge(
+	task: Task,
+	pushed: TaskPRBadgeInfo | null | undefined,
+	branchStatus?: { prNumber: number | null; prUrl: string | null } | null,
+): TaskPRBadgeInfo | null {
+	if (pushed) return pushed;
+	const identity = branchStatus?.prNumber != null
+		? { number: branchStatus.prNumber, url: branchStatus.prUrl ?? "" }
+		: task.prNumber != null
+			? { number: task.prNumber, url: task.prUrl ?? "" }
+			: undefined;
+	if (!identity) return null;
+	const cache = task.prStatusCache;
+	if (!identity.url && cache?.number === identity.number && cache.url) identity.url = cache.url;
+	return taskPRBadgeFromStoredData(task, identity);
 }
 
 export function hydrateTaskPRMap(

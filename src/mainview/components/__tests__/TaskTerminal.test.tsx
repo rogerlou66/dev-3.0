@@ -16,7 +16,7 @@ vi.mock("../../rpc", () => ({
 			dismissCloneFailures: vi.fn(),
 			moveTask: vi.fn(),
 			cancelTaskPreparation: vi.fn(),
-			checkWorktreeExists: vi.fn(),
+			checkWorktreeState: vi.fn(),
 			getResolvedProject: vi.fn().mockResolvedValue({}),
 			getBranchStatus: vi.fn().mockResolvedValue({}),
 			getPortAllocations: vi.fn().mockResolvedValue([]),
@@ -223,7 +223,7 @@ describe("TaskTerminal", () => {
 
 			// getPtyUrl fails → triggers error classification
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(true);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("present");
 			mockedApi.request.moveTask.mockResolvedValue({ ...makeTask(), status: "completed" });
 
 			await act(async () => {
@@ -268,7 +268,7 @@ describe("TaskTerminal", () => {
 			const navigate = vi.fn();
 
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(false);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("missing");
 			mockedApi.request.moveTask.mockResolvedValue({ ...makeTask(), status: "cancelled" });
 
 			await act(async () => {
@@ -303,7 +303,7 @@ describe("TaskTerminal", () => {
 				const navigate = vi.fn();
 
 				mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-				mockedApi.request.checkWorktreeExists.mockResolvedValue(true);
+				mockedApi.request.checkWorktreeState.mockResolvedValue("present");
 				mockedApi.request.moveTask.mockResolvedValue({ ...makeTask(), status: "completed" });
 
 				await act(async () => {
@@ -326,7 +326,7 @@ describe("TaskTerminal", () => {
 			const user = userEvent.setup();
 
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(true);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("present");
 			mockedApi.request.moveTask.mockResolvedValue({ ...makeTask(), status: "completed" });
 
 			await act(async () => {
@@ -523,7 +523,7 @@ describe("TaskTerminal", () => {
 	describe("Resume Session button", () => {
 		it("shows Resume Session button on session-ended error", async () => {
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(true);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("present");
 
 			await act(async () => {
 				renderTerminal();
@@ -538,7 +538,7 @@ describe("TaskTerminal", () => {
 			const user = userEvent.setup();
 			// Both calls fail — we only care that the second call has resume: true
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(true);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("present");
 
 			await act(async () => {
 				renderTerminal();
@@ -560,7 +560,7 @@ describe("TaskTerminal", () => {
 
 		it("does not show Resume Session button when worktree is gone", async () => {
 			mockedApi.request.getPtyUrl.mockRejectedValue(new Error("no pty"));
-			mockedApi.request.checkWorktreeExists.mockResolvedValue(false);
+			mockedApi.request.checkWorktreeState.mockResolvedValue("missing");
 
 			await act(async () => {
 				renderTerminal();

@@ -17,6 +17,18 @@ reasoning (48 of 50 dates), so the record wins and this file stays an index. Wri
 in full only while no record exists — the case for 84 below, whose reasoning lives nowhere
 else, so never compact them by deleting it.
 
+## 2026-10-02 — The agent-message toast names every destination
+
+Bible §5.7: both names link to their task, plus Sender/Traffic/Recipient actions; the card still opens traffic. Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md.
+
+## 2026-09-25 — Clips play inside the image viewer
+
+Bible §3 `Task image viewer` / yaml `task_image_viewer`: `dev3 show-video` clips (own `sharedVideos` field, merged by `taskSharedMedia`) join the same history and stage as images; no second viewer or panel. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md.
+
+## 2026-09-22 — One task context menu, card and sidebar row
+
+Bible §4 `Context menu` / yaml `surfaces.context_menu.task_menu`: right-click (long-press on touch) opens one shared `TaskContextMenu` for the task object, routing to the pickers, modals and RPCs that already exist. It may repeat a control the surface shows — a menu reached blind is not chrome. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
+
 ## 2026-09-20 — Simplified Mode leads toward the Full interface
 
 Bible §5.10 / yaml `simplify_mode`: fresh-only onboarding, calm persisted invitations, Appearance ownership and separate personal hiding. Repeated invitations encourage discovery without forced switching; merging preset and personal ids cannot preserve personal choices when leaving the preset. Supersedes the September 15 single-set rule; no new permanent chrome.
@@ -41,9 +53,7 @@ Reverses "no composer" — bible §5.9, yaml `agent_traffic_screen`. Why: `decis
 
 Bounded reader beside Messages and Tasks, labelled `Live` or `Archived` — bible §5.9, yaml `agent_traffic_screen`. Why: `decisions/2026/09/12/task-conversation-in-the-traffic-inspector.md`.
 
-## 2026-09-12 — A notification into agent traffic opens all projects
-
-An agent-message toast opens the traffic screen unscoped ("All active projects"); deliberate entries still seed the board in view — bible §5.7. Why: `decisions/2026/09/12/notification-entry-to-traffic-opens-all-projects.md`.
+2026-09-12 — Toast into traffic opens all projects. Why: `decisions/2026/09/12/notification-entry-to-traffic-opens-all-projects.md`.
 
 ## 2026-09-08 — Agent traffic becomes the ninth destination, not an overlay
 
@@ -59,7 +69,7 @@ One App viewer docks by default or uses a lightbox via `openArtifactsInPopup` in
 
 ## 2026-09-07 — Tasks can leave the Active Tasks queue without stopping
 
-`Task.hidden` hides a whole variant group from the Active Tasks sidebar only; row toggle, conditional reveal in the filter row (dot when one needs you), `is:hidden` token. Why: `decisions/2026/09/07/hide-tasks-from-active-sidebar.md`.
+`Task.hidden` hides a whole variant group from the Active Tasks sidebar only; row toggle, conditional reveal in the filter row (dot when one needs you), `is:hidden` token. Hibernated and disconnected tasks are out by default too, behind the same eye (`is:hibernated`). Why: `decisions/2026/09/07/hide-tasks-from-active-sidebar.md`, `decisions/2026/10/01/active-tasks-hide-hibernated.md`.
 
 ## 2026-09-05 — HTML artifacts open as a popup
 
@@ -145,9 +155,7 @@ One round floating button over the canvas, only while that pane is scrolled up, 
 - **Why:** editing a secret you cannot see half-overwrites working keys and makes "clear to remove" impossible to offer, so the reveal is the edit gate; rejected alternative — send every key with the catalog and mask it client-side (a credential would cross to the renderer, including over a remote tunnel, because a screen loaded).
 - **Status:** Implemented. Evidence: `docs/ux/ux-architecture.yaml` `stored-secret-revealed-before-edit`, `src/mainview/components/global-settings/ModelCatalogSection.tsx` (`ProviderKeyField`), `src/bun/rpc-handlers/model-catalog.ts` (`modelCatalogRevealKey`).
 
-## 2026-08-14 — An agent-to-agent message toast names two tasks and owns its own hue
-
-Two-task source line, non-severity `agent` violet, click-through to the receiver — bible §5.7. Why: `decisions/2026/08/14/agent-message-toast-two-identities.md`.
+2026-08-14 — Agent toast: two-task line, own violet. Why: `decisions/2026/08/14/agent-message-toast-two-identities.md`.
 
 ## 2026-08-14 — An agent-written log gets a capped preview, not a whole screen
 
@@ -210,9 +218,7 @@ Two-task source line, non-severity `agent` violet, click-through to the receiver
 
 ## 2026-08-07 — Every toast has one anatomy, and its origin is resolved centrally
 
-- **Rule:** Where a toast came from never changes its shape: source line → message → click target → swipe **and** X **and** timeout. The line falls back task → project → app area (`Settings`/`Update`/`Dashboard`/`Terminal`/`Menu`), first match wins, so no toast is ever bare; an area is a label with no click target. A caller passes ONE token (`taskId`/`projectId`/`source`) and `ToastHost` composes the rest via a resolver injected by `App.tsx`, once at emit, never per render. Bible §5.7, yaml `surfaces.toast`.
-- **Why:** with many parallel tasks a bare sentence cannot say which task it is about — CLI push toasts already carried the source line, in-app ones did not. Rejected: composing `context`/`onClick` at each of ~180 call sites (drifts again on the next toast anyone writes); letting `toast.tsx` import app state (a module-level service would depend on the reducer); and stamping every originless toast with `dev-3.0` (a uniform line that carries nothing is fabrication by another route). Resolving per render passed every unit test yet lost a live toast's line and click target as soon as the user left the project — hence once at emit.
-- **Status:** Decided. Evidence: `src/mainview/toast.tsx`, `src/mainview/App.tsx` (`ToastHost` mount, `openTaskFromNotification`), seq 1437.
+Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned by `PRODUCT_UX_BIBLE.md` §5.7 and yaml `surfaces.toast`.
 
 ## 2026-08-06 — Opening a viewed artifact in the real browser is one icon next to download
 
@@ -584,15 +590,13 @@ Two-task source line, non-severity `agent` violet, click-through to the receiver
 
 ## 2026-06-18 — Action palette (⇧⌘P): two-surfaces-one-shell; DOM mirror of the native menu
 
-- **Rule:** Navigation (⌘K) and actions (⇧⌘P) are two surfaces on one extracted `PaletteShell`; the action palette runs commands via the existing `handleMenuAction` router (a mirror, not a second command runner); destructive lifecycle + modal flows are excluded by policy (destructive needs friction, not fuzzy-Enter); language-switch labels stay identical across locales so English is always findable.
+- **Rule:** Navigation (⇧⌘K) and actions (⇧⌘P) are two surfaces on one extracted `PaletteShell`; the action palette runs commands via the existing `handleMenuAction` router (a mirror, not a second command runner); destructive lifecycle + modal flows are excluded by policy (destructive needs friction, not fuzzy-Enter); language-switch labels stay identical across locales so English is always findable.
 - **Why:** VSCode's chord convention; routing through `handleMenuAction` also fixed several previously-inert native menu items. Decision 072.
 - **Status:** Observed. Evidence: `CommandPaletteModal.tsx`, `commands.ts`, `PaletteShell.tsx`.
 
-## 2026-06-18 — Command palette (⌘K) introduced as a new surface
+## 2026-06-18 — Navigation palette introduced (key moved to ⇧⌘K on 2026-10-01)
 
-- **Rule:** ⌘K is the type-to-find navigation surface (keyboard-only, zero visible chrome — no toolbar-creep); short UI entities must reuse `utils/fuzzyMatch.ts` as the single matcher (BM25 stays for long transcripts only); ⌘K = navigation, ⇧⌘P = actions, kept separate.
-- **Why:** `Cmd+T` rejected — universal "new tab" and intercepted by the live terminal; ⌘K is the Slack/Linear/Notion convention. Distinct from the Option+Tab switcher (MRU over *active* tasks vs type-search over all entities).
-- **Status:** Observed. Evidence: `ProjectQuickSwitchModal.tsx`, `utils/fuzzyMatch.ts`.
+- **Rule:** type-to-find navigation surface, keyboard-only, zero chrome; short UI entities reuse `utils/fuzzyMatch.ts`. Distinct from the Option+Tab switcher. Now owned by bible §Command palette.
 
 ## 2026-06-15 — Option+Tab task switcher is a transient HUD overlay, NOT a command palette
 
@@ -703,3 +707,11 @@ Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `
 ## 2026-09-01 — The space is a level of the trail, not a remembered mode
 - **Rule:** A space on the route renders as a plain-link crumb between home and the chip (`dev-3.0 / AI / Nanochat`), icon-only below `md`; the tail always carries the switcher — bible §Breadcrumbs.
 - **Why:** `decisions/2026/09/01/space-rides-into-a-task-by-reducer-inheritance.md`. Status: observed, `GlobalHeader.tsx`.
+
+## 2026-10-01 — Go to Project moves from ⌘K to ⇧⌘K; Find coordinator joins ⇧⌘P
+- **Rule:** the navigation palette is ⇧⌘K (Ctrl+Shift+K off-macOS); plain ⌘K stays free for the terminal (clear, tracked as its own task). Coordinators are found via the ⇧⌘P `Find coordinator…` picker on `PaletteShell`.
+- **Why:** terminal users expect ⌘K to clear; ⇧⌘K keeps the K mnemonic with the fewest conflicts found (Firefox Win/Linux Web Console caveat). Rejected ⌘P, ⌘E. User-approved. Evidence: `keymap.ts`, `decisions/2026/10/01/go-to-project-moves-to-shift-cmd-k.md`.
+
+## 2026-10-03 — The dashboard pins every coordinator above the attention rows
+- **Rule:** each active coordinator gets its own navigation-only row in its project's dashboard card, whatever its status — yaml `dashboard-coordinator-rows`.
+- **Why:** a working coordinator vanished into the footer count, yet it is what the user opens to talk to a project. Rejected a global coordinators panel (new chrome; ⇧⌘P `Find coordinator…` already exists). Evidence: `DashboardCoordinatorRows.tsx`.

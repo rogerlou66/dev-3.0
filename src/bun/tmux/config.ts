@@ -1,7 +1,7 @@
 /**
  * Bundled tmux configuration, moved from pty-server.ts.
  *
- * Three theme-specific configs are written at module load: dark, light, and cmux.
+ * Dark, light and cmux configs each have dimmed and undimmed variants.
  * Each sets @catppuccin_flavor, sources the Catppuccin plugin for styling,
  * then applies our functional settings (keybindings, scrollback, etc.).
  *
@@ -14,7 +14,8 @@ import { DEV3_HOME } from "../paths";
 import { dev3TempPath } from "../temp-paths";
 import { SHELL_INIT_DIR, writeShellInit } from "../shell-init";
 import { getUserShell } from "../shell-env";
-import { CATPPUCCIN_PLUGIN_DIR, writeCatppuccinPlugin } from "./themes";
+import { CATPPUCCIN_PLUGIN_DIR, PANE_ID_BADGE, writeCatppuccinPlugin } from "./themes";
+import { TMUX_AGENT_PANE_OPTION } from "./constants";
 
 /**
  * Working directory for every spawned tmux CLIENT process (`new-session`,
@@ -44,13 +45,6 @@ export function tmuxClientCwd(): string {
  */
 export const PANE_CWD_FORMAT = "#{?pane_current_path,#{pane_current_path},#{session_path}}";
 
-/**
- * Pane-scoped user option (value "1") marking a pane as an AI-agent pane. The app
- * sets it on every agent pane; the focus hook below reads it to remember which
- * agent pane the user last focused. `pane_current_command` is useless for this —
- * an agent constantly spawns children — so the marker is the reliable signal.
- */
-export const TMUX_AGENT_PANE_OPTION = "@dev3_agent";
 
 /**
  * Session-scoped user option holding the pane id of the last agent pane the user
@@ -59,21 +53,36 @@ export const TMUX_AGENT_PANE_OPTION = "@dev3_agent";
  */
 export const TMUX_LAST_AGENT_PANE_OPTION = "@dev3_last_agent_pane";
 
-export const TMUX_CONF_DARK_PATH = dev3TempPath("dev3-tmux-dark.conf");
-export const TMUX_CONF_LIGHT_PATH = dev3TempPath("dev3-tmux-light.conf");
-export const TMUX_CONF_CMUX_PATH = dev3TempPath("dev3-tmux-cmux.conf");
+/**
+ * The themed config for one theme and one default dimming choice. The choice is
+ * part of the NAME: every dev3 process on the machine writes these shared files
+ * at import, and a name that ignored it let another process's default overwrite
+ * the file this app later sources into the shared server.
+ */
+export function tmuxConfigPath(theme: "dark" | "light" | "cmux", dimmed: boolean): string {
+	return dev3TempPath(`dev3-tmux-${theme}-${dimmed ? "dimmed" : "undimmed"}.conf`);
+}
 
-/** Path currently loaded — switched by setActiveTmuxTheme() on theme change. */
-let activeConfigPath = TMUX_CONF_DARK_PATH;
+let activeTheme: "dark" | "light" | "cmux" = "dark";
 
+/**
+ * The `dimInactivePanes` preference, pushed in by the host at startup and on
+ * every settings save. Held here rather than read from `settings.ts`: this
+ * module writes its configs at import time, and importing the settings loader
+ * for that would drag the whole settings graph into every module that touches
+ * tmux.
+ */
+let dimInactivePanes = true;
+
+/** The config this process sources: its active theme and its own preference. */
 export function activeTmuxConfigPath(): string {
-	return activeConfigPath;
+	return tmuxConfigPath(activeTheme, dimInactivePanes);
 }
 
 /** Switch the active themed config and return its path. */
 export function setActiveTmuxTheme(theme: "dark" | "light", appearancePreset: "default" | "cmux" = "default"): string {
-	activeConfigPath = appearancePreset === "cmux" ? TMUX_CONF_CMUX_PATH : theme === "light" ? TMUX_CONF_LIGHT_PATH : TMUX_CONF_DARK_PATH;
-	return activeConfigPath;
+	activeTheme = appearancePreset === "cmux" ? "cmux" : theme;
+	return activeTmuxConfigPath();
 }
 
 // Shared functional settings (not theme-related)
@@ -239,31 +248,55 @@ function defaultShellConfig(): string[] {
 	}
 }
 
-// Status bar setup — references Catppuccin status modules built by the plugin
+const MULTI_WINDOW = "#{>:#{session_windows},1}";
+const STATUS_BAR_BY_CLIENT_SESSION = `if -F "${MULTI_WINDOW}" "set status on" "set status off"`;
+const HOOK_SESSION = "=#{hook_session_name}:";
+const STATUS_BAR_BY_HOOK_SESSION = String.raw`run -C \"if -F -t '${HOOK_SESSION}' '${MULTI_WINDOW.replaceAll("#", "##")}' 'set -t ${HOOK_SESSION} status on' 'set -t ${HOOK_SESSION} status off'\"`;
+
+// Status bar setup — window tabs, and the focused pane's id on the right
 const TMUX_STATUS_BAR = `
-# Status bar — Catppuccin modules
-set -g status-right-length 100
-set -g status-right "#{E:@catppuccin_status_application}#{E:@catppuccin_status_session}"
+# Status bar — window tabs, focused pane id on the right. On top so the window list sits where the
+# eye starts: a window opened by Cmd+T or an agent must not hide its task.
+set -g status-position top
+set -g status-right "${PANE_ID_BADGE}"
 set -g status-left ""
+
+# Show the bar only while a session has more than one window — a lone window
+# gets its row back. Session-scoped, re-evaluated whenever a window joins or
+# leaves a session and when a client attaches (covers sessions that predate
+# this config). window-(un)linked hooks run outside the session's context, so
+# they target it by #{hook_session_name}; ## defers the count until if-shell.
+set-hook -g window-linked "${STATUS_BAR_BY_HOOK_SESSION}"
+set-hook -g window-unlinked "${STATUS_BAR_BY_HOOK_SESSION}"
+set-hook -g client-attached '${STATUS_BAR_BY_CLIENT_SESSION}'
+set-hook -g client-session-changed '${STATUS_BAR_BY_CLIENT_SESSION}'
 `;
+
+/**
+ * Server-global user option holding the dim-inactive-panes choice (`on`/`off`).
+ * It lives in the tmux server, not in the config text, because every dev3
+ * instance on the machine shares that server: the last explicit toggle — from
+ * any instance — must win, and re-sourcing a config must never undo it.
+ */
+export const TMUX_PANE_DIMMING_OPTION = "@dev3_pane_dimming";
 
 /**
  * How much an unfocused pane differs from the focused one.
  *
  * Catppuccin's own config darkens every inactive pane so the focused split is
- * obvious; the user can switch that off (`dimInactivePanes`), and then every
- * pane keeps the theme's normal background and foreground. Both states emit the
- * lines: these configs are re-sourced into a LIVE tmux server, where a merely
- * omitted line leaves the previous value in effect.
+ * obvious; the user can switch that off (`dimInactivePanes`). The config only
+ * seeds the server option when it is unset (`-o`), with this process's saved
+ * choice, then derives both styles from the option. Always emitted: a line
+ * merely omitted on re-source would leave the plugin's dimmed value in effect.
  */
-function paneDimConfig(dimInactivePanes: boolean): string {
-	const bg = dimInactivePanes ? "#{@thm_mantle}" : "#{@thm_bg}";
-	const fg = dimInactivePanes ? "#{@thm_overlay_1}" : "#{@thm_fg}";
+function paneDimConfig(defaultDimmed: boolean): string {
+	const off = `#{==:#{${TMUX_PANE_DIMMING_OPTION}},off}`;
 	return [
 		"",
 		"# Inactive pane contrast (Settings → Terminal → Dim inactive panes)",
-		`set -gF window-style "bg=${bg},fg=${fg}"`,
-		`set -gF pane-border-style "fg=#{@thm_surface_1},bg=${bg}"`,
+		`set -goq ${TMUX_PANE_DIMMING_OPTION} ${defaultDimmed ? "on" : "off"}`,
+		`set -gF window-style "#{?${off},bg=#{@thm_bg}#,fg=#{@thm_fg},bg=#{@thm_mantle}#,fg=#{@thm_overlay_1}}"`,
+		`set -gF pane-border-style "fg=#{@thm_surface_1},bg=#{?${off},#{@thm_bg},#{@thm_mantle}}"`,
 		"",
 	].join("\n");
 }
@@ -296,29 +329,22 @@ export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = t
 	].join("\n");
 }
 
-/**
- * The `dimInactivePanes` preference, pushed in by the host at startup and on
- * every settings save. Held here rather than read from `settings.ts`: this
- * module writes its configs at import time, and importing the settings loader
- * for that would drag the whole settings graph into every module that touches
- * tmux.
- */
-let dimInactivePanes = true;
-
 export function setTmuxPaneDimming(enabled: boolean): void {
 	dimInactivePanes = enabled;
 }
 
 /**
- * Rewrite all themed configs. Called at startup, and again when a setting the
- * config embeds changes: the shell (baked into `default-shell`) and whether
- * inactive panes are dimmed.
+ * Rewrite every themed config — default and cmux, both dimming variants. Called at
+ * startup, and again when a setting the config embeds changes: the shell (baked
+ * into `default-shell`) and whether inactive panes are dimmed.
  */
 export function writeTmuxConfigs(): void {
 	writeShellInit();
-	writeFileSync(TMUX_CONF_DARK_PATH, buildThemeConfig("mocha", dimInactivePanes));
-	writeFileSync(TMUX_CONF_LIGHT_PATH, buildThemeConfig("latte", dimInactivePanes));
-	writeFileSync(TMUX_CONF_CMUX_PATH, buildThemeConfig("mocha", dimInactivePanes, "cmux"));
+	for (const dimmed of [true, false]) {
+		writeFileSync(tmuxConfigPath("dark", dimmed), buildThemeConfig("mocha", dimmed));
+		writeFileSync(tmuxConfigPath("light", dimmed), buildThemeConfig("latte", dimmed));
+		writeFileSync(tmuxConfigPath("cmux", dimmed), buildThemeConfig("mocha", dimmed, "cmux"));
+	}
 }
 
 // Write Catppuccin plugin files + themed configs + shell init at startup

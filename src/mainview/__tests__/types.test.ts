@@ -377,14 +377,41 @@ describe("DEFAULT_AGENTS", () => {
 		}
 	});
 
-	it("defaults Claude to Opus 5 at Medium effort", () => {
+	it("uses the pinned 1M Opus 5.5 model in Opus 5.5 presets", () => {
 		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
-		expect(claude!.defaultConfigId).toBe("claude-auto-opus5-medium");
+		const opus55Configs = claude!.configurations.filter((config) => /-opus55(-|$)/.test(config.id));
+		expect(opus55Configs.map((c) => c.id)).toEqual([
+			"claude-auto-opus55-medium",
+			"claude-auto-opus55-high",
+			"claude-auto-opus55-xhigh",
+			"claude-bypass-opus55-medium",
+			"claude-bypass-opus55-high",
+			"claude-bypass-opus55-xhigh",
+			"claude-default-opus55",
+			"claude-plan-opus55",
+			"claude-approvals-opus55",
+		]);
+		for (const config of opus55Configs) {
+			expect(config.model).toBe("claude-opus-5-5[1m]");
+		}
+	});
+
+	it("defaults Claude to Opus 5.5 at Medium effort", () => {
+		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
+		expect(claude!.defaultConfigId).toBe("claude-auto-opus55-medium");
 
 		const cfg = claude!.configurations.find((c) => c.id === claude!.defaultConfigId);
-		expect(cfg!.model).toBe("claude-opus-5[1m]");
+		expect(cfg!.model).toBe("claude-opus-5-5[1m]");
 		expect(cfg!.effort).toBe("medium");
 		expect(cfg!.permissionMode).toBe("auto");
+	});
+
+	it("lists Opus 5.5 directly ahead of Opus 5 in every Claude mode group", () => {
+		const claude = DEFAULT_AGENTS.find((a) => a.id === "builtin-claude");
+		const ids = claude!.configurations.map((c) => c.id);
+		for (const opus5 of ids.filter((id) => /-opus5(-|$)/.test(id))) {
+			expect(ids[ids.indexOf(opus5) - 1], opus5).toBe(opus5.replace("-opus5", "-opus55"));
+		}
 	});
 
 	it("lists Opus 5 ahead of Opus 4.8 in every Claude mode group", () => {
@@ -406,7 +433,7 @@ describe("DEFAULT_AGENTS", () => {
 		}
 	});
 
-	it("uses Astra Medium bypass as the default Codex configuration", () => {
+	it("uses GPT-6 Astra Medium bypass as the default Codex configuration", () => {
 		const codex = DEFAULT_AGENTS.find((a) => a.id === "builtin-codex");
 		expect(codex).toBeDefined();
 
@@ -414,27 +441,41 @@ describe("DEFAULT_AGENTS", () => {
 		expect(cfg).toBeDefined();
 		expect(cfg!.name).toBe("GPT-6 Astra Bypass [Medium] — Default");
 		expect(cfg!.model).toBe("gpt-6-astra");
+		expect(codex!.defaultConfigId).toBe("codex-default");
 		expect(cfg!.additionalArgs).toContain("--sandbox");
 		expect(cfg!.additionalArgs).toContain("danger-full-access");
 		expect(cfg!.additionalArgs).toContain('model_reasoning_effort="medium"');
 		expect(cfg!.additionalArgs).not.toContain('default_permissions="dev3"');
 	});
 
-	it("prioritizes Astra ahead of the existing Codex model tiers", () => {
+	it("leads with the GPT-6 tiers, Astra first, ahead of the GPT-5.x tiers", () => {
 		const codex = DEFAULT_AGENTS.find((a) => a.id === "builtin-codex");
 		expect(codex).toBeDefined();
 
 		const modelOrder = codex!.configurations
 			.map((config) => config.model)
 			.filter((model, index, models) => model != null && models.indexOf(model) === index);
-		expect(modelOrder).toEqual(["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]);
+		expect(modelOrder).toEqual(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]);
 
 		const modesFor = (model: string) => codex!.configurations
 			.filter((config) => config.model === model)
 			.map((config) => config.modeLabel);
+		expect(modesFor("gpt-6.1-sol")).toEqual([
+			"Bypass [Medium]", "Bypass [Low]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]", "Bypass [Ultra]",
+			"Standard [Medium]", "Standard [Low]", "Standard [High]", "Standard [X-High]", "Standard [Max]", "Standard [Ultra]",
+		]);
+		expect(modesFor("gpt-6-sol")).toEqual([
+			"Bypass [Medium]", "Bypass [Low]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]", "Bypass [Ultra]",
+			"Standard [Medium]", "Standard [Low]", "Standard [High]", "Standard [X-High]", "Standard [Max]", "Standard [Ultra]",
+			"Plan [High]", "Plan → Bypass [High]",
+		]);
 		expect(modesFor("gpt-6-astra")).toEqual([
 			"Bypass [Medium] — Default", "Bypass [Low]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]", "Bypass [Ultra]",
 			"Standard [Medium]", "Standard [Low]", "Standard [High]", "Standard [X-High]", "Standard [Max]", "Standard [Ultra]",
+		]);
+		expect(modesFor("gpt-6-luna")).toEqual([
+			"Bypass [Medium]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]",
+			"Standard [Medium]", "Standard [High]",
 		]);
 		expect(modesFor("gpt-5.6-luna")).toEqual([
 			"Bypass [X-High]",
@@ -444,7 +485,6 @@ describe("DEFAULT_AGENTS", () => {
 		expect(modesFor("gpt-5.6-sol")).toEqual([
 			"Bypass [Low]", "Bypass [Medium]", "Bypass [High]", "Bypass [X-High]", "Bypass [Max]", "Bypass [Ultra]",
 			"Standard [Low]", "Standard [Medium]", "Standard [High]", "Standard [X-High]", "Standard [Max]", "Standard [Ultra]",
-			"Plan [High]", "Plan → Bypass [High]",
 		]);
 		expect(modesFor("gpt-5.6-terra")).toEqual([
 			"Bypass [Medium]", "Bypass [High]", "Bypass [X-High]",
@@ -456,9 +496,10 @@ describe("DEFAULT_AGENTS", () => {
 		]);
 	});
 
-	it("configures every generated GPT-5.6 Codex mode with matching effort and permissions", () => {
+	it("configures every generated GPT-6.x and GPT-5.6 Codex mode with matching effort and permissions", () => {
 		const codex = DEFAULT_AGENTS.find((a) => a.id === "builtin-codex")!;
-		const generated = codex.configurations.filter((config) => config.id.startsWith("codex-5.6-"));
+		const generated = codex.configurations.filter((config) => /^codex-(6(?:\.1)?|5\.6)-/.test(config.id));
+		expect(generated.some((config) => config.model === "gpt-6-luna")).toBe(true);
 		for (const config of generated) {
 			const effort = config.modeLabel!.match(/\[([^\]]+)\]/)![1].toLowerCase().replace("x-high", "xhigh");
 			expect(config.additionalArgs).toContain(`model_reasoning_effort="${effort}"`);

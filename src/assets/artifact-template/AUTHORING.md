@@ -1,5 +1,7 @@
 # dev3 artifact starter
 
+Use this shell for prose-only reports too. Direct `.md`/`.txt` publishing bypasses its CSS.
+
 The layout is fixed; do not list or explore the directory before starting:
 
 - `AUTHORING.md` — this card. Enough for an ordinary report; read it once.
@@ -34,7 +36,7 @@ Write the class — never a `<style>` block, never a hex color, never a px font 
 | A select, slider, switch | native markup + `data-ui-select` / `data-ui-slider`; `.check`, `.switch`, `.option-group` skin the rest |
 | Any other input | plain `<input>`, `<textarea>`, `<select>` — the shell already skins every type, checkbox and radio glyphs included, with or without a `.field` wrapper. Write no styles for them |
 | A menu that opens | `.popover-anchor` → `data-popover-trigger` + `.popover` — never `position: absolute` + `z-index` |
-| A short clip | plain `<video controls playsinline preload="metadata" poster="clips/x.png">` with an MP4 or WebM under the report directory — 16 MB per clip, 48 MB in total. `REFERENCE.md` § Bundled video clips |
+| A clip or a track | `<video playsinline>` or `<audio>`, both `controls preload="metadata"`, with an MP4/WebM or MP3/M4A/WAV/OGG under the report directory — 16 MB each, 48 MB total. `REFERENCE.md` § Bundled media |
 
 ## Color: three families, never mixed
 
@@ -57,6 +59,23 @@ Pass the **element**, never its id. `update()` and `remount()` take **no argumen
 
 Keep `data-dev3-artifact-template="v1"` on `<html>`, the dev3 icon and a `DEV3 ARTIFACT · <CATEGORY>` eyebrow, the theme and `A− / 100% / A+` controls in `.actions`, `Built with dev3 Artifacts` in the footer. Never define or shadow `window.dev3` — the viewer owns it. A path your JavaScript builds at runtime goes through `dev3Artifact.asset()`.
 
+## Before you publish — no browser pass by default
+
+Publish straight away. The shell already owns themes, text size, narrow-screen table stacking and print, so opening a browser, taking screenshots, or sweeping phone and desktop widths is **not** part of making or revising an ordinary report. Product UI browser checks do not apply to ordinary reports.
+
+What stays is seconds of work, no browser: `node --check report.js` (or `bun build report.js > /dev/null`) on every script you wrote, since one syntax error blanks the report; every `id` that `report.js` looks up exists in `index.html`; `show-artifact` exits 0.
+
+Open it in a browser once, only for the part at risk, when one of these holds:
+
+| Trigger | Check |
+|---|---|
+| First publish of a large report — several charts, a dozen panels, or a few hundred table rows | it renders and the console is clean |
+| Something the shell does not provide — your own CSS, a hand-built widget or drawing, live `fetch`/WebSocket, a `sendToAgent` form | that one piece works |
+| Someone reported it rendering wrong | reproduce, fix, confirm that defect |
+| The user asked for a check, a phone view, a print, or a size | exactly what they asked |
+
+Being new is not a trigger for a small report, and a revision that only changes text, data or rows inside existing panels never is. One width, the one that shows the risk — a narrow one only when the risk is narrow layout. A later version gets a pass only if its change brings a new trigger. Open `index.html` straight from the directory and close the browser when done.
+
 ## When the report needs more — `REFERENCE.md`
 
 | Read the section | When |
@@ -65,7 +84,7 @@ Keep `data-dev3-artifact-template="v1"` on `<html>`, the dev3 icon and a `DEV3 A
 | Color tokens · Tones | writing any CSS at all |
 | Text size | a one-off size, or a px number ECharts reads from something other than `fontSize` |
 | Publishing and assets | images under `shots/`, a path built in JavaScript, files outside the report directory |
-| Bundled video clips | an MP4/WebM clip in the report, its poster, and the size limits |
+| Bundled media | a clip or audio track, a download link, the size limits |
 | Network and libraries | pulling another CDN library, `fetch()` to a dev server |
 | Charts | more than one chart, live data, chart types |
 | Navigation and form controls | selects, sliders, switches, radio groups, `setControl()` |

@@ -76,6 +76,7 @@ describe("getModelGroupLabel", () => {
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "claude-opus-5[1m]" })).toBe("Opus 5");
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "claude-opus-4-8[1m]" })).toBe("Opus 4.8");
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "claude-fable-5" })).toBe("Fable 5");
+		expect(getModelGroupLabel({ id: "a", name: "x", model: "gpt-6.1-sol" })).toBe("GPT-6.1 Sol");
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "gpt-5.6-sol" })).toBe("GPT-5.6 Sol");
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "gpt-5.6-terra" })).toBe("GPT-5.6 Terra");
 		expect(getModelGroupLabel({ id: "a", name: "x", model: "gpt-5.6-luna" })).toBe("GPT-5.6 Luna");
@@ -186,6 +187,42 @@ describe("buildPickerGroups", () => {
 		expect(buildPickerGroups(undefined)).toEqual([]);
 	});
 
+	it("marks a group unavailable when the account cannot select its model", () => {
+		const groups = buildPickerGroups(claude, new Set(["claude-fable-5"]));
+		const byLabel = Object.fromEntries(groups.map((g) => [g.label, g.unavailable]));
+		expect(byLabel["Fable 5"]).toBe(true);
+		expect(byLabel["Opus 4.8"]).toBe(false);
+	});
+
+	it("marks nothing when availability is unknown (no set passed)", () => {
+		for (const g of buildPickerGroups(claude)) expect(g.unavailable).toBe(false);
+	});
+
+	it("only marks a group unavailable when EVERY preset's model is unavailable", () => {
+		// Opus 4.8 has three presets, all the same model; a set missing that model
+		// leaves the whole group available.
+		const groups = buildPickerGroups(claude, new Set(["claude-opus-4-8[1m]"]));
+		const opus = groups.find((g) => g.label === "Opus 4.8");
+		expect(opus?.unavailable).toBe(true);
+	});
+
+	it("never marks a routed (role-bound) group unavailable, even if its slug is unavailable", () => {
+		const agent: CodingAgent = {
+			id: "x",
+			name: "X",
+			baseCommand: "codex",
+			configurations: [
+				{ id: "routed", name: "Routed Preset", model: "gpt-6-sol", modelRoles: { main: "m" } },
+				{ id: "plain", name: "Plain", model: "gpt-6-sol" },
+			],
+		};
+		const groups = buildPickerGroups(agent, new Set(["gpt-6-sol"]));
+		// Role-bound preset gets its own group (labeled by its name) and is exempt.
+		expect(groups.find((g) => g.label === "Routed Preset")?.unavailable).toBe(false);
+		// The plain preset pinning the same unavailable slug is still flagged.
+		expect(groups.find((g) => g.configs.some((c) => c.id === "plain"))?.unavailable).toBe(true);
+	});
+
 	it("puts model-less custom configs under a single agent-default group", () => {
 		const custom: CodingAgent = {
 			id: "custom",
@@ -286,6 +323,7 @@ describe("pickConfigForModelChange", () => {
 describe("MODEL_GROUP_LABELS", () => {
 	it("covers the Claude model strings that drove the redesign", () => {
 		expect(MODEL_GROUP_LABELS["claude-fable-5-1[1m]"]).toBe("Fable 5.1");
+		expect(MODEL_GROUP_LABELS["claude-opus-5-5[1m]"]).toBe("Opus 5.5");
 		expect(MODEL_GROUP_LABELS["claude-fable-5"]).toBe("Fable 5");
 		expect(MODEL_GROUP_LABELS["claude-opus-4-8[1m]"]).toBe("Opus 4.8");
 		expect(MODEL_GROUP_LABELS["claude-sonnet-5"]).toBe("Sonnet 5");

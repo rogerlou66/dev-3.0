@@ -246,6 +246,7 @@ describe("task lifecycle transition table", () => {
 			"gracefulAgentExit",
 			"destroyTaskPty",
 			"killDevServer",
+			"judgeFailureWorkspace",
 			"runCleanupScript",
 			"reapWorktreeProcesses",
 			"removeWorktree",
@@ -1134,6 +1135,7 @@ describe("draft tasks cannot be activated", () => {
 		const result = transition(state("todo"), {
 			type: "moveRequested",
 			target: { status: "in-progress", customColumnId: null },
+			explicitLaunch: true,
 		});
 
 		expect(result.next.column.status).toBe("in-progress");
@@ -1237,6 +1239,7 @@ describe("hibernation", () => {
 		});
 
 		expect(result.next.column.status).toBe("completed");
+		expect(result.next.facts.hibernated).toBe(false);
 		expect(result.effects.map((e) => e.type)).toContain("removeWorktree");
 	});
 

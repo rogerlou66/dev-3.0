@@ -34,6 +34,7 @@ describe("external telemetry removal", () => {
 				if (!/\.[cm]?[jt]sx?$/.test(path) || /(?:__tests__|test-setup|\.test\.|\.generated\.|changelog-bundled|agent-skills)/.test(path)) continue;
 				const source = readFileSync(join(directory, path), "utf8");
 				if (/(?:from\s*|import\s*\(|require\s*\()\s*["'][^"']*(?:analytics|posthog|telemetry-profile|telemetry-consent)[^"']*["']/.test(source)
+					|| /\b(?:trackEvent|initAnalytics)\s*\(|\bposthog\s*\.\s*(?:capture|identify|init)\s*\(/.test(source)
 					|| /https?:\/\/[^\s"'`]*(?:google-analytics\.com|googletagmanager\.com|posthog\.com|posthog\.cloud)/.test(source)) {
 					violations.push(`src/${area}/${path}`);
 				}

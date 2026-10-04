@@ -7,6 +7,8 @@ import type { Project, Task } from "../../../shared/types";
 vi.mock("../../rpc", () => ({
 	api: { request: {
 		getWorkspaceBoardTasks: vi.fn(),
+		getUnsavedWork: vi.fn().mockResolvedValue({ hasUncommitted: false, hasUnpushed: false }),
+		resetTaskToTodo: vi.fn(),
 		setTaskBlocked: vi.fn(),
 		moveTask: vi.fn(),
 		getAgents: vi.fn().mockResolvedValue([]),
@@ -28,9 +30,11 @@ vi.mock("../TaskCard", () => ({
 	),
 }));
 
-vi.mock("../LaunchVariantsModal", () => ({ default: () => null }));
+vi.mock("../LaunchVariantsModal", () => ({ default: () => <div data-testid="workspace-launch-modal" /> }));
+vi.mock("../../confirm", () => ({ confirm: vi.fn().mockResolvedValue(false) }));
 
 import { api } from "../../rpc";
+import { confirm } from "../../confirm";
 
 const projects: Project[] = [
 	{ id: "p1", name: "Alpha", path: "/tmp/alpha", setupScript: "", devScript: "", cleanupScript: "", defaultBaseBranch: "main", createdAt: "2026-01-01T00:00:00Z" },
@@ -42,6 +46,41 @@ function task(id: string, projectId: string, status: Task["status"]): Task {
 }
 
 describe("WorkspaceBoard", () => {
+	it("keeps a To Do worktree untouched when its launch reset is declined", async () => {
+		const previous = { ...task("previous-run", "p1", "todo"), worktreePath: "/tmp/previous", branchName: "dev3/previous" };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [previous] }]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		const card = await screen.findByTestId("workspace-task-previous-run");
+		await act(async () => card.dispatchEvent(new Event("dragstart", { bubbles: true })));
+		await act(async () => screen.getByTestId("workspace-cell-p1-in-progress").dispatchEvent(new Event("drop", { bubbles: true })));
+		await waitFor(() => expect(confirm).toHaveBeenCalled());
+		expect(api.request.resetTaskToTodo).not.toHaveBeenCalled();
+		expect(api.request.moveTask).not.toHaveBeenCalled();
+		expect(screen.queryByTestId("workspace-launch-modal")).not.toBeInTheDocument();
+		expect(screen.getByTestId("workspace-cell-p1-todo")).toHaveTextContent("previous-run");
+	});
+
+	it.each([
+		["type:coordinator", "coordinator"],
+		["is:hibernated", "sleeping"],
+		["is:blocked", "held"],
+		["status:blocked", "held"],
+		['status:"Waiting externally"', "custom"],
+	])("filters workspace tasks by %s", async (query, expectedId) => {
+		const project = { ...projects[0], customColumns: [{ id: "external", name: "Waiting externally", color: "#777777", llmInstruction: "" }] };
+		const tasks: Task[] = [
+			{ ...task("coordinator", "p1", "in-progress"), taskType: "coordinator" },
+			{ ...task("sleeping", "p1", "in-progress"), hibernated: true },
+			{ ...task("held", "p1", "review-by-user"), blocked: true },
+			{ ...task("custom", "p1", "in-progress"), customColumnId: "external" },
+			task("ordinary", "p1", "in-progress"),
+		];
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks }]);
+		render(<I18nProvider><WorkspaceBoard projects={[project]} query={query} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		expect(await screen.findByTestId(`workspace-task-${expectedId}`)).toBeInTheDocument();
+		for (const entry of tasks.filter((entry) => entry.id !== expectedId)) expect(screen.queryByTestId(`workspace-task-${entry.id}`)).not.toBeInTheDocument();
+	});
+
 	beforeEach(() => vi.clearAllMocks());
 
 	it("names the Blocked column visibly in the narrow carousel", async () => {

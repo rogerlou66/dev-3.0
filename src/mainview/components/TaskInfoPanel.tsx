@@ -7,12 +7,15 @@ import LabelChip from "./LabelChip";
 import PriorityBadge from "./PriorityBadge";
 import OpenInMenu from "./OpenInMenu";
 import { formatDate } from "./NoteItem";
-import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, isCoordinatorTask, resolveTaskCompareBaseBranch, taskCompletesManually } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, isCoordinatorTask, isSharedVideo, resolveTaskCompareBaseBranch, taskCompletesManually, taskSharedMedia } from "../../shared/types";
+import { earlierPullRequests } from "../../shared/task-pull-requests";
 import InlineRename from "./InlineRename";
 import { getTaskOpenMode, taskClosedHomeRoute, type AppAction, type Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
 import { formatBytes } from "../utils/formatBytes";
+import { prBadgeDisplayState, prStateTone } from "../utils/prStateTone";
+import { inspectorPRBadge } from "../utils/taskPrBadge";
 import { getStatusLabel } from "../utils/statusLabel";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import { ImageAttachmentsStrip } from "./ImageAttachmentsStrip";
@@ -159,6 +162,7 @@ function TaskInfoPanel({
 	const t = useT();
 	const compact = useCompact();
 	const narrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
+	const sharedMedia = taskSharedMedia(task);
 	// Per-control hiding (§5.10) — each of these can be individually hidden
 	// (right-click "Hide") and restored from the panel's one restore control.
 	const spawnAgentHidden = useIsControlHidden("spawn-agent");
@@ -227,7 +231,8 @@ function TaskInfoPanel({
 		shortcuts: terminalFullscreenShortcutLabel(isMac()),
 	});
 	// Counterpart of the sidebar-header panel toggle: on the fullscreen task
-	// screen (sidebar hidden) this brings the Active Tasks panel back.
+	// screen (sidebar hidden) this brings the Active Tasks panel back. Leads the
+	// git row, at the left edge where the sidebar it restores will reappear.
 	const showPanelButton = isFullPage ? (
 		<Tooltip content={t("infoPanel.showPanel")} detail={t("ttip.infoPanel.showPanel")}>
 			<button
@@ -473,7 +478,6 @@ function TaskInfoPanel({
 				projectId: project.id,
 				priority,
 			});
-			// Priority is group-wide, so the RPC returns every changed variant.
 			for (const changedTask of changed) {
 				dispatch({ type: "updateTask", task: changedTask });
 			}
@@ -632,18 +636,9 @@ function TaskInfoPanel({
 			? metadataBranchState
 			: null;
 	const metadataBranchStatus = branchMeta?.branchStatus ?? null;
-	const metadataPrInfo: TaskPRBadgeInfo | null = branchMeta?.prStatus
-		?? (metadataBranchStatus?.prNumber != null
-			? {
-				number: metadataBranchStatus.prNumber,
-				url: metadataBranchStatus.prUrl ?? "",
-			}
-			: task.prNumber != null
-				? {
-					number: task.prNumber,
-					url: task.prUrl ?? "",
-				}
-				: null);
+	const metadataPrInfo: TaskPRBadgeInfo | null = inspectorPRBadge(task, branchMeta?.prStatus, metadataBranchStatus);
+	const metadataPrState = metadataPrInfo ? prBadgeDisplayState(metadataPrInfo, metadataBranchStatus, task.prStatusCache) : undefined;
+	const metadataPrTone = metadataPrState ? prStateTone(metadataPrState) : null;
 	const allDiffFileStats = metadataBranchStatus?.diffFileStats ?? [];
 	// Per-file stats are what the filter subtracts from. Without them there is
 	// nothing to subtract, so the raw totals stand instead of collapsing to zero.
@@ -1184,13 +1179,14 @@ function TaskInfoPanel({
 							{metadataPrInfo && (
 								<>
 									<span className="text-fg-3">{t("infoPanel.pullRequest")}</span>
-									<TaskPrStatusPopover prInfo={metadataPrInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff}>
+									<TaskPrStatusPopover prInfo={metadataPrInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} displayState={metadataPrState}>
 										<button
 											type="button"
 											onClick={() => metadataPrInfo.url && window.open(metadataPrInfo.url, "_blank")}
-											className="inline-flex items-center gap-1.5 text-success font-mono font-semibold hover:underline text-left"
+											className={`inline-flex items-center gap-1.5 font-mono font-semibold hover:underline text-left ${metadataPrTone?.text ?? "text-fg-3"}`}
 										>
 											<span>{t("task.prBadge", { number: String(metadataPrInfo.number) })}</span>
+											{metadataPrTone?.labelKey && <span className="sr-only">{` — ${t(metadataPrTone.labelKey)}`}</span>}
 											{(metadataPrInfo.unresolvedCount ?? 0) > 0 && (
 												<span className="inline-flex items-center gap-0.5 text-warning-strong no-underline" aria-label={t.plural("task.prUnresolvedComments", metadataPrInfo.unresolvedCount ?? 0)}>
 													<span className="leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF086"}</span>
@@ -1524,20 +1520,20 @@ function TaskInfoPanel({
 
 							<TaskExposedPorts task={task} rowClassName={SHEET_ROW_CLASS} />
 
-							{(task.sharedImages?.length ?? 0) > 0 && (
+							{sharedMedia.length > 0 && (
 								<button
 									type="button"
 									onClick={() => {
 										setActionsSheetOpen(false);
 										window.dispatchEvent(new CustomEvent("dev3:openImageViewer", {
-											detail: { taskId: task.id, projectId: project.id, images: task.sharedImages },
+											detail: { taskId: task.id, projectId: project.id, images: sharedMedia },
 										}));
 									}}
 									className={SHEET_ROW_CLASS}
 								>
 									<ImagesIcon className="h-5 w-5 shrink-0 text-fg-3" />
-									<span className="flex-1 text-sm font-medium">{t("infoPanel.imagesLabel")}</span>
-									<span className="text-xs font-semibold text-accent tabular-nums">{task.sharedImages?.length}</span>
+									<span className="flex-1 text-sm font-medium">{t(sharedMedia.some(isSharedVideo) ? "infoPanel.mediaLabel" : "infoPanel.imagesLabel")}</span>
+									<span className="text-xs font-semibold text-accent tabular-nums">{sharedMedia.length}</span>
 								</button>
 							)}
 
@@ -1642,10 +1638,10 @@ function TaskInfoPanel({
 						<PanelRestoreControl entries={panelHideableEntries} />
 						<HelpSpot topicId="inspector.panel" className="ml-0.5" />
 						<TerminalShortcutsButton taskId={task.id} />
-						{showPanelButton}
 					</div>
 
 					<div className="flex items-center gap-1.5 min-w-0">
+						{showPanelButton}
 						<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.git-bar" data-tour-anchor="task.git-bar">
 							{project.kind === "virtual" ? (
 								<span className="text-fg-muted text-micro italic flex-shrink-0 truncate">{t("ops.gitUnavailable")}</span>
@@ -1719,10 +1715,10 @@ function TaskInfoPanel({
 							<PanelRestoreControl entries={panelHideableEntries} />
 							<HelpSpot topicId="inspector.panel" className="ml-0.5" />
 							<TerminalShortcutsButton taskId={task.id} />
-							{showPanelButton}
 						</div>
 
 						<div className="flex items-center gap-1.5 min-w-0 pb-1">
+							{showPanelButton}
 							<div className="flex items-center gap-1.5 min-w-0 overflow-hidden" data-help-id="inspector.git-bar" data-tour-anchor="task.git-bar">
 								{project.kind === "virtual" ? (
 									<span className="text-fg-muted text-micro italic flex-shrink-0 truncate">{t("ops.gitUnavailable")}</span>
