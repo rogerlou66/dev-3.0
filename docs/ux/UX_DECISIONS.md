@@ -11,11 +11,7 @@ history, PRs and `decisions/`. Newest first.
 **Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
 
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
-**Once a decision has a record under `decisions/`, its entry folds to a pointer:** the rule
-in one clause, where it lives, and the record for the why. Two files carried the same
-reasoning (48 of 50 dates), so the record wins and this file stays an index. Write an entry
-in full only while no record exists — the case for 84 below, whose reasoning lives nowhere
-else, so never compact them by deleting it.
+**Record-backed entries are pointers:** state the rule, its canonical location and the `decisions/` record. Keep full reasoning only where no record exists; never delete the only explanation.
 
 ## 2026-10-02 — The agent-message toast names every destination
 
@@ -23,11 +19,11 @@ Bible §5.7: both names link to their task, plus Sender/Traffic/Recipient action
 
 ## 2026-09-25 — Clips play inside the image viewer
 
-Bible §3 `Task image viewer` / yaml `task_image_viewer`: `dev3 show-video` clips (own `sharedVideos` field, merged by `taskSharedMedia`) join the same history and stage as images; no second viewer or panel. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md.
+Bible §3 / yaml `task_image_viewer`: clips share image history and stage, without another viewer. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md.
 
 ## 2026-09-22 — One task context menu, card and sidebar row
 
-Bible §4 `Context menu` / yaml `surfaces.context_menu.task_menu`: right-click (long-press on touch) opens one shared `TaskContextMenu` for the task object, routing to the pickers, modals and RPCs that already exist. It may repeat a control the surface shows — a menu reached blind is not chrome. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
+Bible §4 / yaml `surfaces.context_menu.task_menu`: shared task menu reuses existing actions; blind access permits repeating visible controls. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
 
 ## 2026-09-20 — Simplified Mode leads toward the Full interface
 
