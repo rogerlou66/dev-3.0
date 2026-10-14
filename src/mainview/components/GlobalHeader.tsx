@@ -1074,7 +1074,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 						<Tooltip content={t("update.readyTooltip", { version: updateVersion })} detail={t("ttip.header.updateReady")}>
 							<button
 								onClick={() => setShowUpdateDropdown((v) => !v)}
-								className="header-anim flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors animate-pulse"
+								className="header-anim flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors motion-safe:animate-pulse"
 								aria-label={t("update.readyTooltip", { version: updateVersion })}
 							>
 								<UpdateReadyIcon className="w-4 h-4" />
@@ -1261,7 +1261,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 
 				{/* Ambient agent rate-limit indicator — hidden until any limit data exists
 				    (folded into the kebab bottom sheet on narrow). */}
-				{!isNarrow && <RateLimitIndicator compact={compact} />}
+				{!isNarrow && <RateLimitIndicator compact={compact} projectId={currentProjectId} />}
 
 				{/* Quick Shell lives in the overflow menu at every width — it is a
 				    keyboard action (⌘⇧`) far more than a button. */}
@@ -1437,7 +1437,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 						<PreventSleepToggle />
 						<MemoryHeadroomIndicator navigate={navigate} />
 						{viewedOverRemote && <ConnectionQualityIndicator />}
-						<RateLimitIndicator compact={false} />
+						<RateLimitIndicator compact={false} projectId={currentProjectId} />
 						{currentProjectId && !isVirtualProject && (
 							<GitPullButton projectId={currentProjectId} compact={false} />
 						)}

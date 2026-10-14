@@ -111,7 +111,9 @@ export function setWebNotificationsSuppressed(value: boolean): void {
 /**
  * Show a browser Web Notification for the payload, or fall back to an in-app
  * toast when the Notification API is unavailable (insecure LAN context), not
- * granted, or muted by the user. `onOpenTask` runs when the user clicks either.
+ * granted, or muted by the user. `onOpenTask` runs only on a click of the in-app
+ * toast: clicking the OS-level Web Notification just focuses the page and never
+ * navigates (decisions/2026/10/06/notification-click-only-foregrounds.md).
  */
 export function showWebNotificationOrToast(
 	detail: WebNotificationDetail,
@@ -145,7 +147,6 @@ export function showWebNotificationOrToast(
 				} catch {
 					/* focus may be blocked — best effort */
 				}
-				openTask?.();
 				n.close();
 			};
 			return;

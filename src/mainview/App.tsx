@@ -46,10 +46,10 @@ import GaugeDemo from "./components/gauges/GaugeDemo";
 import ProductivityStatsView from "./components/ProductivityStatsView";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
-import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastLink, type ToastOrigin } from "./toast";
+import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
+import { agentMessageToast, type AgentMessageDetail, type AgentToastEnd } from "./agent-message-toast";
 import { useSpaces } from "./useSpaces";
 import AgentTrafficScreen from "./components/agent-traffic/AgentTrafficScreen";
-import { AgentTrafficIcon } from "./components/HeaderIcons";
 import { noteTrafficArrival } from "./agent-traffic";
 import {
 	OPEN_AGENT_TRAFFIC_LOG_EVENT,
@@ -81,10 +81,12 @@ import { taskDialogInfoFromSubject } from "./utils/taskDialogInfo";
 import { unsavedWorkWarning } from "./utils/confirmTaskCompletion";
 import { createAgentRequestAbort } from "./utils/agentRequestAbort";
 import { getRecentProjectIds, orderByRecency, recordProjectJump } from "./utils/recentProjects";
+import { recordTaskVisit } from "./utils/recentTasks";
+import { navKey, recordNavVisit } from "./utils/recentNav";
 import type { NavigationGuard } from "./navigation-guard";
 import { useTaskSwitcher } from "./hooks/useTaskSwitcher";
 import TaskSwitcherOverlay from "./components/TaskSwitcherOverlay";
-import ProjectQuickSwitchModal from "./components/ProjectQuickSwitchModal";
+import GoToPalette, { type GoToMode } from "./components/GoToPalette";
 import CommandPaletteModal from "./components/CommandPaletteModal";
 import CoordinatorFinderModal from "./components/CoordinatorFinderModal";
 import OpenInPickerModal from "./components/OpenInPickerModal";
@@ -121,7 +123,12 @@ const QR_REFRESH_SECONDS = 60;
 
 const QUIT_AUTO_CONFIRM_SECONDS = 10;
 
-type NavPalette = "project" | "command" | "coordinator";
+type NavPalette = GoToMode | "command" | "coordinator";
+
+/** The three "Go to" palette modes share one surface (GoToPalette). */
+function isGoToMode(p: NavPalette | null): p is GoToMode {
+	return p === "project" || p === "task" || p === "combined";
+}
 
 type RemoteAccessQRData = {
 	qrDataUrl: string;
@@ -184,41 +191,6 @@ function reduceWorkspaceTasks(target: WorkspaceTaskTarget, action: AppAction): W
 
 function isRemoteTunnelActive(tunnelState?: string): boolean {
 	return tunnelState === "starting" || tunnelState === "connected";
-}
-
-/** One task an agent-message toast names, with what it needs to be opened and spoken. */
-interface AgentToastEnd {
-	taskId: string;
-	projectId: string;
-	/** `21`, or `21-2` for one attempt of a variant group. */
-	seq: string;
-	title?: string;
-	/** Set only when the message crossed boards. */
-	projectName?: string;
-}
-
-/** Paper plane: the end that sent the message (the toast itself is the envelope). */
-function SentIcon() {
-	return (
-		<svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
-			<path d="M21 3 10.5 13.5" />
-			<path d="M21 3 14.5 21l-4-7.5L3 9.5 21 3Z" />
-		</svg>
-	);
-}
-
-/** Inbox tray: the end the message landed in. */
-function ReceivedIcon() {
-	return (
-		<svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
-			<path d="M3 13h5l1.5 3h5L16 13h5" />
-			<path d="M5.5 5h13L21 13v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5l2.5-8Z" />
-		</svg>
-	);
-}
-
-function variantSeqLabel(seq: number, variantIndex: number | undefined): string {
-	return variantIndex != null ? `${seq}-${variantIndex}` : `${seq}`;
 }
 
 /**
@@ -904,6 +876,23 @@ function App() {
 		setHintMode(false);
 	}, [state.route]);
 
+	// Record a task VISIT for the "Go to" palette's recency the moment the route
+	// lands on a task — any way it got there (a card, the switcher, a deep link,
+	// back/forward, restore). This is why a task floats to the top on being VIEWED,
+	// not only when picked from the palette (the persisted mirror of `taskMru`).
+	useEffect(() => {
+		const taskId = routeTaskId(state.route);
+		if (taskId) {
+			recordTaskVisit(taskId);
+			// A task view records the TASK on the unified timeline (its project row
+			// stays separate), so Combined mode can interleave the two by visit time.
+			recordNavVisit(navKey("task", taskId));
+		} else {
+			const projectId = projectIdForRoute(state.route);
+			if (projectId) recordNavVisit(navKey("project", projectId));
+		}
+	}, [state.route]);
+
 	// Single chokepoint for committing a navigation. Records a project "jump"
 	// for the Cmd+Shift+K recency list whenever the destination route lands on a
 	// project, so every entry point (Dashboard click, Cmd+1..9, Cmd+Shift+1..9,
@@ -1263,9 +1252,10 @@ function App() {
 			shortcutIndexById[p.id] = i;
 		});
 		// Pin the builtin Operations board first (consistent with the dashboard,
-		// header switcher, and sidebar), then recency, then board order.
+		// header switcher, and sidebar), then recency, then board order. Any "Go to"
+		// mode (project/task/combined) gets the recency ordering.
 		const ordered = orderProjectsForDisplay(
-			navPalette === "project" ? orderByRecency(boardProjects, getRecentProjectIds()) : boardProjects,
+			isGoToMode(navPalette) ? orderByRecency(boardProjects, getRecentProjectIds()) : boardProjects,
 		);
 		return { projects: ordered, shortcutIndexById };
 	}, [state.projects, navPalette]);
@@ -1345,6 +1335,8 @@ function App() {
 		// The View-menu palette items open (not toggle) the palettes — the
 		// Cmd+Shift+K / Cmd+Shift+P keydown handlers below own the toggle behavior.
 		const onProjectSwitch = () => setNavPalette("project");
+		const onTaskSwitch = () => setNavPalette("task");
+		const onCombinedSwitch = () => setNavPalette("combined");
 		const onCommandPalette = () => setNavPalette("command");
 		const onCoordinatorFinder = () => setNavPalette("coordinator");
 		const onImportConversations = (e: Event) => {
@@ -1356,6 +1348,8 @@ function App() {
 		window.addEventListener("menu:open-new-task", onNewTask);
 		window.addEventListener("menu:open-add-project", onAddProject);
 		window.addEventListener("menu:open-project-switch", onProjectSwitch);
+		window.addEventListener("menu:open-task-switch", onTaskSwitch);
+		window.addEventListener("menu:open-combined-switch", onCombinedSwitch);
 		window.addEventListener("menu:open-command-palette", onCommandPalette);
 		window.addEventListener("menu:open-coordinator-finder", onCoordinatorFinder);
 		return () => {
@@ -1363,6 +1357,8 @@ function App() {
 			window.removeEventListener("menu:open-new-task", onNewTask);
 			window.removeEventListener("menu:open-add-project", onAddProject);
 			window.removeEventListener("menu:open-project-switch", onProjectSwitch);
+			window.removeEventListener("menu:open-task-switch", onTaskSwitch);
+			window.removeEventListener("menu:open-combined-switch", onCombinedSwitch);
 			window.removeEventListener("menu:open-command-palette", onCommandPalette);
 			window.removeEventListener("menu:open-coordinator-finder", onCoordinatorFinder);
 		};
@@ -1525,6 +1521,18 @@ function App() {
 				e.stopPropagation();
 				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
 				toggleNavPalette("project");
+			} else if (matchesShortcut(e, "go-to-task")) {
+				// Same "Go to" palette, opened on the Tasks mode (recent-first, token-DSL).
+				e.preventDefault();
+				e.stopPropagation();
+				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
+				toggleNavPalette("task");
+			} else if (matchesShortcut(e, "go-to-combined")) {
+				// Same "Go to" palette, opened on the Combined (projects + tasks) mode.
+				e.preventDefault();
+				e.stopPropagation();
+				if (showQuitDialog || createTaskProjectId || showAddProjectModal) return;
+				toggleNavPalette("combined");
 			} else if (matchesShortcut(e, "command-palette")) {
 				// The action (command) palette (VSCode convention). The navigation
 				// sibling is `go-to-project`.
@@ -1548,6 +1556,13 @@ function App() {
 				if (showQuitDialog) return;
 				if (state.route.screen === "agent-traffic") dispatch({ type: "goBack" });
 				else navigate({ screen: "agent-traffic", scopeProjectId: projectIdForRoute(state.route) ?? undefined });
+			} else if (matchesShortcut(e, "toggle-file-explorer")) {
+				// Capture phase so a focused terminal cannot swallow it.
+				e.preventDefault();
+				e.stopPropagation();
+				if (showQuitDialog) return;
+				// Through the router: on a board the toggle navigates to the Repo screen.
+				handleMenuBarAction("view-toggle-file-explorer");
 			} else if (matchesShortcut(e, "help-mode")) {
 				// Help mode ("Explain this screen"): every data-help-id zone gets an (i)
 				// badge with a HelpCard. Sibling of the shortcuts reference overlay.
@@ -1694,7 +1709,7 @@ function App() {
 				}
 			}
 		},
-		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, openWorkspaceBoard, requestWorkspaceDismiss, showAddProjectModal, showQuitDialog, state.projects, state.route, terminalImmersiveVisible, toggleTerminalImmersive, workspaceTaskTarget],
+		[armGoToIndex, armGoToVerb, clearGoTo, createTaskProjectId, cycleVariant, dispatch, goToCurrentProject, goToProjectIndex, handleMenuBarAction, hintMode, navigate, navigateToProject, openAddProject, openCreateTaskModal, openInCurrent, openQuickShell, openWorkspaceBoard, requestWorkspaceDismiss, showAddProjectModal, showQuitDialog, state.projects, state.route, terminalImmersiveVisible, toggleTerminalImmersive, workspaceTaskTarget],
 		{ capture: true },
 	);
 
@@ -1937,25 +1952,13 @@ function App() {
 
 	// One agent wrote into another task's agent (`dev3 message` from a worktree).
 	// Its own violet variant and a two-identity source line — the only toast whose
-	// event has a sender AND a receiver. The card's own click opens the traffic
-	// screen with the beta on, else the RECEIVER; both names in the source line and
-	// the labelled actions open each end directly (decisions/2026/10/02/agent-message-toast-names-every-destination.md).
+	// event has a sender AND a receiver. The card's own click opens the SENDER;
+	// both names and the labelled actions open each end, and only the traffic action
+	// opens traffic (decisions/2026/10/08/agent-message-toast-card-opens-the-sender.md).
 	useEffect(() => {
 		function onAgentMessage(e: Event) {
-			const detail = (e as CustomEvent).detail as {
-				taskId: string;
-				projectId: string;
-				fromProjectId?: string;
-				fromTaskId?: string;
-				fromVariantIndex?: number;
-				toVariantIndex?: number;
-				toSeq: number;
-				toTitle: string;
-				fromSeq: number;
-				fromTitle?: string;
-				preview: string;
-			};
-			const { taskId, projectId, fromProjectId, toSeq, toTitle, fromSeq, fromTitle, preview } = detail;
+			const detail = (e as CustomEvent).detail as AgentMessageDetail;
+			const { taskId, projectId, fromProjectId, preview } = detail;
 			if (!taskId || !preview) return;
 			// This window is already showing the traffic screen, where the message
 			// lands in full — a toast previewing it would cover its own destination.
@@ -1964,46 +1967,11 @@ function App() {
 			// Either side sensitive on camera drops the whole toast: it names both.
 			if (isProjectSilencedForDisplay(projectId) || isProjectSilencedForDisplay(fromProjectId)) return;
 
-			const senderProjectId = fromProjectId ?? projectId;
-			// Name the projects only when the two ends live on different boards.
-			const crossProject = senderProjectId !== projectId;
-			const projectName = (id: string) => projectsRef.current.find((p) => p.id === id)?.name;
-			const recipient: AgentToastEnd = {
-				taskId,
-				projectId,
-				seq: variantSeqLabel(toSeq, detail.toVariantIndex),
-				title: toTitle,
-				projectName: crossProject ? projectName(projectId) : undefined,
-			};
-			const sender: AgentToastEnd | undefined = detail.fromTaskId
-				? {
-					taskId: detail.fromTaskId,
-					projectId: senderProjectId,
-					seq: variantSeqLabel(fromSeq, detail.fromVariantIndex),
-					title: fromTitle,
-					projectName: crossProject ? projectName(senderProjectId) : undefined,
-				}
-				: undefined;
-			const fromLabel = sender?.seq ?? variantSeqLabel(fromSeq, detail.fromVariantIndex);
-			const from = [`#${fromLabel}`, fromTitle].filter(Boolean).join(" ");
-			const to = [`#${recipient.seq}`, toTitle].filter(Boolean).join(" ");
-			const describe = (end: AgentToastEnd) =>
-				[`#${end.seq}`, end.title, end.projectName && `· ${end.projectName}`].filter(Boolean).join(" ");
-			const senderAria = sender && t("toast.agent.openSender", { task: describe(sender) });
-			const recipientAria = t("toast.agent.openRecipient", { task: describe(recipient) });
-			const link = (end: AgentToastEnd, ariaLabel: string): ToastLink => ({
-				lead: `#${end.seq}`,
-				label: end.title,
-				suffix: end.projectName ? `· ${end.projectName}` : undefined,
-				ariaLabel,
-				onClick: () => void openAgentToastEnd(end),
-			});
-
 			// Decided once, when the toast is raised, because the card's accessible name
 			// and the traffic action both say where a click goes. A beta switched OFF
 			// later leaves nothing to open, so the click then falls back to the receiver.
 			const trafficOffered = isAgentTrafficVisible();
-			const openTraffic = () => {
+			const openTraffic = (recipient: AgentToastEnd) => {
 				if (!trafficOffered || !isAgentTrafficVisible()) {
 					void openAgentToastEnd(recipient);
 					return;
@@ -2017,40 +1985,17 @@ function App() {
 				// exactly the traffic the click was asking to see. The RECEIVER
 				// rides along as the screen's subject — the click is about one
 				// task, and it lands the same way clicking that card would.
-				openAgentTrafficLog("all-projects", { taskId, projectId });
+				openAgentTrafficLog("all-projects", { taskId: recipient.taskId, projectId: recipient.projectId });
 			};
 
-			toast.agent(t("toast.agentMessage", { preview }), {
-				context: `${from} → ${to}`,
-				contextParts: [
-					sender ? link(sender, senderAria!) : from,
-					"→",
-					link(recipient, recipientAria),
-				],
-				clickLabel: trafficOffered ? t("traffic.openLog") : recipientAria,
-				taskId,
-				onClick: openTraffic,
-				actions: [
-					...(sender
-						? [{
-							label: `#${sender.seq}`,
-							icon: <SentIcon />,
-							ariaLabel: t("toast.agent.sender", { seq: sender.seq }),
-							emphasis: true,
-							onClick: () => void openAgentToastEnd(sender),
-						}]
-						: []),
-					...(trafficOffered
-						? [{ label: t("traffic.label"), icon: <AgentTrafficIcon className="h-3.5 w-3.5" />, shrink: true, onClick: openTraffic }]
-						: []),
-					{
-						label: `#${recipient.seq}`,
-						icon: <ReceivedIcon />,
-						ariaLabel: t("toast.agent.recipient", { seq: recipient.seq }),
-						onClick: () => void openAgentToastEnd(recipient),
-					},
-				],
+			const { message, opts } = agentMessageToast(detail, {
+				t,
+				projectName: (id) => projectsRef.current.find((p) => p.id === id)?.name,
+				trafficOffered,
+				openEnd: (end) => void openAgentToastEnd(end),
+				openTraffic,
 			});
+			toast.agent(message, opts);
 		}
 		window.addEventListener("rpc:agentMessage", onAgentMessage);
 		return () => window.removeEventListener("rpc:agentMessage", onAgentMessage);
@@ -2698,15 +2643,6 @@ function App() {
 	}, [t]);
 
 	useEffect(() => {
-		function onOpenTaskFromNotification(e: Event) {
-			const { taskId, projectId } = (e as CustomEvent).detail as { taskId: string; projectId: string };
-			openTaskFromNotification(taskId, projectId);
-		}
-		window.addEventListener("rpc:openTaskFromNotification", onOpenTaskFromNotification);
-		return () => window.removeEventListener("rpc:openTaskFromNotification", onOpenTaskFromNotification);
-	}, [openTaskFromNotification]);
-
-	useEffect(() => {
 		function onOpenTaskNavigation(e: Event) {
 			const { taskId, projectId } = (e as CustomEvent<{ taskId: string; projectId: string }>).detail;
 			openTaskFromNotification(taskId, projectId);
@@ -2714,25 +2650,6 @@ function App() {
 		window.addEventListener("rpc:openTaskNavigation", onOpenTaskNavigation);
 		return () => window.removeEventListener("rpc:openTaskNavigation", onOpenTaskNavigation);
 	}, [openTaskFromNotification]);
-
-	// If this window was reopened by a notification click while the app sat
-	// window-less in the dock, the click target is waiting in the backend — pull
-	// it on mount and navigate. Pulling (rather than bun pushing) avoids racing
-	// the listener registration above; same pattern as consumePendingQuitDialog.
-	// Optional-chained: some tests mock `api.request` without this method.
-	useEffect(() => {
-		const pending = api.request.consumePendingNotificationNav?.();
-		if (!pending) return;
-		pending
-			.then((target) => {
-				if (target) openTaskFromNotification(target.taskId, target.projectId);
-			})
-			.catch(() => {});
-		// Mount-only on purpose: the backend slot is consumed on first read, so
-		// re-running on `openTaskFromNotification` identity changes would only
-		// ever read null.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
 
 	// Consume a CLI task-open request that reopened this window.
 	useEffect(() => {
@@ -2746,13 +2663,11 @@ function App() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	// Report window focus state to the backend. It uses this to suppress
-	// notification click-to-open arming while the app is already in the foreground —
-	// otherwise an in-app click that re-keys the window gets misread as a
-	// notification click and zooms the user into the task.
+	// Report window focus state to the backend (`dev3 ui state`, time tracking,
+	// and a notification click leaving an already-focused window alone).
 	useEffect(() => {
 		const report = (focused: boolean) => {
-			// Optional-chained: best-effort telemetry, and some tests mock `api`
+			// Optional-chained: best-effort window state, and some tests mock `api`
 			// without this method.
 			void api.request.setWindowForeground?.({ focused })?.catch?.(() => { /* best-effort */ });
 		};
@@ -3309,19 +3224,28 @@ function App() {
 					onExit={(completed) => finishTour(activeTour.id, completed)}
 				/>
 			)}
-			{navPalette === "project" && (
-				<ProjectQuickSwitchModal
+			{isGoToMode(navPalette) && (
+				<GoToPalette
+					mode={navPalette}
+					onModeChange={(m) => setNavPalette(m)}
 					projects={quickSwitch.projects}
 					shortcutIndexById={quickSwitch.shortcutIndexById}
-					onSelect={(projectId) => {
-						closeNavPalette("project");
+					projectById={switcherProjectById}
+					taskPorts={state.taskPorts}
+					currentTaskId={routeTaskId(state.route)}
+					onSelectProject={(projectId) => {
+						setNavPalette(null);
 						navigateToProject(projectId);
 					}}
 					onSelectSpace={(spaceId) => {
-						closeNavPalette("project");
+						setNavPalette(null);
 						navigateToSpace(spaceId);
 					}}
-					onClose={() => closeNavPalette("project")}
+					onSelectTask={(task) => {
+						setNavPalette(null);
+						navigate(taskOpenRoute(task.id, task.projectId, getTaskOpenMode(), false));
+					}}
+					onClose={() => setNavPalette(null)}
 				/>
 			)}
 			{openInPicker && (
@@ -4007,6 +3931,7 @@ function App() {
 						<ProjectTerminal
 							projectId={route.projectId}
 							projectPath={proj.path}
+							projectName={proj.name}
 							onBack={() => navigate({ screen: "project", projectId: route.projectId })}
 						/>
 					</div>

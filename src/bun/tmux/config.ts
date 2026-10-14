@@ -14,7 +14,7 @@ import { DEV3_HOME } from "../paths";
 import { dev3TempPath } from "../temp-paths";
 import { SHELL_INIT_DIR, writeShellInit } from "../shell-init";
 import { getUserShell } from "../shell-env";
-import { CATPPUCCIN_PLUGIN_DIR, PANE_ID_BADGE, writeCatppuccinPlugin } from "./themes";
+import { CATPPUCCIN_PLUGIN_DIR, NEW_WINDOW_STATUS_RANGE, PANE_ID_BADGE, STATUS_FORMAT, writeCatppuccinPlugin } from "./themes";
 import { TMUX_AGENT_PANE_OPTION } from "./constants";
 
 /**
@@ -248,28 +248,26 @@ function defaultShellConfig(): string[] {
 	}
 }
 
-const MULTI_WINDOW = "#{>:#{session_windows},1}";
-const STATUS_BAR_BY_CLIENT_SESSION = `if -F "${MULTI_WINDOW}" "set status on" "set status off"`;
-const HOOK_SESSION = "=#{hook_session_name}:";
-const STATUS_BAR_BY_HOOK_SESSION = String.raw`run -C \"if -F -t '${HOOK_SESSION}' '${MULTI_WINDOW.replaceAll("#", "##")}' 'set -t ${HOOK_SESSION} status on' 'set -t ${HOOK_SESSION} status off'\"`;
-
-// Status bar setup — window tabs, and the focused pane's id on the right
+// Status bar setup — window tabs, a new-window button, and the focused pane's id on the right
 const TMUX_STATUS_BAR = `
 # Status bar — window tabs, focused pane id on the right. On top so the window list sits where the
 # eye starts: a window opened by Cmd+T or an agent must not hide its task.
+set -g status on
 set -g status-position top
 set -g status-right "${PANE_ID_BADGE}"
 set -g status-left ""
 
-# Show the bar only while a session has more than one window — a lone window
-# gets its row back. Session-scoped, re-evaluated whenever a window joins or
-# leaves a session and when a client attaches (covers sessions that predate
-# this config). window-(un)linked hooks run outside the session's context, so
-# they target it by #{hook_session_name}; ## defers the count until if-shell.
-set-hook -g window-linked "${STATUS_BAR_BY_HOOK_SESSION}"
-set-hook -g window-unlinked "${STATUS_BAR_BY_HOOK_SESSION}"
-set-hook -g client-attached '${STATUS_BAR_BY_CLIENT_SESSION}'
-set-hook -g client-session-changed '${STATUS_BAR_BY_CLIENT_SESSION}'
+# A + button right after the last tab opens a window like Cmd+T: same cwd rule.
+# Any other click keeps tmux's default (switch to the clicked tab).
+set -g 'status-format[0]' '${STATUS_FORMAT}'
+bind -n MouseDown1Status if -F '#{==:#{mouse_status_range},${NEW_WINDOW_STATUS_RANGE}}' 'new-window -c "${PANE_CWD_FORMAT}"' 'switch-client -t ='
+
+# The bar stays visible with a single window too. Earlier configs hid it through
+# these hooks, and re-sourcing never drops a hook on a live server — unset them.
+set-hook -gu window-linked
+set-hook -gu window-unlinked
+set-hook -gu client-attached
+set-hook -gu client-session-changed
 `;
 
 /**

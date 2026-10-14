@@ -125,16 +125,20 @@ needed: the browser is on the same machine, so the public tunnel stays off.
 
 ### First run, in the foreground
 
+This fork sends no external telemetry or usage analytics.
+
 ```sh
-DEV3_TELEMETRY=off dev3 remote --no-detach --no-tunnel --host 127.0.0.1 --port 8090
+dev3 remote --no-detach --no-tunnel --host 127.0.0.1 --port 8090
 ```
 
-- `DEV3_TELEMETRY=off` turns telemetry off from the first start. Leave it out if you are happy to
-  send it; the in-app toggle works either way.
 - `--no-tunnel` skips the Cloudflare quick tunnel.
 - `--host 127.0.0.1` keeps the server off the network. The default bind is `0.0.0.0`, and under
   WSL's mirrored networking mode that puts the sign-in page on your LAN.
 - `--port 8090` gives a stable address to bookmark.
+
+`dev3 local` adds `--no-tunnel --host 127.0.0.1` for you, so
+`dev3 local --no-detach --port 8090` runs the same command. The same applies to
+`dev3 local install-service`.
 
 Open the printed URL in a Windows browser: `http://localhost:8090/...`. WSL forwards connections
 to `localhost` on Windows into the distro (WSL's default `localhostForwarding`; do not disable it
@@ -153,14 +157,14 @@ sudo loginctl enable-linger $USER   # start with the distro, not with your first
 systemctl --user edit dev3-remote.service
 ```
 
-`--no-start` matters: without it the service starts right away, before the drop-in below exists,
-and runs with telemetry on until you restart it.
+`install-service` carries configured `DEV3_HOME`, `DEV3_LOG_LEVEL`, and Cloudflare connection
+settings from your shell into the unit. Reinstalling from a shell without those settings keeps
+the previous values. `--no-start` keeps the service stopped until the drop-in below exists.
 
 Put this in the drop-in that `systemctl --user edit` opens:
 
 ```ini
 [Service]
-Environment=DEV3_TELEMETRY=off
 KillMode=process
 ```
 
@@ -168,8 +172,7 @@ then `systemctl --user start dev3-remote`. `KillMode=process` keeps running agen
 service restarts; it is safe here only because this setup runs `--no-tunnel` (why:
 [Keep agents alive across restarts](remote-access.md#run-it-as-a-service-linux)). It also means
 stopping the service no longer stops the agents; that section shows how to take them down too.
-`Environment=DEV3_TELEMETRY=off` is needed because the unit does not carry your shell's
-environment. Edit the drop-in, not the unit: `install-service` rewrites the unit on every run.
+Edit the drop-in, not the unit: `install-service` rewrites the unit on every run.
 
 WSL may stop the whole distro, systemd services included, shortly after its last terminal closes,
 which takes dev3 and every agent with it; and nothing starts the distro when Windows boots. If

@@ -35,6 +35,12 @@ const common = {
 
 	// Агент просит запустить другую задачу (или одноразовый scratch)
 	"agentLaunch.titleSpawn": "Агент хочет добавить агента в эту задачу",
+	"agentLaunch.titleResume": "Агент хочет возобновить сохранённую сессию задачи",
+	"agentLaunch.resumeNote": "Откроет сохранённые разговоры, каждый со своим агентом, пресетом и аккаунтом.",
+	"agentLaunch.resumeConversation": "Разговор {id}",
+	"agentLaunch.resumeLatest": "Нет сохранённого id разговора — агент откроет свой последний",
+	"agentLaunch.resume": "Возобновить",
+	"agentLaunch.resuming": "Возобновляю…",
 	"agentLaunch.initialPrompt": "Начальные инструкции",
 	"agentLaunch.spawnHandoff": "Новый агент также получит последний разговор этой задачи.",
 	"agentLaunch.title": "Агент хочет запустить эту задачу",
@@ -49,6 +55,7 @@ const common = {
 	"agentLaunch.launching": "Запускаю…",
 	"agentLaunch.decline": "Отказать",
 	"agentLaunch.autoApproveIn": "Запустится сам через {time}",
+	"agentLaunch.autoResumeIn": "Возобновится само через {time}",
 	"agentLaunch.autoApproveHeld": "Ждёт вашего ответа",
 
 	// Навигация в стиле Vimium
@@ -392,6 +399,19 @@ const common = {
 	"coordinatorFinder.state.disconnected": "Отключён",
 	"coordinatorFinder.state.hibernated": "Заморожен",
 	"coordinatorFinder.state.hidden": "Скрыт",
+	"goTo.title": "Перейти",
+	"goTo.mode.project": "Проекты",
+	"goTo.mode.task": "Задачи",
+	"goTo.mode.combined": "Все",
+	"goTo.placeholder.project": "Введите название проекта…",
+	"goTo.placeholder.task": "Введите задачу — название, #seq, label:, status:…",
+	"goTo.placeholder.combined": "Введите проект или задачу…",
+	"goTo.noResults.project": "Нет подходящих проектов",
+	"goTo.noResults.task": "Нет подходящих задач",
+	"goTo.noResults.combined": "Ничего не найдено",
+	"goTo.loading": "Загрузка задач…",
+	"goTo.loadFailed": "Не удалось загрузить задачи",
+	"goTo.hint": "↑↓ выбор · ⇥ сменить режим · ⏎ открыть · esc отмена",
 
 	// Command (action) palette — Cmd/Ctrl+Shift+P
 	"commandPalette.title": "Выполнить команду",
@@ -411,6 +431,8 @@ const common = {
 	"command.importConversations": "Импортировать разговоры из других агентов",
 	"command.viewDashboard": "Перейти на дашборд",
 	"command.findCoordinator": "Найти координатора…",
+	"command.goToTask": "Перейти к задаче…",
+	"command.goToCombined": "Перейти к чему угодно…",
 	"command.viewKanban": "Перейти на доску",
 	"command.viewChangelog": "Открыть changelog",
 	"command.openSettings": "Открыть настройки",
@@ -441,11 +463,12 @@ const common = {
 	"command.moveUserQuestions": "В колонку «User Questions»",
 	"command.moveReviewAi": "В колонку «Review by AI»",
 	"command.moveReviewUser": "В колонку «Review by User»",
-	"command.openProjectTerminal": "Открыть терминал проекта",
+	"command.openProjectTerminal": "Открыть репо (терминал и файлы проекта)",
 	"command.openQuickShell": "Открыть быструю консоль",
 	"command.tmuxCheatSheet": "Показать шпаргалку tmux",
 	"command.keyboardShortcuts": "Горячие клавиши",
 	"command.agentTrafficLog": "Трафик агентов",
+	"command.toggleFileExplorer": "Показать или скрыть проводник",
 
 	// Open in...
 	"openIn.menuTitle": "Открыть в...",

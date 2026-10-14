@@ -175,11 +175,10 @@ describe("saveSettings", () => {
 	});
 
 	/**
-	 * low-battery is opt-in: absent means off. Both booleans are stored — an explicit
-	 * `false` is the user saying "off", which is what makes the next start uninstall
-	 * what dev3 wrote, and it must not collapse into "never chose".
+	 * Legacy key of the removed low-battery feature: `true` is the proof startup needs
+	 * to delete dev3's files, and the `false` it stores afterwards must survive.
 	 */
-	it("defaults lowBatteryEnabled to off and keeps both explicit choices", async () => {
+	it("passes the legacy lowBatteryEnabled key through in both polarities", async () => {
 		expect((await loadSettings()).lowBatteryEnabled).toBeUndefined();
 
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ lowBatteryEnabled: true }), null, 2), "utf-8");
@@ -239,6 +238,21 @@ describe("saveSettings", () => {
 
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({ openArtifactsInPopup: false }), null, 2), "utf-8");
 		expect((await loadSettings()).openArtifactsInPopup).toBe(false);
+	});
+
+	// The dev3 template is the default, so only the two other modes are stored.
+	it("keeps only the non-default artifactTemplate modes and a non-blank folder", async () => {
+		expect((await loadSettings()).artifactTemplate).toBeUndefined();
+
+		for (const mode of ["off", "custom"] as const) {
+			writeFileSync(settingsPath, JSON.stringify(makeSettings({ artifactTemplate: mode }), null, 2), "utf-8");
+			expect((await loadSettings()).artifactTemplate).toBe(mode);
+		}
+
+		writeFileSync(settingsPath, JSON.stringify({ ...makeSettings(), artifactTemplate: "on", artifactTemplatePath: "  " }, null, 2), "utf-8");
+		const loaded = await loadSettings();
+		expect(loaded.artifactTemplate).toBeUndefined();
+		expect(loaded.artifactTemplatePath).toBeUndefined();
 	});
 
 	// The default-on era's opt-out key. It is never consulted now (its meaning, off,
@@ -358,6 +372,8 @@ describe("saveSettings", () => {
 			// on platforms the canary feed publishes for.
 			updateChannel: "canary",
 			openArtifactsInPopup: true,
+			artifactTemplate: "custom",
+			artifactTemplatePath: "/Users/me/my-template",
 			terminalPathOpenMode: "reveal",
 			terminalShell: "sh",
 			dimInactivePanes: false,

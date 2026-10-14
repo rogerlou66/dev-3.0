@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type Dispatch, type DragEvent, type MutableRefObject, type ReactNode } from "react";
 import { toast } from "../toast";
 import { confirm } from "../confirm";
+import { confirmCustomColumnDelete } from "../utils/confirmCustomColumnDelete";
 import type { CodingAgent, ColumnAgentConfig, CustomColumn, Dev3RepoConfig, DevServerConfig, GitHubAccount, GitHubCliStatus, Label, Project, SetupScriptLaunchMode, Task } from "../../shared/types";
 import { DEV_SERVER_NAME_PATTERN } from "../../shared/dev-servers";
 import { ACTIVE_STATUSES, PROJECT_NAME_MAX_LENGTH, getTaskTitle, normalizeProjectName, repoConfigEnabled } from "../../shared/types";
 import { hasEnvLineBreak, parseEnvText, serializeEnvText } from "../../shared/env-text";
-import { COORDINATOR_PROMPT, CUSTOM_COLUMN_INSTRUCTION_MAX_CHARS, DEFAULT_PR_REVIEW_PROMPT, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, DEFAULT_REVIEW_PROMPT, resolvePresetPrompt } from "../../shared/types";
+import { COORDINATOR_PROMPT, CUSTOM_COLUMN_INSTRUCTION_MAX_CHARS, DEFAULT_PR_REVIEW_PROMPT, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, DEFAULT_REVIEW_PROMPT, resolveArtifactTemplate, resolvePresetPrompt, type ArtifactTemplateMode, type ProjectSettingsUpdate, type ResolvedArtifactTemplate } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
@@ -15,11 +16,14 @@ import AgentConfigPicker from "./AgentConfigPicker";
 import AutomationsPanel from "./AutomationsPanel";
 import ColorSwatchPicker from "./ColorSwatchPicker";
 import SettingsSection from "./global-settings/SettingsSection";
+import ArtifactTemplateFolderField from "./global-settings/ArtifactTemplateFolderField";
+import { ARTIFACT_TEMPLATE_MODE_LABELS } from "./global-settings/BehaviorSettingsSection";
 import ProjectSpacesField from "./ProjectSpacesField";
 import ImportConversationsModal from "./ImportConversationsModal";
 import { matchesBranchQuery } from "./BranchSelector";
 import type { NavigationGuard } from "../navigation-guard";
 import { useIsControlHidden } from "../hooks/useIsControlHidden";
+import { BackIcon } from "./HeaderIcons";
 
 const CONFIG_BOOLEAN_DEFAULTS = {
 	autoReviewEnabled: false,
@@ -291,9 +295,10 @@ interface CustomColumnRowProps {
 	onUpdate: (name: string, color: string, llmInstruction: string, agentConfig?: ColumnAgentConfig | null) => void;
 	onDelete: () => void;
 	availableAgents: CodingAgent[];
+	projectId: string;
 }
 
-function CustomColumnRow({ column, saving, onUpdate, onDelete, availableAgents }: CustomColumnRowProps) {
+function CustomColumnRow({ column, saving, onUpdate, onDelete, availableAgents, projectId }: CustomColumnRowProps) {
 	const t = useT();
 	const [name, setName] = useState(column.name);
 	const [color, setColor] = useState(column.color);
@@ -410,6 +415,7 @@ function CustomColumnRow({ column, saving, onUpdate, onDelete, availableAgents }
 						<AgentConfigPicker
 							idPrefix={`column-agent-${column.id}`}
 							agents={availableAgents}
+							projectId={projectId}
 							agentId={agentId}
 							configId={configId}
 							onChange={(next) => {
@@ -1556,6 +1562,7 @@ function ProjectSettings({
 	const [globalCoordinatorPrompt, setGlobalCoordinatorPrompt] = useState<string | undefined>(undefined);
 	const [globalReviewModePrompt, setGlobalReviewModePrompt] = useState<string | undefined>(undefined);
 	const inheritedReviewModePrompt = resolvePresetPrompt(undefined, globalReviewModePrompt, DEFAULT_PR_REVIEW_PROMPT);
+	const [globalArtifactTemplate, setGlobalArtifactTemplate] = useState<ResolvedArtifactTemplate>({ mode: "on" });
 	const inheritedCoordinatorPrompt = resolvePresetPrompt(undefined, globalCoordinatorPrompt, COORDINATOR_PROMPT);
 
 	// Load available agents
@@ -1564,6 +1571,7 @@ function ProjectSettings({
 		api.request.getGlobalSettings().then((s) => {
 			setGlobalReviewModePrompt(s.reviewModePrompt);
 			setGlobalCoordinatorPrompt(s.coordinatorPrompt);
+			setGlobalArtifactTemplate(resolveArtifactTemplate({}, s));
 		}).catch(() => {});
 	}, []);
 
@@ -1736,6 +1744,19 @@ function ProjectSettings({
 		} catch (err) {
 			toast.error(t("projectSettings.failedSave", { error: String(err) }), { projectId });
 			return false;
+		}
+	}
+
+	async function handleArtifactTemplateChange(next: Pick<ProjectSettingsUpdate, "artifactTemplate" | "artifactTemplatePath">) {
+		try {
+			const updated = await api.request.updateProjectSettings({ projectId, ...next });
+			if (next.artifactTemplate === "custom") {
+				const path = updated.artifactTemplatePath || globalArtifactTemplate.path;
+				api.request.prepareCustomArtifactTemplate({ path, seed: true }).catch(() => {});
+			}
+			dispatch({ type: "updateProject", project: updated });
+		} catch (err) {
+			toast.error(t("projectSettings.failedSave", { error: String(err) }), { projectId });
 		}
 	}
 
@@ -1924,16 +1945,7 @@ function ProjectSettings({
 	async function handleDeleteColumn(columnId: string) {
 		if (!project) return;
 		const column = (project.customColumns ?? []).find((c) => c.id === columnId);
-		const parked = tasks.filter((task) => task.customColumnId === columnId).length;
-		const confirmed = await confirm({
-			title: t("customColumns.deleteConfirmTitle"),
-			message: parked > 0
-				? t.plural("customColumns.deleteConfirmMessage", parked, { name: column?.name ?? "" })
-				: t("customColumns.deleteConfirmMessageEmpty", { name: column?.name ?? "" }),
-			confirmLabel: t("customColumns.deleteColumn"),
-			danger: true,
-		});
-		if (!confirmed) return;
+		if (!column || !(await confirmCustomColumnDelete(column, tasks, t))) return;
 		setColumnSaving(columnId);
 		try {
 			await api.request.deleteCustomColumn({ projectId, columnId });
@@ -2102,9 +2114,9 @@ function ProjectSettings({
 							<button
 								type="button"
 								onClick={() => _navigate({ screen: "project", projectId, activeTaskId: initialWorktreeTaskId })}
-								className="flex items-center gap-1.5 text-fg-3 hover:text-fg-2 text-sm transition-colors -mt-1 -mb-3"
+								className="header-anim flex items-center gap-1.5 text-fg-3 hover:text-fg-2 text-sm transition-colors -mt-1 -mb-3"
 							>
-								<span className="text-sm leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0141}"}</span>
+								<BackIcon className="w-3.5 h-3.5 flex-shrink-0" />
 								<span className="truncate max-w-xs">{getTaskTitle(backTask)}</span>
 							</button>
 						) : null;
@@ -2175,6 +2187,7 @@ function ProjectSettings({
 											onUpdate={(name, color, llmInstruction, agentConfig) => handleUpdateColumn(col.id, name, color, llmInstruction, agentConfig)}
 											onDelete={() => handleDeleteColumn(col.id)}
 											availableAgents={availableAgents}
+											projectId={projectId}
 										/>
 									))}
 									{(project.customColumns ?? []).length === 0 && (
@@ -2256,6 +2269,36 @@ function ProjectSettings({
 								</button>
 								</SettingsSection>
 							)}
+
+							<SettingsSection
+								title={t("projectSettings.artifactTemplate")}
+								description={t("projectSettings.artifactTemplateDesc")}
+							>
+							<select
+								id="project-artifact-template"
+								aria-label={t("projectSettings.artifactTemplate")}
+								value={project.artifactTemplate ?? "inherit"}
+								onChange={(e) => void handleArtifactTemplateChange({ artifactTemplate: e.target.value as ArtifactTemplateMode | "inherit" })}
+								className="w-full sm:w-auto px-3 py-2 bg-raised border border-edge rounded-lg text-fg text-sm outline-none focus:border-accent/40 transition-colors"
+							>
+								<option value="inherit">
+									{t("projectSettings.artifactTemplateInherit", { value: t(ARTIFACT_TEMPLATE_MODE_LABELS[globalArtifactTemplate.mode]) })}
+								</option>
+								{(["on", "off", "custom"] as const).map((mode) => (
+									<option key={mode} value={mode}>{t(ARTIFACT_TEMPLATE_MODE_LABELS[mode])}</option>
+								))}
+							</select>
+							{project.artifactTemplate === "custom" && (
+								<div className="mt-4">
+									<ArtifactTemplateFolderField
+										value={project.artifactTemplatePath ?? ""}
+										placeholderPath={globalArtifactTemplate.path}
+										projectId={projectId}
+										onChange={(path) => void handleArtifactTemplateChange({ artifactTemplatePath: path })}
+									/>
+								</div>
+							)}
+							</SettingsSection>
 
 							<SettingsSection
 								title={t("projectSettings.groupPrivacy")}

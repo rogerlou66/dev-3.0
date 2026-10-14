@@ -580,10 +580,13 @@ function TaskInfoPanel({
 		if (!onOpenInlineDiff) {
 			return;
 		}
+		// Pinned: the badge counts committed work, so the viewer's remembered mode
+		// (default "uncommitted") must not swap in a different scope on open.
 		onOpenInlineDiff({
 			mode: "branch",
+			pinMode: true,
 			compareRef: branchMeta?.compareRef,
-			compareLabel: branchMeta?.compareLabel ?? project.defaultCompareRef ?? resolveTaskCompareBaseBranch(task, project),
+			compareLabel: diffCompareLabel,
 			focusFile,
 		});
 	}
@@ -636,6 +639,7 @@ function TaskInfoPanel({
 			? metadataBranchState
 			: null;
 	const metadataBranchStatus = branchMeta?.branchStatus ?? null;
+	const diffCompareLabel = branchMeta?.compareLabel ?? project.defaultCompareRef ?? resolveTaskCompareBaseBranch(task, project);
 	const metadataPrInfo: TaskPRBadgeInfo | null = inspectorPRBadge(task, branchMeta?.prStatus, metadataBranchStatus);
 	const metadataPrState = metadataPrInfo ? prBadgeDisplayState(metadataPrInfo, metadataBranchStatus, task.prStatusCache) : undefined;
 	const metadataPrTone = metadataPrState ? prStateTone(metadataPrState) : null;
@@ -656,9 +660,16 @@ function TaskInfoPanel({
 	const visibleDiffDeletions = showRawDiffTotals
 		? (metadataBranchStatus?.diffDeletions ?? 0)
 		: visibleDiffFileStats.reduce((sum, e) => sum + e.deletions, 0);
-	const diffBadgeTitle = !includeTests && excludedTestCount > 0
-		? t.plural("infoPanel.diffTestsHidden", excludedTestCount)
-		: t("infoPanel.showDiff");
+	const diffBadgeTitle = [
+		t("infoPanel.diffBadgeTooltip", { branch: diffCompareLabel }),
+		!includeTests && excludedTestCount > 0 ? t.plural("infoPanel.diffTestsHidden", excludedTestCount) : null,
+	].filter(Boolean).join(" ");
+	const diffBadgeAriaLabel = t("infoPanel.diffBadgeAria", {
+		files: t.plural("infoPanel.diffFileCount", visibleDiffFiles),
+		insertions: String(visibleDiffInsertions),
+		deletions: String(visibleDiffDeletions),
+		branch: diffCompareLabel,
+	});
 	// The tests filter is a segment of the diff badge, not a chip of its own: it
 	// only ever modifies these very numbers, and as a neighbour it read as a
 	// second, unrelated action. Same segmented idiom as the status control —
@@ -669,14 +680,15 @@ function TaskInfoPanel({
 		<button
 			type="button"
 			ref={diffFilesTriggerRef}
-			className={`inline-flex items-center gap-1.5 px-2 py-1 text-micro font-mono text-fg-2 cursor-pointer transition-colors hover:bg-elevated-hover ${showTestsSegment ? "rounded-l-lg" : "rounded-lg"}`}
+			className={`git-anim inline-flex items-center gap-1.5 px-2 py-1 text-micro font-mono text-fg-2 cursor-pointer transition-colors hover:bg-elevated-hover ${showTestsSegment ? "rounded-l-lg" : "rounded-lg"}`}
 			onClick={() => openBranchDiff()}
 			onMouseEnter={showDiffFilesPopover}
 			onMouseLeave={hideDiffFilesPopover}
 			title={diffBadgeTitle}
+			aria-label={diffBadgeAriaLabel}
 			data-testid="diff-summary-badge"
 		>
-			<span className="text-fg-muted text-sm-plus leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF0CB"}</span>
+			<ShowDiffIcon className="w-[0.95rem] h-[0.95rem] flex-shrink-0 text-fg-muted" />
 			<span>{t.plural("infoPanel.diffFileCount", visibleDiffFiles)}</span>
 			<span className="text-success">+{visibleDiffInsertions}</span>
 			<span className="text-danger">−{visibleDiffDeletions}</span>
@@ -723,11 +735,11 @@ function TaskInfoPanel({
 			onClick={() => openDiffWhereTheChangesAre(hasCommittedDiff)}
 			aria-label={t("infoPanel.showDiff")}
 			title={diffBadgeTitle}
-			className={`flex-shrink-0 inline-flex items-center justify-center gap-1.5 rounded-lg border border-edge bg-elevated px-2 min-w-[2.75rem] min-h-[2.75rem] text-micro font-mono text-fg-2 transition-colors hover:bg-elevated-hover ${
+			className={`git-anim flex-shrink-0 inline-flex items-center justify-center gap-1.5 rounded-lg border border-edge bg-elevated px-2 min-w-[2.75rem] min-h-[2.75rem] text-micro font-mono text-fg-2 transition-colors hover:bg-elevated-hover ${
 				hasCommittedDiff ? "[@container(min-width:400px)]:hidden" : ""
 			}`}
 		>
-			<span className="text-fg-muted text-sm-plus leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF0CB"}</span>
+			<ShowDiffIcon className="w-[0.95rem] h-[0.95rem] flex-shrink-0 text-fg-muted" />
 			{/* The numbers go before the chip does. A 390px bar already carrying a
 			    variant switcher, status, priority, images and artifacts has ~44px
 			    left — a square and nothing more — while a dirty "+4000 −2000" needs
@@ -746,6 +758,8 @@ function TaskInfoPanel({
 			)}
 		</button>
 	) : null;
+	// Sits at z 9999, above the default tooltip tier — so the row tooltips below
+	// take the "popover" layer, or they open underneath this very list.
 	const diffFilesPopover = diffFilesHover && metadataBranchStatus && visibleDiffFileStats.length > 0 && createPortal(
 		<div
 			className="fixed bg-overlay border border-edge-active rounded-lg shadow-2xl shadow-black/40 py-2 pl-3 pr-1.5 max-w-[25rem] max-h-[20rem] overflow-auto"
@@ -767,7 +781,7 @@ function TaskInfoPanel({
 						</span>
 					)}
 					<div className="flex items-center gap-1.5 flex-shrink-0">
-						<Tooltip content={t("infoPanel.showDiff")} detail={t("ttip.infoPanel.showDiff")}>
+						<Tooltip content={t("infoPanel.showDiff")} detail={t("ttip.infoPanel.showDiff")} layer="popover">
 							<button
 								onClick={(event) => handleFileDiff(event, fileName)}
 								aria-label={t("infoPanel.showDiff")}
@@ -776,7 +790,7 @@ function TaskInfoPanel({
 								<span style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uF4D2"}</span>
 							</button>
 						</Tooltip>
-						<Tooltip content={t("openIn.menuTitle")} detail={t("ttip.openIn.menu")}>
+						<Tooltip content={t("openIn.menuTitle")} detail={t("ttip.openIn.menu")} layer="popover">
 							<button
 								onClick={(event) => handleFileOpenIn(event, fileName)}
 								aria-label={t("openIn.menuTitle")}
@@ -907,7 +921,7 @@ function TaskInfoPanel({
 							onClick={handleQuickComplete}
 							disabled={quickCompleting}
 							aria-label={t("pipeline.completeTooltip")}
-							className={`flex flex-shrink-0 items-center justify-center self-stretch rounded-r-lg px-1.5 text-success transition-[color,background-color,opacity] ${
+							className={`task-anim flex flex-shrink-0 items-center justify-center self-stretch rounded-r-lg px-1.5 text-success transition-[color,background-color,opacity] ${
 								quickCompleting ? "bg-success/25 opacity-100" : "opacity-75 hover:bg-success/20 hover:opacity-100"
 							}`}
 						>
@@ -1168,7 +1182,7 @@ function TaskInfoPanel({
 										<button
 											type="button"
 											onClick={ownForeignCode}
-											className="task-anim flex-shrink-0 rounded border border-edge px-1.5 py-0.5 text-dense text-fg-3 hover:bg-elevated hover:text-fg transition-colors"
+											className="flex-shrink-0 rounded border border-edge px-1.5 py-0.5 text-dense text-fg-3 hover:bg-elevated hover:text-fg transition-colors"
 										>
 											{t("infoPanel.foreignCodeOwn")}
 										</button>
@@ -1661,7 +1675,7 @@ function TaskInfoPanel({
 						</div>
 						<div className="flex-1" />
 						<div className="flex items-center gap-2 flex-shrink-0" data-help-id="inspector.runtime-bar">
-							<TaskOpenIn task={task} project={project} isTaskActive={isTaskActive} showFileBrowser compact={tight} />
+							<TaskOpenIn task={task} isTaskActive={isTaskActive} showFileBrowser compact={tight} />
 							{project.kind !== "virtual" && (
 								<>
 									{!scriptsRunnerHidden && (
@@ -1737,7 +1751,7 @@ function TaskInfoPanel({
 							</div>
 							<div className="flex-1" />
 							<div className="flex items-center gap-2 flex-shrink-0" data-help-id="inspector.runtime-bar">
-								<TaskOpenIn task={task} project={project} isTaskActive={isTaskActive} showFileBrowser={false} compact={tight} />
+								<TaskOpenIn task={task} isTaskActive={isTaskActive} showFileBrowser={false} compact={tight} />
 								{project.kind !== "virtual" && (
 									<>
 										{!scriptsRunnerHidden && (

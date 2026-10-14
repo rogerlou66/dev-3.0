@@ -32,14 +32,6 @@ vi.mock("../../rpc", () => ({
 			retryRemoteAccess: vi.fn().mockResolvedValue({ running: true, port: 51473, failure: null }),
 			saveGlobalSettings: vi.fn(),
 			checkAgentAvailability: vi.fn().mockResolvedValue([]),
-			getLowBatteryStatus: vi.fn().mockResolvedValue({
-				enabled: true,
-				revision: "0".repeat(40),
-				styleInstalled: true,
-				skillInstalled: true,
-				outcome: { kind: "selected" },
-			}),
-			selectLowBatteryStyle: vi.fn(),
 			setTmuxTheme: vi.fn().mockResolvedValue(undefined),
 			checkCaffeinateAvailable: vi.fn().mockResolvedValue({ available: true }),
 			checkCanaryChannelAvailable: vi.fn().mockResolvedValue({ available: true }),
@@ -56,7 +48,7 @@ vi.mock("../../rpc", () => ({
 			}),
 			setNewTaskTerminalBackend: vi.fn().mockResolvedValue({ backend: "native" }),
 			listAgentAccounts: vi.fn().mockResolvedValue({
-				claude: { accounts: [], activeId: null, systemIdentity: null },
+				claude: { accounts: [], activeId: null, systemConfigDir: "/home/me/.claude", systemIdentity: null },
 				codex: { accounts: [], activeId: null, currentIdentity: null },
 			}),
 			// Model catalog surfaces: an empty catalog keeps them quiet, which is

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useT } from "../i18n";
 import { api, isElectrobun } from "../rpc";
 import { toast } from "../toast";
@@ -17,6 +17,10 @@ import { useReviewSend } from "../review/useReviewSend";
 import { useTaskReview } from "../review/useTaskReview";
 import { MarkdownDocument } from "./pr-review/markdown";
 import { isRenderableDocPath, toRenderableMarkdown } from "./pr-review/markdown-files";
+import { useResolvedTheme } from "../hooks/useResolvedTheme";
+import { useSyntaxLines, type SyntaxToken } from "./file-preview-syntax";
+// Token colours for both themes — the diff viewer's own stylesheet, scoped to its wrapper class.
+import "@git-diff-view/react/styles/diff-view-pure.css";
 
 interface FilePreviewModalProps {
 	path: string;
@@ -54,6 +58,59 @@ function middleTruncate(text: string, max: number): string {
 	return `${text.slice(0, half)}…${text.slice(text.length - half)}`;
 }
 
+const WRAP_KEY = "dev3-file-preview-wrap";
+const EXPANDED_KEY = "dev3-file-preview-expanded";
+
+/** Per-viewer view preference; storage can be missing or throw (private windows). */
+function readFlag(key: string, fallback: boolean): boolean {
+	try {
+		const raw = localStorage.getItem(key);
+		return raw === null ? fallback : raw === "1";
+	} catch {
+		return fallback;
+	}
+}
+
+function writeFlag(key: string, value: boolean): void {
+	try {
+		localStorage.setItem(key, value ? "1" : "0");
+	} catch {
+		// Preference only — the toggle still works for this session.
+	}
+}
+
+function usePersistedFlag(key: string, fallback: boolean): [boolean, () => void] {
+	const [value, setValue] = useState(() => readFlag(key, fallback));
+	const toggle = useCallback(() => setValue((current) => {
+		writeFlag(key, !current);
+		return !current;
+	}), [key]);
+	return [value, toggle];
+}
+
+/**
+ * Grow-only height for the content-hugging dialog: reflowing the same file
+ * (Wrap lines, Raw/Rendered, find bar) may enlarge it but never shrinks it under
+ * the reader. A new file or an explicit Expand/Restore starts over (`resetKey`).
+ */
+function useFitHeightFloor(ref: RefObject<HTMLElement | null>, active: boolean, resetKey: string): number | null {
+	const [floor, setFloor] = useState<number | null>(null);
+	useEffect(() => {
+		setFloor(null);
+		const element = ref.current;
+		if (!active || !element || typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver(() => {
+			const height = Math.round(element.getBoundingClientRect().height);
+			setFloor((current) => (current === null || height > current ? height : current));
+		});
+		observer.observe(element);
+		return () => observer.disconnect();
+	}, [ref, active, resetKey]);
+	return active ? floor : null;
+}
+
+const ICON_FONT = "'JetBrainsMono Nerd Font Mono'";
+
 const GHOST_BUTTON =
 	"px-3 py-1.5 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated " +
 	"transition-[background-color,color,transform] duration-150 ease-out motion-safe:active:scale-[0.96]";
@@ -69,6 +126,8 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 	const trapRef = useFocusTrap<HTMLDivElement>();
 	const [preview, setPreview] = useState<FilePreviewResult | null>(null);
 	const [showRaw, setShowRaw] = useState(false);
+	const [wrapLines, toggleWrapLines] = usePersistedFlag(WRAP_KEY, true);
+	const [expanded, toggleExpanded] = usePersistedFlag(EXPANDED_KEY, false);
 	const [imageDims, setImageDims] = useState<{ w: number; h: number } | null>(null);
 	const highlightRef = useRef<HTMLDivElement | null>(null);
 	const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -172,10 +231,16 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 		? ""
 		: anchor.endLine === null || anchor.endLine === anchor.startLine ? `:${anchor.startLine}` : `:${anchor.startLine}–${anchor.endLine}`;
 	const showAside = canComment && (pending !== null || pendingRegion !== null || fileComments.length > 0 || commentMode);
+	const theme = useResolvedTheme();
+	const syntaxLines = useSyntaxLines(
+		preview?.kind === "text" ? preview.content : null,
+		path,
+		!isRenderableDocPath(path) || showRaw,
+	);
 	// Re-search whenever the body is replaced: the async load landing, and the
 	// raw/rendered toggle, both swap the text the ranges point into.
 	const find = useFindInElement(bodyRef, {
-		contentKey: `${preview?.kind ?? "loading"}:${showRaw}`,
+		contentKey: `${preview?.kind ?? "loading"}:${showRaw}:${wrapLines}:${syntaxLines ? "syntax" : "plain"}`,
 		onOpen: focusFindInput,
 	});
 
@@ -218,12 +283,24 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 	const slash = path.lastIndexOf("/");
 	const fileName = slash >= 0 ? path.slice(slash + 1) : path;
 	const dirName = slash > 0 ? path.slice(0, slash) : "";
+	const showsCode = textContent !== null && (!isRenderable || showRaw);
+
+	function renderTokens(tokens: SyntaxToken[]) {
+		return tokens.map((token, i) => (token.className ? <span key={i} className={token.className}>{token.text}</span> : token.text));
+	}
 
 	function renderCode(content: string) {
 		const lines = content.split("\n");
-		const gutterWidth = `${String(lines.length).length}ch`;
+		// The span is border-box, so its `pr-3` has to be added on top of the digits.
+		const gutterWidth = `calc(${String(lines.length).length}ch + 0.75rem)`;
 		return (
-			<div className="font-mono text-xs leading-relaxed">
+			<div
+				className={`font-mono text-xs leading-relaxed${syntaxLines ? " diff-tailwindcss-wrapper" : ""}`}
+				data-testid="file-preview-code"
+				data-wrap={wrapLines ? "true" : "false"}
+				data-syntax={syntaxLines ? "true" : "false"}
+				data-theme={syntaxLines ? theme : undefined}
+			>
 				{lines.map((text, i) => {
 					const isTarget = line !== undefined && i + 1 === line;
 					const commented = commentedLines.has(i + 1);
@@ -241,7 +318,9 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 							>
 								{i + 1}
 							</span>
-							<span className="whitespace-pre text-fg">{text}</span>
+							<span className={`${wrapLines ? "min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]" : "whitespace-pre"} text-fg${syntaxLines ? " diff-line-syntax-raw" : ""}`}>
+								{syntaxLines?.has(i + 1) ? renderTokens(syntaxLines.get(i + 1)!) : text}
+							</span>
 						</div>
 					);
 				})}
@@ -273,7 +352,7 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 						{isRenderable && !showRaw ? (
 							<MarkdownDocument
 								body={toRenderableMarkdown(preview.content, path)}
-								className="max-w-[70ch] mx-auto"
+								className="dev3-file-preview-md"
 								imageBaseDir={dirName || null}
 							/>
 						) : (
@@ -357,6 +436,17 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 	}
 
 	const fileMissing = preview?.kind === "not-found";
+	// A one-line notice (binary, missing, too large) stays a small dialog. Content
+	// hugs its own height up to the screen, or fills the screen once expanded — the
+	// size changes only when the user asks, never while they read.
+	const showsContent = !preview || preview.kind === "text" || preview.kind === "image";
+	const size = !showsContent ? "notice" : expanded ? "expanded" : "fit";
+	const fitHeight = useFitHeightFloor(trapRef, size === "fit", `${path}:${size}`);
+	const sizeClass = {
+		notice: "w-[calc(100vw-2rem)] sm:w-[calc(100vw-4rem)] max-w-xl",
+		fit: `${showAside ? "w-[min(calc(100vw-2rem),80rem)] sm:w-[min(calc(100vw-4rem),80rem)]" : "w-[min(calc(100vw-2rem),60rem)] sm:w-[min(calc(100vw-4rem),60rem)]"} max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-4rem)]`,
+		expanded: "w-[calc(100vw-2rem)] sm:w-[calc(100vw-4rem)] h-[calc(100dvh-2rem)] sm:h-[calc(100dvh-4rem)]",
+	}[size];
 
 	return (
 		<div
@@ -371,9 +461,12 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 				aria-modal="true"
 				aria-labelledby="file-preview-title"
 				tabIndex={-1}
-				className={`bg-overlay border border-edge rounded-2xl shadow-2xl ${showAside ? "w-[min(80rem,92vw)]" : "w-[min(56rem,92vw)]"} max-h-[85vh] flex flex-col outline-none`}
+				data-size={size}
+				// `min-height` outranks `max-height`, so the floor is capped to the screen itself.
+				style={fitHeight ? { minHeight: `min(${fitHeight}px, calc(100dvh - 4rem))` } : undefined}
+				className={`bg-overlay border border-edge rounded-2xl shadow-2xl ${sizeClass} flex flex-col outline-none`}
 			>
-				<div className="flex items-center gap-3 px-4 py-3 border-b border-edge">
+				<div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 border-b border-edge">
 					<div className="min-w-0 flex-1">
 						<h2 id="file-preview-title" className="text-fg text-sm font-semibold truncate" title={path}>
 							{fileName}
@@ -384,6 +477,9 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 							</p>
 						)}
 					</div>
+					{/* View controls: inline on wide screens, their own row under the title on
+					    narrow ones so the close button never wraps away from the file name. */}
+					<div className="order-last flex w-full flex-wrap items-center gap-2 empty:hidden sm:order-none sm:w-auto">
 					{isRenderable && textContent !== null && (
 						<div className="shrink-0 flex rounded-lg border border-edge overflow-hidden text-xs">
 							{([false, true] as const).map((raw) => (
@@ -403,6 +499,21 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 							))}
 						</div>
 					)}
+					{showsCode && (
+						<button
+							type="button"
+							data-testid="file-preview-wrap"
+							onClick={toggleWrapLines}
+							aria-pressed={wrapLines}
+							title={t("terminal.filePreviewWrapHint")}
+							className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-edge px-2.5 py-1 text-xs transition-[background-color,color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] ${
+								wrapLines ? "bg-accent/10 text-accent" : "bg-raised text-fg-3 hover:text-fg"
+							}`}
+						>
+							<span aria-hidden="true" className="text-sm leading-none" style={{ fontFamily: ICON_FONT }}>{"\u{f05b6}"}</span>
+							<span>{t("terminal.filePreviewWrap")}</span>
+						</button>
+					)}
 					{canComment && preview?.kind === "image" && (
 						<button
 							type="button"
@@ -416,6 +527,24 @@ export default function FilePreviewModal({ path, line, taskId, projectId, task, 
 							}`}
 						>
 							<span aria-hidden="true" className="text-base leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\uf075"}</span>
+						</button>
+					)}
+					</div>
+					{showsContent && (
+						<button
+							type="button"
+							data-testid="file-preview-expand"
+							onClick={toggleExpanded}
+							aria-pressed={expanded}
+							aria-label={expanded ? t("terminal.filePreviewRestore") : t("terminal.filePreviewExpand")}
+							title={expanded ? t("terminal.filePreviewRestore") : t("terminal.filePreviewExpand")}
+							className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-fg-3 hover:text-fg hover:bg-fg/8 transition-[background-color,color,transform] duration-150 ease-out motion-safe:active:scale-[0.96]"
+						>
+							<svg key={String(expanded)} className="w-4 h-4 motion-safe:animate-[dev3-icon-swap_150ms_cubic-bezier(0.2,0,0,1)]" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden="true">
+								<path strokeLinecap="round" strokeLinejoin="round" d={expanded
+									? "M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"
+									: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"} />
+							</svg>
 						</button>
 					)}
 					<button

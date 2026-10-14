@@ -30,7 +30,7 @@ function accounts(): AgentAccountsState {
 				{ id: "home", kind: "claude", label: "Home Claude", identity: null, auth: "oauth", api: null, createdAt: 0 },
 			],
 			activeId: "work",
-			systemIdentity: null,
+			systemConfigDir: "/home/me/.claude", systemIdentity: null,
 		},
 		codex: { accounts: [], activeId: null, currentIdentity: null },
 	};
@@ -53,7 +53,7 @@ function sameEmailAccounts(): AgentAccountsState {
 				{ id: "b", kind: "claude", label: "dev@corp.com", identity: identity("Beta"), auth: "oauth", api: null, createdAt: 0 },
 			],
 			activeId: null,
-			systemIdentity: null,
+			systemConfigDir: "/home/me/.claude", systemIdentity: null,
 		},
 		codex: { accounts: [], activeId: null, currentIdentity: null },
 	};
@@ -104,6 +104,58 @@ describe("AgentUsagePanel", () => {
 		expect(screen.getByText("Home Claude")).toBeTruthy();
 		expect(screen.getByText("42% used")).toBeTruthy();
 		expect(screen.getAllByText("no recent data").length).toBeGreaterThan(0);
+	});
+
+	it("says a live account reported no limits instead of 'no recent data' (h0x91b/dev-3.0#1948)", () => {
+		const now = Date.now();
+		const base = report();
+		const withEnterprise: AgentRateLimitsReport = {
+			...base,
+			snapshots: [
+				...base.snapshots,
+				{ source: "claude", accountId: "home", capturedAt: now - 3 * 60_000, windows: [], creditsBalance: null, monthlyCredits: null, planType: null },
+			],
+		};
+		render(
+			<I18nProvider>
+				<AgentUsagePanel report={withEnterprise} accounts={accounts()} interactive onOpenSettings={() => {}} />
+			</I18nProvider>,
+		);
+		const home = screen.getByText("Home Claude").closest("button")!;
+		expect(home.textContent).toContain("no usage limits reported");
+		expect(home.textContent).toContain("3m");
+		expect(home.textContent).not.toContain("no recent data");
+		expect(home.textContent).not.toContain("% used");
+		// The personal account's own limits are untouched.
+		expect(screen.getByText("Work Claude").closest("button")!.textContent).toContain("42% used");
+	});
+
+	it("shows a gateway spend limit with its dollars", () => {
+		const now = Date.now();
+		const spend: AgentRateLimitsReport = {
+			generatedAt: now,
+			snapshots: [
+				{
+					source: "claude",
+					accountId: "work",
+					capturedAt: now,
+					windows: [{ id: "spend_limit", usedPercent: 62.8, resetsAt: now + 86_400_000, windowMinutes: null }],
+					creditsBalance: null,
+					monthlyCredits: null,
+					planType: null,
+					spendLimit: { usedUsd: 314.12, limitUsd: 500, period: "monthly" },
+				},
+			],
+		};
+		render(
+			<I18nProvider>
+				<AgentUsagePanel report={spend} accounts={accounts()} interactive onOpenSettings={() => {}} />
+			</I18nProvider>,
+		);
+		const work = screen.getByText("Work Claude").closest("button")!;
+		expect(work.textContent).toContain("spend");
+		expect(work.textContent).toContain("63% used");
+		expect(work.textContent).toContain("~$314.12 of $500.00 monthly limit");
 	});
 
 	it("marks the current default and leaves it inert", async () => {
@@ -198,7 +250,7 @@ describe("AgentUsagePanel", () => {
 	it("switches back to the Claude system login", async () => {
 		renderPanel();
 		await userEvent.click(
-			screen.getByRole("radio", { name: "Make System login (~/.claude) the default account" }),
+			screen.getByRole("radio", { name: "Make Default login (/home/me/.claude) the default account" }),
 		);
 		expect(setActive).toHaveBeenCalledWith({ kind: "claude", accountId: null });
 	});
@@ -217,5 +269,158 @@ describe("AgentUsagePanel", () => {
 		expect(unmanaged).toBeTruthy();
 		await userEvent.click(unmanaged as HTMLElement);
 		expect(setActive).not.toHaveBeenCalled();
+	});
+
+	it("gives each pinned config dir its own row and keeps its usage off the system row", async () => {
+		const now = Date.now();
+		const pinnedReport: AgentRateLimitsReport = {
+			generatedAt: now,
+			snapshots: [
+				{
+					source: "claude",
+					accountId: null,
+					configDir: "/mnt/e/Projects/app/.claude",
+					capturedAt: now,
+					windows: [{ id: "five_hour", usedPercent: 77, resetsAt: null, windowMinutes: 300 }],
+					creditsBalance: null,
+					monthlyCredits: null,
+					planType: null,
+				},
+			],
+		};
+		render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={pinnedReport}
+					accounts={accounts()}
+					pinnedLogins={[
+						{
+							configDir: "/mnt/e/Projects/app/.claude",
+							identity: { email: "pin@corp.com", organization: null, plan: null, planLabel: null, accountId: null },
+							projectNames: ["app"],
+						},
+					]}
+					interactive
+					onOpenSettings={() => {}}
+				/>
+			</I18nProvider>,
+		);
+		const pinned = screen.getAllByRole("radio").find((r) => r.textContent?.includes("pin@corp.com"));
+		expect(pinned?.textContent).toContain("Project login (…/app/.claude)");
+		expect(pinned?.textContent).toContain("77% used");
+		const system = screen.getAllByRole("radio").find((r) => r.textContent?.includes("Default login (/home/me/.claude)"));
+		expect(system?.textContent).not.toContain("77%");
+		await userEvent.click(pinned as HTMLElement);
+		expect(setActive).not.toHaveBeenCalled();
+	});
+
+	it("still shows a reading from a dir no project pins any more, named by its dir", () => {
+		const now = Date.now();
+		render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={{
+						generatedAt: now,
+						snapshots: [
+							{
+								source: "claude",
+								accountId: null,
+								configDir: "/old/proj/.claude",
+								capturedAt: now,
+								windows: [{ id: "five_hour", usedPercent: 13, resetsAt: null, windowMinutes: 300 }],
+								creditsBalance: null,
+								monthlyCredits: null,
+								planType: null,
+							},
+						],
+					}}
+					accounts={accounts()}
+					interactive
+					onOpenSettings={() => {}}
+				/>
+			</I18nProvider>,
+		);
+		const orphan = screen.getAllByRole("radio").find((r) => r.textContent?.includes("13% used"));
+		expect(orphan?.textContent).toContain("Project login (…/proj/.claude)");
+	});
+
+	it("drops an empty default login when nothing needs it", () => {
+		const state = accounts();
+		state.claude.accounts = [];
+		render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={report()}
+					accounts={state}
+					pinnedLogins={[{ configDir: "/p/app/.claude", identity: null, projectNames: ["app"] }]}
+					interactive
+					onOpenSettings={() => {}}
+				/>
+			</I18nProvider>,
+		);
+		expect(screen.queryByText("Default login (/home/me/.claude)")).toBeNull();
+		expect(screen.getByText("Project login (…/app/.claude)")).toBeTruthy();
+	});
+
+	it("drops a default login nobody is signed into, even when an old reading is filed under it", () => {
+		const now = Date.now();
+		const state = accounts();
+		state.claude.accounts = [];
+		render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={{
+						generatedAt: now,
+						snapshots: [
+							{
+								source: "claude",
+								accountId: null,
+								capturedAt: now,
+								windows: [{ id: "five_hour", usedPercent: 83, resetsAt: null, windowMinutes: 300 }],
+								creditsBalance: null,
+								monthlyCredits: null,
+								planType: null,
+							},
+						],
+					}}
+					accounts={state}
+					pinnedLogins={[{ configDir: "/p/app/.claude", identity: null, projectNames: ["app"] }]}
+					interactive
+					onOpenSettings={() => {}}
+				/>
+			</I18nProvider>,
+		);
+		expect(screen.queryByText(/Default login/)).toBeNull();
+		expect(screen.queryByText(/83% used/)).toBeNull();
+	});
+
+	it("puts a pinned dir's label on its own line so the identity keeps its room", () => {
+		const state = accounts();
+		state.claude.accounts = [];
+		render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={{ generatedAt: Date.now(), snapshots: [] }}
+					accounts={state}
+					pinnedLogins={[
+						{
+							configDir: "/p/app/.claude",
+							identity: { email: "pin@corp.com", organization: null, plan: null, planLabel: null, accountId: null },
+							projectNames: ["app"],
+						},
+					]}
+					interactive
+					onOpenSettings={() => {}}
+				/>
+			</I18nProvider>,
+		);
+		const chip = screen.getByText("Project login (…/app/.claude)");
+		expect(chip.getAttribute("title")).toBe("/p/app/.claude");
+		expect(chip.closest(".flex.items-center")).toBeNull();
+	});
+
+	it("keeps an empty default login beside managed accounts, where it is a real choice", () => {
+		renderPanel();
+		expect(screen.getAllByRole("radio").some((r) => r.textContent?.includes("Default login (/home/me/.claude)"))).toBe(true);
 	});
 });

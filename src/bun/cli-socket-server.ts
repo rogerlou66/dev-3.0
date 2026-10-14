@@ -16,9 +16,9 @@ import { SharedImageError, saveSharedImage, saveSharedVideo } from "./shared-ima
 import { SharedArtifactError, saveSharedArtifact } from "./shared-artifacts";
 import { appendArtifactVersion, latestArtifactVersion } from "../shared/artifact-versions";
 import { addAutomation, deleteAutomation, loadAutomations, updateAutomation } from "./automations-data";
-import { createAgentRequest, getAgentRequestState, joinAgentRequest } from "./agent-requests";
+import { createAgentRequest, getAgentRequestState, joinAgentRequest, setAgentRequestLaunchChoice } from "./agent-requests";
 import { DESTRUCTIVE_APPROVAL_TARGET, type AgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../shared/agent-approval";
-import type { AgentLaunchChoice } from "../shared/types";
+import type { AgentLaunchChoice, LaunchVariant } from "../shared/types";
 import { deliverLaunchHandoff } from "./agent-launch-handoff";
 import * as data from "./data";
 import * as taskNotes from "./board-operations/task-notes";
@@ -34,6 +34,7 @@ import type { NotificationLogInput, NotificationLogMode, NotificationLogOutcome 
 import { getDevServerStatus, runDevServer, stopDevServer, restartDevServer } from "./rpc-handlers/tmux-pty";
 import { getTmuxLayout } from "./pty-server";
 import { cancelScheduledMessageByRef, scheduleMessage as scheduleMessageCore, sendMessageImmediately } from "./scheduled-message-scheduler";
+import { captureScheduledMessageAuthor } from "./scheduled-message-author";
 import { toScheduledMessageListing } from "../shared/scheduled-message-listing";
 import { NATIVE_PROMPT_DELIVERY_METHOD, deliverNativePromptAsOwner } from "./agent-prompt-native";
 import { deliverAgentPrompt } from "./agent-prompt-delivery";
@@ -619,6 +620,25 @@ function launcherHandoffNote(params: Record<string, unknown>): string | null {
 	return raw ? raw : null;
 }
 
+function launchSuggestionRequested(params: Record<string, unknown>): boolean {
+	return params.agentId != null || params.configId != null;
+}
+
+/**
+ * The agent/config a launch request suggests (`--agent`/`--config`), validated
+ * BEFORE any dialog or placeholder task exists: a bad id must fail loudly, never
+ * fall back to the default preset. Null when nothing was suggested.
+ */
+async function resolveLaunchSuggestion(params: Record<string, unknown>): Promise<LaunchVariant | null> {
+	if ("accountId" in params) throw new Error("Account selection is not supported for launch requests — the user picks the account in the approval dialog.");
+	if (!launchSuggestionRequested(params)) return null;
+	const { validateLaunchSuggestion } = await import("./cli-agent-spawn");
+	return validateLaunchSuggestion({
+		agentId: typeof params.agentId === "string" ? params.agentId : null,
+		configId: typeof params.configId === "string" ? params.configId : null,
+	});
+}
+
 /** {@link seqIsShared} against a project's live task list; pessimistic if it cannot be read. */
 async function isSeqSharedOnBoard(project: Project, task: Task): Promise<boolean> {
 	try {
@@ -679,6 +699,8 @@ async function requestAgentLaunchApproval(opts: {
 	requester: AgentMessageSource;
 	/** The launcher's standing text, already read from its `--handoff-file`. */
 	launcherNote?: string | null;
+	/** Validated `--agent`/`--config` suggestion; only preselects the dialog. */
+	suggested?: LaunchVariant | null;
 }): Promise<LaunchApprovalOutcome> {
 	const { project, task, targetStatus, requester } = opts;
 	const push = getPushMessage();
@@ -691,12 +713,16 @@ async function requestAgentLaunchApproval(opts: {
 	// deliberately does not do this — it destroys a worktree.
 	const defaultPriority = await resolveLaunchPriority(task, requester);
 	const autoApproveAfterMs = agentLaunchAutoApproveMs(await loadSettings());
+	const joining = getAgentRequestState("launch", task.id).state === "pending";
 	const { requestId, decision, autoApproveAt } = createAgentRequest(
 		"launch",
 		task.id,
 		project.id,
 		{ autoApproveAfterMs },
 	);
+	// Seeds what an unwatched auto-approval launches. A joined retry must not
+	// overwrite a pick the user may already have made in the open dialog.
+	if (opts.suggested && !joining) setAgentRequestLaunchChoice(requestId, { variants: [opts.suggested] });
 	// Pushed on EVERY attempt, joined retries included — see the note on
 	// `task.requestCancellation`. Clients dedup by `requestId`, so a dialog that
 	// is already on screen is untouched and nothing here re-arms the countdown.
@@ -715,6 +741,7 @@ async function requestAgentLaunchApproval(opts: {
 		defaultPriority,
 		canAddVariants: canSpawnAsVariants(task),
 		autoApproveAt,
+		...(opts.suggested ? { suggested: opts.suggested } : {}),
 	});
 
 	const answer = await decision;
@@ -1059,6 +1086,17 @@ const handlers: Record<string, Handler> = {
 			prompt: typeof params.prompt === "string" ? params.prompt : undefined, handoff: params.handoff === true,
 		});
 	},
+	"agent.resume": async (params) => {
+		for (const key of ["agentId", "configId", "accountId", "prompt"]) {
+			if (key in params) throw new Error(`agent.resume takes no ${key} — it restores the saved harness, config and account.`);
+		}
+		const { project, task } = await requirePaneTask(params);
+		const sourceId = typeof params.sourceTaskId === "string" ? params.sourceTaskId : "";
+		const requester = sourceId ? await resolveTaskAcrossProjects(sourceId) : null;
+		if (sourceId && !requester) throw new Error("Unknown requesting task — cannot attribute the resume request.");
+		const { resumeCliAgent } = await import("./cli-agent-resume");
+		return resumeCliAgent({ project, task, requester: requester?.task ?? null, allowAgentLatest: params.allowAgentLatest === true });
+	},
 	// Cross-instance notification: another dev-3.0 instance changed data.
 	// Re-read from disk and push to local renderer only (no re-broadcast).
 	"_notify": async (params) => {
@@ -1181,7 +1219,9 @@ const handlers: Record<string, Handler> = {
 		return await startPaneRun({
 			task,
 			command: String(params.command ?? ""),
-			placement: params.placement === "below" ? "below" : "right",
+			// An older CLI sends "right" for "no flag" — that, like anything unknown, is auto.
+			placement: params.placement === "below" ? "below" : "auto",
+			selfPaneId: params.selfPaneId === undefined ? null : String(params.selfPaneId),
 			label: params.label === undefined ? undefined : String(params.label),
 			cwd,
 			env: buildTaskLifecycleEnv(project, task, cwd),
@@ -1273,6 +1313,8 @@ const handlers: Record<string, Handler> = {
 		}
 
 		const project = await data.getProject(projectId);
+		// Before the placeholder exists, so a bad id leaves nothing behind.
+		const suggested = await resolveLaunchSuggestion(params);
 		const task = await createScratchTask(project.id);
 		const requester = await resolveAgentMessageSource(params, task.id);
 		if (!requester) {
@@ -1286,6 +1328,7 @@ const handlers: Record<string, Handler> = {
 			targetStatus: "in-progress",
 			requester,
 			launcherNote: launcherHandoffNote(params),
+			suggested,
 		});
 		// A declined scratch task has no reason to exist — it was created only to
 		// have something for the dialog to launch. Leaving it would litter To Do
@@ -2116,6 +2159,7 @@ const handlers: Record<string, Handler> = {
 		const customColumns = project.customColumns ?? [];
 		const customColumn = findByIdPrefix(customColumns, newStatus, "custom column");
 		if (customColumn) {
+			if (launchSuggestionRequested(params)) throw new Error("--agent/--config only apply when the move asks to start another task's agent — a custom column is a plain move.");
 			return moveTask({
 				taskId: task.id,
 				projectId: project.id,
@@ -2148,13 +2192,18 @@ const handlers: Record<string, Handler> = {
 			log.info("Ignoring own-agent activation of a To Do task", { taskId: task.id.slice(0, 8), to: builtinStatus });
 			return task;
 		}
-		if (requester && isActivation && !isStatusGuardBlocked(task.status, { ifStatus, ifStatusNot })) {
+		const isLaunch = requester && isActivation && !isStatusGuardBlocked(task.status, { ifStatus, ifStatusNot });
+		if (launchSuggestionRequested(params) && !isLaunch) {
+			throw new Error("--agent/--config only apply when the move asks to start another task's agent — this one is a plain move.");
+		}
+		if (isLaunch) {
 			return requestAgentLaunchApproval({
 				project,
 				task,
 				targetStatus: builtinStatus,
 				requester,
 				launcherNote: launcherHandoffNote(params),
+				suggested: await resolveLaunchSuggestion(params),
 			});
 		}
 
@@ -2365,7 +2414,16 @@ const handlers: Record<string, Handler> = {
 		// Same gate as the immediate send: a delay changes nothing about the subject.
 		const subject = requireMessageSubject(params.subject, text);
 		const source = await resolveAgentMessageSource(params, task.id);
-		const updated = await scheduleMessageCore(project, task, { text, at, source, subject });
+		// Only a self-reminder is bound to its author: a message for another task
+		// is addressed to that task, whichever of its agents is live.
+		const author = params.sourceTaskId === task.id
+			? await captureScheduledMessageAuthor(
+				task,
+				typeof params.sourcePaneId === "string" ? params.sourcePaneId : null,
+				typeof params.sourcePid === "number" ? params.sourcePid : null,
+			)
+			: null;
+		const updated = await scheduleMessageCore(project, task, { text, at, source, subject, author });
 		const queue = updated.scheduledMessages ?? [];
 		// Appended under the tasks-file lock, so the returned queue ends with ours.
 		const messageId = queue[queue.length - 1]?.id;
@@ -2456,8 +2514,9 @@ const handlers: Record<string, Handler> = {
 		const { project, task } = await resolveTaskFromParams(params);
 		const worktreePath = typeof params.worktreePath === "string" && params.worktreePath ? params.worktreePath : undefined;
 		// Imported here, not at module scope: only this rarely-used route needs it.
-		const { ensureArtifactTemplate } = await import("./artifact-template");
-		return { dir: ensureArtifactTemplate(project, task, { worktreePath }), taskId: task.id, projectId: project.id };
+		const { provisionArtifactStarter } = await import("./artifact-template");
+		const { dir, mode } = provisionArtifactStarter(project, task, { worktreePath });
+		return { dir, mode, taskId: task.id, projectId: project.id };
 	},
 
 	// UI control: report what the app is currently showing, so the agent can decide

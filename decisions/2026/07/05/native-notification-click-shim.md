@@ -1,5 +1,7 @@
 # 106 — Compiled ObjC shim for notification click callbacks
 
+> Superseded on 2026-10-06 by `decisions/2026/10/06/notification-click-only-foregrounds.md`: OS notification clicks no longer navigate anywhere; they only bring the app window forward.
+
 ## Context
 
 Clicking a macOS notification should focus the task that fired it. Electrobun's
@@ -25,7 +27,7 @@ dies; both are impossible from a deferred JS callback.
 
 Ship a ~130-line compiled shim, `src/native/macos/dev3-notifications.m` →
 `dist/native/dev3-notifications.dylib` (built by
-`scripts/build-native-notifications.sh` inside `build:cli`, bundled via the
+`scripts/build-native-macos.sh` inside `build:cli`, bundled via the
 `"dist/native": "native"` copy rule). It sets a UN delegate, posts
 notifications whose **request identifier encodes `taskId|projectId`** (no
 userInfo plumbing; stable per task, so newer notifications replace older ones),

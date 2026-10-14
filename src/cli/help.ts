@@ -9,6 +9,7 @@
 
 import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES, MAX_SCHEDULED_MESSAGE_LENGTH } from "../shared/types";
 import { MAX_MESSAGE_SUBJECT_LENGTH, MESSAGE_SUBJECT_WORD_GUIDANCE } from "../shared/agent-message-subject";
+import { CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_PANE_NO_ROOM, CLI_EXIT_CODE_RESUME_ALREADY_RUNNING, CLI_EXIT_CODE_RESUME_UNAVAILABLE } from "../shared/cli-exit-codes";
 
 /** One subcommand of a command group (e.g. `task create`). */
 export interface SubcommandHelp {
@@ -88,6 +89,28 @@ const COMMANDS: CommandHelp[] = [
 					"The configured launch auto-approval policy applies; decline exits 10.",
 					"Outside a task worktree, runs directly as a user-initiated launch.",
 					"The target terminal must already be running; no task or worktree is created.",
+					"A task whose terminal is gone (after a restart) needs agent resume first.",
+				],
+			},
+			{
+				name: "resume",
+				usage: "dev3 agent resume [--task <id>] [--project <id>] [--allow-agent-latest] [--json]",
+				summary: "Resume a task's saved agent session when its terminal is gone — the app's Resume Session.",
+				details: [
+					"Same path as the Resume Session button: same worktree, branch, files and conversations,",
+					"each saved pane under its saved agent, config and account. Never a fresh session or a reset.",
+					"Restores every saved pane; the result lists each one with the conversation id it resumed",
+					"and how it was chosen (exact, substituted = newest surviving transcript, unverified).",
+					`A pane whose agent CLI cannot resume would start over; that always exits ${CLI_EXIT_CODE_RESUME_UNAVAILABLE}.`,
+					"The native backend restores only the main pane; extra panes are reported as skipped.",
+					"A hibernated task is woken, same as Wake & resume.",
+					`--allow-agent-latest  Resume a pane with no saved conversation id anyway: its harness picks`,
+					`                      its own latest and may start a new conversation. Otherwise exits ${CLI_EXIT_CODE_RESUME_UNAVAILABLE}.`,
+					"--json          Print the outcome: backend, tmux session, and per pane its ids and status.",
+					`Already running exits ${CLI_EXIT_CODE_RESUME_ALREADY_RUNNING} and touches nothing; nothing to resume exits ${CLI_EXIT_CODE_RESUME_UNAVAILABLE}.`,
+					`From another task's worktree, asks the user to approve in the app; decline exits ${CLI_EXIT_CODE_LAUNCH_DECLINED}.`,
+					"Outside a task worktree, runs directly, as if the user had clicked the button.",
+					"A retry while the dialog is open joins it; it never resumes twice.",
 				],
 			},
 		],
@@ -120,7 +143,7 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "create",
-				usage: 'dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard] | dev3 task create --scratch --run',
+				usage: 'dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard] | dev3 task create --scratch --run [--agent <id> [--config <id>]]',
 				summary: "Create a task in To Do, or ask the user to start a scratch peer agent.",
 				details: [
 					"--title <text>        Task title (required).",
@@ -148,6 +171,9 @@ const COMMANDS: CommandHelp[] = [
 					"--handoff-file <path> Append this file's text to the handoff note the new agent",
 					"                      receives, for standing instructions you would otherwise",
 					"                      message by hand. Launches only; unreadable/empty exits 3.",
+					"--agent <id> [--config <id>]  With --scratch --run: preselect this agent/preset in",
+					"                      the approval dialog (ids from `dev3 agent list`). The user",
+					"                      can still pick another; unknown/mismatched ids fail.",
 				],
 			},
 			{
@@ -174,7 +200,7 @@ const COMMANDS: CommandHelp[] = [
 			},
 			{
 				name: "move",
-				usage: "dev3 task move [<id>] --status <status>",
+				usage: "dev3 task move [<id>] --status <status> [--agent <id> [--config <id>]]",
 				summary: "Change a task's status / column.",
 				details: [
 					"--status <status>        Target status or custom column id (required).",
@@ -193,6 +219,11 @@ const COMMANDS: CommandHelp[] = [
 					"--handoff-file <path>    Append this file's text to that handoff note, for",
 					"                         standing instructions you would otherwise message by",
 					"                         hand. Only read when the move becomes a launch.",
+					"--agent <id>             Preselect this agent in that approval dialog, and",
+					"--config <id>            this preset of it (ids from `dev3 agent list`). The",
+					"                         user keeps the final pick; an unattended auto-approval",
+					"                         launches the suggestion. Unknown or mismatched ids fail",
+					"                         instead of falling back to the default. Launches only.",
 				],
 			},
 			{
@@ -712,9 +743,11 @@ const COMMANDS: CommandHelp[] = [
 		usage: 'dev3 show-artifact <report-dir | file.html | notes.md | notes.txt> [--assets <file...>] [--title "..."] [--artifact-id <slug>] [--new] [--task <id>]',
 		details: [
 			"<report-dir>          Publish the directory: its index.html plus every CSS, classic JS, raster, MP4/WebM video and MP3/M4A/WAV/OGG audio file under it.",
-			"<notes.md | .txt>     Publish Markdown or plain text as-is, only when the user explicitly asked for that format (raw HTML shows as text, no --assets).",
+			"<notes.md | .txt>     Publish Markdown or plain text as-is when the user explicitly asked for it or for no HTML (raw HTML shows as text, no --assets).",
 			"                      Text files skip the dev3 artifact template CSS. Every other human-facing report, prose-only briefs included, defaults to",
 			"                      the template: copy $DEV3_ARTIFACT_TEMPLATE_DIR (or run dev3 artifact-template), read AUTHORING.md, publish the directory.",
+			"                      With $DEV3_ARTIFACT_TEMPLATE=off (Settings, or per project) or on request, publish your own free-form .html or directory instead.",
+			"                      With $DEV3_ARTIFACT_TEMPLATE=custom the starter is the user's own template: its AUTHORING.md is the contract.",
 			"--assets <paths...>   Name local CSS, classic JS, raster, video and audio assets by hand; all following paths belong to the artifact until the next flag.",
 			"                      A bundled video or audio file is capped at 16 MB, and all of them together at 48 MB; poster images count as ordinary rasters.",
 			"                      A player or link to a local media file that is not bundled or not a supported format stops the publish, naming the fix.",
@@ -733,6 +766,7 @@ const COMMANDS: CommandHelp[] = [
 		details: [
 			"Provisions the pristine starter, copies it into ./dev3-artifact-report, and prints that path.",
 			"Re-running it restores the managed files over an existing copy.",
+			"When the project uses \"My template\", it copies that folder (every file in it) instead.",
 			"Use it when $DEV3_ARTIFACT_TEMPLATE_DIR is unset: that variable is baked into the session",
 			"environment at launch, so an older session or a shell that never inherited it has no other way",
 			"to reach the starter.",
@@ -760,7 +794,7 @@ const COMMANDS: CommandHelp[] = [
 		name: "peek",
 		summary: "Read-only glance at a task's terminal — what it was doing and how fresh that is.",
 		subcommands: [],
-		usage: "dev3 peek [--task <id|seq:N>] [--project <id>] [--pane <N|paneId>] [--lines <N>] [--json]",
+		usage: "dev3 peek [--task <id|seq:N>] [--project <id>] [--pane <N|paneId>] [--lines <N>] [--json] [--follow [--interval <s>]]",
 		details: [
 			"Prints a header, one line per pane (command, alive/dead, age of last output) and the tail of the focused pane.",
 			"--task <id>      Any task on this project's board; defaults to the current worktree's task.",
@@ -770,6 +804,12 @@ const COMMANDS: CommandHelp[] = [
 			"--pane <N|id>    Tail another pane: the number from the summary, or its raw pane id.",
 			"--lines <N>      Tail budget, 1..1000 (default 120).",
 			"--json           Emit the raw snapshot object.",
+			"--follow         Keep watching: print the snapshot now, then sample once per --interval and",
+			"                 print again only when the tail text changed. Redraws between samples collapse",
+			"                 into the latest screen. With --json, one compact object per line (NDJSON).",
+			"                 Stops on Ctrl-C. A sampled view, not a lossless log — use the pane's own log for that.",
+			"--interval <s>   Seconds between samples with --follow, 1..3600 (default 30).",
+			"                 A backend that cannot read the screen prints its one snapshot and exits 29.",
 			"Never focuses, writes, resizes, or takes ownership — the peeked task cannot tell it happened.",
 			"A task with no live terminal answers successfully with the reason (draft, hibernated, not running).",
 			"On tmux, output ages are per WINDOW (tmux has no per-pane activity time); native reports them per pane.",
@@ -796,7 +836,12 @@ const COMMANDS: CommandHelp[] = [
 				summary: "Open a pane next to yours, run the command there, and mirror its output to a log.",
 				details: [
 					"Put flags AFTER the command so the command is not read as a flag value.",
-					"--below          Split below instead of to the right.",
+					"Placement is automatic: the first run takes the right half of your pane; each later run",
+					"halves the biggest of dev3's own output panes, side by side or stacked, whichever shape",
+					"is roomier. Your pane, other agents and panes you opened are never resized.",
+					"When nothing can be halved into two panes of at least 40x8, tmux opens the run in a new",
+					`\`Runs\` window (not switched to); native, which has no windows, exits ${CLI_EXIT_CODE_PANE_NO_ROOM} and opens nothing.`,
+					"--below          Only stack vertically (never side by side).",
 					"--label <name>   Short human label for the pane (letters, digits, space, . _ -).",
 					"The command runs through the platform's own shell (sh -c on POSIX, Windows PowerShell",
 					"on Windows) with the task's worktree as cwd and the task's lifecycle env.",
@@ -858,7 +903,8 @@ const COMMANDS: CommandHelp[] = [
 					"--auto-merge[=<m>]    Enable auto-merge after creating it: squash (default), merge, rebase.",
 					"                      A repo with that strategy disabled exits 1 — the pull request is",
 					"                      still open, only auto-merge was not enabled.",
-					"`gh` missing or logged out exits 23 BEFORE anything is pushed.",
+					"`gh` missing or logged out exits 23 BEFORE anything is pushed; a `gh` that cannot",
+					"verify GitHub's TLS certificate (an agent sandbox: x509 OSStatus -26276) exits 28.",
 					"Takes no --task: the pull request is for the branch checked out here, so naming",
 					"another task would push one branch and describe another.",
 					"Needs no running app — it is git and gh against the current branch.",
@@ -875,7 +921,7 @@ const COMMANDS: CommandHelp[] = [
 					"--off            Clear auto-merge instead of setting it; takes no --strategy.",
 					"The pull request goes BEFORE the switch (`dev3 pr auto-merge 1722 --off`):",
 					"a bare --off swallows the next token, so `--off 1722` is refused, not guessed.",
-					"`gh` missing or logged out exits 23, same as `pr create`.",
+					"`gh` missing or logged out exits 23, a blocked TLS check 28, same as `pr create`.",
 				],
 			},
 		],

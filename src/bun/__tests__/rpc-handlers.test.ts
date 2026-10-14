@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import type { GlobalSettings, Project, Task, TaskDiffResponse } from "../../shared/types";
 import { MAX_TASK_NOTES_KEPT, buildTaskDialogSubject, getPreparingStageProgress, resolveTaskCompareBaseBranch } from "../../shared/types";
@@ -445,9 +445,7 @@ const {
 	notifyWatchedTaskStatusChange,
 	notifyWatchedTaskEvent,
 	notifyFromCliDesktop,
-	consumeRecentWatchedNotification,
 	_resetWatchedNotificationState,
-	NOTIFICATION_CLICK_TTL_MS,
 	setAppForeground,
 	isAppForeground,
 	setActiveContext,
@@ -10846,6 +10844,118 @@ describe("resumeTask session-id healing", () => {
 	});
 });
 
+describe("resumeTaskSession — the Resume Session path dev3 agent resume reuses", () => {
+	const WORKTREE = "/tmp/resume-cli-wt";
+	const LIVE = "2ff0f3b4-8b0e-4d0f-9d55-8c0a4a3c1d01";
+	const DEAD = "0b6b0f6e-3f0c-4c6a-8f2e-1b8f3c7d9e02";
+	const STORE = `${process.env.HOME}/.claude/projects/${claudeEncodePath(WORKTREE)}`;
+	// Imported late: a top-level import evaluates tmux-pty before this file's hoisted mocks exist.
+	let resumeTaskSession: typeof import("../rpc-handlers/tmux-pty").resumeTaskSession;
+	let ResumeUnavailableError: typeof import("../rpc-handlers/tmux-pty").ResumeUnavailableError;
+	beforeAll(async () => {
+		({ resumeTaskSession, ResumeUnavailableError } = await import("../rpc-handlers/tmux-pty"));
+	});
+
+	function arrange(sessionIds: Array<string | null>, files: string[], extra: Partial<Task> = {}): Task {
+		(readdirSync as any).mockImplementation((dir: string) => (String(dir) === STORE ? files : []));
+		(existsSync as any).mockImplementation(() => true);
+		const task = makeTask({
+			worktreePath: WORKTREE,
+			sessionState: { panes: sessionIds.map((sessionId) => ({ agentCmd: "claude", sessionId, agentId: "builtin-claude", configId: "claude-default" })) },
+			...extra,
+		});
+		(data.loadProjects as any).mockResolvedValue([makeProject()]);
+		(data.loadVirtualProjects as any).mockResolvedValue([]);
+		(data.getTask as any).mockResolvedValue(task);
+		(pty.hasSession as any).mockReturnValue(false);
+		(pty.getPtyPort as any).mockReturnValue(9999);
+		return task;
+	}
+
+	beforeEach(() => vi.clearAllMocks());
+	afterEach(() => {
+		(readdirSync as any).mockImplementation(() => []);
+		(existsSync as any).mockImplementation(() => true);
+		vi.mocked(pty.tmuxSessionExists).mockImplementation((() => true) as any);
+	});
+
+	it("leaves a live terminal alone when asked to refuse one", async () => {
+		arrange([LIVE], [`${LIVE}.jsonl`]);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		(pty.hasSession as any).mockReturnValue(true);
+
+		await expect(resumeTaskSession("task-1", { refuseLive: true })).resolves.toEqual({ kind: "already-running", backend: "tmux" });
+		expect(pty.destroySessionAwaited).not.toHaveBeenCalled();
+		expect(agents.resolveCommandForAgent).not.toHaveBeenCalled();
+	});
+
+	it("refuses before launching anything when a pane would fall back to the harness's latest", async () => {
+		arrange([DEAD], []);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(false);
+
+		const refused = resumeTaskSession("task-1", { refuseLive: true, requireSessionIds: true });
+		await expect(refused).rejects.toBeInstanceOf(ResumeUnavailableError);
+		await expect(refused).rejects.toMatchObject({ reason: "session-id-unknown", panes: [expect.objectContaining({ storedSessionId: DEAD, sessionId: null, mode: "agent-latest" })] });
+		expect(agents.resolveCommandForAgent).not.toHaveBeenCalled();
+	});
+
+	it("refuses a harness that cannot resume — it would start over — even when the latest is allowed", async () => {
+		const task = arrange(["generic-1"], []);
+		task.sessionState!.panes[0] = { ...task.sessionState!.panes[0], agentCmd: "/opt/tools/my-wrapper", agentFamily: null };
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(false);
+
+		const refused = resumeTaskSession("task-1", { refuseLive: true, refuseFresh: true, requireSessionIds: false });
+		await expect(refused).rejects.toMatchObject({ reason: "harness-cannot-resume", panes: [expect.objectContaining({ mode: "fresh", sessionId: null, storedSessionId: "generic-1" })] });
+		expect(agents.resolveCommandForAgent).not.toHaveBeenCalled();
+	});
+
+	it("judges the harness by the pane's agent record, the way the relaunch does", async () => {
+		const task = arrange(["wrapped-1"], []);
+		task.sessionState!.panes[0] = { ...task.sessionState!.panes[0], agentCmd: "/opt/tools/my-wrapper", agentFamily: null };
+		vi.mocked(agents.getAllAgents).mockResolvedValueOnce([{ id: "builtin-claude", name: "Wrapped", baseCommand: "/opt/tools/my-wrapper", agentFamily: "claude", configurations: [] }] as any);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValueOnce(false);
+
+		const outcome = await resumeTaskSession("task-1", { refuseLive: true, refuseFresh: true, requireSessionIds: false });
+		expect(outcome).toMatchObject({ kind: "resumed", result: { panes: [expect.objectContaining({ mode: "unverified", sessionId: "wrapped-1" })] } });
+	});
+
+	it("still lets the button resume the harness's latest, as it always did", async () => {
+		arrange([DEAD], []);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValueOnce(false);
+
+		await expect(handlers.resumeTask({ taskId: "task-1" })).resolves.toContain("session=task-1");
+		expect((agents.resolveCommandForAgent as any).mock.calls[0][3].sessionId).toBeUndefined();
+	});
+
+	it("reports which conversation each pane resumed and how it was chosen", async () => {
+		arrange([DEAD], [`${LIVE}.jsonl`], { seq: 42 } as Partial<Task>);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValueOnce(false);
+
+		const outcome = await resumeTaskSession("task-1", { refuseLive: true, requireSessionIds: true });
+		expect(outcome).toMatchObject({
+			kind: "resumed",
+			result: {
+				taskId: "task-1", seq: 42, backend: "tmux", woke: false,
+				tmux: { session: "dev3-task-1" },
+				panes: [{ index: 0, agentId: "builtin-claude", configId: "claude-default", storedSessionId: DEAD, sessionId: LIVE, mode: "substituted", status: "resumed" }],
+			},
+		});
+	});
+
+	it("runs one resume for concurrent callers — a click during a CLI resume joins it", async () => {
+		arrange([LIVE], [`${LIVE}.jsonl`]);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValueOnce(false);
+
+		const [cli, click] = await Promise.all([
+			resumeTaskSession("task-1", { refuseLive: true, requireSessionIds: true }),
+			handlers.resumeTask({ taskId: "task-1" }),
+		]);
+		expect(cli.kind).toBe("resumed");
+		expect(click).toContain("session=task-1");
+		expect(agents.resolveCommandForAgent).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("restartTask (start fresh) floors the Codex scan", () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -14344,37 +14454,16 @@ describe("notifyWatchedTaskStatusChange", () => {
 		expect(Utils.showNotification).not.toHaveBeenCalled();
 	});
 
-	it("records the notification target so it can be consumed on window focus", () => {
-		const task = makeTask({ watched: true, projectId: "proj-7" });
+	it.each([true, false])("shows the banner and never pushes task navigation (app foreground: %s)", (foreground) => {
+		const push = vi.fn();
+		setPushMessage(push);
+		setAppForeground(foreground);
+		const task = makeTask({ watched: true, projectId: "proj-nav" });
 		notifyWatchedTaskStatusChange(task, "in-progress", "review-by-user", "MyProject");
 
-		const consumed = consumeRecentWatchedNotification();
-		expect(consumed).toEqual({ taskId: task.id, projectId: "proj-7" });
-	});
-
-	it("does not record the notification target when the task is not watched", () => {
-		const task = makeTask({ watched: false });
-		notifyWatchedTaskStatusChange(task, "in-progress", "review-by-user", "MyProject");
-		expect(consumeRecentWatchedNotification()).toBeNull();
-	});
-
-	it("shows the banner but does NOT arm click-to-open when the app is in the foreground", () => {
-		setAppForeground(true);
-		const task = makeTask({ watched: true, projectId: "proj-fg" });
-		notifyWatchedTaskStatusChange(task, "in-progress", "review-by-user", "MyProject");
-
-		// Banner still shown — the user is just informed, not teleported.
 		expect(Utils.showNotification).toHaveBeenCalledTimes(1);
-		// Slot must stay empty so a later in-app click cannot trigger navigation.
-		expect(consumeRecentWatchedNotification()).toBeNull();
-	});
-
-	it("arms click-to-open when the app is in the background", () => {
-		setAppForeground(false);
-		const task = makeTask({ watched: true, projectId: "proj-bg" });
-		notifyWatchedTaskStatusChange(task, "in-progress", "review-by-user", "MyProject");
-
-		expect(consumeRecentWatchedNotification()).toEqual({ taskId: task.id, projectId: "proj-bg" });
+		expect(push.mock.calls.map(([name]) => name)).toEqual(["webNotification"]);
+		setPushMessage(() => {});
 	});
 
 	it("queues watched-task notifications until terminal focus ends", () => {
@@ -14512,46 +14601,6 @@ describe("setAppForeground / isAppForeground", () => {
 		expect(isAppForeground()).toBe(true);
 		await handlers.setWindowForeground({ focused: false });
 		expect(isAppForeground()).toBe(false);
-	});
-});
-
-describe("consumeRecentWatchedNotification", () => {
-	beforeEach(() => {
-		vi.mocked(Utils.showNotification).mockClear();
-		_resetWatchedNotificationState();
-	});
-
-	it("returns null when nothing has been recorded", () => {
-		expect(consumeRecentWatchedNotification()).toBeNull();
-	});
-
-	it("returns and clears the stored target on first call", () => {
-		const task = makeTask({ watched: true, projectId: "proj-A" });
-		notifyWatchedTaskStatusChange(task, "todo", "in-progress", "P");
-
-		expect(consumeRecentWatchedNotification()).toEqual({ taskId: task.id, projectId: "proj-A" });
-		// Second call must yield null — the slot is one-shot.
-		expect(consumeRecentWatchedNotification()).toBeNull();
-	});
-
-	it("returns null and clears the slot when the stored target is older than the TTL", () => {
-		const task = makeTask({ watched: true, projectId: "proj-X" });
-		notifyWatchedTaskStatusChange(task, "todo", "in-progress", "P");
-
-		// Simulate a focus event arriving long after the notification.
-		const farFuture = Date.now() + NOTIFICATION_CLICK_TTL_MS + 1000;
-		expect(consumeRecentWatchedNotification(farFuture)).toBeNull();
-		// Slot is cleared even on TTL miss — a stale entry must not bleed into a later focus.
-		expect(consumeRecentWatchedNotification()).toBeNull();
-	});
-
-	it("each new notification overwrites the previous unconsumed target", () => {
-		const taskA = makeTask({ id: "a", watched: true, projectId: "p" });
-		const taskB = makeTask({ id: "b", watched: true, projectId: "p" });
-		notifyWatchedTaskStatusChange(taskA, "todo", "in-progress", "P");
-		notifyWatchedTaskStatusChange(taskB, "todo", "in-progress", "P");
-
-		expect(consumeRecentWatchedNotification()).toEqual({ taskId: "b", projectId: "p" });
 	});
 });
 

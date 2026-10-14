@@ -164,7 +164,7 @@ describe("ActivityOverview", () => {
 		expect(screen.getByRole("button", { name: "Add project" })).toBeInTheDocument();
 		expect(screen.getByTitle("Project settings")).toBeInTheDocument();
 		expect(screen.getByTitle("Open in Finder")).toBeInTheDocument();
-		expect(screen.getByTitle("Open a terminal in the project root")).toBeInTheDocument();
+		expect(screen.getByTitle("Repo: a terminal and the files of the project root")).toBeInTheDocument();
 		expect(screen.getByTitle("Remove")).toBeInTheDocument();
 	});
 
@@ -174,7 +174,7 @@ describe("ActivityOverview", () => {
 		const cluster = (await screen.findByTitle("Project settings")).parentElement;
 
 		expect(cluster?.className).not.toMatch(/opacity-0/);
-		for (const title of ["Project settings", "Open in Finder", "Open a terminal in the project root", "Remove"]) {
+		for (const title of ["Project settings", "Open in Finder", "Repo: a terminal and the files of the project root", "Remove"]) {
 			expect(screen.getByTitle(title).className).toContain("text-fg-3");
 		}
 	});
@@ -217,7 +217,7 @@ describe("ActivityOverview", () => {
 		await screen.findByText("My Project");
 
 		await user.click(screen.getByTitle("Project settings"));
-		await user.click(screen.getByTitle("Open a terminal in the project root"));
+		await user.click(screen.getByTitle("Repo: a terminal and the files of the project root"));
 		await user.click(screen.getByTitle("Remove"));
 
 		expect(navigate).toHaveBeenCalledWith({
@@ -785,6 +785,8 @@ describe("ActivityOverview row complete action", () => {
 		expect(
 			screen.getByLabelText(`Move to Completed — ${getTaskTitle(mockTask)}`),
 		).toBeInTheDocument();
+		// The hidden pending spinner must not run an infinite animation (issue #1949).
+		expect(screen.getByTestId("activity-row-complete").querySelector(".animate-spin")).toBeNull();
 	});
 
 	it("completes through the shared confirmed move and drops the row", async () => {

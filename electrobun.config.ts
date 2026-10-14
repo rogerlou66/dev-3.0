@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import type { ElectrobunConfig } from "electrobun";
 import { MINIMUM_WINDOWS_CONPTY_BUN_VERSION } from "./src/shared/native-terminal-runtime";
+import { RELEASE_BASE_URL } from "./src/shared/release-feed";
 
 /**
  * Vite copies `src/mainview/public/*` to the dist root, but `copy` below is an
@@ -43,7 +44,7 @@ export default {
 	app: {
 		name: "dev-3.0",
 		identifier: "dev3.electrobun.dev",
-		version: "1.56.0",
+		version: "1.58.0",
 	},
 	runtime: {
 		// Standard macOS behavior: closing the last window does NOT quit the app —
@@ -54,7 +55,7 @@ export default {
 		exitOnLastWindowClosed: false,
 	},
 	release: {
-		baseUrl: "https://h0x91b-releases.s3.eu-west-1.amazonaws.com/dev-3.0",
+		baseUrl: RELEASE_BASE_URL,
 	},
 	build: {
 		// This is global across Electrobun platforms; decision 150 records why.

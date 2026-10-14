@@ -16,6 +16,8 @@ this page and the website all read from it.
 |---|---|---|
 | Go to project (quick switch) | ⇧⌘K | Ctrl+Shift+K |
 | Open the all-project Kanban | ⌘` | Ctrl+` |
+| Go to task (quick switch) | ⇧⌘J | Ctrl+Shift+J |
+| Go to anything — projects + tasks | ⇧⌘L | Ctrl+Shift+L |
 | Zoom out to the space board | ⇧⌘U | Ctrl+Shift+U |
 | Command palette | ⇧⌘P / ⇧⌘Space | Ctrl+Shift+P / Ctrl+Shift+Space |
 | Keyboard shortcuts panel | ⌘/ | Ctrl+/ |
@@ -24,6 +26,7 @@ this page and the website all read from it.
 | Help mode (explain this screen) | ⇧⌘/ | Ctrl+Shift+/ |
 | Open current project/worktree in an app (picker) | ⌘O | Ctrl+O |
 | Terminal immersive fullscreen | F11 / ⇧⌘F | F11 / Ctrl+Shift+F |
+| Show or hide the file explorer | ⇧⌘E | Ctrl+Shift+B |
 | Find in the focused terminal | ⌘F | Ctrl+Shift+F |
 | Find in an HTML artifact | ⌘F | Ctrl+F |
 | Find in an open file preview | ⌘F | Ctrl+F |
@@ -42,7 +45,7 @@ this page and the website all read from it.
 | Settings | ⌘, | Ctrl+, |
 | Zoom in / out / reset | ⌘= / ⌘- / ⌘0 | Ctrl+= / Ctrl+- / Ctrl+0 |
 | Hard refresh | ⌘R | Ctrl+R |
-| Toggle project terminal / open Quick Shell | ⌘J / ⇧⌘` | Ctrl+J / Ctrl+Shift+` |
+| Toggle Repo (project terminal and files) / open Quick Shell | ⌘J / ⇧⌘` | Ctrl+J / Ctrl+Shift+` |
 | Close dialog / step back (not inside a task) | Esc | Esc |
 | Quit / Hide | ⌘Q / ⌘H | Ctrl+Q / Ctrl+H |
 
@@ -56,10 +59,10 @@ then `D`/`P`, or the breadcrumb to leave a task.
 Two rules shape the keymap there, and both are enforced in
 [`src/mainview/keymap.ts`](../src/mainview/keymap.ts):
 
-- **The browser keeps some combos** — ⌘W, ⌘T, ⌘N, ⌘1–9, ⌘0, F11, zoom, refresh — and a page cannot
-  cancel them. Those bindings do not fire in remote; the panel shows the alternative instead
+- **The browser keeps some combos** — ⌘W, ⌘T, ⌘N, ⌘1–9, ⌘0, ⇧⌘J, F11, zoom, refresh — and a page
+  cannot cancel them. Those bindings do not fire in remote; the panel shows the alternative instead
   (`G` then `1–9` for projects, `G` then `0` for Operations, `C` for a new task, `⌃B x` / `⌃B c` for
-  panes). **⇧⌘Space always opens the Command Palette**, and every action is a command — so nothing is
+  panes, ⇧⌘K then `Tab` for Go to task). **⇧⌘Space always opens the Command Palette**, and every action is a command — so nothing is
   out of reach even where a combo is lost.
 - **The shell keeps `Ctrl`** — on Windows and Linux the app modifier is Ctrl, and `^D`, `^W`, `^K`,
   `^[` belong to whatever runs in the terminal. No app shortcut fires while a terminal has focus

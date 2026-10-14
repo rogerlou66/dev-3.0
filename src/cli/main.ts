@@ -18,6 +18,7 @@ import { handleInstallSkills } from "./commands/install-skills";
 import { handleConfig } from "./commands/config";
 import { handleDevServer } from "./commands/dev-server";
 import { handleRemote } from "./commands/remote";
+import { LOCAL_HELP, expandLocalAlias, localHostError } from "./commands/local";
 import { handleGui } from "./commands/gui";
 import { handleConversations, handleImportCurrentSession, resolveImportTarget } from "./commands/conversations";
 import { handleNotify, handleAttention, handleUi } from "./commands/ui-control";
@@ -57,12 +58,13 @@ Auto-detects project and task from the worktree context.
 Commands:
   dev3 agent list [--json]              List agent and preset IDs for managed launches
   dev3 agent spawn [--task <id>] [--agent <id>] [--config <id>] [--prompt <text>|-] [--handoff] [--json]
+  dev3 agent resume [--task <id>] [--allow-agent-latest] [--json]
                                          Add one managed agent to an existing task (asks for approval from a task worktree)
   dev3 current [--brief]                Show current project, task, status
                                          (--brief: hide the full description if you already have it in your prompt)
   dev3 task show [--task <id>] [--notes] [--history] [--json]  Full task details
                                          (always shows current overview; --notes inlines note bodies, --history shows title/overview change log; --json prints a stable object)
-  dev3 task move [--task <id>] --status <status>  Change task status
+  dev3 task move [--task <id>] --status <status> [--agent <id> [--config <id>]]  Change task status
   dev3 task terminal-backend [--task <id>] [--to tmux|native]  Inspect/switch this task's terminal backend
   dev3 task update [--task <id>] --title "..." [--description "..." | --description -] [--manual-completion on|off] [--type coordinator|pr-review|standard]  Update task fields
   dev3 task create --title "..." [--description "..." | --description -] [--pr <n> | --branch <ref>] [--type coordinator|pr-review|standard]  Create a new task (To Do)
@@ -116,7 +118,7 @@ Commands:
   dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, image, video and audio file under it
   dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
   dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
-  dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane
+  dev3 peek [--task <id>] [--pane <N|paneId>] [--lines <N>] [--json] [--follow [--interval <s>]]  Read-only glance at a task's terminal: pane summary with output freshness + the tail of one pane; --follow re-prints only changed screens
   dev3 pane list [--json]                Which terminal backend you are on, which panes exist, which one is yours
   dev3 pane run "<command>" [--below] [--label <name>]  Run a command in a neighbouring pane of your own terminal
   dev3 pane logs <run-id> [--lines <N>]  That run's outcome (running / exit code) + the tail of what it printed
@@ -139,6 +141,8 @@ Commands:
                                          (backgrounds by default; manage it with
                                           status / url / restart / logs / stop.
                                           See "dev3 remote --help" for full usage)
+  dev3 local [<remote subcommand>]       Same as dev3 remote --no-tunnel --host 127.0.0.1:
+                                         this machine only, no LAN, no public URL
   dev3 update [--check|--dry-run]         Install a newer dev3 (brew or CLI tarball, auto-detected).
                                          On a box running \`dev3 remote\`, the server does the restart
                                          itself and keeps its public tunnel URL and your session.
@@ -180,7 +184,19 @@ async function main(): Promise<void> {
 	const inputArgs = process.argv.slice(2);
 	// `--instance` targets the whole invocation, not one command, so it leaves
 	// argv before help routing and per-command flag validation ever see it.
-	const { rest: rawArgs, value: instanceValue } = extractInstanceFlag(inputArgs);
+	const { rest: argvRest, value: instanceValue } = extractInstanceFlag(inputArgs);
+
+	// `dev3 local` is `dev3 remote` with loopback-only defaults, so it is rewritten
+	// before help routing and the EPIPE guard ever see it.
+	if (argvRest[0] === "local" && (argvRest.includes("--help") || argvRest.includes("-h"))) {
+		process.stdout.write(LOCAL_HELP);
+		process.exit(CLI_EXIT_CODE_SUCCESS);
+	}
+	const rawArgs = argvRest[0] === "local" ? expandLocalAlias(argvRest) : argvRest;
+	if (argvRest[0] === "local") {
+		const problem = localHostError(rawArgs);
+		if (problem) exitUsage(problem);
+	}
 
 	// Every short print-and-exit command may have its stdout closed early by a
 	// downstream consumer (`dev3 … | head`, `| grep -m1`, quitting a pager).

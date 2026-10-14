@@ -370,57 +370,12 @@ rate-limit tracking and skill directories differ per agent — the full grid is 
 
 ## Telemetry
 
-The app reports usage analytics so the project can see what is actually used:
+This fork ships no external telemetry or analytics. Diagnostics stay in local logs; no analytics
+identity, geolocation collection, remote feature flags, or external crash reporting is enabled.
+No environment variable or opt-out setting is needed, including in released builds.
+Desktop update checks and downloads run only on explicit user actions.
 
-| Channel | What it sends |
-|---|---|
-| Google Analytics 4 | App launch, version and build channel, OS and its major version, screen resolution, language, CPU architecture, how the app was installed, which screen you are on, a 10-minute heartbeat, agent launches, and unhandled errors. How many projects and tasks you have is sent only as a coarse bucket (`6-15`, `201-1000`), and how long ago you installed dev3 only as an age band (`day-0`, `week-03`). Your country is derived from your computer's timezone — your IP address is never looked up and never sent as data, and no city or region is sent. Identified by a random per-install id. Project *names*, task titles and file paths are deliberately never sent, and no project or task identifier goes into the page address either. |
-| PostHog | Task and project actions (created, moved, merged, pushed …) plus unhandled errors, under a random per-install id. Also delivers feature flags. Live in the official release builds; a build from source has no key and stays off. |
-
-Neither channel sends your project names, task titles, file paths, prompts, diffs or terminal
-output. Autocapture runs with element text and attributes masked, and paths are stripped out of
-crash reports before they are sent — the local log file keeps the untouched text.
-
-### Turning it off
-
-Any **one** of these switches off everything at once: no GA4 hits, no PostHog client, no crash
-reports. Feature flags then fall back to their shipped defaults.
-
-| How | Where | Takes effect |
-|---|---|---|
-| **Settings → System → Telemetry** | The toggle, in any released build | Switching off is immediate; switching back on needs a relaunch |
-| `DEV3_TELEMETRY=off` | The app's environment (`false`, `0` and `no` work the same way) | Next launch, and it locks the toggle off |
-| `DO_NOT_TRACK=1` | The app's environment — the [cross-vendor convention](https://consoledonottrack.com/) | Next launch, and it locks the toggle off |
-| `VITE_TELEMETRY=off` | A build from source; compiles the channels out entirely | Build time |
-
-```bash
-# For one launch, or add it to your shell profile for every launch
-DEV3_TELEMETRY=off /Applications/dev-3.0.app/Contents/MacOS/dev-3.0
-
-# Compile it out instead
-echo 'VITE_TELEMETRY=off' >> .env && bun run build
-```
-
-An environment variable read from your shell profile requires **Settings → System → Import shell
-environment** to be on (it is by default); a variable set on the launch command itself always
-applies. An opted-out install also stops handing its per-install id to the renderer at all, so a
-browser on the remote-access server cannot read it either.
-
-### The rules this project holds itself to
-
-These are not aspirations — they are the constraints any change touching telemetry has to meet.
-See [AGENTS.md](AGENTS.md#telemetry-anonymous-always-opt-out-always-respected-mandatory) for the
-contributor-facing version.
-
-1. **Everything sent is anonymous, always.** No project names, repo paths, task titles, branch
-   names, prompts, diffs, file contents, terminal output, or anything else that could identify you
-   or your customer. Only a random per-install id and coarse facts about the app itself.
-2. **An opt-out is always respected, everywhere.** One switch turns off every channel, with no
-   exception kept alive "just for crashes" or "just for feature flags".
-3. **An opt-out works in a released binary.** A switch that only exists when you rebuild from
-   source is not an opt-out.
-4. **A channel that cannot be masked is not enabled.** If a vendor feature would send visible text
-   or free-form strings we cannot redact, it stays off rather than shipping with a promise attached.
+See [AGENTS.md](AGENTS.md#telemetry--removed-in-this-fork-mandatory) for the contributor rules.
 
 ## Development
 

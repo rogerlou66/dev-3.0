@@ -24,6 +24,7 @@ import TerminalPreviewPopover from "./TerminalPreviewPopover";
 import { moveTaskToStatus } from "../utils/moveTaskToStatus";
 import TaskDetailModal from "./TaskDetailModal";
 import PipelineDropdown, { PipelineMenuAction } from "./PipelineDropdown";
+import { OpenInIcon, PlayIcon, SendLaterIcon, WatchIcon, WatchingIcon } from "./TaskIcons";
 import TaskCardRail from "./TaskCardRail";
 import TaskBlockAction from "./TaskBlockAction";
 import { isTaskBlocked } from "../../shared/task-blocking";
@@ -68,7 +69,7 @@ function compactSummaryPosition(anchor: DOMRect) {
 	return { left, top: Math.max(SUMMARY_PREVIEW_PAD, top) };
 }
 
-/** Deferred-time glyph: the scheduled-launch badge and the "send later" menu row. */
+/** Deferred-time glyph for the scheduled-launch countdown badge. */
 function ClockIcon({ className }: { className?: string }) {
 	return (
 		<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
@@ -789,15 +790,13 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						// Toggle failed silently — secondary action
 					}
 				}}
-				className={`flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs transition-[opacity,color,background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-fg/5 ${
+				className={`task-anim flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs transition-[opacity,color,background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-fg/5 ${
 					task.watched ? "text-accent font-medium" : "text-fg-3 hover:text-fg"
 				}`}
 				aria-label={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")}
 				disabled={isDisabled}
 			>
-				<span className="text-xs leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>
-					{task.watched ? "\u{F009A}" : "\u{F0F1C}"}
-				</span>
+				{task.watched ? <WatchingIcon className="h-3.5 w-3.5 flex-shrink-0" /> : <WatchIcon className="h-3.5 w-3.5 flex-shrink-0" />}
 				{!devServerControl && <span className="text-micro">{task.watched ? t("task.watching") : t("task.watch")}</span>}
 			</button>
 		</Tooltip>
@@ -1403,10 +1402,10 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 											setCtxMenuPos({ top: rect.bottom + 4, left: rect.left });
 											setCtxMenuOpen(true);
 										}}
-										className="flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-accent transition-[color,background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-accent/15"
+										className="task-anim flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-accent transition-[color,background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-accent/15"
 										aria-label={t("openIn.menuTitle")}
 									>
-										<span className="text-xs leading-none" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0379}"}</span>
+										<OpenInIcon className="h-3.5 w-3.5" />
 									</button>
 								</Tooltip>
 							)}
@@ -1437,14 +1436,10 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 											e.stopPropagation();
 											onLaunchVariants(task, "in-progress");
 										}}
-										className="flex flex-shrink-0 items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-green-900/30 transition-[background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-green-500"
+										className="task-anim flex flex-shrink-0 items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-green-900/30 transition-[background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96] hover:bg-green-500"
 										disabled={isDisabled}
 									>
-										{/* Play triangle centred on the viewBox — the usual 8→19 path
-										    sits 1.5px right of centre and opens a gap before the label. */}
-										<svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24">
-											<path d="M6 4.5v15l12-7.5z" />
-										</svg>
+										<PlayIcon className="h-3 w-3" />
 										{t("task.run")}
 									</button>
 								</Tooltip>
@@ -1488,7 +1483,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						<div className="mx-3 my-1 border-t border-edge-active" />
 						<PipelineMenuAction
 							size={narrow ? "touch" : undefined}
-							icon={<ClockIcon className={narrow ? "w-5 h-5" : "w-4 h-4"} />}
+							icon={<SendLaterIcon className={narrow ? "w-5 h-5" : "w-4 h-4"} />}
 							label={t("task.sendMessageLater")}
 							onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setScheduleMsgOpen(true); }}
 						/>

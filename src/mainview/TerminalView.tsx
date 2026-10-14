@@ -6,6 +6,7 @@ import { useT } from "./i18n";
 import { toast } from "./toast";
 import { api, isElectrobun } from "./rpc";
 import { getShiftKeySequence } from "./shift-key-sequences";
+import { pasteIntoTerminal, terminalBracketsPaste } from "./terminal-paste";
 import { debugLog } from "./debug-log";
 import { encodeResizeSequence } from "../shared/resize-protocol";
 import {
@@ -57,6 +58,8 @@ import { cellFromMouseEvent } from "./terminal-cell-hit";
 import { installOsc8HoverTooltip, type Osc8HoverHandle } from "./terminal-osc8-hover";
 import { installFilePathUnderlines, type FilePathUnderlinesHandle } from "./terminal-link-underlines";
 import { activateTerminalPath, activateOsc8Uri } from "./terminal-path-open";
+import { installTouchLinkTap, osc8TouchLink, plainUrlAt, type TouchLink, type TouchLinkSource } from "./terminal-touch-links";
+import TerminalLinkSheet from "./components/TerminalLinkSheet";
 import { isRemote } from "./utils/platform";
 import { paneHighlightRect, type PaneRectPct } from "./utils/paneHighlight";
 import TerminalSearchBar, { type TerminalSearchBarHandle } from "./components/TerminalSearchBar";
@@ -279,7 +282,7 @@ export function clearStaleSelectionOnWrite(term: {
 
 export interface TerminalHandle {
 	sendInput: (data: string) => void;
-	/** Paste text through ghostty — wraps in bracketed-paste (DEC 2004) only if the app enabled it. */
+	/** Paste text as one bracketed paste (DEC 2004) when the app asked for it — see pasteIntoTerminal(). */
 	paste: (data: string) => void;
 	/** Paste text and submit once, settling unbracketed paste bursts first. */
 	submit: (data: string) => void;
@@ -346,6 +349,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	const wrapperRef = useRef<HTMLDivElement>(null);
 	const searchBarRef = useRef<TerminalSearchBarHandle | null>(null);
 	const [searchOpen, setSearchOpen] = useState(false);
+	// The link a touch user tapped — rendered as the Open / Copy sheet.
+	const [touchLink, setTouchLink] = useState<TouchLink | null>(null);
 	// The pane the search resolved to, and its %-rect over the terminal canvas —
 	// drawn as a frame so a multi-pane layout shows WHICH pane is being searched.
 	const [searchPaneId, setSearchPaneId] = useState<string | null>(null);
@@ -371,6 +376,8 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	// must survive the socket — a tmux session never sets either of these.
 	const nativeSeqRef = useRef<number | null>(null);
 	const nativeRoleRef = useRef<NativeStreamRole | null>(null);
+	/** The socket delivered bare (unframed) output, which only a tmux session sends. */
+	const tmuxStreamRef = useRef(false);
 	/** The PTY's size, which an observer renders at instead of its container's. */
 	const ptyGeometryRef = useRef<{ cols: number; rows: number } | null>(null);
 	/** Set by the terminal-setup effect; re-runs the fit after geometry or role changes. */
@@ -690,6 +697,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 		// One screen reset per Terminal instance. A rebuild re-runs this effect and
 		// therefore earns a fresh one; a reconnect does not.
 		let screenResetForThisTerminal = false;
+		tmuxStreamRef.current = false;
 		let fitAddon: FitAddon | null = null;
 		let ws: WebSocket | null = null;
 		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -980,6 +988,32 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 				container: containerRef.current,
 				linksForRows: filePathLinks.linksForRows,
 			});
+			// Touch has no Cmd/Ctrl, so every provider above is a dead link on a
+			// phone: a tap on any of them opens the Open / Copy sheet instead. Same
+			// activations as the modifier click, in the same precedence.
+			const linkCtx = () => ({ t: tRef.current, taskId, projectId });
+			const touchLinkSources: TouchLinkSource[] = [
+				(y, x) => {
+					const hit = osc8Provider.linkAt(y, x);
+					return hit && osc8TouchLink(hit.uri, () => void activateOsc8Uri(hit.uri, linkCtx()));
+				},
+				(y, x) => {
+					const url = plainUrlAt(term.buffer.active.getLine(y) ?? undefined, x);
+					return url ? { kind: "web", target: url, open: () => void window.open(url, "_blank", "noopener,noreferrer") } : undefined;
+				},
+				(y, x) => {
+					const hit = filePathLinks?.linkAt(y, x);
+					return hit
+						? { kind: "file", target: hit.target.path, open: () => void activateTerminalPath(hit.target, tRef.current, hit.line, taskId) }
+						: undefined;
+				},
+			];
+			termSubs.push(installTouchLinkTap({
+				container: containerRef.current,
+				sources: touchLinkSources,
+				cellAt: (point) => cellFromMouseEvent(term, point),
+				onLink: setTouchLink,
+			}));
 
 			// If a future ghostty build exposes no textarea, focus falls back to the
 			// container; keep that path from summoning the mobile keyboard on entry.
@@ -998,20 +1032,24 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			if (hiddenTextarea) {
 				// In browser mode, keep the textarea focused to prevent
 				// the mobile keyboard from dismissing. Re-focus on blur
-				// unless another input element actually needs focus.
+				// unless focus settled on something outside the terminal.
 				if (!isElectrobun) {
 					hiddenTextarea.addEventListener("blur", () => {
 						if (disposed) return;
 						// Compose mode owns the keyboard: re-grabbing focus here would
 						// re-summon the OSK right after the composer closes.
 						if (touchComposeModeRef.current) return;
-						const active = document.activeElement;
-						if (!active || active === document.body) {
-							setTimeout(() => {
-								if (disposed || touchComposeModeRef.current) return;
-								hiddenTextarea.focus();
-							}, 50);
-						}
+						// During blur, activeElement is still body, so judge where focus went
+						// once it has settled - else a menu or input that took it loses it again.
+						// A dialog that took focus (the terminal link sheet) restores it on close.
+						// The container is the terminal itself (term.focus(), a canvas click), and
+						// its inputmode="none" would hide the on-screen keyboard - take focus back.
+						setTimeout(() => {
+							if (disposed || touchComposeModeRef.current) return;
+							const active = document.activeElement;
+							if (active && active !== document.body && active !== containerRef.current) return;
+							hiddenTextarea.focus();
+						}, 50);
 					});
 
 					// Mobile keyboards use IME composition for letters, but
@@ -1390,25 +1428,24 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 										wsRef.current.send(data);
 									}
 								},
-								// ghostty's paste() wraps in \x1b[200~…\x1b[201~ only when the
-								// running app enabled DEC 2004 and routes through onData → WS.
+								// Bracketed per pasteIntoTerminal(), routed through onData → WS.
 								// Text typed while the pane sits in tmux copy-mode would be eaten as
 								// copy-mode keys, so a pending scroll-up is cleared first (async only
 								// when there is something to clear — the common path stays sync).
 								paste: (data: string) => {
-									const run = () => { try { term.paste(data); } catch { /* disposed */ } };
+									const run = () => { try { pasteIntoTerminal(term, data, tmuxStreamRef.current); } catch { /* disposed */ } };
 									if (copyModePending()) void exitCopyModeIfNeeded().then(run);
 									else run();
 								},
 								submit: (data: string) => {
 									const run = () => submitPastedText(data, {
-										paste: (value) => term.paste(value),
+										paste: (value) => pasteIntoTerminal(term, value, tmuxStreamRef.current),
 										sendInput: (value) => {
 											if (wsRef.current?.readyState === WebSocket.OPEN) {
 												wsRef.current.send(value);
 											}
 										},
-										hasBracketedPaste: () => term.hasBracketedPaste(),
+										hasBracketedPaste: () => terminalBracketsPaste(term, tmuxStreamRef.current),
 									});
 									if (copyModePending()) void exitCopyModeIfNeeded().then(run);
 									else run();
@@ -1989,6 +2026,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 							handleNativeFrame(native.header, native.payload);
 							return;
 						}
+						tmuxStreamRef.current = true;
 						const cleaned = event.data.replace(OSC52_RE, "");
 						if (cleaned) {
 							noteSocketBytes(cleaned.length);
@@ -1997,6 +2035,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 						}
 					} else {
 						// Binary data — decode, then write on the same path as text
+						tmuxStreamRef.current = true;
 						const str = new TextDecoder().decode(new Uint8Array(event.data));
 						if (str) {
 							noteSocketBytes(str.length);
@@ -2511,7 +2550,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 	}, []);
 
 	// Intercept ALL paste events: images / large text blocks are saved to disk and
-	// their path injected into the PTY; ordinary text goes through term.paste()
+	// their path injected into the PTY; ordinary text goes through pasteIntoTerminal()
 	// (bracketed, CR-normalized) — never ghostty's raw container handler.
 	useEffect(() => {
 		const container = containerRef.current;
@@ -2607,7 +2646,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			try {
-				term.paste(normalizePastedText(text));
+				pasteIntoTerminal(term, normalizePastedText(text), tmuxStreamRef.current);
 			} catch {
 				// Terminal disposed mid-paste — nothing to do.
 			}
@@ -2725,6 +2764,7 @@ function TerminalView({ ptyUrl, taskId, projectId, onReady, onNativeStatus, onSe
 					data-testid="terminal-search-pane-frame"
 				/>
 			)}
+			<TerminalLinkSheet link={touchLink} onClose={() => setTouchLink(null)} taskId={taskId} />
 			{searchOpen && (
 				<TerminalSearchBar
 					ref={searchBarRef}

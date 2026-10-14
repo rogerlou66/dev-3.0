@@ -11,18 +11,26 @@ import { APP_SHORTCUTS, shortcutKeysFor } from "../keymap";
 import { useKeymapVersion } from "../keymap-store";
 import { appendAndroidDraft, bindAndroidTerminal, isAndroidAppHost } from "../android-client-bridge";
 import { isTouchPrimary } from "../utils/platform";
+import { BackIcon } from "./HeaderIcons";
+import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { subscribeTerminalPaste, terminalPasteTarget } from "../terminal-paste-request";
+import FileExplorerFrame from "./FileExplorerFrame";
+import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal");
 
 interface ProjectTerminalProps {
 	projectId: string;
 	projectPath: string;
+	projectName: string;
 	onBack: () => void;
 }
 
-function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProps) {
+/** The project's "Repo" screen: a shell in the main checkout with its file explorer beside it. */
+function ProjectTerminal({ projectId, projectPath, projectName, onBack }: ProjectTerminalProps) {
 	const t = useT();
 	useKeymapVersion();
+	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
 	const [ptyUrl, setPtyUrl] = useState<string | null>(null);
 	const [error, setError] = useState(false);
 	const [restarting, setRestarting] = useState(false);
@@ -57,7 +65,19 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 	}
 
 	// A session key, not a task id: no task record backs it.
-	const sessionKey = `project-${projectId}`;
+	const sessionKey = terminalPasteTarget(projectId);
+
+	// The explorer's "insert path": compose mode drafts it, otherwise it lands on the prompt.
+	useEffect(() => {
+		return subscribeTerminalPaste(sessionKey, (text) => {
+			if (touchInput && !rawMode && composerApiRef.current) {
+				composerApiRef.current.appendPaths([text.trim()]);
+				return;
+			}
+			termHandle?.paste(text);
+			termHandle?.focus();
+		});
+	}, [sessionKey, touchInput, rawMode, termHandle]);
 
 	useEffect(() => {
 		if (!termHandle) return;
@@ -143,11 +163,9 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 			<div className="flex items-center justify-between px-4 py-1.5 border-b border-edge flex-shrink-0 bg-raised" data-collapse-on-compose>
 				<button
 					onClick={onBack}
-					className="flex items-center gap-1.5 text-fg-3 hover:text-fg transition-colors text-sm"
+					className="header-anim flex items-center gap-1.5 text-fg-3 hover:text-fg transition-colors text-sm"
 				>
-					<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-					</svg>
+					<BackIcon className="w-3.5 h-3.5" />
 					<span>{t("projectTerminal.backToBoard")}</span>
 				</button>
 				<div className="flex items-center gap-3">
@@ -159,6 +177,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 				</div>
 			</div>
 			<div className="relative flex-1 min-h-0 overflow-hidden">
+				<FileExplorerFrame projectId={projectId} rootLabel={projectName} enabled={!isNarrow}>
 				{ptyUrl ? (
 					<TerminalView
 						ptyUrl={ptyUrl}
@@ -179,6 +198,7 @@ function ProjectTerminal({ projectId, projectPath, onBack }: ProjectTerminalProp
 				{scrolledUp && termHandle && (
 					<ScrollToLatestButton onClick={() => termHandle.scrollToBottom()} />
 				)}
+				</FileExplorerFrame>
 			</div>
 			{/* Keep the composer mounted in raw mode (hidden) so a draft survives the toggle. */}
 			{touchInput && !androidComposer && termHandle && (

@@ -1,3 +1,5 @@
+> Superseded in part on 2026-10-09 by `decisions/2026/10/09/picker-orders-models-by-release-date.md`: drag-to-reorder is gone and the launch picker orders models by release date, not stored preset order.
+
 # 096: One-time resync of built-in agent preset order
 
 ## Context

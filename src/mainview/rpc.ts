@@ -93,6 +93,7 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	spacesUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:spacesUpdated", { detail: payload })),
 	taskSound: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskSound", { detail: payload })),
 	ptyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:ptyDied", { detail: payload })),
+	taskTerminalResumed: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskTerminalResumed", { detail: payload })),
 	projectPtyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectPtyDied", { detail: payload })),
 	terminalBell: (payload) => window.dispatchEvent(new CustomEvent("rpc:terminalBell", { detail: payload })),
 	gitOpCompleted: (payload) => window.dispatchEvent(new CustomEvent("rpc:gitOpCompleted", { detail: payload })),
@@ -119,7 +120,6 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	taskPreparationFailed: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskPreparationFailed", { detail: payload })),
 	globalSettingsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:globalSettingsUpdated", { detail: payload })),
 	agentsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentsUpdated", { detail: payload })),
-	openTaskFromNotification: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskFromNotification", { detail: payload })),
 	openTaskNavigation: (payload) => window.dispatchEvent(new CustomEvent("rpc:openTaskNavigation", { detail: payload })),
 	cliToast: (payload) => window.dispatchEvent(new CustomEvent("rpc:cliToast", { detail: payload })),
 	agentMessageLogChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentMessageLogChanged", { detail: payload })),
@@ -218,6 +218,7 @@ function enrichRequest(rawRequest: RequestProxy): RequestProxy {
 const PING_TIMEOUT_MS = 4_000;
 const PING_INTERVAL_MS = 30_000;
 const RELOAD_MIN_GAP_MS = 30_000;
+const REINIT_PROBE_DELAY_MS = 1_500;
 
 // Guard against reload loops: if a previous watchdog reload happened very
 // recently (same browser session), skip another one and let socket re-init try.
@@ -311,9 +312,16 @@ function startBridgeWatchdog(electroview: Electroview<any>, rawRequest: RequestP
 					// leaves no trace on the side that keeps the logs, and a frozen UI is
 					// indistinguishable from an idle one (seq 1407).
 					reportWatchdogAction(rawRequest, "reinit");
+					// Probe again soon instead of on the next 30s tick: the replay of
+					// pending approval dialogs waits for that first live ping.
+					setTimeout(() => void check(), REINIT_PROBE_DELAY_MS);
 				} catch (err) {
 					console.error("[rpc-watchdog] socket re-init failed", err);
 				}
+			} else if (action === "recovered") {
+				// The old socket took every push sent while it was dead with it. Announce
+				// the reconnect so pending approval requests are replayed (h0x91b/dev-3.0#1669).
+				setRpcState("connected");
 			} else if (action === "reload") {
 				console.warn("[rpc-watchdog] bridge still dead after re-init — reloading webview");
 				recordDiagnostic({

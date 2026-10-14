@@ -33,6 +33,7 @@ vi.mock("../../rpc", () => ({
 			getProjects: vi.fn().mockResolvedValue([]),
 			getAgents: vi.fn().mockResolvedValue([]),
 			getGlobalSettings: vi.fn().mockResolvedValue({}),
+			prepareCustomArtifactTemplate: vi.fn().mockResolvedValue({ path: "/home/.dev3.0/artifact-template-custom", exists: true, seeded: false }),
 			getSpaces: vi.fn().mockResolvedValue({ version: 1, spaces: [], order: [] }),
 		},
 	},
@@ -1205,4 +1206,101 @@ describe("dev servers editor", () => {
 		});
 	});
 });
+
+	describe("artifact template override", () => {
+		it("follows the global setting by default and names its current value", async () => {
+			(api.request.getGlobalSettings as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ artifactTemplate: "off" });
+			await renderProjectSettings();
+			const select = screen.getByLabelText("Artifact template") as HTMLSelectElement;
+			expect(select.value).toBe("inherit");
+			expect(within(select).getByRole("option", { name: "Global default (Free-form HTML)" })).toBeInTheDocument();
+		});
+
+		it("saves only the override, and Global default clears it", async () => {
+			const user = userEvent.setup();
+			const mockSave = api.request.updateProjectSettings as ReturnType<typeof vi.fn>;
+			mockSave.mockClear();
+			await renderProjectSettings(mockProject, { artifactTemplate: "off" });
+			const select = screen.getByLabelText("Artifact template") as HTMLSelectElement;
+			expect(select.value).toBe("off");
+			await user.selectOptions(select, "inherit");
+			expect(mockSave).toHaveBeenCalledWith({ projectId: "proj-1", artifactTemplate: "inherit" });
+		});
+
+		it("offers My template and shows the folder field once a project picks it", async () => {
+			await renderProjectSettings(mockProject, { artifactTemplate: "custom", artifactTemplatePath: "/tmp/tpl" });
+			const select = screen.getByLabelText("Artifact template") as HTMLSelectElement;
+			expect(within(select).getByRole("option", { name: "My template" })).toBeInTheDocument();
+			expect(screen.getByLabelText("Template folder")).toHaveValue("/tmp/tpl");
+		});
+	});
+});
+
+// h0x91b/dev-3.0#1940 — every AI Review field must mark the form dirty, save, and discard.
+describe("AI Review column fields", () => {
+	const AGENTS = [
+		{ id: "agent-a", name: "Agent A", baseCommand: "true", configurations: [{ id: "config-a", name: "Config A" }, { id: "config-a2", name: "Config A2" }] },
+		{ id: "agent-b", name: "Agent B", baseCommand: "true", configurations: [{ id: "config-b0", name: "Config B0" }, { id: "config-b", name: "Config B" }] },
+	];
+	const A = { agentId: "agent-a", configId: "config-a", prompt: "SYNTHETIC PROMPT A" };
+
+	async function renderWithReviewA() {
+		(api.request.getAgents as ReturnType<typeof vi.fn>).mockResolvedValue(AGENTS);
+		(api.request.updateProjectSettings as ReturnType<typeof vi.fn>).mockClear();
+		await renderProjectSettings(mockProject, { builtinColumnAgents: { "review-by-ai": A } });
+		await goToProjectTab();
+		await vi.waitFor(() => expect(screen.getByLabelText("Review Agent")).toHaveValue("agent-a"));
+	}
+
+	async function editToB(user: ReturnType<typeof userEvent.setup>) {
+		await user.selectOptions(screen.getByLabelText("Review Agent"), "agent-b");
+		await user.selectOptions(screen.getByLabelText("Configuration"), "config-b");
+		const prompt = screen.getByLabelText("Review Prompt");
+		await user.clear(prompt);
+		await user.type(prompt, "SYNTHETIC PROMPT B");
+	}
+
+	it.each([
+		["agent", async (user: ReturnType<typeof userEvent.setup>) => user.selectOptions(screen.getByLabelText("Review Agent"), "agent-b")],
+		["configuration", async (user: ReturnType<typeof userEvent.setup>) => user.selectOptions(screen.getByLabelText("Configuration"), "config-a2")],
+		["prompt", async (user: ReturnType<typeof userEvent.setup>) => user.type(screen.getByLabelText("Review Prompt"), " more")],
+	])("shows the unsaved-changes bar when only the %s changes", async (_field, edit) => {
+		const user = userEvent.setup();
+		await renderWithReviewA();
+		expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+
+		await edit(user);
+
+		expect(screen.getByText("You have unsaved changes")).toBeInTheDocument();
+	});
+
+	it("saves agent, configuration and prompt B together and clears the bar", async () => {
+		const user = userEvent.setup();
+		await renderWithReviewA();
+		await editToB(user);
+
+		await user.click(screen.getByText("Save"));
+
+		await vi.waitFor(() => {
+			expect(api.request.updateProjectSettings).toHaveBeenCalledWith(expect.objectContaining({
+				projectId: "proj-1",
+				builtinColumnAgents: { "review-by-ai": { agentId: "agent-b", configId: "config-b", prompt: "SYNTHETIC PROMPT B" } },
+			}));
+		});
+		await vi.waitFor(() => expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument());
+	});
+
+	it("discards all three fields back to A without saving", async () => {
+		const user = userEvent.setup();
+		await renderWithReviewA();
+		await editToB(user);
+
+		await user.click(screen.getByText("Discard"));
+
+		expect(screen.getByLabelText("Review Agent")).toHaveValue("agent-a");
+		expect(screen.getByLabelText("Configuration")).toHaveValue("config-a");
+		expect(screen.getByLabelText("Review Prompt")).toHaveValue("SYNTHETIC PROMPT A");
+		expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+		expect(api.request.updateProjectSettings).not.toHaveBeenCalled();
+	});
 });

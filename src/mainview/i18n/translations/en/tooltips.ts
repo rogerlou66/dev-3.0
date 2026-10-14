@@ -60,7 +60,10 @@ export const tooltips = {
 	// Task info panel
 	"ttip.infoPanel.includeTests":
 		"When off, test files are excluded from the diff view and the +/− counters — you see the production-code footprint only.",
-	"ttip.infoPanel.showDiff": "Everything this task changed, compared against the base branch.",
+	"ttip.infoPanel.changesSummaryUncommitted": "The +/− numbers count lines not committed yet: staged, unstaged and new files. Ahead / behind counts commits against {branch}. The file counter above counts committed work only.",
+	"ttip.infoPanel.changesSummaryUncommittedOnly": "The +/− numbers count lines not committed yet: staged, unstaged and new files. No commits on this branch yet.",
+	"ttip.infoPanel.changesSummaryBranch": "Ahead / behind counts commits against {branch}. The working tree is clean, so this opens the committed branch diff.",
+	"ttip.infoPanel.showDiff": "This file's committed changes on the branch, compared against the base branch.",
 	"ttip.infoPanel.spawnAgent":
 		"Adds one more agent pane to this task's tmux window. Both agents share the same worktree — handy for a helper or a reviewer.",
 	"ttip.infoPanel.bugHunters":
@@ -108,7 +111,7 @@ export const tooltips = {
 
 	// Open in / files
 	"ttip.openIn.menu": "Open this task's worktree in your editor, terminal, file manager or on GitHub.",
-	"ttip.openIn.fileBrowser": "Browse the worktree files in a terminal file manager (yazi), right in a pane next to the agent.",
+	"ttip.openIn.fileBrowser": "Show the worktree files in a side panel. Pin it or let it auto-hide.",
 
 	// Scripts / dev server / ports / images
 	"ttip.scripts.run": "Runs a package.json script or Makefile target from this worktree in a tmux pane, so you watch the output live.",

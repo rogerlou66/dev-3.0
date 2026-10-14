@@ -5,10 +5,9 @@ import { markQuitConfirmed } from "./quit-manager";
 import { BUILD_ORDER } from "../shared/build-info.generated";
 import { decideUpdate, type UpdateChannel, type UpdateManifest } from "../shared/update-channel";
 import type { UpdateChangelog } from "../shared/types";
+import { RELEASE_BASE_URL } from "../shared/release-feed";
 
 const log = createLogger("updater");
-
-const BASE_URL = "https://h0x91b-releases.s3.eu-west-1.amazonaws.com/dev-3.0";
 
 // Electrobun's Updater keeps its state (updateReady flag, downloaded tar
 // bookkeeping) in module-level memory, and its checkForUpdate() OVERWRITES
@@ -111,7 +110,7 @@ export async function checkForUpdateWithChannel(channel: UpdateChannel): Promise
 	const platformPrefix = getPlatformPrefix();
 
 	// Construct URL for the selected channel's update.json
-	const updateUrl = `${BASE_URL}/${channel}-${platformPrefix}-update.json?_=${Date.now()}`;
+	const updateUrl = `${RELEASE_BASE_URL}/${channel}-${platformPrefix}-update.json?_=${Date.now()}`;
 
 	log.info("Checking for update", { channel, url: updateUrl, localHash: local.hash.slice(0, 12) });
 

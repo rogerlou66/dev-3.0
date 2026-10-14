@@ -7,7 +7,7 @@ import Electrobun, {
 	Utils,
 } from "electrobun/bun";
 import { startDisplayWatch } from "./display-watch";
-import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, consumeRecentWatchedNotification, setAppForeground, setFocusMode, pushTerminalBell, getActiveContext } from "./rpc-handlers";
+import { handlers, setPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, setAppForeground, isAppForeground, setFocusMode, pushTerminalBell, getActiveContext } from "./rpc-handlers";
 import { applyFreezeDiagnosticsSetting, configureFreezeDiagnostics, recordFreezeDiagnostic, stopFreezeDiagnostics } from "./freeze-diagnostics";
 import { resolve } from "node:path";
 import { startRendererWatchdog } from "./renderer-watchdog";
@@ -24,7 +24,8 @@ import { setCurrentUiTheme } from "./theme-state";
 import { shouldAutoOpenDevTools } from "./devtools-auto-open";
 import { installSignalQuitConfirmation, isQuitConfirmed, markQuitConfirmed, markQuitDialogPending } from "./quit-manager";
 import { initNativeNotifications } from "./native-notifications";
-import { markPendingNotificationNav } from "./notification-nav";
+import { adoptNativeWindowsMenu } from "./native-window-menu";
+import { handleNotificationClick } from "./notification-click";
 import { createLogger, getLogPath } from "./logger";
 import { writeAppReadyMarker } from "./app-ready-marker";
 import {
@@ -43,11 +44,12 @@ import { writeSystemClipboard } from "./system-clipboard";
 import { stopTunnel } from "./cloudflare-tunnel";
 import { killModelSidecarNow } from "./model-sidecar";
 import { installAgentSkills } from "./agent-skills";
+import { retireLowBattery } from "./low-battery";
 import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { ensureCodexConfigFile } from "./codex-config";
 import { ensureWindowsShortcuts } from "./windows-shortcuts";
 import { makeTitle } from "./app-utils";
-import { buildApplicationMenu, getMenuContext, MENU_ACTIONS, onMenuContextChange } from "../shared/application-menu";
+import { buildApplicationMenu, getMenuContext, MENU_ACTIONS, onMenuContextChange, type MenuContext } from "../shared/application-menu";
 import { openLogsDirectory } from "./menu-actions";
 import { startLoopMonitor } from "./loop-monitor";
 import { configureHandoffWorker } from "./conversation-handoff-runner";
@@ -180,7 +182,8 @@ log.info("Log files", { dir: getLogPath() });
 
 	// Install dev3 skill into all supported AI agent directories (~/.claude, ~/.codex, etc.).
 	// Overwritten on every start to match the running app version (same pattern as CLI binary).
-	await installAgentSkills({ configureCodex: false, lowBattery: loadSettingsSync().lowBatteryEnabled });
+	await installAgentSkills({ configureCodex: false });
+	await retireLowBattery(homedir());
 
 	// Append ~/.dev3.0/bin to the user's shell rc files (idempotent).
 	// This makes `dev3` available in all terminals, not just worktree tmux
@@ -414,13 +417,20 @@ applyFreezeDiagnosticsSetting(loadSettingsSync().freezeDiagnosticsEnabled === tr
 
 // --- Application Menu ---
 
-ApplicationMenu.setApplicationMenu(buildApplicationMenu(getMenuContext()));
+// Every rebuild must also re-register the Window menu with AppKit — see
+// native-window-menu.ts. Keep both calls together here.
+function installApplicationMenu(ctx: MenuContext): void {
+	ApplicationMenu.setApplicationMenu(buildApplicationMenu(ctx));
+	adoptNativeWindowsMenu();
+}
+
+installApplicationMenu(getMenuContext());
 
 // Rebuild the menu whenever the renderer pushes a new context (route change).
 // Items that require a task / project / terminal toggle their enabled state.
 onMenuContextChange((ctx) => {
 	log.debug("Menu context changed, rebuilding native menu", { hasTask: ctx.hasTask, hasProject: ctx.hasProject, hasTerminal: ctx.hasTerminal });
-	ApplicationMenu.setApplicationMenu(buildApplicationMenu(ctx));
+	installApplicationMenu(ctx);
 });
 
 // --- Main Window ---
@@ -491,7 +501,6 @@ async function openMainWindow(restore?: WindowState, activate = true) {
 			// also reports this via setWindowForeground, but the native focus event
 			// is the authoritative source and never races renderer mount timing.
 			setAppForeground(true);
-			tryNavigateFromRecentNotification("window-focus");
 		},
 	});
 }
@@ -867,65 +876,23 @@ Electrobun.events.on("before-quit", (e: { response?: { allow: boolean } }) => {
 	}
 });
 
-// Click-to-open for task notifications — native channel (macOS).
-//
-// The compiled shim (src/native/macos/dev3-notifications.m) owns a
-// UNUserNotificationCenterDelegate: a click hands us the exact task that fired
-// the notification, whenever it happens — no timing heuristics. When the shim
-// is active, shared.ts posts notifications through it and never arms the
-// focus-proxy slot below.
-const nativeNotificationClicks = initNativeNotifications((target) => {
-	log.info("[notif] native notification click", { taskId: target.taskId.slice(0, 8), projectId: target.projectId.slice(0, 8) });
-	if (getWindowCount() === 0) {
-		// App sits window-less in the dock: reopen a window; the renderer pulls
-		// the target on mount via consumePendingNotificationNav (a push would race
-		// its not-yet-registered listener).
-		markPendingNotificationNav(target);
-		void openMainWindow();
-		return;
-	}
-	// macOS already activates the app on notification click; make sure a window
-	// is key (e.g. it was miniaturized) and navigate.
-	focusFocusedWindow();
-	sendToFocusedWindow("openTaskFromNotification", target);
+// A native notification click (macOS shim) only brings the window forward —
+// see src/bun/notification-click.ts. Platforms without the shim get no click
+// callback at all, and app focus/reopen events never imply a click.
+const nativeNotificationClicks = initNativeNotifications(() => {
+	const outcome = handleNotificationClick({ getWindowCount, openMainWindow, isAppForeground, focusFocusedWindow });
+	log.info("[notif] native notification click", { outcome });
 });
-log.info(`[notif] click channel: ${nativeNotificationClicks ? "native delegate" : "focus-proxy fallback"}`);
-
-// Click-to-open FALLBACK (Linux, headless dylib-less builds, or notification
-// permission denied — cases where the native channel above reports false and
-// shared.ts posts via Electrobun's Utils.showNotification instead).
-// That path has no click callback, so we treat any "app became foreground"
-// signal that arrives shortly after a notification fired as a click-through.
-//
-// We listen on multiple events because none of them fire reliably in every scenario:
-//   - window focus  — fires on windowDidBecomeKey: (does NOT re-fire if the window was
-//                      already key, e.g. another app was just on top). Wired per-window
-//                      via the createAppWindow onFocus hook.
-//   - `app.reopen`  — fires on applicationShouldHandleReopen: (dock click, some
-//                      notification-activation paths on macOS).
-//
-// On the first signal we consume the recent-notification slot and tell the focused window
-// to navigate. Subsequent signals find the slot empty and no-op.
-function tryNavigateFromRecentNotification(source: string): void {
-	const recent = consumeRecentWatchedNotification();
-	log.debug(`[notif] activation signal received (${source})`, {
-		hadRecent: !!recent,
-		taskId: recent?.taskId?.slice(0, 8) ?? null,
-	});
-	if (!recent) return;
-	sendToFocusedWindow("openTaskFromNotification", recent);
-}
+log.info(`[notif] click channel: ${nativeNotificationClicks ? "native delegate (foreground only)" : "none"}`);
 
 Electrobun.events.on("reopen", () => {
 	// With `exitOnLastWindowClosed: false` the app can sit window-less in the
 	// dock. A dock-icon click (reopen) should bring a window back, like any mac
-	// app. If a window already exists, treat it as a notification-activation.
+	// app.
 	if (getWindowCount() === 0) {
 		log.info("Reopen with no window — opening a fresh window");
 		void openMainWindow();
-		return;
 	}
-	tryNavigateFromRecentNotification("app-reopen");
 });
 
 // Helper to push update progress to the renderer

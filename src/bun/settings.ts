@@ -163,6 +163,9 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		// Both booleans are kept — an explicit false is the user choosing the panel,
 		// not the absence of a choice.
 		openArtifactsInPopup: typeof d.openArtifactsInPopup === "boolean" ? d.openArtifactsInPopup : undefined,
+		// Default = the dev3 template, so only the two other modes are stored.
+		artifactTemplate: d.artifactTemplate === "off" || d.artifactTemplate === "custom" ? d.artifactTemplate : undefined,
+		artifactTemplatePath: typeof d.artifactTemplatePath === "string" && d.artifactTemplatePath.trim() ? d.artifactTemplatePath.trim() : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		remoteSilentUpdate: d.remoteSilentUpdate === false ? false : undefined,
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
@@ -199,12 +202,9 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		agentsLayoutRevision: typeof d.agentsLayoutRevision === "number" ? d.agentsLayoutRevision : undefined,
 		// Default-off experimental toggle — only an explicit true is a stored opt-in.
 		pxpipeProxyEnabled: d.pxpipeProxyEnabled === true ? true : undefined,
-		// Default-off feature — no key at all means off, so nothing is installed and
-		// no output style is touched until the user opts in. Both booleans are kept:
-		// an explicit false is the user saying "off", not the absence of a choice.
+		// Legacy keys of the removed low-battery feature — passed through so an older
+		// co-installed build keeps its own state; `retireLowBattery` reads the first.
 		lowBatteryEnabled: typeof d.lowBatteryEnabled === "boolean" ? d.lowBatteryEnabled : undefined,
-		// Legacy keys, never read by this version — passed through so an older
-		// co-installed build keeps its own opt-out and announce flag.
 		lowBatteryDisabled: d.lowBatteryDisabled === true ? true : undefined,
 		lowBatteryAnnounced: d.lowBatteryAnnounced === true ? true : undefined,
 		// Bring-your-own-tunnel config; kept only when it names a runnable custom command.

@@ -190,6 +190,11 @@ vi.mock("../scheduled-message-scheduler", () => ({
 	cancelScheduledMessageByRef: vi.fn(),
 }));
 
+vi.mock("../scheduled-message-author", () => ({
+	captureScheduledMessageAuthor: vi.fn(async (_task: unknown, paneId: string | null) =>
+		paneId ? { paneId, sessionId: "conv-a", paneToken: "gen-1", agentProcess: "101@x" } : null),
+}));
+
 vi.mock("../vents", () => ({
 	addVent: vi.fn(() => ({ fileName: "2026-06-15_14-30_x.md", path: "/tmp/v/2026-06-15_14-30_x.md", name: "x" })),
 }));
@@ -241,6 +246,7 @@ import { saveSharedImage, saveSharedVideo } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
 import { cancelScheduledMessageByRef, scheduleMessage, sendMessageImmediately } from "../scheduled-message-scheduler";
+import { captureScheduledMessageAuthor } from "../scheduled-message-author";
 
 // `task.open` imports the window layer lazily; mocking it keeps electrobun out.
 vi.mock("../window-manager", () => ({
@@ -250,7 +256,7 @@ vi.mock("../window-manager", () => ({
 }));
 
 vi.mock("../artifact-template", () => ({
-	ensureArtifactTemplate: vi.fn(() => "/wt-container/artifact-template-v1"),
+	provisionArtifactStarter: vi.fn(() => ({ dir: "/wt-container/artifact-template-v1", mode: "on" })),
 }));
 
 vi.mock("../task-pane-runs", () => ({
@@ -458,6 +464,32 @@ describe("message.scheduled.list / cancel — the CLI queue verbs", () => {
 		expect(resp.data).toMatchObject({ messageId: "new-id", pending: 2 });
 	});
 
+	it("binds a self-scheduled message to the scheduling agent's pane", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			sourceTaskId: task.id, sourcePaneId: "%1", sourcePid: 4242,
+		}));
+		expect(resp.ok).toBe(true);
+		expect(captureScheduledMessageAuthor).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }), "%1", 4242);
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: { paneId: "%1", sessionId: "conv-a" } });
+	});
+
+	it("leaves a message for ANOTHER task addressed to that task, not to the sender's pane", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			sourceTaskId: "some-other-task", sourcePaneId: "%7",
+		}));
+		expect(resp.ok).toBe(true);
+		expect(captureScheduledMessageAuthor).not.toHaveBeenCalled();
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: null });
+	});
+
 	it("lists the queue earliest first, with sender seq and a flattened preview", async () => {
 		const task = makeTask({ scheduledMessages: [
 			queued("late", "2099-01-02T00:00:00.000Z", { subject: "second" }),
@@ -587,9 +619,11 @@ describe("pane.* — the CLI's own pane surface", () => {
 		expect(resp.data).toMatchObject({ runId: "run-0123456789ab" });
 	});
 
-	it("defaults an unknown placement to the pane on the right rather than guessing", async () => {
+	it("reads an unknown placement — and an older CLI's \"right\" — as auto, and passes the caller's pane", async () => {
 		await handleRequest(makeRequest("pane.run", { taskId: makeTask().id, command: "ls", placement: "sideways" }));
-		expect(vi.mocked(startPaneRun).mock.calls[0][0].placement).toBe("right");
+		await handleRequest(makeRequest("pane.run", { taskId: makeTask().id, command: "ls", placement: "right", selfPaneId: "%3" }));
+		expect(vi.mocked(startPaneRun).mock.calls[0][0]).toMatchObject({ placement: "auto", selfPaneId: null });
+		expect(vi.mocked(startPaneRun).mock.calls[1][0]).toMatchObject({ placement: "auto", selfPaneId: "%3" });
 	});
 
 	it("refuses to split a task with no worktree instead of running the command somewhere else", async () => {
@@ -2316,7 +2350,7 @@ describe("artifact.template-dir", () => {
 		const task = makeTask();
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.loadTasks).mockResolvedValue([task]);
-		const { ensureArtifactTemplate } = await import("../artifact-template");
+		const { provisionArtifactStarter } = await import("../artifact-template");
 
 		const resp = await handleRequest(makeRequest("artifact.template-dir", {
 			taskId: task.id,
@@ -2325,8 +2359,8 @@ describe("artifact.template-dir", () => {
 		}));
 
 		expect(resp.ok).toBe(true);
-		expect(resp.data).toMatchObject({ dir: "/wt-container/artifact-template-v1", taskId: task.id });
-		expect(ensureArtifactTemplate).toHaveBeenCalledWith(project, task, { worktreePath: "/wt-container/worktree" });
+		expect(resp.data).toMatchObject({ dir: "/wt-container/artifact-template-v1", mode: "on", taskId: task.id });
+		expect(provisionArtifactStarter).toHaveBeenCalledWith(project, task, { worktreePath: "/wt-container/worktree" });
 	});
 
 	it("reports the provisioning failure instead of inventing a path", async () => {
@@ -2334,8 +2368,8 @@ describe("artifact.template-dir", () => {
 		const task = makeTask();
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.loadTasks).mockResolvedValue([task]);
-		const { ensureArtifactTemplate } = await import("../artifact-template");
-		vi.mocked(ensureArtifactTemplate).mockImplementationOnce(() => {
+		const { provisionArtifactStarter } = await import("../artifact-template");
+		vi.mocked(provisionArtifactStarter).mockImplementationOnce(() => {
 			throw new Error("Bundled dev3 artifact template not found");
 		});
 

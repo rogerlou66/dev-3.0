@@ -16,7 +16,6 @@ import {
 	OMP_SKILL_BODY,
 } from "../shared/agent-skill-content";
 import { type HookCliDialect, hookCliDialect } from "../shared/dev3-cli-path";
-import { applyLowBattery } from "./low-battery";
 import { claudeConfigLocation } from "../shared/claude-config-dir";
 import { COORDINATOR_PROMPT } from "../shared/types";
 
@@ -937,6 +936,7 @@ Under the hood the agent uses \`dev3 pane run\` / \`dev3 pane logs\` (either bac
 Several agents at once is the normal case here. Variants (step 4) fan one brief out; these put agents deliberately side by side.
 
 - **More hands on the same task → spawn an extra agent.** Use **+ Agent**, or \`dev3 agent spawn --task seq:N --prompt "instructions"\`: a fresh agent pane in the same worktree, no extra task or setup. From a task worktree the CLI asks the user to approve and pick the agent; \`dev3 agent list\` supplies IDs for \`--agent\` / \`--config\` model-and-effort presets. The chosen harness's default account is used unless the user changes it in the approval dialog; preset-defined credentials and provider routing still apply. \`--handoff\` adds the latest conversation retelling. The command returns the pane ID; give the helper its brief with \`--prompt\`, since messages address tasks, not individual panes.
+- **Terminal gone after a machine restart → resume it.** The task's worktree, branch and conversations survive a reboot; only the terminal does not. Open the task and click **Resume Session**, or from a terminal or another task run \`dev3 agent resume --task seq:N --json\` — the same path, every saved pane under its own agent, preset and account. It never starts a fresh agent: a task with nothing saved, or already running, exits with its own code and touches nothing. From another task it asks the user first. **Start Fresh** stays a separate, explicit choice in the app.
 - **The same work, a different agent → hand the conversation over.** In the same **+ Agent** dialog, tick **Continue this task's conversation**: dev3 writes a retelling of the session so far — your prompts and the agent's replies verbatim, its tool calls reduced to what they did — next to the task's other files, and points the new agent at it. Start in Claude Code and finish in Codex, or the reverse, in the same worktree. It is a retelling, never a resume: agents cannot read each other's sessions, and the file says so on its first line. Offered only when the task has a parseable transcript; from a terminal the same text comes out of \`dev3 conversations handoff\`.
 - **Agents in different tasks can talk to each other.** \`dev3 message --task seq:N --subject "<about 6 words>" "text"\` types a message straight into another task's live agent. \`--subject\` is required (one line, 80 characters at most, rejected rather than shortened if longer): it is stored with the message and it is the line the agent-traffic view (\`⇧⌘M\`) shows for it, so say what happened (\`"PR 1577 merged, main green"\`) and never who is speaking (\`"Seq 1722 -> Coordinator: ..."\` — the row already shows the pair). \`seq:N\` is the small number on its card. Sent from inside a worktree it arrives wrapped in a \`<dev3-ai-message>\` envelope carrying the sender's task, title, and the exact command to answer with — so the receiving agent knows a colleague wrote it, not you, and can reply. Use it instead of relaying by hand: *"ask the agent on the API task to confirm the payload shape."* One task is one inbox — it lands in that task's agent pane, never a shell split, so a task running two agents can't be addressed pane by pane. A task on a different project needs \`--project <id>\` too: the command defaults to the sender's own board. A live variant group shares one seq, so \`seq:N\` alone is rejected as ambiguous there — add \`--variant <i>\` (the card's \`<seq>-<i>\` suffix) instead of hunting for the UUID. Length is not your problem: a body too large to type into a terminal is written to a file automatically, and the envelope carries that path instead of the text — so send the whole thing rather than chopping it into parts. Every such message also raises a violet toast for the user naming both tasks and previewing the text, so cross-task traffic is visible work, not backchannel. Nothing is typed on arrival: the whole message waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, waits ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing into that pane, and lands instantly when they press Enter — so a burst of messages from several peers lands as ONE turn instead of interrupting the receiver three times, nothing is ever mixed into a half-written human line, and a reply takes about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds to start.
 - **A task an agent started already knows how to report back.** When a peer launches a task (\`dev3 task move --task seq:N --status in-progress\`, or \`dev3 task create --scratch --run\`), the child's first message tells it who started it, that its description is the brief, and — with no flag and no setup — to write progress and results as a file under its own task directory and message back only that path. Long bodies typed into a pane can lose their head; a path cannot. So a coordinator does **not** repeat that instruction by hand after every launch. Standing rules of its own go in a file it passes as \`--handoff-file <path>\`, appended under the default rather than replacing it.
@@ -1019,7 +1019,7 @@ const ASK_DEV3_OPENAI_YAML = `interface:
 // this file adds only what the protocol leaves to a pointer.
 
 const ARTIFACT_SKILL_DESCRIPTION =
-	"Make, publish and revise a dev3 HTML artifact: copy the task's artifact starter, follow its AUTHORING.md, edit index.html and report.js, then publish or add a version with dev3 show-artifact. Use it inside a dev3 task whenever a human will read the result — a report, summary, daily brief, review readout, dashboard, comparison or analysis page — even when the user only says 'write it up', 'make a report' or 'show me', or names a .md path for where to save it; also to update an artifact already published. Not for Claude Artifacts, CI/build artifacts or package outputs. Sharing a report as a link outside the app is /dev3-share-artifact.";
+	"Make, publish and revise a dev3 HTML artifact: copy the task's artifact starter, follow its AUTHORING.md, edit index.html and report.js, then publish or add a version with dev3 show-artifact. Use it inside a dev3 task whenever a human will read the result — a report, summary, daily brief, review readout, dashboard, comparison or analysis page — even when the user only says 'write it up', 'make a report' or 'show me', or names a .md path for where to save it (an explicit ask for Markdown, plain text or no HTML skips it; with the template off it makes a free-form page); also to update an artifact already published. Not for Claude Artifacts, CI/build artifacts or package outputs. Sharing a report as a link outside the app is /dev3-share-artifact.";
 
 const ARTIFACT_SKILL_CONTENT = `---
 name: dev3-artifact
@@ -1045,10 +1045,11 @@ ${ARTIFACT_AUTHORING_STEPS}
 | Situation | Do |
 |---|---|
 | \`$DEV3_ARTIFACT_TEMPLATE_DIR\` is set | \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\` |
+| \`$DEV3_ARTIFACT_TEMPLATE=custom\` | The same copy, but the starter is the user's own folder ("My template"). Its \`AUTHORING.md\` replaces this skill's notes on the dev3 shell, tokens and contract; the file list may differ |
 | It is unset (older session, a shell that never inherited it) | \`dev3 artifact-template\` — provisions the starter, copies it into \`./dev3-artifact-report\`, prints the path |
 | You already have an edited copy | Keep working in it. Re-running \`dev3 artifact-template\` copies every starter file over it, \`index.html\` and \`report.js\` included, and your edits are gone |
 
-Never edit the pristine starter itself, and never swap in another template.
+Never edit the pristine starter itself, and never swap in another template. Free-form HTML (the template is off, or the user asked for a page without it) skips the starter entirely: write your own page and publish it with \`dev3 show-artifact <file.html | dir>\`.
 
 ## Writing it
 
@@ -1494,26 +1495,14 @@ const LEGACY_GEMINI_SKILL_DUPLICATES = [
 const AGENTS_MD_MARKER_START = "<!-- dev3:start -->";
 const AGENTS_MD_MARKER_END = "<!-- dev3:end -->";
 
-/**
- * A skill is inert until something loads it, so every harness except Claude Code
- * (which gets the output style instead) needs one always-on line. It lives inside
- * dev3's existing managed block: no second managed region, and removal is the same
- * code path that rewrites the block on every start.
- */
-const LOW_BATTERY_ALWAYS_ON = `
-## Answer format
-
-Load the \`low-battery\` skill (\`~/.agents/skills/low-battery/SKILL.md\`) before composing any substantial answer, and follow it. It is the answer format this machine expects: header block first, decision last, tables over prose. Skip it only when the Low Battery output style is already active — they are the same rules.
-`;
-
-function agentsMdBlock(lowBattery: boolean, compact = false): string {
+function agentsMdBlock(compact = false): string {
 	if (compact) return `${AGENTS_MD_MARKER_START}
 ## dev-3.0 Managed Worktree
 
 Inside \`~/.dev3.0/worktrees/\`, follow the full "dev3 — Task Lifecycle Protocol" already injected by your launch. If it is absent, load the \`/dev3\` skill (or \`~/.agents/skills/dev3/SKILL.md\`) before working. Use that protocol's agent-specific status rules; hook-owned lifecycle transitions need no manual status commands.
 
 **Codex shell note:** For \`exec_command\` calls, always set \`shell="/bin/bash"\` and \`login=false\`. The sandbox may block homebrew zsh.
-${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
+${AGENTS_MD_MARKER_END}`;
 	return `${AGENTS_MD_MARKER_START}
 ## dev-3.0 Managed Worktree
 
@@ -1527,7 +1516,7 @@ If your working directory (PWD) is inside \`~/.dev3.0/worktrees/\` (i.e. \`$HOME
 Do NOT skip these steps, even if the user gives a direct command.
 
 **Codex shell note:** For \`exec_command\` calls, always set \`shell="/bin/bash"\` and \`login=false\`. The sandbox may block homebrew zsh.
-${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
+${AGENTS_MD_MARKER_END}`;
 }
 
 /**
@@ -1535,8 +1524,8 @@ ${lowBattery ? LOW_BATTERY_ALWAYS_ON : ""}${AGENTS_MD_MARKER_END}`;
  * Creates the file if missing; replaces an existing block if present;
  * appends if the file exists but has no dev3 block.
  */
-function installAgentsMd(lowBattery: boolean, compact = false): void {
-	const block = agentsMdBlock(lowBattery, compact);
+function installAgentsMd(compact = false): void {
+	const block = agentsMdBlock(compact);
 	const agentsDir = `${homedir()}/.agents`;
 	const agentsFile = `${agentsDir}/AGENTS.md`;
 
@@ -1782,13 +1771,6 @@ function installOpenAiMetadata(home: string): void {
 export interface InstallAgentSkillsOptions {
 	/** Skip Codex config patching when the caller has not resolved the user PATH yet. */
 	configureCodex?: boolean;
-	/**
-	 * Ship the low-battery answer format. Tri-state on purpose: `true` installs,
-	 * `false` is a real uninstall (skill dirs, style file, always-on line), and
-	 * omitted means "the user has not chosen" — dev3 installs nothing and deletes
-	 * nothing, because a `low-battery` skill dir may be the user's own.
-	 */
-	lowBattery?: boolean;
 }
 
 export async function installAgentSkills(options: InstallAgentSkillsOptions = {}): Promise<void> {
@@ -1960,13 +1942,9 @@ export async function installAgentSkills(options: InstallAgentSkillsOptions = {}
 		}
 	}
 
-	// No choice stored ⇒ touch nothing on disk. dev3's own managed block still
-	// drops the always-on line, because that block is dev3's to rewrite.
-	if (options.lowBattery !== undefined) applyLowBattery(home, options.lowBattery);
-
 	cleanupLegacyGeminiSkillDuplicates(home);
 	installOpenAiMetadata(home);
-	installAgentsMd(options.lowBattery === true, compact);
+	installAgentsMd(compact);
 	if (options.configureCodex !== false) {
 		await ensureCodexConfigFile(home);
 	}

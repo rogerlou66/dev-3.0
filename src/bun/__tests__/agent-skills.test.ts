@@ -68,10 +68,9 @@ describe("dev3 skill content", () => {
 		for (const skill of [CLAUDE_SKILL_BODY, getCodexSkillContent(), OMP_SKILL_BODY, getGenericSkillContent()]) {
 			expect(skill).toContain("Any report a human reads defaults to the dev3 template, text-only summaries and daily briefs included.");
 			expect(skill).toContain("**Copy the starter and publish its directory.**");
-			expect(skill).toContain("only when the user explicitly asks for Markdown or plain text");
+			expect(skill).toContain("An explicit ask for Markdown, plain text or no HTML overrides the default");
 			// A brief naming `…/REPORT.md` once read as a Markdown request (Seq 2070).
 			expect(skill).toContain("A `.md` report path in a brief says where to save it, not how to show it.");
-			expect(skill).toContain("ask which wins before publishing");
 			expect(skill).toContain('data-dev3-artifact-template="v1"');
 			expect(skill).toContain("`dev3 show-artifact <report-dir | file.html> [--assets");
 			expect(skill).not.toContain("file.html | .md | .txt");
@@ -106,7 +105,7 @@ describe("dev3 skill content", () => {
 			expect(skill).toContain("## dev3 HTML artifacts");
 			expect(skill).toContain("DEV3_ARTIFACT_TEMPLATE_DIR");
 			expect(skill).toContain('cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report');
-			expect(skill).toContain("The layout is fixed; do not spend a turn listing or rediscovering it");
+			expect(skill).toContain("dev3 layout: `AUTHORING.md` is the card");
 			for (const file of ARTIFACT_TEMPLATE_FILES) {
 				expect(skill).toContain(`\`${file}\``);
 			}
@@ -727,10 +726,28 @@ describe("dev3-artifact skill content", () => {
 		}
 	});
 
-	it("keeps the Markdown exception and the report-path ruling", () => {
-		const skill = getArtifactSkillContent();
-		expect(skill).toContain("only when the user explicitly asks for Markdown or plain text");
-		expect(skill).toContain("A `.md` report path in a brief says where to save it, not how to show it.");
+	// An agent told "no HTML" once called it a conflict with the template and asked to
+	// choose again. Explicit no-HTML / Markdown / plain text wins; a bare `.md` path does not.
+	it("lets an explicit non-HTML ask override the default without re-asking", () => {
+		for (const text of [getArtifactSkillContent(), CLAUDE_SKILL_BODY, getCodexSkillContent(), OMP_SKILL_BODY, getGenericSkillContent()]) {
+			expect(text).toContain("Any report a human reads defaults to the dev3 template");
+			expect(text).toContain("An explicit ask for Markdown, plain text or no HTML overrides the default");
+			expect(text).toContain("do not ask to choose again");
+			expect(text).toContain("A `.md` report path in a brief says where to save it, not how to show it.");
+			expect(text).not.toMatch(/ask which (wins|requirement takes priority)/);
+			expect(text).not.toContain("conflicts with the template");
+		}
+		expect(getArtifactSkillContent()).toContain("(an explicit ask for Markdown, plain text or no HTML skips it; with the template off it makes a free-form page)");
+	});
+
+	// #1848: the user's setting (or one request) opts out of the starter, not only out of HTML.
+	it("lets the template setting or a per-artifact ask switch to free-form HTML or the user's own starter", () => {
+		for (const text of [getArtifactSkillContent(), CLAUDE_SKILL_BODY, getCodexSkillContent(), OMP_SKILL_BODY, getGenericSkillContent()]) {
+			expect(text).toContain("`$DEV3_ARTIFACT_TEMPLATE=off` or asking for a page without the dev3 template → free-form HTML");
+			expect(text).toContain("Asking for the template wins.");
+			expect(text).toContain("`=custom`: the user's own starter; its `AUTHORING.md` is the contract.");
+			expect(text).toContain('A dev3-template report needs its `data-dev3-artifact-template="v1"`');
+		}
 	});
 
 	it("warns that re-running the starter command overwrites an edited copy", () => {

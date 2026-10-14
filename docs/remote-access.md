@@ -46,6 +46,14 @@ as well and the server accepts connections from this machine only: no LAN, no pu
 banner and `dev3 remote url` print the URL without a QR, since no phone could open it (a tunnel URL
 keeps its QR).
 
+`dev3 local` is a shorthand for `dev3 remote --no-tunnel --host 127.0.0.1`. It takes every
+`dev3 remote` subcommand. `start`, `restart` and `install-service` get the two flags added; the
+others pass through unchanged. Flags you pass come after the added ones and win, so
+`dev3 local --host localhost` binds `localhost`; any other `--host` is refused, since that would put
+the server on the LAN. For example, `dev3 local install-service --port 8090` writes a loopback-only
+systemd unit. There is still one server: `dev3 local stop`, `status` and `restart` act on whichever one
+is running, including a tunnelled server started with plain `dev3 remote`.
+
 ## Background lifecycle (for SSH boxes)
 
 `dev3 remote` backgrounds the server by default, so it survives your SSH session. From any
@@ -123,6 +131,15 @@ Stop any foreground or backgrounded `dev3 remote` on the same port first (`dev3 
 Otherwise the unit cannot bind, and systemd restarts it in a loop, logging `Is port <n> in use?`
 each time.
 
+systemd starts the unit with an empty environment, so `install-service` writes these variables
+from your shell into the unit as `Environment=` lines and prints what it carried:
+`DEV3_HOME`, `DEV3_LOG_LEVEL`, `DEV3_CLOUDFLARED_PROTOCOL`, and
+`DEV3_CLOUDFLARED_EDGE_BIND`.
+
+To change a carried value later, set it and run `install-service` again. A variable this shell
+does not set keeps the value the previous unit carried. To remove a carried variable, run
+`dev3 remote uninstall-service` first. This fork has no telemetry to opt out of.
+
 **Keep agents alive across restarts (optional, `--no-tunnel` only).** Agent terminals run in a
 tmux server that dev3 starts, so they belong to the unit's cgroup, and systemd's default
 `KillMode=control-group` kills them all whenever the unit stops or restarts. A service started
@@ -131,8 +148,6 @@ with `--no-tunnel` can opt out with a drop-in (`systemctl --user edit dev3-remot
 ```ini
 [Service]
 KillMode=process
-# Optional: the unit does not inherit your shell's environment.
-Environment=DEV3_TELEMETRY=off
 ```
 
 Then `systemctl --user restart dev3-remote`. The drop-in survives a later `install-service`, which
@@ -148,7 +163,7 @@ cgroup, agents included.
 
 ### WSL: the UI in a Windows browser
 
-Run the server inside WSL2 with `--no-tunnel --host 127.0.0.1 --port <n>` and open
+Run the server inside WSL2 with `dev3 local --port <n>` and open
 `http://localhost:<n>` in a Windows browser: WSL forwards Windows `localhost` into the distro, and
 `http://localhost` is a secure context, so notifications and clipboard work without HTTPS. Full
 walkthrough, including where projects should live and per-project Claude Code logins:

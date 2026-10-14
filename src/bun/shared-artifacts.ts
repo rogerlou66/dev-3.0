@@ -8,6 +8,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, extname, isAbsolute, posix, relative, resolve as resolvePath, sep } from "node:path";
 import type { SharedArtifact, SharedArtifactAsset } from "../shared/types";
 import {
@@ -23,6 +24,7 @@ import { unplayableMediaReferences } from "./artifact-media-references";
 import { artifactGroupKey } from "../shared/artifact-versions";
 import { DEV3_HOME } from "./paths";
 import { createZip } from "./zip";
+import { inlineHtmlSource } from "../shared/html-inline";
 import { projectSlug } from "./git";
 import { TEXT_ARTIFACT_EXTS, textArtifactHtml } from "./text-artifact";
 
@@ -52,11 +54,13 @@ function megabytes(bytes: number): string {
 	return `${mb >= 10 || Number.isInteger(mb) ? Math.round(mb) : mb.toFixed(1)} MB`;
 }
 
+// Every selector sits in :where() so it is a fallback only: it lands after the
+// page's own <style>, and a free-form page's CSS must still win over it.
 const ARTIFACT_THEME_CONTRACT = `<style data-dev3-artifact-shell>
-:root,[data-theme="dark"]{color-scheme:dark;--dev3-surface-base:6 9 21;--dev3-surface-raised:14 18 30;--dev3-surface-elevated:21 26 41;--dev3-text-primary:250 252 255;--dev3-text-secondary:170 187 212;--dev3-text-muted:82 98 121;--dev3-border:32 38 55;--dev3-accent:68 150 255;--dev3-success:74 222 128;--dev3-warning:250 204 21;--dev3-danger:255 130 130;--dev3-on-accent:255 255 255;--dev3-shadow:0 0 0}
-[data-theme="light"]{color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}
-@media(prefers-color-scheme:light){:root:not([data-theme]){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}}
-html{background:rgb(var(--dev3-surface-base));color:rgb(var(--dev3-text-primary));font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{margin:0}.dev3-card{background:rgb(var(--dev3-surface-raised));border:1px solid rgb(var(--dev3-border));border-radius:16px;padding:16px}.dev3-grid{display:grid;gap:16px}.dev3-muted{color:rgb(var(--dev3-text-secondary))}.dev3-accent{color:rgb(var(--dev3-accent))}
+:where(:root,[data-theme="dark"]){color-scheme:dark;--dev3-surface-base:6 9 21;--dev3-surface-raised:14 18 30;--dev3-surface-elevated:21 26 41;--dev3-text-primary:250 252 255;--dev3-text-secondary:170 187 212;--dev3-text-muted:82 98 121;--dev3-border:32 38 55;--dev3-accent:68 150 255;--dev3-success:74 222 128;--dev3-warning:250 204 21;--dev3-danger:255 130 130;--dev3-on-accent:255 255 255;--dev3-shadow:0 0 0}
+:where([data-theme="light"]){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}
+@media(prefers-color-scheme:light){:where(:root:not([data-theme])){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}}
+:where(html){background:rgb(var(--dev3-surface-base));color:rgb(var(--dev3-text-primary));font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}:where(body){margin:0}:where(.dev3-card){background:rgb(var(--dev3-surface-raised));border:1px solid rgb(var(--dev3-border));border-radius:16px;padding:16px}:where(.dev3-grid){display:grid;gap:16px}:where(.dev3-muted){color:rgb(var(--dev3-text-secondary))}:where(.dev3-accent){color:rgb(var(--dev3-accent))}
 </style><script data-dev3-artifact-shell>(function(){function setTheme(theme){if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme}window.addEventListener('message',function(event){if(event.data&&event.data.type==='dev3-artifact-theme')setTheme(event.data.theme)});if(!document.documentElement.dataset.theme)setTheme(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')})();</script>`;
 
 /** Validation failure surfaced verbatim by the CLI socket handler. */
@@ -341,9 +345,58 @@ function sanitizeDownloadStem(raw: string): string {
 		.trim();
 }
 
+export type SharedArtifactDownloadKind = "html" | "zip";
+
+type DownloadPlan =
+	| { kind: "html"; html: string }
+	| { kind: "zip"; reason: string };
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * One self-contained HTML file whenever the page embeds every copied file; the
+ * ZIP only for genuine attachments. The template's own CSS, JS and icon are
+ * referenced from the page, so they fold in like any stylesheet or image.
+ * The ZIP stays when a file is video or audio (data-URI playback is unreliable
+ * in WebKit and unseekable), when the page never references it statically (a
+ * download link, a path built at runtime), or when a reference survives folding.
+ * decisions/2026/10/05/artifact-download-standalone-html.md
+ */
+function planSharedArtifactDownload(artifact: SharedArtifact): DownloadPlan {
+	const dir = assertStoredArtifactRecord(artifact);
+	const html = readFileSync(artifact.storedPath, "utf8");
+	if (artifact.assets.length === 0 || !artifact.bundlePath) return { kind: "html", html };
+	const media = artifact.assets.find((asset) => /^(?:video|audio)\//.test(asset.mime));
+	if (media) return { kind: "zip", reason: `${media.name} is video or audio` };
+
+	const byPath = new Map(artifact.assets.map((asset) => [resolvePath(asset.storedPath), asset]));
+	const folded = inlineHtmlSource(html, dir, (path) => {
+		const asset = byPath.get(resolvePath(path));
+		return asset ? readFileSync(asset.storedPath) : null;
+	});
+	const embedded = new Set(folded.state.inlined.map((ref) => ref.resolved && resolvePath(ref.resolved)));
+	for (const [path, asset] of byPath) {
+		if (!embedded.has(path)) return { kind: "zip", reason: `${asset.name} is not embedded by the page` };
+	}
+	// A name right after a quote, `(` or `=` is a reference; prose and comments that
+	// merely mention it are not. Base64 has no ".", so data URIs never match.
+	for (const asset of artifact.assets) {
+		const leftover = new RegExp(`["'(=](?:\\.\\/)?${escapeRegExp(asset.name)}(?=["')?#\\s>])`);
+		if (leftover.test(folded.html)) return { kind: "zip", reason: `${asset.name} is still referenced as a file` };
+	}
+	return { kind: "html", html: folded.html };
+}
+
+/** What the download button hands over — the viewer labels the button with it. */
+export function sharedArtifactDownloadKind(artifact: SharedArtifact): SharedArtifactDownloadKind {
+	return planSharedArtifactDownload(artifact).kind;
+}
+
 /** Human-friendly download name from the artifact title, not the stored HTML basename. */
-export function sharedArtifactDownloadName(artifact: SharedArtifact): string {
-	const ext = artifact.bundlePath ? ".zip" : ".html";
+export function sharedArtifactDownloadName(artifact: SharedArtifact, kind: SharedArtifactDownloadKind): string {
+	const ext = kind === "zip" ? ".zip" : ".html";
 	const fromTitle = sanitizeDownloadStem(artifact.title);
 	const fallback = basename(artifact.name || artifact.storedPath).replace(/\.html$/i, "");
 	return `${fromTitle || fallback || "artifact"}${ext}`;
@@ -356,16 +409,31 @@ export interface SharedArtifactDownloadFile {
 	bytes: number;
 }
 
-/** Validate and describe the portable file without loading it into memory. */
+/** Materialize standalone HTML for the same file-backed transfer used by ZIP downloads. */
 export function sharedArtifactDownloadFile(artifact: SharedArtifact): SharedArtifactDownloadFile {
-	assertStoredArtifactRecord(artifact);
-	const path = artifact.bundlePath ?? artifact.storedPath;
+	const plan = planSharedArtifactDownload(artifact);
+	let path: string;
+	if (plan.kind === "zip") {
+		path = artifact.bundlePath!;
+	} else if (artifact.assets.length === 0 || !artifact.bundlePath) {
+		path = artifact.storedPath;
+	} else {
+		const cacheDir = `${DEV3_HOME}/cache/artifact-downloads`;
+		const hash = createHash("sha256").update(plan.html).digest("hex");
+		mkdirSync(cacheDir, { recursive: true });
+		path = `${cacheDir}/${hash}.html`;
+		try {
+			writeFileSync(path, plan.html, { encoding: "utf8", flag: "wx" });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+	}
 	const stat = statSync(path);
 	if (!stat.isFile()) throw new SharedArtifactError("Artifact download is not a file");
 	return {
 		path,
-		fileName: sharedArtifactDownloadName(artifact),
-		mime: artifact.bundlePath ? "application/zip" : "text/html",
+		fileName: sharedArtifactDownloadName(artifact, plan.kind),
+		mime: plan.kind === "zip" ? "application/zip" : "text/html",
 		bytes: stat.size,
 	};
 }

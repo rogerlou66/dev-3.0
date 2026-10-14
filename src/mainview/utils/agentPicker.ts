@@ -1,8 +1,9 @@
 import type { AgentConfiguration, CodingAgent, FavoriteAgentConfig } from "../../shared/types";
-import { DEPRECATED_DEFAULT_CONFIG_REMAP } from "../../shared/types";
+import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../../shared/types";
 import { orderFavorites } from "../../shared/favorites";
 import { modelRolesForAgent, type CatalogProviderKind } from "../../shared/model-catalog";
 import { unconnectedRecommendations, type RecommendedModel } from "../../shared/recommended-models";
+import { AGENT_CHOSEN_MODEL_SLUGS, modelReleaseDate } from "../../shared/model-release-dates";
 import { translate } from "../i18n";
 
 /**
@@ -26,7 +27,9 @@ export const MODEL_GROUP_LABELS: Record<string, string> = {
 	"claude-opus-5-5[1m]": "Opus 5.5",
 	"claude-opus-5[1m]": "Opus 5",
 	"claude-opus-4-8[1m]": "Opus 4.8",
+	"claude-sonnet-5-5": "Sonnet 5.5",
 	"claude-sonnet-5": "Sonnet 5",
+	"claude-haiku-5-5": "Haiku 5.5",
 	"claude-opus-4-7[1m]": "Opus 4.7",
 	// Codex
 	"gpt-6.1-sol": "GPT-6.1 Sol",
@@ -221,9 +224,42 @@ function isRoutedConfig(config: AgentConfiguration): boolean {
 	return (!!config.modelRoles && Object.keys(config.modelRoles).length > 0) || config.requiresPxpipeProxy === true;
 }
 
-/** Group an agent's configurations by model into ordered picker groups.
- *  First-seen order is preserved for both groups and configs within a group,
- *  so the curated DEFAULT_AGENTS ordering carries through.
+const curatedRankByAgent = new Map<string, Map<string, number>>();
+
+/** Each built-in preset's index in DEFAULT_AGENTS. Breaks release-date ties and
+ *  orders the modes inside a group. Stored order can't be trusted for this:
+ *  merging appends every preset a release adds to the tail of agents.json. */
+function curatedPresetRank(agentId: string): Map<string, number> {
+	let rank = curatedRankByAgent.get(agentId);
+	if (!rank) {
+		const def = DEFAULT_AGENTS.find((a) => a.id === agentId);
+		rank = new Map((def?.configurations ?? []).map((c, index) => [c.id, index]));
+		curatedRankByAgent.set(agentId, rank);
+	}
+	return rank;
+}
+
+/** Where a group sits before release dates are compared: "let the agent pick"
+ *  first, then real models by date, then everything without a native date
+ *  (unknown models, role-bound and proxy-gated presets). */
+function groupTier(configs: AgentConfiguration[]): number {
+	if (configs.every((c) => !isRoutedConfig(c) && (!c.model || AGENT_CHOSEN_MODEL_SLUGS.has(c.model)))) return 0;
+	return newestReleaseDate(configs) ? 1 : 2;
+}
+
+function newestReleaseDate(configs: AgentConfiguration[]): string {
+	let newest = "";
+	for (const config of configs) {
+		const date = isRoutedConfig(config) ? undefined : modelReleaseDate(config.model);
+		if (date && date > newest) newest = date;
+	}
+	return newest;
+}
+
+/** Group an agent's configurations by model into ordered picker groups, newest
+ *  model first by `MODEL_RELEASE_DATES`. Same-day models and the modes inside a
+ *  group follow the curated DEFAULT_AGENTS order; presets dev3 does not ship
+ *  follow the built-in ones in stored order (both sorts are stable).
  *
  *  `unavailableModels` (raw preset `model` slugs the account cannot select, from
  *  the `getAgentAvailableModels` probe) marks a group `unavailable` when every one
@@ -234,9 +270,12 @@ export function buildPickerGroups(
 	unavailableModels?: ReadonlySet<string> | null,
 ): PickerGroup[] {
 	if (!agent) return [];
+	const rank = curatedPresetRank(agent.id);
+	const rankOf = (config: AgentConfiguration) => rank.get(config.id) ?? Number.MAX_SAFE_INTEGER;
+	const curated = [...agent.configurations].sort((a, b) => rankOf(a) - rankOf(b));
 	const order: string[] = [];
 	const byLabel = new Map<string, AgentConfiguration[]>();
-	for (const config of agent.configurations) {
+	for (const config of curated) {
 		const label = getModelGroupLabel(config);
 		let bucket = byLabel.get(label);
 		if (!bucket) {
@@ -246,6 +285,18 @@ export function buildPickerGroups(
 		}
 		bucket.push(config);
 	}
+	const sortKey = new Map(
+		order.map((label) => {
+			const configs = byLabel.get(label) as AgentConfiguration[];
+			return [label, { tier: groupTier(configs), date: newestReleaseDate(configs) }] as const;
+		}),
+	);
+	order.sort((a, b) => {
+		const ka = sortKey.get(a)!;
+		const kb = sortKey.get(b)!;
+		if (ka.tier !== kb.tier) return ka.tier - kb.tier;
+		return ka.date === kb.date ? 0 : ka.date < kb.date ? 1 : -1;
+	});
 	return order.map((label) => {
 		const configs = byLabel.get(label) as AgentConfiguration[];
 		// A group is unavailable only when every preset in it pins a model the

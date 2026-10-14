@@ -175,6 +175,15 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
+		id: "artifact-template",
+		category: "tasks",
+		titleKey: "settings.artifactTemplate",
+		descriptionKey: "settings.artifactTemplateDesc",
+		anchor: "artifact-template",
+		globalField: "artifactTemplate",
+		storage: "global",
+	},
+	{
 		id: "default-diff-view",
 		category: "tasks",
 		titleKey: "settings.defaultDiffViewMode",
@@ -365,15 +374,6 @@ export const SETTINGS_ENTRIES = [
 		descriptionKey: "settings.agentsDesc",
 		anchor: "agents-editor",
 		storage: "surface",
-	},
-	{
-		id: "low-battery",
-		category: "agents",
-		titleKey: "settings.lowBattery",
-		descriptionKey: "settings.lowBatteryDesc",
-		anchor: "low-battery",
-		globalField: "lowBatteryEnabled",
-		storage: "global",
 	},
 	{
 		id: "rate-limit-tracking",
@@ -590,12 +590,15 @@ export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	// Which traffic presentation was last picked. A view mode chosen on the surface
 	// itself (like the diff viewer's modes), not a settings row.
 	"agentTrafficExperiment",
-	// Legacy low-battery keys from the default-on era. Never read; kept on disk only
-	// so an older co-installed build keeps its own opt-out and announce flag.
+	// Legacy keys of the removed low-battery feature; kept on disk only so an older
+	// co-installed build keeps its own state. No settings row.
+	"lowBatteryEnabled",
 	"lowBatteryDisabled",
 	"lowBatteryAnnounced",
 	// Edited inside the terminal-shell-prompt entry, which is registered by `shellPrompt`.
 	"shellPromptCustom",
+	// Edited inside the artifact-template entry, which is registered by `artifactTemplate`.
+	"artifactTemplatePath",
 ] as const satisfies readonly (keyof GlobalSettings)[];
 
 /** Runtime list used by the registry integrity test; the type check catches schema drift. */
@@ -631,6 +634,8 @@ export const GLOBAL_SETTINGS_FIELDS = [
 	"terminalPathOpenMode",
 	"defaultDiffViewMode",
 	"openArtifactsInPopup",
+	"artifactTemplate",
+	"artifactTemplatePath",
 	"remoteSilentUpdate",
 	"preventSleepWhileRunning",
 	"skipQuitDialog",

@@ -35,6 +35,12 @@ const common = {
 
 	// An agent asking to start another task (or a throwaway scratch peer)
 	"agentLaunch.titleSpawn": "Agent wants to add an agent to this task",
+	"agentLaunch.titleResume": "Agent wants to resume this task's saved session",
+	"agentLaunch.resumeNote": "Reopens the saved conversations, each with its own agent, preset and account.",
+	"agentLaunch.resumeConversation": "Conversation {id}",
+	"agentLaunch.resumeLatest": "No saved conversation id — the agent opens its latest",
+	"agentLaunch.resume": "Resume",
+	"agentLaunch.resuming": "Resuming…",
 	"agentLaunch.initialPrompt": "Initial instructions",
 	"agentLaunch.spawnHandoff": "The new agent will also receive this task's latest conversation.",
 	"agentLaunch.title": "Agent wants to start this task",
@@ -47,6 +53,7 @@ const common = {
 	"agentLaunch.launching": "Launching…",
 	"agentLaunch.decline": "Decline",
 	"agentLaunch.autoApproveIn": "Starts on its own in {time}",
+	"agentLaunch.autoResumeIn": "Resumes on its own in {time}",
 	"agentLaunch.autoApproveHeld": "Waiting for your answer",
 
 	// Vimium-style hint navigation
@@ -368,6 +375,19 @@ const common = {
 	"coordinatorFinder.state.disconnected": "Disconnected",
 	"coordinatorFinder.state.hibernated": "Hibernated",
 	"coordinatorFinder.state.hidden": "Hidden",
+	"goTo.title": "Go to",
+	"goTo.mode.project": "Projects",
+	"goTo.mode.task": "Tasks",
+	"goTo.mode.combined": "All",
+	"goTo.placeholder.project": "Type a project name…",
+	"goTo.placeholder.task": "Type a task — title, #seq, label:, status:…",
+	"goTo.placeholder.combined": "Type a project or task…",
+	"goTo.noResults.project": "No matching projects",
+	"goTo.noResults.task": "No matching tasks",
+	"goTo.noResults.combined": "No matches",
+	"goTo.loading": "Loading tasks…",
+	"goTo.loadFailed": "Couldn’t load tasks",
+	"goTo.hint": "↑↓ move · ⇥ switch mode · ⏎ open · esc cancel",
 
 	// Command (action) palette — Cmd/Ctrl+Shift+P
 	"commandPalette.title": "Run a command",
@@ -387,6 +407,8 @@ const common = {
 	"command.importConversations": "Import conversations from other agents",
 	"command.viewDashboard": "Go to dashboard",
 	"command.findCoordinator": "Find coordinator…",
+	"command.goToTask": "Go to Task…",
+	"command.goToCombined": "Go to Anything…",
 	"command.viewKanban": "Go to board",
 	"command.viewChangelog": "Open changelog",
 	"command.openSettings": "Open settings",
@@ -418,11 +440,12 @@ const common = {
 	"command.moveUserQuestions": "Move to User Questions",
 	"command.moveReviewAi": "Move to Review by AI",
 	"command.moveReviewUser": "Move to Review by User",
-	"command.openProjectTerminal": "Open project terminal",
+	"command.openProjectTerminal": "Open Repo (project terminal and files)",
 	"command.openQuickShell": "Open Quick Shell",
 	"command.tmuxCheatSheet": "Show tmux cheat sheet",
 	"command.keyboardShortcuts": "Keyboard shortcuts",
 	"command.agentTrafficLog": "Agent traffic",
+	"command.toggleFileExplorer": "Toggle file explorer",
 
 	// Open in...
 	"openIn.menuTitle": "Open in...",

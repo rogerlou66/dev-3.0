@@ -1,4 +1,4 @@
-import type { Task } from "../../shared/types";
+import { isCoordinatorTask, isTaskDisconnected, type Task } from "../../shared/types";
 import { compareTasksInBand, type TaskSortOrder } from "./sortTasks";
 import { isAttentionTask } from "../utils/taskFacets";
 import { isTaskBlocked } from "../../shared/task-blocking";
@@ -9,7 +9,8 @@ import { isTaskBlocked } from "../../shared/task-blocking";
  * status. Tiers render top → bottom:
  *
  *   - `needs-you`  — waiting on the user: `review-by-user` ∪ `user-questions` ∪
- *                    `review-by-colleague`.
+ *                    `review-by-colleague`. Live coordinators lead it, then every
+ *                    `user-questions` task (an agent blocked on a reply), ahead of every band.
  *   - `blocked`    — explicitly held tasks, excluded from the actionable queue.
  *   - `custom`     — one tier per project custom column (deliberate manual
  *                    placement), in the project's column order, between the two
@@ -31,7 +32,8 @@ export interface SidebarTier {
 	 *  component can resolve the column's name and color for its header. */
 	projectId?: string;
 	customColumnId?: string;
-	/** Tasks in final render order (priority band → activity clock → `seq`). */
+	/** Tasks in final render order (priority band → activity clock → `seq`;
+	 *  NEEDS YOU leads with live coordinators, then `user-questions`). */
 	tasks: Task[];
 }
 
@@ -62,6 +64,11 @@ export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): Si
 	const { orderedCustomColumns, sortOrder } = ctx;
 	// The board's in-band comparator verbatim, so the two surfaces can never disagree.
 	const byBand = (a: Task, b: Task) => compareTasksInBand(a, b, sortOrder);
+	// Live coordinators steer everything else, then an unanswered question blocks an agent:
+	// both outrank priority and recency. A parked coordinator loses the lift, as in `taskSortRank`.
+	const needsYouRank = (t: Task) =>
+		isCoordinatorTask(t) && !t.hibernated && !isTaskDisconnected(t) ? 0 : t.status === "user-questions" ? 1 : 2;
+	const coordinatorsThenQuestions = (a: Task, b: Task) => needsYouRank(a) - needsYouRank(b) || byBand(a, b);
 
 	const needsYou: Task[] = [];
 	const waiting: Task[] = [];
@@ -90,7 +97,7 @@ export function groupTasksIntoTiers(tasks: Task[], ctx: TierGroupingContext): Si
 
 	const tiers: SidebarTier[] = [];
 	if (needsYou.length > 0) {
-		tiers.push({ kind: "needs-you", key: "needs-you", tasks: needsYou.sort(byBand) });
+		tiers.push({ kind: "needs-you", key: "needs-you", tasks: needsYou.sort(coordinatorsThenQuestions) });
 	}
 	if (blocked.length) tiers.push({ kind: "blocked", key: "blocked", tasks: blocked.sort(byBand) });
 	for (const { projectId, columnId } of orderedCustomColumns) {

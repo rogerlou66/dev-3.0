@@ -14,9 +14,7 @@ export {
 	notifyWatchedTaskStatusChange,
 	notifyWatchedTaskEvent,
 	notifyFromCliDesktop,
-	consumeRecentWatchedNotification,
 	_resetWatchedNotificationState,
-	NOTIFICATION_CLICK_TTL_MS,
 	setAppForeground,
 	isAppForeground,
 	setActiveContext,
@@ -71,6 +69,7 @@ export {
 
 import { appHandlers } from "./rpc-handlers/app-handlers";
 import { terminalPathHandlers } from "./rpc-handlers/terminal-paths";
+import { fileExplorerHandlers } from "./rpc-handlers/file-explorer";
 import { settingsConfigHandlers } from "./rpc-handlers/settings-config";
 import { taskLifecycleHandlers } from "./rpc-handlers/task-lifecycle";
 import { gitOperationHandlers } from "./rpc-handlers/git-operations";
@@ -96,6 +95,7 @@ import { spacesHandlers } from "./rpc-handlers/spaces";
 export const handlers = {
 	...appHandlers,
 	...terminalPathHandlers,
+	...fileExplorerHandlers,
 	...settingsConfigHandlers,
 	...taskLifecycleHandlers,
 	...gitOperationHandlers,

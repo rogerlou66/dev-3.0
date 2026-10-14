@@ -118,3 +118,23 @@ describe("updateProjectSettings — rename", () => {
 		expect(updates).toMatchObject({ sensitive: true });
 	});
 });
+
+describe("updateProjectSettings — artifact template override", () => {
+	it("stores an explicit override on the project record", async () => {
+		await updateProjectSettings({ projectId: "p1", artifactTemplate: "off" });
+		expect(mocks.updateProject).toHaveBeenCalledWith("p1", expect.objectContaining({ artifactTemplate: "off" }));
+	});
+
+	it("drops the field on inherit so the global setting takes over again", async () => {
+		await updateProjectSettings({ projectId: "p1", artifactTemplate: "inherit" });
+		const [, updates] = mocks.updateProject.mock.calls[0];
+		expect(updates).toHaveProperty("artifactTemplate", undefined);
+	});
+
+	it("stores a trimmed custom folder and clears a blank one", async () => {
+		await updateProjectSettings({ projectId: "p1", artifactTemplate: "custom", artifactTemplatePath: "  /Users/me/tpl  " });
+		expect(mocks.updateProject).toHaveBeenLastCalledWith("p1", expect.objectContaining({ artifactTemplate: "custom", artifactTemplatePath: "/Users/me/tpl" }));
+		await updateProjectSettings({ projectId: "p1", artifactTemplatePath: " " });
+		expect(mocks.updateProject.mock.lastCall?.[1]).toHaveProperty("artifactTemplatePath", undefined);
+	});
+});

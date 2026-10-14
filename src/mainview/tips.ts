@@ -287,14 +287,6 @@ const ALL_TIPS: Tip[] = [
 		contexts: ["board"],
 	},
 	{
-		id: "active-tasks-sidebar",
-		titleKey: "tip.activeTasksSidebar.title",
-		bodyKey: "tip.activeTasksSidebar.body",
-		icon: "\u{F0CB1}", // nf-md-view_list
-		score: 3,
-		contexts: ["terminal"],
-	},
-	{
 		id: "terminal-drag-drop-file-path",
 		titleKey: "tip.terminalDragDropFilePath.title",
 		bodyKey: "tip.terminalDragDropFilePath.body",
@@ -303,9 +295,9 @@ const ALL_TIPS: Tip[] = [
 		contexts: ["terminal"],
 	},
 	{
-		id: "yazi-file-browser",
-		titleKey: "tip.yaziFileBrowser.title",
-		bodyKey: "tip.yaziFileBrowser.body",
+		id: "file-explorer-insert-path",
+		titleKey: "tip.fileExplorerInsertPath.title",
+		bodyKey: "tip.fileExplorerInsertPath.body",
 		icon: "", // nf-fa-folder_open
 		score: 3,
 		contexts: ["terminal"],
@@ -365,6 +357,7 @@ const ALL_TIPS: Tip[] = [
 		icon: "\u{F0219}", // nf-md-robot
 		score: 4,
 		contexts: ["settings"],
+		settingsSection: "agents",
 	},
 	{
 		id: "git-branch-status",

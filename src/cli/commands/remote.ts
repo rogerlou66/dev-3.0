@@ -68,6 +68,8 @@ Subcommands:
                       server survives logout and starts on boot. Accepts the
                       same start flags (e.g. --port, --no-tunnel). The unit runs
                       in the foreground under systemd — do NOT pass --detach.
+                      Carries DEV3_HOME, DEV3_LOG_LEVEL and allowlisted
+                      Cloudflare settings from this shell into the unit.
   uninstall-service   (Linux) Stop, disable, and remove the systemd --user unit.
 
 Flags (start):
@@ -141,6 +143,7 @@ Examples:
   dev3 remote uninstall-service            # (Linux) remove the systemd --user service
   dev3 remote --no-tunnel                  # LAN + SSH only (no public URL)
   dev3 remote --no-tunnel --host 127.0.0.1 # this machine only (no LAN, no public URL)
+  dev3 local                               # same as the line above (alias)
   dev3 remote --port 3000                  # fixed port (ideal for Docker -p 3000:3000)
   dev3 remote --expose-ports=3000,5173     # also expose dev-server ports publicly
 `;

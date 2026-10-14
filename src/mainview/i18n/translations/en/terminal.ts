@@ -235,15 +235,15 @@ const terminal = {
 	"resources.details": "{memory} · {cpu}% CPU",
 
 	// Project Terminal
-	"projectTerminal.open": "Terminal",
-	"projectTerminal.close": "Close Terminal",
-	"projectTerminal.tooltip": "Open a terminal in the project root",
+	"projectTerminal.open": "Repo",
+	"projectTerminal.close": "Close Repo",
+	"projectTerminal.tooltip": "Repo: a terminal and the files of the project root",
 	"projectTerminal.sessionEnded": "Terminal session ended",
 	"projectTerminal.sessionEndedDesc": "The terminal process has exited. Click restart to open a new session.",
 	"projectTerminal.restart": "Restart",
-	"projectTerminal.label": "Project Terminal",
+	"projectTerminal.label": "Repo",
 	"projectTerminal.backToBoard": "Back to Board",
-	"projectTerminal.tooltipWithShortcut": "Project Terminal ({shortcut})",
+	"projectTerminal.tooltipWithShortcut": "Repo: terminal and files ({shortcut})",
 
 	// Quick Shell (built-in Operations shell in $HOME)
 	"quickShell.open": "Quick Shell",
@@ -273,6 +273,15 @@ const terminal = {
 	"terminal.fileLinkUnreadable": "That link isn't a readable file path: {uri}",
 	"terminal.deepLinkNotFound": "Nothing to open for {uri} — that task, project or space is gone.",
 	"terminal.deepLinkBad": "That isn't a dev3 link this app knows: {uri}",
+	// Touch link sheet: a tap on a terminal link (no Cmd/Ctrl on a phone)
+	"terminal.linkSheetTitleWeb": "Link",
+	"terminal.linkSheetTitleFile": "File",
+	"terminal.linkSheetOpenWeb": "Open link",
+	"terminal.linkSheetOpenFile": "Open file",
+	"terminal.linkSheetCopyLink": "Copy link",
+	"terminal.linkSheetCopyPath": "Copy path",
+	"terminal.linkSheetLinkCopied": "Link copied",
+	"terminal.linkSheetCopyFailed": "Couldn't copy. Select the text above and copy it by hand.",
 	"terminal.filePreviewLoading": "Loading preview…",
 	"terminal.filePreviewNotFound": "File not found — it may have been moved or deleted.",
 	"terminal.filePreviewBinary": "Binary file ({size}) — no preview available.",
@@ -290,6 +299,10 @@ const terminal = {
 	"terminal.filePreviewRendered": "Rendered",
 	"terminal.filePreviewSearch": "Find in file",
 	"terminal.filePreviewRaw": "Raw",
+	"terminal.filePreviewWrap": "Wrap lines",
+	"terminal.filePreviewWrapHint": "Wrap long lines to fit the window. The file and copied text are unchanged.",
+	"terminal.filePreviewExpand": "Expand",
+	"terminal.filePreviewRestore": "Restore size",
 	"terminal.rendererCrashed": "The terminal renderer crashed and could not restart itself. Click to reload the window — your session keeps running.",
 	// TerminalPerfOverlay (View → Debug). Metric names inside the HUD name code —
 	// `fps`, `render`, `write`, `p50` — and stay untranslated like terminal output.

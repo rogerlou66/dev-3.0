@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback, type Dispatch } from "react";
 import { useTaskSortOrder } from "../hooks/useTaskSortOrder";
 import type { CodingAgent, PortInfo, Project, Task, TaskPriority, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, ALL_PRIORITIES, DEFAULT_PRIORITY, spacesOfProject } from "../../shared/types";
+import { ACTIVE_STATUSES, ALL_PRIORITIES } from "../../shared/types";
 import { isTaskBlocked } from "../../shared/task-blocking";
 import { PRIORITY_NAME_KEYS } from "./priorityStyles";
 import { groupTasksIntoTiers } from "./sidebarTiers";
@@ -14,7 +14,8 @@ import type { AppAction, Route } from "../state";
 import { useT } from "../i18n";
 import { getStatusLabel } from "../utils/statusLabel";
 import { isFacetTokenActive, matchesTaskQuery, toggleFacetToken } from "../utils/taskSearch";
-import { buildFilterGroups, taskQueryContext, taskStatusValues, isAttentionTask, isTaskNotRunning, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
+import { buildFilterGroups, taskQueryContext, isAttentionTask, isTaskNotRunning, type FacetResolver, type FilterFunnelOption } from "../utils/taskFacets";
+import { buildFacetResolver } from "../utils/facetResolver";
 import FilterFunnel from "./FilterFunnel";
 import TipCard from "./TipCard";
 import { useTipRotation } from "../hooks/useTipRotation";
@@ -346,28 +347,13 @@ function ActiveTasksSidebar({
 	const knowsProject = useCallback((projectId: string) => projectById.has(projectId), [projectById]);
 	const taskPrMap = useTaskPrBadges({ tasks: activeTasks, knowsProject });
 
-	// Facet resolver + funnel pool for the token-DSL filter. Labels/statuses are
-	// resolved per the task's OWN project (the pool may be cross-project in
-	// global scope).
-	const resolver: FacetResolver = useMemo(() => ({
-		agents,
-		labelsFor: (task) => {
-			const pool = projectById.get(task.projectId)?.labels ?? [];
-			return pool.filter((l) => task.labelIds?.includes(l.id));
-		},
-		statusValuesFor: (task) => {
-			const proj = projectById.get(task.projectId);
-			const col = task.customColumnId ? proj?.customColumns?.find((c) => c.id === task.customColumnId) : undefined;
-			return isTaskBlocked(task) ? ["blocked", t("task.blocked")] : taskStatusValues(task, col, getStatusLabel(task.status, t, proj));
-		},
-		priorityFor: (task) => task.priority ?? DEFAULT_PRIORITY,
-		hasPortFor: (task) => (taskPorts.get(task.id)?.length ?? 0) > 0,
-		isAttentionFor: (task) => isAttentionTask(task),
-		// Space names come from the task's OWN project, so a cross-project pool
-		// can be filtered by space; a single-project pool yields one value.
-		spaceNamesFor: (task) => spacesOfProject(spaces, task.projectId).map((s) => s.name),
-		prNumberFor: (task) => taskPrMap.get(task.id)?.number ?? null,
-	}), [agents, projectById, taskPorts, taskPrMap, spaces, t]);
+	// Token-DSL facet resolver, shared with the "Go to" palette (the Kanban board
+	// keeps its own board-scoped one). Labels/statuses/spaces resolve per the
+	// task's OWN project, so this cross-project pool filters correctly.
+	const resolver: FacetResolver = useMemo(
+		() => buildFacetResolver({ agents, projectById, taskPorts, spaces, t, prNumberFor: (task) => taskPrMap.get(task.id)?.number ?? null }),
+		[agents, projectById, taskPorts, spaces, t, taskPrMap],
+	);
 
 	const priorityCandidates = useMemo<FilterFunnelOption[]>(
 		() => ALL_PRIORITIES.map((p) => ({ facet: "priority" as const, value: p, label: `${p} — ${t(PRIORITY_NAME_KEYS[p])}` })),
@@ -768,7 +754,7 @@ function ActiveTasksSidebar({
 									? t.plural("sidebar.hiddenAttentionCount", hiddenAttentionCount)
 									: t("sidebar.showHiddenTasks")
 							}
-							className={`relative shrink-0 ${SCOPE_BUTTON_CLASS} ${SCOPE_STATE_CLASS(showHidden)}`}
+							className={`task-anim relative shrink-0 ${SCOPE_BUTTON_CLASS} ${SCOPE_STATE_CLASS(showHidden)}`}
 							data-testid="sidebar-show-hidden"
 							data-help-id="sidebar.show-hidden"
 						>

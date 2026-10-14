@@ -4,8 +4,16 @@ import type { ConversationMatch } from "./conversation-search-core";
 import type { ImportConversationsResult, ImportableConversationView } from "./conversation-import-model";
 import type { HandoffPreview, SpawnAgentResult } from "./conversation-handoff-model";
 import type { TaskConversationView } from "./task-conversation-model";
+import type { ResumeDialogPane } from "./agent-resume";
 import type { AgentRateLimitsReport } from "./rate-limits";
-import type { AgentAccount, AgentAccountKind, AgentAccountsState, ClaudeSlotModels } from "./agent-accounts";
+import type {
+	AgentAccount,
+	AgentAccountKind,
+	AgentAccountsState,
+	ClaudeSlotModels,
+	PinnedClaudeLogin,
+	ProjectClaudeLogin,
+} from "./agent-accounts";
 import type { TerminalBackendIdentity } from "./terminal-backend-identity";
 import type { TaskPaneState, TaskPaneAction, TaskPaneBackendKind, TmuxCloseWindowResult } from "./task-panes";
 import type { ReviewComment, ReviewReplyAuthor } from "./review";
@@ -14,9 +22,7 @@ import type { PosixShellResolution, ShellFlavor } from "./posix-shell";
 import type { AgentPromptDelivery } from "./agent-prompt-delivery";
 import type { AgentMessageLogPage, AgentMessageOrigin } from "./agent-message-log";
 import type { NotificationLogPage } from "./notification-log";
-import type { LowBatteryStatus } from "./low-battery";
 import type { TaskPeekSnapshot } from "./task-peek";
-export type { LowBatteryStatus, OutputStyleOutcome } from "./low-battery";
 
 export interface TaskNavigationTarget {
 	taskId: string;
@@ -887,8 +893,11 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-auto-opus5-xhigh", name: "Auto (Opus 5, X-High)", model: "claude-opus-5[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus48-medium", name: "Auto (Opus 4.8, Medium)", model: "claude-opus-4-8[1m]", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus48-xhigh", name: "Auto (Opus 4.8, X-High)", model: "claude-opus-4-8[1m]", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-sonnet55-medium", name: "Auto (Sonnet 5.5, Medium)", model: "claude-sonnet-5-5", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-sonnet5-medium", name: "Auto (Sonnet 5, Medium)", model: "claude-sonnet-5", permissionMode: "auto", effort: "medium", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-sonnet55-xhigh", name: "Auto (Sonnet 5.5, X-High)", model: "claude-sonnet-5-5", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-sonnet5-xhigh", name: "Auto (Sonnet 5, X-High)", model: "claude-sonnet-5", permissionMode: "auto", effort: "xhigh", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-auto-haiku55", name: "Auto (Haiku 5.5)", model: "claude-haiku-5-5", permissionMode: "auto", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-auto-opus47", name: "Auto (Opus 4.7)", model: "claude-opus-4-7[1m]", permissionMode: "auto", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
 			// --- Bypass (same model order as Auto) ---
 			{ id: "claude-bypass-fable51-medium", name: "Bypass (Fable 5.1, Medium)", model: "claude-fable-5-1[1m]", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
@@ -905,8 +914,11 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-bypass-opus5-xhigh", name: "Bypass (Opus 5, X-High)", model: "claude-opus-5[1m]", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus48-medium", name: "Bypass (Opus 4.8, Medium)", model: "claude-opus-4-8[1m]", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus48-xhigh", name: "Bypass (Opus 4.8, X-High)", model: "claude-opus-4-8[1m]", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-sonnet55-medium", name: "Bypass (Sonnet 5.5, Medium)", model: "claude-sonnet-5-5", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-sonnet5-medium", name: "Bypass (Sonnet 5, Medium)", model: "claude-sonnet-5", permissionMode: "bypassPermissions", effort: "medium", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-sonnet55-xhigh", name: "Bypass (Sonnet 5.5, X-High)", model: "claude-sonnet-5-5", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-sonnet5-xhigh", name: "Bypass (Sonnet 5, X-High)", model: "claude-sonnet-5", permissionMode: "bypassPermissions", effort: "xhigh", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-bypass-haiku55", name: "Bypass (Haiku 5.5)", model: "claude-haiku-5-5", permissionMode: "bypassPermissions", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-bypass-opus47", name: "Bypass (Opus 4.7)", model: "claude-opus-4-7[1m]", permissionMode: "bypassPermissions", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
 			// --- Default (Claude's normal permission mode). No hard bypass flag:
 			//     the adapter injects --allow-dangerously-skip-permissions so bypass
@@ -919,7 +931,9 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-default-opus55", name: "Default (Opus 5.5)", model: "claude-opus-5-5[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default-opus5", name: "Default (Opus 5)", model: "claude-opus-5[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default-opus48", name: "Default (Opus 4.8)", model: "claude-opus-4-8[1m]", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
+			{ id: "claude-default-sonnet55", name: "Default (Sonnet 5.5)", model: "claude-sonnet-5-5", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-default-sonnet5", name: "Default (Sonnet 5)", model: "claude-sonnet-5", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 2 },
+			{ id: "claude-default-haiku55", name: "Default (Haiku 5.5)", model: "claude-haiku-5-5", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			// --- Plan ---
 			// Plan mode: the allow-bypass flag is now injected by the claude adapter
 			// for every session, so it is not repeated here (single source).
@@ -928,14 +942,18 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "claude-plan-opus55", name: "Plan (Opus 5.5)", model: "claude-opus-5-5[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-opus5", name: "Plan (Opus 5)", model: "claude-opus-5[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-opus48", name: "Plan (Opus 4.8)", model: "claude-opus-4-8[1m]", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-plan-sonnet55", name: "Plan (Sonnet 5.5)", model: "claude-sonnet-5-5", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-plan-sonnet5", name: "Plan (Sonnet 5)", model: "claude-sonnet-5", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-plan-haiku55", name: "Plan (Haiku 5.5)", model: "claude-haiku-5-5", permissionMode: "plan", envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			// --- Accept Edits ---
 			{ id: "claude-approvals-fable51", name: "Accept Edits (Fable 5.1)", model: "claude-fable-5-1[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals", name: "Accept Edits (Fable 5)", model: "claude-fable-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 8 },
 			{ id: "claude-approvals-opus55", name: "Accept Edits (Opus 5.5)", model: "claude-opus-5-5[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-opus5", name: "Accept Edits (Opus 5)", model: "claude-opus-5[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-opus48", name: "Accept Edits (Opus 4.8)", model: "claude-opus-4-8[1m]", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-approvals-sonnet55", name: "Accept Edits (Sonnet 5.5)", model: "claude-sonnet-5-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			{ id: "claude-approvals-sonnet5", name: "Accept Edits (Sonnet 5)", model: "claude-sonnet-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
+			{ id: "claude-approvals-haiku55", name: "Accept Edits (Haiku 5.5)", model: "claude-haiku-5-5", permissionMode: "acceptEdits", additionalArgs: ["--dangerously-skip-permissions"], envVars: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, version: 1 },
 			// --- Experimental: token-saving image proxy (opt-in, disabled until enabled in Settings) ---
 			// Its own Model group ("Fable 5 (cost trick)"). Fable 5 does not behave under
 			// --permission-mode auto, so the cost-saving experiment offers Bypass and Default
@@ -960,6 +978,15 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 		installCommand: "brew install codex",
 		installUrl: "https://github.com/openai/codex",
 		configurations: [
+			// Newest generation first: the picker lists model groups in this order.
+			// --- GPT-6.1 Sol ---
+			...createCodexReasoningPresets(
+				"gpt-6.1-sol",
+				"GPT-6.1 Sol",
+				"codex-6.1-sol",
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+				["medium", "low", "high", "xhigh", "max", "ultra"],
+			),
 			// --- GPT-6 Astra (default: Sol is rejected under a ChatGPT-account login) ---
 			{
 				id: "codex-default",
@@ -975,13 +1002,6 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 				"GPT-6 Astra",
 				"codex-6-astra",
 				["low", "high", "xhigh", "max", "ultra"],
-				["medium", "low", "high", "xhigh", "max", "ultra"],
-			),
-			...createCodexReasoningPresets(
-				"gpt-6.1-sol",
-				"GPT-6.1 Sol",
-				"codex-6.1-sol",
-				["medium", "low", "high", "xhigh", "max", "ultra"],
 				["medium", "low", "high", "xhigh", "max", "ultra"],
 			),
 			// --- GPT-6 Sol (frontier coding and agentic workflows) ---
@@ -1147,11 +1167,11 @@ export const DEFAULT_AGENTS: CodingAgent[] = [
 			{ id: "cursor-gpt", name: "GPT-5.6 Sol X-High", model: "gpt-5.6-sol-xhigh" },
 			{ id: "cursor-yolo-gpt", name: "YOLO GPT-5.6 Sol", model: "gpt-5.6-sol-xhigh", permissionMode: "bypassPermissions" },
 			{ id: "cursor-grok-4-6", name: "Grok 4.6 Fast", model: "cursor-grok-4.6-high-fast" },
-			{ id: "cursor-gemini", name: "Gemini 3.7 Flash", model: "gemini-3.7-flash-high" },
 			// Cursor docs list Gemini 3.8 Flash, but no `cursor-agent models` dump
 			// we can attribute spells its slug out — this one follows the verified
 			// 3.7 shape. Requested explicitly; treat as unverified.
 			{ id: "cursor-gemini-3-8", name: "Gemini 3.8 Flash", model: "gemini-3.8-flash-high" },
+			{ id: "cursor-gemini", name: "Gemini 3.7 Flash", model: "gemini-3.7-flash-high" },
 			{ id: "cursor-composer-2-5", name: "Composer 2.5", model: "composer-2.5" },
 		],
 		defaultConfigId: "cursor-default",
@@ -1460,17 +1480,11 @@ export interface GlobalSettings {
 	 */
 	agentTrafficExperiment?: AgentTrafficExperiment;
 	/**
-	 * Turn on the `low-battery` answer format dev3 ships (header block first,
-	 * decision last, tables over prose). Absent ⇒ off: dev3 installs nothing and
-	 * touches no output style until the user asks. Turning it off again is a real
-	 * uninstall of what dev3 wrote, never of the user's own style or skills.
+	 * Legacy keys of the removed low-battery feature. `lowBatteryEnabled: true` proves
+	 * dev3 installed its files, so startup removes them and stores `false`; the rest is
+	 * kept on disk so an older co-installed build keeps its own opt-out.
 	 */
 	lowBatteryEnabled?: boolean;
-	/**
-	 * Legacy keys from when low-battery shipped on by default. Never read — kept on
-	 * disk so an older co-installed build still sees its own opt-out and its own
-	 * "already announced" flag instead of starting over.
-	 */
 	lowBatteryDisabled?: boolean;
 	lowBatteryAnnounced?: boolean;
 	playSoundOnTaskComplete?: boolean;
@@ -1505,6 +1519,14 @@ export interface GlobalSettings {
 	 */
 	openArtifactsInPopup?: boolean;
 	/**
+	 * Which starter agents build human-facing reports from. Absent = the bundled
+	 * dev3 template. `"off"` = free-form HTML; `"custom"` = the user's own folder
+	 * ({@link artifactTemplatePath}). Reaches agents as `DEV3_ARTIFACT_TEMPLATE`.
+	 */
+	artifactTemplate?: "off" | "custom";
+	/** The user's own starter folder for `"custom"`. Absent = `~/.dev3.0/artifact-template-custom`, seeded from the dev3 template. */
+	artifactTemplatePath?: string;
+	/**
 	 * Let a headless `dev3 remote` box install updates on its own once browser and
 	 * terminal activity are quiet. Default ON — the whole point is that nobody
 	 * ever goes back to a terminal to type `brew upgrade`. Helper restarts preserve
@@ -1513,7 +1535,7 @@ export interface GlobalSettings {
 	 * the desktop app, which has its own updater.
 	 */
 	remoteSilentUpdate?: boolean;
-	preventSleepWhileRunning?: boolean; // spawn caffeinate when agents are active
+	preventSleepWhileRunning?: boolean; // keep a sleep inhibitor running while the app is open
 	skipQuitDialog?: boolean; // suppress the "tmux keeps running" quit confirmation
 	/**
 	 * Inherit the user's full exported login-shell environment into agent/MCP
@@ -2005,6 +2027,10 @@ export interface ProjectSettingsUpdate extends Dev3RepoConfig {
 	reviewModePrompt?: string;
 	/** Blank string clears the project override and falls back to global. */
 	coordinatorPrompt?: string;
+	/** `"inherit"` clears the project override and falls back to global. */
+	artifactTemplate?: ArtifactTemplateMode | "inherit";
+	/** Blank string clears the project folder and falls back to the global one. */
+	artifactTemplatePath?: string;
 }
 
 export interface Project {
@@ -2082,6 +2108,10 @@ export interface Project {
 	 * the global setting, then the built-in. See resolvePresetPrompt.
 	 */
 	coordinatorPrompt?: string;
+	/** Project override of {@link GlobalSettings.artifactTemplate}. Absent = follow the global setting. */
+	artifactTemplate?: ArtifactTemplateMode;
+	/** This project's own starter folder when its mode is `"custom"`. Absent = the global folder. */
+	artifactTemplatePath?: string;
 	/**
 	 * When dev3 offered to import this project's outside-dev3 agent conversations
 	 * on its own. Set once, whatever the answer was — the unprompted offer is
@@ -2109,6 +2139,29 @@ export interface Project {
  */
 export function repoConfigEnabled(project: Pick<Project, "useRepoConfig">): boolean {
 	return project.useRepoConfig !== false;
+}
+
+/** `on` = the bundled dev3 template, `off` = free-form HTML, `custom` = the user's own starter folder. */
+export type ArtifactTemplateMode = "on" | "off" | "custom";
+
+export interface ResolvedArtifactTemplate {
+	mode: ArtifactTemplateMode;
+	/** Only for `custom`: the configured folder, or undefined for the default one. */
+	path?: string;
+}
+
+/**
+ * The artifact template in effect for a project: its override, then the global
+ * setting, then on. A custom project without its own folder uses the global one.
+ */
+export function resolveArtifactTemplate(
+	project: Pick<Project, "artifactTemplate" | "artifactTemplatePath">,
+	settings: Pick<GlobalSettings, "artifactTemplate" | "artifactTemplatePath"> | null | undefined,
+): ResolvedArtifactTemplate {
+	const mode = project.artifactTemplate ?? settings?.artifactTemplate ?? "on";
+	if (mode !== "custom") return { mode };
+	const path = (project.artifactTemplate === "custom" ? project.artifactTemplatePath?.trim() : "") || settings?.artifactTemplatePath?.trim();
+	return { mode, path: path || undefined };
 }
 
 /**
@@ -3094,6 +3147,28 @@ export interface ScheduledMessage {
 	 * pointer rather than a body, instead of guessing from the wording.
 	 */
 	spilledPath?: string;
+	/**
+	 * The agent that queued this for its OWN task (a self-reminder), so the fire
+	 * goes back to that agent instead of whichever sibling is focused. Absent for
+	 * cross-task and human-queued messages. Additive: older versions ignore it.
+	 */
+	author?: ScheduledMessageAuthor;
+}
+
+/**
+ * Who a self-reminder belongs to, captured when it was queued. The identity is
+ * the agent PROCESS (pid + start time): pane ids are reused across tmux servers,
+ * and an agent that exits leaves its pane behind as a plain shell.
+ */
+export interface ScheduledMessageAuthor {
+	/** Pane the scheduling agent ran in (tmux `%N` or native pane id). */
+	paneId: string;
+	/** That pane's agent conversation id from `sessionState`, when known. */
+	sessionId: string | null;
+	/** The pane's generation: tmux server token, or the native registry session id. */
+	paneToken: string;
+	/** Start signature (`pid@lstart`) of the agent process itself. */
+	agentProcess: string;
 }
 
 /**
@@ -3185,7 +3260,7 @@ export function taskSharedMedia(task: Pick<Task, "sharedImages" | "sharedVideos"
 export const MAX_SHARED_IMAGES_PER_CALL = 20;
 
 /** Maximum accepted HTML source size for `dev3 show-artifact` (bytes). */
-export const MAX_SHARED_ARTIFACT_HTML_BYTES = 5 * 1024 * 1024;
+export const MAX_SHARED_ARTIFACT_HTML_BYTES = 50 * 1024 * 1024;
 
 /**
  * Video extensions a bundled artifact clip may use (lowercase, no dot). MP4 and
@@ -3465,6 +3540,13 @@ export interface AgentCancellationRequest {
 export interface AgentLaunchRequest {
 	/** CLI +Agent request: one pane, not a task/variant launch. */
 	spawn?: { choice: LaunchVariant; prompt?: string; handoff: boolean };
+	/** `dev3 agent resume`: restore these saved panes exactly — the dialog offers no agent choice. */
+	resume?: { panes: ResumeDialogPane[] };
+	/**
+	 * Agent/config the requesting agent suggested with `--agent`/`--config`,
+	 * already validated. Only preselects the picker — the user still decides.
+	 */
+	suggested?: LaunchVariant;
 	requestId: string;
 	taskId: string;
 	projectId: string;
@@ -3841,7 +3923,9 @@ export interface SharedArtifactVersion {
  *
  * The stored HTML contains the stable dev3 artifact theme contract. When
  * `assets` is non-empty, `bundlePath` points at a portable ZIP containing the
- * HTML and every copied local asset at its relative path.
+ * HTML and every copied local asset at its relative path. The download hands
+ * it over only when attachments need it; otherwise it folds everything into one
+ * standalone HTML (`loadSharedArtifactDownload`).
  *
  * Re-publishing the same artifact adds a VERSION instead of a new record: the
  * top-level fields above always describe the newest version, while
@@ -4832,6 +4916,34 @@ export interface FolderEntry {
 	isDir: boolean;
 }
 
+/** Children listed per directory before `ExplorerListing.truncated` is set. */
+export const EXPLORER_MAX_ENTRIES = 2000;
+
+/** One child of a directory in the file explorer (`listExplorerDirectory`). */
+export interface ExplorerEntry {
+	name: string;
+	/** Absolute path, so the renderer never joins paths with a platform separator. */
+	path: string;
+	/** Root-relative, `/`-separated, used as the tree key and for "copy relative path". */
+	relPath: string;
+	kind: "file" | "directory";
+	/** Matched by the repo's ignore rules; the tree shows it dimmed. */
+	ignored: boolean;
+}
+
+/**
+ * One directory level of the file explorer. The root is the task worktree when a
+ * task is given, otherwise the project's own checkout. `error` set ⇒ `entries` empty.
+ */
+export interface ExplorerListing {
+	root: string;
+	relPath: string;
+	entries: ExplorerEntry[];
+	/** More children than the cap; the listing holds the first ones after sorting. */
+	truncated?: boolean;
+	error?: "no-root" | "outside-root" | "not-found" | "unreadable";
+}
+
 export interface FolderListing {
 	path: string;
 	parent: string | null;
@@ -5000,6 +5112,11 @@ export type AppRPCSchema = {
 				params: { path?: string | null; includeFiles?: boolean; showHidden?: boolean };
 				response: FolderListing;
 			};
+			/** One level of the file explorer tree, gated to the task worktree or project checkout. */
+			listExplorerDirectory: {
+				params: { projectId: string; taskId?: string | null; relPath?: string; insideIgnored?: boolean };
+				response: ExplorerListing;
+			};
 			listAgentSkills: {
 				params: { projectPath?: string | null };
 				response: AgentSkillInfo[];
@@ -5084,6 +5201,15 @@ export type AppRPCSchema = {
 				params: { projectId: string };
 				response: { hasRepoConfig: boolean; hasLocalConfig: boolean };
 			};
+			/**
+			 * Resolve a "My template" folder (blank = the default one). With `seed`, a
+			 * missing or empty folder is filled with a copy of the dev3 template; a
+			 * folder that already holds files is never touched.
+			 */
+			prepareCustomArtifactTemplate: {
+				params: { path?: string; seed?: boolean };
+				response: { path: string; exists: boolean; seeded: boolean };
+			};
 			/** Update project settings in projects.json (scripts, clone paths, AI Review, etc.). */
 			updateProjectSettings: {
 				params: { projectId: string } & ProjectSettingsUpdate;
@@ -5125,20 +5251,6 @@ export type AppRPCSchema = {
 			saveGlobalSettings: {
 				params: GlobalSettings;
 				response: void;
-			};
-			/** What the low-battery answer format is doing right now: whether it is on,
-			 *  which upstream revision this build carries, and — the part the settings
-			 *  row has to say out loud — whether the user's own output style was left
-			 *  selected instead. */
-			getLowBatteryStatus: {
-				params: void;
-				response: LowBatteryStatus;
-			};
-			/** Select the low-battery output style for a user who kept their own and
-			 *  then asked for it anyway. The one-click switch under the settings row. */
-			selectLowBatteryStyle: {
-				params: void;
-				response: LowBatteryStatus;
 			};
 			/** Toggle an (agentId, configId) pair in the global favorites list —
 			 *  add it (with LFU-then-LRU eviction once MAX_FAVORITES is reached) or
@@ -5289,6 +5401,16 @@ export type AppRPCSchema = {
 			listAgentAccounts: {
 				params: void;
 				response: AgentAccountsState;
+			};
+			/** The Claude login a project pins via `CLAUDE_CONFIG_DIR` in its env. */
+			getProjectClaudeLogin: {
+				params: { projectId: string };
+				response: ProjectClaudeLogin;
+			};
+			/** Every login some project pins via `CLAUDE_CONFIG_DIR`, one per directory. */
+			listPinnedClaudeLogins: {
+				params: void;
+				response: PinnedClaudeLogin[];
 			};
 			importAgentAccount: {
 				params: { kind: AgentAccountKind };
@@ -5787,10 +5909,6 @@ export type AppRPCSchema = {
 				params: void;
 				response: boolean;
 			};
-			consumePendingNotificationNav: {
-				params: void;
-				response: { taskId: string; projectId: string } | null;
-			};
 			/** Read and clear a CLI task-open request queued while no window existed. */
 			consumePendingTaskNavigation: {
 				params: void;
@@ -6097,7 +6215,12 @@ export type AppRPCSchema = {
 			};
 			readArtifactContent: {
 				params: { artifact: SharedArtifact };
-				response: { html: string; assets: Array<{ name: string; mime: string; dataUrl: string }> };
+				response: {
+					html: string;
+					assets: Array<{ name: string; mime: string; dataUrl: string }>;
+					/** What the download button saves: one standalone HTML, or the ZIP when attachments need it. */
+					downloadKind: "html" | "zip";
+				};
 			};
 			readArtifactDownload: {
 				params: { artifact: SharedArtifact };
@@ -6563,6 +6686,8 @@ export type AppRPCSchema = {
 			spacesUpdated: { file: SpacesFile };
 			taskSound: { status: "completed" | "cancelled"; taskId: string };
 			ptyDied: { taskId: string };
+			/** A saved session was resumed — possibly from the CLI, so a recovery screen still on display must re-read. */
+			taskTerminalResumed: { taskId: string; projectId: string };
 			projectPtyDied: { projectId: string };
 			terminalBell: { taskId: string };
 			gitOpCompleted: { taskId: string; projectId: string; operation: string; ok: boolean };
@@ -6679,11 +6804,6 @@ export type AppRPCSchema = {
 			 *  Surfaces that hold a long-lived snapshot (boards, launch pickers) would
 			 *  otherwise keep offering presets the user just renamed or deleted. */
 			agentsUpdated: CodingAgent[];
-			/**
-			 * Emitted when the main window gains focus shortly after a watched-task notification fired.
-			 * The renderer navigates to the referenced task — implements click-to-open for native notifications.
-			 */
-			openTaskFromNotification: { taskId: string; projectId: string };
 			/** Navigate to the task selected by the CLI. */
 			openTaskNavigation: TaskNavigationTarget;
 			/**

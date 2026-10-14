@@ -58,7 +58,10 @@ export const tooltips = {
 	// Task info panel
 	"ttip.infoPanel.includeTests":
 		"Когда выключено, тестовые файлы исключаются из диффа и счётчиков +/− — видно след только продакшен-кода.",
-	"ttip.infoPanel.showDiff": "Всё, что изменила эта таска, в сравнении с базовой веткой.",
+	"ttip.infoPanel.changesSummaryUncommitted": "Числа +/− считают ещё не закоммиченные строки: staged, unstaged и новые файлы. Ahead / behind считает коммиты относительно {branch}. Счётчик файлов выше считает только закоммиченное.",
+	"ttip.infoPanel.changesSummaryUncommittedOnly": "Числа +/− считают ещё не закоммиченные строки: staged, unstaged и новые файлы. Коммитов в этой ветке пока нет.",
+	"ttip.infoPanel.changesSummaryBranch": "Ahead / behind считает коммиты относительно {branch}. Рабочее дерево чистое, поэтому откроется diff закоммиченной ветки.",
+	"ttip.infoPanel.showDiff": "Закоммиченные изменения этого файла в ветке, в сравнении с базовой веткой.",
 	"ttip.infoPanel.spawnAgent":
 		"Добавляет ещё одну панель с агентом в tmux-окно таски. Оба агента делят один worktree — удобно для помощника или ревьюера.",
 	"ttip.infoPanel.bugHunters":
@@ -106,7 +109,7 @@ export const tooltips = {
 
 	// Open in / files
 	"ttip.openIn.menu": "Открыть worktree таски в редакторе, терминале, файловом менеджере или на GitHub.",
-	"ttip.openIn.fileBrowser": "Просматривайте файлы worktree в терминальном файловом менеджере (yazi), прямо в панели рядом с агентом.",
+	"ttip.openIn.fileBrowser": "Показывает файлы worktree в боковой панели. Закрепите её или включите автоскрытие.",
 
 	// Scripts / dev server / ports / images
 	"ttip.scripts.run": "Запускает скрипт package.json или таргет Makefile этого worktree в tmux-панели — вывод виден вживую.",

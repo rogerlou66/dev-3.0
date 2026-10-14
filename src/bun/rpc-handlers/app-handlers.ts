@@ -11,10 +11,8 @@ import * as git from "../git";
 import * as pty from "../pty-server";
 import { loadSettings, saveSettings } from "../settings";
 import { consumeQuitDialogPending, markQuitConfirmed } from "../quit-manager";
-import { consumePendingNotificationNav as consumeNotificationNavPending } from "../notification-nav";
 import { consumePendingTaskNavigation as consumeTaskNavigationPending } from "../task-navigation";
 import type { TaskNavigationTarget } from "../../shared/types";
-import type { NotificationClickTarget } from "../native-notifications";
 import { BUNDLED_CHANGELOG } from "../changelog-bundled";
 import * as repoConfig from "../repo-config";
 import { DEV3_HOME } from "../paths";
@@ -28,7 +26,7 @@ import { getPushMessage, getUploadedImageExtension, hideAppNative, log, logRende
 import { forgetRendererClient, recordRendererHeartbeat } from "../renderer-watchdog";
 import { consumeArtifactFreezeNotice } from "../artifact-freeze-recovery";
 import { applyMenuContext, type MenuContext } from "../../shared/application-menu";
-import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactDownloadFile, sharedArtifactHtmlPath } from "../shared-artifacts";
+import { loadSharedArtifactContent, loadSharedArtifactDownload, sharedArtifactDownloadFile, sharedArtifactDownloadKind, sharedArtifactHtmlPath } from "../shared-artifacts";
 import { issueArtifactDownloadTicket } from "../artifact-download-tickets";
 import { isFullyQualifiedPath } from "../../shared/absolute-path";
 import { clipboardImageToPng } from "../clipboard-image";
@@ -71,13 +69,6 @@ async function requestQuit(): Promise<void> {
 // mount avoids the race where a push fires before the renderer's listener is up.
 async function consumePendingQuitDialog(): Promise<boolean> {
 	return consumeQuitDialogPending();
-}
-
-// A window reopened by a native notification click (the app was window-less in
-// the dock) calls this on mount and navigates to the clicked task. Same
-// pull-on-mount rationale as consumePendingQuitDialog.
-async function consumePendingNotificationNav(): Promise<NotificationClickTarget | null> {
-	return consumeNotificationNavPending();
 }
 
 // A reopened window consumes the CLI request after its listeners are mounted.
@@ -858,7 +849,7 @@ async function readImageBase64(params: { path: string }): Promise<{ dataUrl: str
 }
 
 async function readArtifactContent(params: { artifact: SharedArtifact }) {
-	return loadSharedArtifactContent(params.artifact);
+	return { ...loadSharedArtifactContent(params.artifact), downloadKind: sharedArtifactDownloadKind(params.artifact) };
 }
 
 async function readArtifactDownload(params: { artifact: SharedArtifact }) {
@@ -1071,7 +1062,6 @@ export const appHandlers = {
 	quitApp,
 	requestQuit,
 	consumePendingQuitDialog,
-	consumePendingNotificationNav,
 	consumePendingTaskNavigation,
 	openNewWindow,
 	hideApp,

@@ -13,9 +13,15 @@ history, PRs and `decisions/`. Newest first.
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 **Record-backed entries are pointers:** state the rule, its canonical location and the `decisions/` record. Keep full reasoning only where no record exists; never delete the only explanation.
 
-## 2026-10-02 — The agent-message toast names every destination
+## 2026-10-08 — The navigation palette gains three modes (projects / tasks / combined)
 
-Bible §5.7: both names link to their task, plus Sender/Traffic/Recipient actions; the card still opens traffic. Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md.
+Bible §4/§5 `command_palette`, yaml `command_palette`: one `GoToPalette` with Tab-switchable modes (⇧⌘K/J/L), tasks reusing the token-DSL matcher (not the funnel) ordered most-recently-viewed first; the tap-reachable mode strip keeps it touch-usable. Why: decisions/2026/10/08/go-to-palette-three-modes.md.
+
+## 2026-10-08 — Agent toast card opens the sender; toasts ignore stray clicks
+
+Bible §5.7: card → sender (inert without one), traffic only via its action; any toast ignores pointer navigation for 600 ms after appearing or moving, and a replacing agent toast keeps its slot. Why: decisions/2026/10/08/agent-message-toast-card-opens-the-sender.md.
+
+2026-10-02 — Agent toast names every destination (card → traffic, superseded 2026-10-08). Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md.
 
 ## 2026-09-25 — Clips play inside the image viewer
 
@@ -363,7 +369,7 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 
 ## 2026-07-13 — Terminal immersive fullscreen is app-only and ephemeral
 
-- **Rule:** The TaskInfoPanel fullscreen toggle plus F11 / Cmd/Ctrl+Shift+F enters a task-bound renderer view with only a thin `dev3` strip and a wide neutral Exit full screen button; agent-facing notifications and viewer events queue during immersive fullscreen or persistent Focus Mode and flush when the active mode ends, with notification clicks exiting immersive fullscreen before normal task navigation.
+- **Rule:** The TaskInfoPanel fullscreen toggle plus F11 / Cmd/Ctrl+Shift+F enters a task-bound renderer view with only a thin `dev3` strip and a wide neutral Exit full screen button; agent-facing notifications and viewer events queue during immersive fullscreen or persistent Focus Mode and flush when the active mode ends, with in-app toast clicks exiting immersive fullscreen before normal task navigation (OS notification clicks never navigate).
 - **Why:** Keeping the existing Route and tmux session preserves the user's exact layout and makes the feature identical in desktop and browser mode. Rejected native/browser fullscreen and tmux `resize-pane -Z` because they either diverge by transport or overwrite user-controlled pane state.
 - **Status:** Implemented. Evidence: `App.tsx`, `TaskInfoPanel.tsx`, `keymap.ts`, `webNotification.ts`.
 
@@ -426,9 +432,7 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 
 ## 2026-07-03 — Close Pane: two-step visual pane picker (no new button; destructive gets spatial friction)
 
-- **Rule:** The red Close Pane control (inspector `tmux_controls` + native menu) no longer blind-kills the active pane — it arms a transient overlay over the terminal that draws one hit-box per pane from real tmux geometry (cells → %, PaneMapSheet math); hover arms a pane in `danger` red (idle = neutral `accent` marching-ants), click kills exactly it, Esc / scrim cancels, last-pane kill routes through the `confirm()` service. Narrow/touch keeps the old direct-kill (no hover). No new toolbar button.
-- **Why:** Blind-kill closed the wrong pane and gave a destructive action zero friction; a spatial two-step pick supplies the friction + `destructive` token + confirmation the rubric wants while adding zero chrome (avoids toolbar-button-creep, the #1 anti-pattern) and reusing the mini-map geometry. Rejected: a dropdown pane list (loses the on-screen spatial mapping); a persistent per-pane close affordance (control creep). Decision 101.
-- **Status:** Observed (verified in-browser). Evidence: `ClosePanePicker.tsx`, `close-pane-picker.ts`, `rpc-handlers/tmux-pty.ts` (tmuxKillPane), `TaskTmuxControls.tsx`, `menuRouter.ts`.
+Folded: rule and reasoning in `decisions/2026/07/03/close-pane-visual-picker.md`; yaml `close_pane_picker`.
 
 ## 2026-07-03 — Agent picker: Provider → Model → Mode cascade (UI-only grouping, flat `configId` stays the key)
 
@@ -557,7 +561,7 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 - **Status:** Observed. Evidence: `tips.ts` (`TipContext`), `hooks/useTipRotation.ts`.
 
 ## 2026-07-11 — Active Tasks sidebar: readiness tiers + visible priority (supersedes 2026-06-22)
-- **Rule:** The sidebar groups by **readiness tier** — `NEEDS YOU` (review-by-user ∪ user-questions ∪ *signalled* review-by-colleague) → custom columns (project order) → `WAITING` (in-progress ∪ review-by-ai ∪ unsignalled review-by-colleague) — not by status; within every tier it sorts by priority band P0→P4, t.
+- **Rule:** The sidebar groups by **readiness tier** — `NEEDS YOU` (review-by-user ∪ user-questions ∪ *signalled* review-by-colleague) → custom columns (project order) → `WAITING` (in-progress ∪ review-by-ai ∪ unsignalled review-by-colleague) — not by status; tiers sort by priority; NEEDS YOU: coordinators, then questions.
 - **Why:** `decisions/2026/07/11/sidebar-readiness-tiers.md`.
 
 ## 2026-06-21 — Hint navigation is a cross-surface primitive; keyboard-first expert layer
@@ -715,3 +719,7 @@ Default-collapse the existing shortcut bar while retaining a local disclosure an
 ## 2026-10-03 — The dashboard pins every coordinator above the attention rows
 - **Rule:** each active coordinator gets its own navigation-only row in its project's dashboard card, whatever its status — yaml `dashboard-coordinator-rows`.
 - **Why:** a working coordinator vanished into the footer count, yet it is what the user opens to talk to a project. Rejected a global coordinators panel (new chrome; ⇧⌘P `Find coordinator…` already exists). Evidence: `DashboardCoordinatorRows.tsx`.
+
+## 2026-10-12 — The file explorer lives beside a terminal, never on the board
+- **Rule:** yaml `file_explorer`: task terminal or the Repo screen (`project-terminal`, renamed); on a board ⇧⌘E opens Repo; auto-hide overlays, never reflows.
+- **Why:** "insert path" needs a terminal and the board is task triage. Rejected a Board/Files switch (a destination hidden in a toolbar, IDE drift) and a Files destination (budget spent). `decisions/2026/10/02/file-explorer-panel.md`.

@@ -43,8 +43,18 @@ describe("external telemetry removal", () => {
 		expect(violations).toEqual([]);
 	});
 
-	it("does not load Google tracking tags on the website", () => {
-		const website = read("docs/index.html");
-		expect(website).not.toMatch(/googletagmanager|google-analytics|\bgtag\s*\(/i);
+	it("does not load tracking tags on any website page", () => {
+		const violations: string[] = [];
+		for (const path of readdirSync(join(ROOT, "docs"), { recursive: true, encoding: "utf8" })) {
+			if (!path.endsWith(".html")) continue;
+			if (/googletagmanager|google-analytics|\bgtag\s*\(|posthog\.(?:com|cloud)/i.test(read(`docs/${path}`))) {
+				violations.push(`docs/${path}`);
+			}
+		}
+		expect(violations).toEqual([]);
+	});
+
+	it("does not carry retired telemetry settings into remote services", () => {
+		expect(read("src/cli/commands/remote-service.ts")).not.toMatch(/DEV3_TELEMETRY|DO_NOT_TRACK/);
 	});
 });

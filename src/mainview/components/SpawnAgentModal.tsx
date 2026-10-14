@@ -186,6 +186,7 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 					<div className="px-6 py-4 space-y-3">
 						<AgentConfigPicker
 							idPrefix="spawn"
+							projectId={project.id}
 							agents={agents}
 							agentId={agentId}
 							configId={configId}

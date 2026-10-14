@@ -19,7 +19,7 @@ import { PANE_RUN_AUTO_CLOSE_SECONDS, PANE_RUN_FAILED_AUTO_CLOSE_SECONDS } from 
 import { CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED } from "./cli-exit-codes";
 
 /** PR creation and auto-merge instructions shared by every harness. */
-export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
+export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. \`x509: OSStatus -26276\` from \`gh\` (exit 28 here) indicates a sandbox TLS failure, not a logout; never advise \`gh auth login\` for it. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
 
 const SKILL_HEADER = `# dev3 — Task Lifecycle Protocol
 
@@ -178,21 +178,21 @@ Each server's output also lands as text in \`<taskDir>/logs/dev-server*.log\`, f
 /** When a report becomes a dev3 HTML artifact. Shared verbatim by the protocol and the `dev3-artifact` skill. */
 export const ARTIFACT_FORMAT_RULES = `Any report a human reads defaults to the dev3 template, text-only summaries and daily briefs included. Other meanings win: Claude Artifacts, CI/build artifacts, package outputs.
 
-- **Copy the starter and publish its directory.** Prose or lists are fine; charts are optional.
-- Publish \`.md\`/\`.txt\` directly (no template CSS) only when the user explicitly asks for Markdown or plain text. A \`.md\` report path in a brief says where to save it, not how to show it.
-- If "do not generate HTML" conflicts with the template, ask which wins before publishing: the template needs an HTML wrapper.
+- **Copy the starter and publish its directory.**
+- An explicit ask for Markdown, plain text or no HTML overrides the default: write that, publish the \`.md\`/\`.txt\` directly (no template CSS), and do not ask to choose again. A \`.md\` report path in a brief says where to save it, not how to show it.
+- \`$DEV3_ARTIFACT_TEMPLATE=off\` or asking for a page without the dev3 template → free-form HTML: no starter or contract; publish your own page. Asking for the template wins. \`=custom\`: the user's own starter; its \`AUTHORING.md\` is the contract.
 `;
 
 /** How to make and publish one. Shared verbatim by the protocol and the `dev3-artifact` skill. */
-export const ARTIFACT_AUTHORING_STEPS = `\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is the pristine starter; never edit it. If unset, \`dev3 artifact-template\` creates \`./dev3-artifact-report\` instead. The layout is fixed; do not spend a turn listing or rediscovering it: \`AUTHORING.md\` is the card, \`REFERENCE.md\` has optional depth, \`index.html\` + \`report.js\` are editable, \`app.css\` + \`app.js\` are the shell, \`dev3-icon.png\` is the brand asset.
+export const ARTIFACT_AUTHORING_STEPS = `\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is the pristine starter; never edit it. If unset, \`dev3 artifact-template\` creates \`./dev3-artifact-report\` instead. dev3 layout: \`AUTHORING.md\` is the card, \`REFERENCE.md\` has optional depth, \`index.html\` + \`report.js\` are editable, \`app.css\` + \`app.js\` are the shell, \`dev3-icon.png\` is the brand asset.
 
 1. \`cp -R "$DEV3_ARTIFACT_TEMPLATE_DIR" ./dev3-artifact-report\`.
-2. Read the copied \`AUTHORING.md\`; edit \`index.html\` and \`report.js\`. Do not read the shell files for ordinary reports. Open \`REFERENCE.md\` sections only as needed. Keep data local; CDN libraries and live fetch are supported.
-3. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` bundles assets (16 MB each, 48 MB total); extras go after \`--assets\`. Completion requires the template's \`data-dev3-artifact-template="v1"\`, shell and brand asset, not merely a published \`.md\`.
+2. Read the copied \`AUTHORING.md\`; edit \`index.html\` and \`report.js\`. Do not read the shell files for ordinary reports. \`REFERENCE.md\` only as needed. Keep data local; CDN libraries and live fetch work.
+3. \`dev3 show-artifact ./dev3-artifact-report --title "Report title"\` bundles its assets; extras go after \`--assets\`. A dev3-template report needs its \`data-dev3-artifact-template="v1"\`, shell and brand asset.
 
 Publish directly: an ordinary report or revision needs no browser pass or screenshots; \`AUTHORING.md\` § Before you publish lists exceptions.
 
-The same \`--title\` or stable \`--artifact-id <slug>\` adds a VERSION. Never invent \`report-v2.html\`; \`--new\` is for a different report. Outside dev3, \`/dev3-share-artifact\` inlines the files and publishes a gist with a checked preview URL.
+The same \`--title\` or stable \`--artifact-id <slug>\` adds a VERSION. Never invent \`report-v2.html\`; \`--new\` is for a different report. A link outside dev3: \`/dev3-share-artifact\` (gist).
 `;
 
 const SKILL_ARTIFACTS = `
@@ -235,14 +235,14 @@ const SKILL_PANES = `
 
 \`\`\`bash
 dev3 pane list                                 # which backend you are on — never assume, tmux is absent on Windows
-dev3 pane run "npm run watch" --label Watch    # opens a pane to your right, prints a run id
+dev3 pane run "npm run watch" --label Watch    # opens a pane beside yours, prints a run id
 dev3 pane logs <run-id> [--lines 400]          # outcome + tail (1..2000, default 200)
 dev3 pane close <run-id>                       # close that pane (kills the command)
 \`\`\`
 
 The outcome line distinguishes **still running** from **finished, exit code N** — never read a quiet tail as finished. Runs are non-interactive: stdin is closed. The canonical dev server is \`dev3 dev-server start\`, not a pane run.
 
-**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run as you go, and again before ending a turn, so \`dev3 pane list\` shows only work still needed. The auto-close timer is a backstop for abandoned panes, not a substitute: exit 0 closes itself after ${PANE_RUN_AUTO_CLOSE_SECONDS} seconds, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} minutes so the user still sees it. Closing destroys nothing — the output stays in the run's log.
+**Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run, and again before ending a turn. Auto-close (exit 0 after ${PANE_RUN_AUTO_CLOSE_SECONDS}s, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} min) is only a backstop. Closing destroys nothing — the output stays in the run's log.
 
 Reading the SCREEN of a pane you did not start ("look at the error on the right") is a different thing and **tmux-only today**: \`dev3 peek --pane <N>\` returns a tail on tmux, only the pane summary on native. On tmux you may also drive tmux directly for layout work the user asks for (rename / swap / move windows, resize) — load \`/dev3-tmux\`. On native those commands do not exist.
 `;
@@ -262,7 +262,7 @@ const SKILL_PEEK = `
 
 Reach for it INSTEAD of messaging a quiet worker "are you alive?" — a message costs that agent a turn, a peek none.
 
-Read the tail yourself; peek deliberately does not classify state. \`last output unknown\` means the backend cannot say — never assume silence. On tmux the ages are per WINDOW, not per pane. A task with no live terminal is a successful answer naming the reason (draft, hibernated, not running), while \`could not read the terminal\` means the read failed and tells you NOTHING about progress. Native-backend tasks answer exactly that today (\`not-enabled\`), so the tail is a tmux-task tool for now; the pane summary works everywhere.
+Read the tail yourself; peek deliberately does not classify state. \`last output unknown\` means the backend cannot say — never assume silence. On tmux the ages are per WINDOW, not per pane. A task with no live terminal is a successful answer naming the reason (draft, hibernated, not running), while \`could not read the terminal\` means the read failed and tells you NOTHING about progress. Native-backend tasks answer that today (\`not-enabled\`); the pane summary works everywhere.
 `;
 
 const SKILL_ASK_TO_LAUNCH = `
@@ -273,11 +273,11 @@ You may ask the user to set another task running; you never launch anything your
 - **An existing To Do task** → \`dev3 task move --task seq:<N> --status in-progress\`. Not your task, so the ordinary board move becomes an approval request.
 - **A throwaway peer agent** → \`dev3 task create --scratch --run\`. A scratch task has **no prompt by design** — it starts idle and you drive it with messages.
 
-It **inherits your priority** unless it has its own; only the user may change that band. Approval returns its \`seq\` and reply command. Its first prompt already names you, treats its description as the brief, and asks for file reports sent back as paths. Add standing instructions with \`--handoff-file <path>\`. **Declined** → exit 10, nothing launched: ask what to change. **Timeout** → approval may still arrive later. An unanswered dialog **approves itself after a few minutes** (5 by default, configurable, switchable off); a retry joins it without restarting its clock.
+It **inherits your priority** unless it has its own; only the user may change that band. Approval returns its \`seq\` and reply command. Its first prompt already names you, treats its description as the brief, and asks for file reports sent back as paths. Add standing instructions with \`--handoff-file <path>\`; \`--agent <id> --config <id>\` (from \`dev3 agent list\`) preselects the picker. **Declined** → exit 10, nothing launched: ask what to change. **Timeout** → approval may still arrive later. An unanswered dialog **approves itself after a few minutes** (5 by default, configurable, switchable off); a retry joins it without restarting its clock.
 
 Use it only for work that belongs in its own session — never to escape your scope, never several at once: each interrupts the user.
 
-**Extra agent in an existing task** → \`dev3 agent spawn --task seq:<N> --prompt "brief"\`: new pane, same worktree and approval, prints the pane ID. \`dev3 agent list\` gives \`--agent\` / \`--config\` preset IDs; default account unless the user picks another. \`--handoff\` adds the conversation retelling. Messages reach the task, not the pane.
+**Extra agent in an existing task** → \`dev3 agent spawn --task seq:<N> --prompt "brief"\`: new pane, same worktree and approval, prints the pane ID. \`dev3 agent list\` gives \`--agent\` / \`--config\` preset IDs; default account unless the user picks another. \`--handoff\` adds the conversation retelling. Messages reach the task, not the pane. Terminal gone → \`dev3 agent resume\` first.
 
 **Talking to another task's agent** — \`dev3 message --task seq:<N> --subject "<about 6 words>" "text"\` types straight into any live task's agent, not only one you started; from a worktree it arrives labeled as agent traffic carrying the command to answer you. \`--in 30m\` / \`--at 14:00\` queues it (aim it at yourself for a wake-up).
 
