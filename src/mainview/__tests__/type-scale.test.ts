@@ -28,12 +28,6 @@ function walk(dir: string, out: string[] = []): string[] {
  *    root-font scaling; arbitrary rem sizes are not.
  *  - A closed scale makes visual audits possible at a glance.
  *
- * Exception — ExtraKeyBar.tsx:
- *  The virtual keyboard buttons use vw-relative font sizes (4vw, 3.5vw, 4.5vw) so
- *  their labels scale with the physical keyboard width on every phone screen size.
- *  This is not representable by a fixed rem or px rung — it is intentional and
- *  reviewed. Any new vw-relative text there must be documented in ExtraKeyBar.tsx.
- *
  * The banned prefix is assembled at runtime on purpose. Tailwind's content glob
  * covers `src/mainview/**` including this directory, so spelling it out as a
  * string literal would keep generating the very rule the test forbids.
@@ -50,10 +44,7 @@ describe("closed type scale", () => {
 	});
 
 	it("uses no arbitrary text-[…] sizes (rem, px, vw, or other) outside the named scale", () => {
-		const EXEMPTED = ["ExtraKeyBar.tsx"]; // vw-relative keyboard buttons — see comment above
-
 		const offenders = files
-			.filter((file) => !EXEMPTED.some((ex) => file.endsWith(ex)))
 			.filter((file) => readFileSync(file, "utf8").includes(ARBIT_PREFIX))
 			.map((file) => path.relative(SRC, file));
 

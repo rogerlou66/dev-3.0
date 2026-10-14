@@ -704,6 +704,10 @@ Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `
 - **Rule:** A space on the route renders as a plain-link crumb between home and the chip (`dev-3.0 / AI / Nanochat`), icon-only below `md`; the tail always carries the switcher — bible §Breadcrumbs.
 - **Why:** `decisions/2026/09/01/space-rides-into-a-task-by-reducer-inheritance.md`. Status: observed, `GlobalHeader.tsx`.
 
+## 2026-09-08 — Touch terminal keys collapse locally
+
+Default-collapse the existing shortcut bar while retaining a local disclosure and the composer; bound key sizes to visible pixels. This reclaims tablet reading space without making terminal-only keys unreachable. See `decisions/2026/09/08/collapsible-terminal-extra-keys.md`; implemented in `ExtraKeyBar.tsx`.
+
 ## 2026-10-01 — Go to Project moves from ⌘K to ⇧⌘K; Find coordinator joins ⇧⌘P
 - **Rule:** the navigation palette is ⇧⌘K (Ctrl+Shift+K off-macOS); plain ⌘K stays free for the terminal (clear, tracked as its own task). Coordinators are found via the ⇧⌘P `Find coordinator…` picker on `PaletteShell`.
 - **Why:** terminal users expect ⌘K to clear; ⇧⌘K keeps the K mnemonic with the fewest conflicts found (Firefox Win/Linux Web Console caveat). Rejected ⌘P, ⌘E. User-approved. Evidence: `keymap.ts`, `decisions/2026/10/01/go-to-project-moves-to-shift-cmd-k.md`.

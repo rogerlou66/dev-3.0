@@ -270,6 +270,8 @@ const terminal = {
 	"terminal.composerExpand": "Развернуть редактор",
 	"terminal.composerCollapse": "Свернуть редактор",
 	"terminal.composerScheduleLater": "Отправить позже",
+	"terminal.showExtraKeys": "Показать клавиши терминала",
+	"terminal.hideExtraKeys": "Скрыть клавиши терминала",
 	"terminal.rawKeyboard": "Прямой ввод с клавиатуры",
 	"terminal.scrollToLatest": "К последнему выводу",
 	"terminal.backspace": "Удалить слева",

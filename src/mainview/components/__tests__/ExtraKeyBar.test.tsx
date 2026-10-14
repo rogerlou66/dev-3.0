@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { render, screen, cleanup, waitFor, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ExtraKeyBar from "../ExtraKeyBar";
 import type { TerminalHandle } from "../../TerminalView";
 import { I18nProvider } from "../../i18n";
 import { uploadDroppedFile } from "../../utils/uploadDroppedFile";
+import { EXTRA_KEYS_STORAGE_KEY, setExtraKeysExpanded } from "../../hooks/useExtraKeysExpanded";
 
 vi.mock("../../utils/uploadDroppedFile", () => ({
 	uploadDroppedFile: vi.fn(),
@@ -45,12 +46,101 @@ function renderBar(
 	);
 }
 
+beforeEach(() => {
+	setExtraKeysExpanded(true);
+});
+
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
+	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
+	setExtraKeysExpanded(false);
 });
 
 describe("ExtraKeyBar", () => {
+	it("defaults to a collapsed accessible entry without focusing the terminal", () => {
+		localStorage.removeItem(EXTRA_KEYS_STORAGE_KEY);
+		const handle = makeHandle();
+		renderBar(handle);
+		expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
+		const toggle = screen.getByRole("button", { name: "Show terminal keys" });
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+		fireEvent.click(toggle);
+		expect(screen.getByRole("button", { name: "Esc" })).toBeVisible();
+		expect(handle.focus).not.toHaveBeenCalled();
+		expect(handle.sendInput).not.toHaveBeenCalled();
+	});
+
+	it("remembers collapse across remounts and synchronizes mounted bars", () => {
+		const first = renderBar(makeHandle());
+		renderBar(makeHandle());
+		fireEvent.click(screen.getAllByRole("button", { name: "Hide terminal keys" })[0]);
+		expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
+		expect(localStorage.getItem(EXTRA_KEYS_STORAGE_KEY)).toBe("false");
+		first.unmount();
+		renderBar(makeHandle());
+		expect(screen.getAllByRole("button", { name: "Show terminal keys" })).toHaveLength(2);
+	});
+
+	it("still toggles when storage writes are blocked", () => {
+		setExtraKeysExpanded(false);
+		vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
+		renderBar(makeHandle());
+		fireEvent.click(screen.getByRole("button", { name: "Show terminal keys" }));
+		expect(screen.getByRole("button", { name: "Esc" })).toBeVisible();
+		fireEvent.click(screen.getByRole("button", { name: "Hide terminal keys" }));
+		expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
+	});
+
+	it("stops held keys and clears sticky Ctrl when collapsed", () => {
+		vi.useFakeTimers();
+		try {
+			const handle = makeHandle();
+			renderBar(handle);
+			fireEvent.pointerDown(screen.getByTestId("extra-key-backspace"));
+			vi.advanceTimersByTime(460);
+			const count = vi.mocked(handle.sendInput).mock.calls.length;
+			fireEvent.click(screen.getByRole("button", { name: "Ctrl" }));
+			fireEvent.click(screen.getByRole("button", { name: "Hide terminal keys" }));
+			vi.advanceTimersByTime(1000);
+			expect(handle.sendInput).toHaveBeenCalledTimes(count);
+			fireEvent.click(screen.getByRole("button", { name: "Show terminal keys" }));
+			expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "false");
+			fireEvent.click(screen.getByRole("button", { name: "/" }));
+			expect(handle.sendInput).toHaveBeenLastCalledWith("/");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("clears sticky Shift when collapsed and keeps shifted arrows after reopening", async () => {
+		const user = userEvent.setup();
+		const handle = makeHandle();
+		renderBar(handle);
+		await user.click(screen.getByRole("button", { name: "Shift" }));
+		await user.click(screen.getByRole("button", { name: "Hide terminal keys" }));
+		await user.click(screen.getByRole("button", { name: "Show terminal keys" }));
+		expect(screen.getByRole("button", { name: "Shift" })).toHaveAttribute("aria-pressed", "false");
+		await user.click(screen.getByRole("button", { name: "▲" }));
+		expect(handle.sendInput).toHaveBeenLastCalledWith("\x1b[A");
+		await user.click(screen.getByRole("button", { name: "Shift" }));
+		await user.click(screen.getByRole("button", { name: "▲" }));
+		expect(handle.sendInput).toHaveBeenLastCalledWith("\x1b[1;2A");
+	});
+
+	it("compensates for the fixed mobile viewport and updates on resize", () => {
+		const viewport = new EventTarget();
+		Object.assign(viewport, { scale: 0.5 });
+		vi.stubGlobal("visualViewport", viewport);
+		const { container } = renderBar(makeHandle());
+		const bar = container.querySelector<HTMLElement>(".extra-key-bar")!;
+		expect(bar.style.getPropertyValue("--extra-key-unit")).toBe("2px");
+		Object.assign(viewport, { scale: 1 });
+		act(() => { viewport.dispatchEvent(new Event("resize")); });
+		expect(bar.style.getPropertyValue("--extra-key-unit")).toBe("1px");
+	});
+
 	it("sends Esc / Tab / Enter escape sequences", async () => {
 		const handle = makeHandle();
 		renderBar(handle);
@@ -127,7 +217,8 @@ describe("ExtraKeyBar", () => {
 		const labels = screen.getAllByRole("button").map(
 			(button) => button.getAttribute("aria-label") ?? button.textContent?.trim(),
 		);
-		expect(labels.slice(0, 10)).toEqual([
+		expect(labels.slice(0, 11)).toEqual([
+			"Hide terminal keys",
 			"Esc",
 			"Enter",
 			"Backspace",

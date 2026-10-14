@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useId, type CSSProperties } from "react";
+import { useExtraKeysExpanded } from "../hooks/useExtraKeysExpanded";
 import type { TerminalHandle } from "../TerminalView";
 import { useT } from "../i18n";
 import { useAttachUpload } from "../hooks/useAttachUpload";
@@ -43,17 +44,29 @@ function applyModifiers(data: string, mods: Modifiers): string {
  * Esc, Enter, Backspace, arrows, Tab, Shift+Tab (agent-mode cycling in Claude
  * Code), Ctrl and Shift (sticky one-shot modifiers — Shift+arrows reach Codex's
  * question stack), and common shell chars.
- * The leading ⌨ button (when the host wires onToggleRaw) switches between
+ * The expanded ⌨ button (when the host wires onToggleRaw) switches between
  * compose mode (default — TerminalComposer owns text entry) and raw mode
  * (direct typing into the terminal).
  * Backspace and the arrows repeat while held, like a physical keyboard.
  *
- * Sizing uses `vw` units so buttons scale to actual screen width
- * regardless of the CSS viewport used in browser mode.
- * 11vw ≈ 43px physical on a 390px-wide phone.
+ * Controls use visible CSS-pixel sizes, compensating for the fixed-width
+ * viewport on phones without enlarging the keys on landscape tablets.
  */
 function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTaskId, onAttachPaths }: ExtraKeyBarProps) {
 	const t = useT();
+	const [expanded, setExpanded] = useExtraKeysExpanded();
+	const keysId = useId();
+	const [viewportScale, setViewportScale] = useState(() => window.visualViewport?.scale || 1);
+	useEffect(() => {
+		const viewport = window.visualViewport;
+		const update = () => setViewportScale(viewport?.scale || 1);
+		viewport?.addEventListener("resize", update);
+		window.addEventListener("resize", update);
+		return () => {
+			viewport?.removeEventListener("resize", update);
+			window.removeEventListener("resize", update);
+		};
+	}, []);
 	const [mods, setModsState] = useState<Modifiers>(NO_MODIFIERS);
 	// Read at send time, so a hold-to-repeat timer never acts on a stale closure.
 	const modsRef = useRef<Modifiers>(NO_MODIFIERS);
@@ -104,6 +117,13 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 	}, []);
 
 	useEffect(() => stopRepeat, [stopRepeat]);
+	useEffect(() => {
+		if (!expanded) {
+			stopRepeat();
+			setMods(NO_MODIFIERS);
+			press.current = null;
+		}
+	}, [expanded, stopRepeat, setMods]);
 
 	const holdProps = useCallback((data: string) => ({
 		onPointerDown: () => {
@@ -130,16 +150,22 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 		refocus();
 	}, [refocus, setMods]);
 
-	// All sizes in vw so they map to real physical screen pixels.
-	const btnBase = "flex-shrink-0 flex items-center justify-center rounded-[1vw] font-semibold select-none active:opacity-70 transition-opacity";
-	const btnStyle = "h-[11vw] min-w-[14vw] px-[2vw] text-[4vw]";
-	const btnNormal = `${btnBase} ${btnStyle} bg-elevated text-fg-2`;
-	const btnModifier = (active: boolean) => `${btnBase} ${btnStyle} ${active ? "bg-accent-fill text-white" : "bg-elevated text-fg-2"}`;
-	const btnRaw = `${btnBase} h-[11vw] min-w-[12vw] px-[2vw] text-[4.5vw] ${rawMode ? "bg-accent-fill text-white" : "bg-elevated text-fg-2"}`;
-	const btnArrow = `${btnBase} h-[11vw] w-[11vw] text-[3.5vw] bg-elevated text-fg-2`;
+	const btnBase = "extra-key-button flex-shrink-0 flex items-center justify-center font-semibold select-none active:opacity-70 transition-opacity";
+	const btnNormal = `${btnBase} bg-elevated text-fg-2`;
+	const btnModifier = (active: boolean) => `${btnBase} ${active ? "bg-accent-fill text-white" : "bg-elevated text-fg-2"}`;
+	const btnRaw = `${btnBase} ${rawMode ? "bg-accent-fill text-white" : "bg-elevated text-fg-2"}`;
+	const btnArrow = btnNormal;
+	const toggleLabel = t(expanded ? "terminal.hideExtraKeys" : "terminal.showExtraKeys");
 
 	return (
-		<div className="flex-shrink-0 flex items-center gap-[1vw] px-[2vw] py-[1.5vw] bg-base border-t border-edge overflow-x-auto">
+		<div className="extra-key-bar flex-shrink-0 flex items-center bg-base border-t border-edge"
+			style={{ "--extra-key-unit": `${1 / viewportScale}px` } as CSSProperties}>
+			<button className={btnNormal} aria-label={toggleLabel} title={toggleLabel} aria-expanded={expanded} aria-controls={keysId}
+				onMouseDown={(event) => event.preventDefault()}
+				onClick={() => setExpanded(!expanded)}>
+				{expanded ? "▾" : `▸ ${toggleLabel}`}
+			</button>
+			<div id={keysId} className="extra-key-items flex items-center overflow-x-auto" hidden={!expanded}>
 			{onToggleRaw && (
 				<>
 					<button
@@ -153,7 +179,7 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 					>
 						<span style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F030C}"}</span>
 					</button>
-					<div className="w-[0.25vw] h-[7vw] bg-edge mx-[0.5vw]" />
+					<div className="extra-key-divider bg-edge" />
 				</>
 			)}
 
@@ -177,12 +203,12 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 						data-testid="extra-key-attach"
 					>
 						{uploading ? (
-							<div className="w-[4vw] h-[4vw] border-2 border-fg-muted/30 border-t-accent rounded-full animate-spin" />
+							<div className="extra-key-spinner border-2 border-fg-muted/30 border-t-accent rounded-full animate-spin" />
 						) : (
 							<span style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F03E2}"}</span>
 						)}
 					</button>
-					<div className="w-[0.25vw] h-[7vw] bg-edge mx-[0.5vw]" />
+					<div className="extra-key-divider bg-edge" />
 				</>
 			)}
 
@@ -201,14 +227,14 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 				{"⌫"}
 			</button>
 
-			<div className="w-[0.25vw] h-[7vw] bg-edge mx-[0.5vw]" />
+			<div className="extra-key-divider bg-edge" />
 
 			<button className={btnArrow} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\x1b[A")} {...holdProps("\x1b[A")}>{"▲"}</button>
 			<button className={btnArrow} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\x1b[B")} {...holdProps("\x1b[B")}>{"▼"}</button>
 			<button className={btnArrow} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\x1b[D")} {...holdProps("\x1b[D")}>{"◀"}</button>
 			<button className={btnArrow} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\x1b[C")} {...holdProps("\x1b[C")}>{"▶"}</button>
 
-			<div className="w-[0.25vw] h-[7vw] bg-edge mx-[0.5vw]" />
+			<div className="extra-key-divider bg-edge" />
 
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\t")}>Tab</button>
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("\x1b[Z")}>{"⇧Tab"}</button>
@@ -224,13 +250,14 @@ function ExtraKeyBar({ handle, rawMode, onToggleRaw, attachProjectId, attachTask
 				Shift
 			</button>
 
-			<div className="w-[0.25vw] h-[7vw] bg-edge mx-[0.5vw]" />
+			<div className="extra-key-divider bg-edge" />
 
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("|")}>|</button>
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("~")}>~</button>
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("-")}>-</button>
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("/")}>/</button>
 			<button className={btnNormal} onMouseDown={(e) => e.preventDefault()} onClick={() => send("`")}>`</button>
+			</div>
 		</div>
 	);
 }

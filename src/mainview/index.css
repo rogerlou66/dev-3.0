@@ -1951,3 +1951,31 @@ svg .th-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 	background-color: rgb(var(--diff-search-highlight-to) / 0.85);
 	color: rgb(var(--surface-base));
 }
+
+/* Keep terminal keys finger-sized even when the 1024px viewport is scaled down. */
+.extra-key-bar {
+	gap: calc(4 * var(--extra-key-unit));
+	padding: calc(2 * var(--extra-key-unit)) calc(4 * var(--extra-key-unit));
+}
+.extra-key-button {
+	height: calc(44 * var(--extra-key-unit));
+	min-width: calc(44 * var(--extra-key-unit));
+	padding-inline: calc(8 * var(--extra-key-unit));
+	border-radius: calc(6 * var(--extra-key-unit));
+	font-size: calc(14 * var(--extra-key-unit));
+	line-height: 1;
+}
+.extra-key-items {
+	min-width: 0;
+	gap: calc(4 * var(--extra-key-unit));
+}
+.extra-key-items[hidden] { display: none; }
+.extra-key-divider {
+	flex-shrink: 0;
+	width: calc(1 * var(--extra-key-unit));
+	height: calc(24 * var(--extra-key-unit));
+}
+.extra-key-spinner {
+	width: calc(16 * var(--extra-key-unit));
+	height: calc(16 * var(--extra-key-unit));
+}

@@ -258,6 +258,8 @@ const terminal = {
 	"terminal.composerExpand": "Expandir editor",
 	"terminal.composerCollapse": "Contraer editor",
 	"terminal.composerScheduleLater": "Enviar más tarde",
+	"terminal.showExtraKeys": "Mostrar teclas del terminal",
+	"terminal.hideExtraKeys": "Ocultar teclas del terminal",
 	"terminal.rawKeyboard": "Entrada directa de teclado",
 	"terminal.scrollToLatest": "Volver a la salida más reciente",
 	"terminal.backspace": "Retroceso",

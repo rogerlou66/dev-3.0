@@ -742,7 +742,7 @@ Evidence: `BottomSheet.tsx` — used by `GlobalHeader` narrow kebab, `ActivityOv
 
 - Honour `prefers-reduced-motion` on every animated transition. `index.css` covers toast-swipe, bottom-sheet slide, close-pane marching-ants, and several icon-animation families; `useReducedMotion` is used in gauges, git/dev-server spinners, launch modals, and skeleton loaders. The carousel was the first; it is no longer the only one.
 - Keep the `.browser-mode` 16px input-font rule (prevents iOS focus-zoom); honour `env(safe-area-inset-*)` (the viewport already sets `viewport-fit=cover`).
-- Reuse the `TerminalView` touch→mouse bridge model for any canvas surface; reuse `ExtraKeyBar`'s vw-based sizing for mobile toolbars.
+- `TerminalView`: touch→mouse bridge. `ExtraKeyBar`: client-local default-collapse; 44px visible keys with viewport-scale compensation; preserve input mode/composer.
 - Carousels: `aria-roledescription="carousel"`, siblings as `group`/`tabpanel`, pager as the tablist; arrow-key support when the pager is focused.
 
 ## 13. Open questions

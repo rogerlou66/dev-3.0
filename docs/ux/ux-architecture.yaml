@@ -927,7 +927,7 @@ ux_architecture:
       toolbar_row: "wrap or sheet — NEVER a non-wrapping overflow row"
       touch_target: ">= 44x44px (many controls are 32px / p-0.5 — bump on narrow)"
     viewport_meta: "useViewport(): browser -> device-width (so a phone reports true width and media queries fire; replaces the old fixed width=1024). Keep the .browser-mode 16px input-font rule (prevents iOS focus-zoom). Honour env(safe-area-inset-*) (viewport already sets viewport-fit=cover)."
-    reusable_primitives: ["useNarrowViewport(px) reactive gate", "MobileBoardCarousel scroll-snap+pager (reference)", "TerminalView touch->mouse bridge (model for canvas surfaces)", "ExtraKeyBar vw-based sizing (mobile toolbars)", "prefersReducedMotion() (apply site-wide)", ".browser-mode CSS sentinel (env-specific styling)"]
+    reusable_primitives: ["useNarrowViewport(px) reactive gate", "MobileBoardCarousel scroll-snap+pager (reference)", "TerminalView touch->mouse bridge (model for canvas surfaces)", "ExtraKeyBar: default-collapse; 44px visible keys", "prefersReducedMotion() (apply site-wide)", ".browser-mode CSS sentinel (env-specific styling)"]
 
   anti_patterns:
     - id: "full-surface-swipe-over-terminal"
