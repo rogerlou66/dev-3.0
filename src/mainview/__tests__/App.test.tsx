@@ -1839,6 +1839,18 @@ describe("App keyboard shortcuts", () => {
 			});
 		});
 
+		it("stacks a burst behind the newest message and names each covered pair", async () => {
+			await renderWithBoard();
+			dispatchAgentMessage({ preview: "first" });
+			dispatchAgentMessage({ preview: "second", fromSeq: 9, fromTaskId: "t-other", fromVariantIndex: 2 });
+			dispatchAgentMessage({ preview: "third" });
+
+			expect(await screen.findByText("third")).toBeInTheDocument();
+			expect(document.querySelector("[data-toast-burst-count]")).toHaveTextContent("+2 earlier");
+			expect(screen.getByRole("alert")).toHaveTextContent("Earlier: #9-2 → #42 ×1, #7 → #42 ×1.");
+			expect(screen.getByRole("button", { name: "Dismiss 3 messages" })).toBeInTheDocument();
+		});
+
 		// The reported bug: the card opened agent traffic, and a toast raised over an
 		// artifact turned every stray click into a trip there. The card now opens the
 		// sender; traffic is only its own labelled action.
@@ -3482,6 +3494,52 @@ describe("App keyboard shortcuts", () => {
 			});
 			expect(screen.getByLabelText("Accessible from anywhere (Cloudflare Tunnel)", { selector: "input" })).not.toBeChecked();
 			expect(api.request.getRemoteAccessQR).toHaveBeenCalledWith({ tunnel: false });
+		});
+
+		it("unchecking the toggle while its own start request is in flight stops the tunnel", async () => {
+			await renderApp();
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,local",
+					accessUrl: "http://192.168.0.1:1234/?token=local",
+					tunnelState: "idle",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+				},
+			}));
+			// The start never answers within the test: the modal still holds the "idle" response.
+			// Once only — a lasting never-resolving mock would leak into later tests.
+			vi.mocked(api.request.getRemoteAccessQR).mockReturnValueOnce(new Promise(() => {}));
+
+			const toggle = await screen.findByLabelText("Accessible from anywhere (Cloudflare Tunnel)", { selector: "input" });
+			await userEvent.click(toggle);
+			expect(toggle).toBeChecked();
+			await userEvent.click(toggle);
+
+			await waitFor(() => expect(api.request.stopTunnel).toHaveBeenCalled());
+			expect(toggle).not.toBeChecked();
+		});
+
+		it("unchecking the toggle stops a tunnel that is still starting (or being retried)", async () => {
+			await renderApp();
+			window.dispatchEvent(new CustomEvent("rpc:showRemoteAccessQR", {
+				detail: {
+					qrDataUrl: "data:image/png;base64,local",
+					accessUrl: "http://192.168.0.1:1234/?token=local",
+					tunnelState: "starting",
+					tunnelBinaryInstalled: true,
+					tunnelProvider: "cloudflare" as const,
+					tunnelFailureReason: null,
+				},
+			}));
+
+			const toggle = await screen.findByLabelText("Accessible from anywhere (Cloudflare Tunnel)", { selector: "input" });
+			expect(toggle).toBeChecked();
+			await userEvent.click(toggle);
+
+			await waitFor(() => expect(api.request.stopTunnel).toHaveBeenCalled());
+			expect(toggle).not.toBeChecked();
 		});
 
 		it("resets consumed state when modal is reopened", async () => {

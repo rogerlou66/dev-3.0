@@ -9,13 +9,16 @@ import { getUserShell, resolveUserShell, setShellPreference } from "../shell-env
 import * as data from "../data";
 import * as agents from "../agents";
 import { resolveModelAvailability } from "../agent-available-models";
+import { getAgentDirLiveModels } from "../agent-dir-live-models";
+import { agentKey } from "../../shared/agent-adapters/registry";
+import type { AgentLiveModels } from "../../shared/agent-live-models";
 import * as github from "../github";
 import * as updater from "../updater";
 import * as rosetta from "../rosetta";
 import * as repoConfig from "../repo-config";
 import * as pty from "../pty-server";
 import { tmux } from "../tmux";
-import { setTmuxPaneDimming, writeTmuxConfigs } from "../tmux/config";
+import { setTmuxPaneDimming, setTmuxPaneTitles, writeTmuxConfigs } from "../tmux/config";
 import { loadSettings, saveSettings } from "../settings";
 import { toggleFavorite } from "../../shared/favorites";
 import { DEV3_HOME } from "../paths";
@@ -26,6 +29,7 @@ import { getCurrentUiTheme, setCurrentUiTheme } from "../theme-state";
 import { extractConfigFromParams, getPushMessage, getSystemRequirements, log, resolveBinaryPath, setFocusMode } from "./shared";
 import { binaryCandidatesOnPath, tmuxSearchPaths } from "./shared-pure";
 import { agentBinaryPathOverride, isExecutableFile } from "../executable";
+import { agentAlternativeInstallCommand, agentInstallCommand } from "../../shared/agent-install";
 import { harnessReadinessFrom } from "../harness-readiness";
 import { validateEnvMap } from "../../shared/env-text";
 import { normalizeProjectName, PROJECT_NAME_MAX_LENGTH, repoConfigEnabled } from "../../shared/types";
@@ -128,6 +132,9 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 		...(params.githubAuthHost !== undefined ? { githubAuthHost: params.githubAuthHost } : {}),
 		...(params.githubAuthLogin !== undefined ? { githubAuthLogin: params.githubAuthLogin } : {}),
 		...(params.sensitive !== undefined ? { sensitive: params.sensitive } : {}),
+		...(params.autoAccountExclusions !== undefined
+			? { autoAccountExclusions: normalizeAccountExclusions(params.autoAccountExclusions) }
+			: {}),
 		// A blank prompt is how the UI clears the override: dropped from the
 		// record so the global setting takes over again.
 		...(params.reviewModePrompt !== undefined
@@ -258,13 +265,20 @@ function getShellAvailability(): ShellAvailability {
  */
 async function applyTmuxConfigChange(
 	theme: "dark" | "light",
-	options: { refreshShell: boolean; dimInactivePanes: boolean; dimChanged: boolean; appearancePreset?: "default" | "cmux" },
+	options: { refreshShell: boolean; dimInactivePanes: boolean; dimChanged: boolean; paneTitles: boolean; titlesChanged: boolean; appearancePreset?: "default" | "cmux" },
 ): Promise<void> {
 	try {
 		if (options.refreshShell) process.env.SHELL = getUserShell();
 		setTmuxPaneDimming(options.dimInactivePanes);
+		setTmuxPaneTitles(options.paneTitles);
 		writeTmuxConfigs();
-		await pty.applyTmuxTheme(theme, { appearancePreset: options.appearancePreset ?? "default", ...(options.dimChanged ? { paneDimming: options.dimInactivePanes } : {}) });
+		// Only a real toggle overrides the server-wide choice; a shell change must
+		// not undo a dimming or title choice another dev3 instance made since.
+		await pty.applyTmuxTheme(theme, {
+			appearancePreset: options.appearancePreset ?? "default",
+			...(options.dimChanged ? { paneDimming: options.dimInactivePanes } : {}),
+			...(options.titlesChanged ? { paneTitles: options.paneTitles } : {}),
+		});
 	} catch (err) {
 		log.warn("Failed to push the settings change into tmux (non-fatal)", { error: String(err) });
 	}
@@ -297,6 +311,8 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 		theme: stored.theme,
 		resolvedTheme: stored.resolvedTheme,
 		analyticsDistinctId: stored.analyticsDistinctId ?? params.analyticsDistinctId,
+		// Written only by the account surfaces' Auto row, after the snapshot was taken.
+		autoAccountDefault: stored.autoAccountDefault,
 	};
 	if (next.appearancePreset === "cmux") next.resolvedTheme = "dark";
 	await saveSettings(next);
@@ -336,12 +352,15 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	}
 	const shellChanged = stored.terminalShell !== next.terminalShell;
 	const dimChanged = (stored.dimInactivePanes !== false) !== (next.dimInactivePanes !== false);
-	if (process.platform !== "win32" && (shellChanged || dimChanged)) {
+	const titlesChanged = (stored.paneTitles === true) !== (next.paneTitles === true);
+	if (process.platform !== "win32" && (shellChanged || dimChanged || titlesChanged)) {
 		await applyTmuxConfigChange(next.appearancePreset === "cmux" ? "dark" : next.resolvedTheme ?? getCurrentUiTheme(), {
 			refreshShell: shellChanged,
 			dimInactivePanes: next.dimInactivePanes !== false,
 			appearancePreset: next.appearancePreset,
 			dimChanged,
+			paneTitles: next.paneTitles === true,
+			titlesChanged,
 		});
 	}
 	getPushMessage()?.("globalSettingsUpdated", next);
@@ -428,6 +447,18 @@ async function getAgentAvailableModels(params: {
 	const agent = all.find((a) => a.id === params.agentId);
 	if (!agent) return { status: "unknown" };
 	return resolveModelAvailability(agent, { accountId: params.accountId, refresh: params.refresh });
+}
+
+async function getAgentLiveModels(params: {
+	agentId: string;
+	accountId?: string | null;
+	refresh?: boolean;
+}): Promise<AgentLiveModels> {
+	const all = await agents.getAllAgents();
+	const agent = all.find((a) => a.id === params.agentId);
+	const kind = agent ? agentKey(agent.baseCommand, agent.agentFamily) : null;
+	if (kind !== "omp" && kind !== "pi") return { status: "unknown" };
+	return getAgentDirLiveModels(kind, params.accountId, { refresh: params.refresh });
 }
 
 async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: string; error?: string }> {
@@ -671,7 +702,8 @@ async function checkAgentAvailability(): Promise<AgentCheckResult[]> {
 			baseCommand: agent.baseCommand,
 			installed: !!resolvedPath,
 			resolvedPath,
-			installCommand: agent.installCommand,
+			installCommand: agentInstallCommand(agent, process.platform),
+			alternativeInstallCommand: agentAlternativeInstallCommand(agent, process.platform),
 			installUrl: agent.installUrl,
 			customPathError,
 		};
@@ -758,6 +790,7 @@ export const settingsConfigHandlers = {
 	getAgents,
 	saveAgents,
 	getAgentAvailableModels,
+	getAgentLiveModels,
 	checkForUpdate,
 	downloadUpdate,
 	applyUpdate,
@@ -774,3 +807,9 @@ export const settingsConfigHandlers = {
 	setAgentBinaryPath,
 	setTmuxTheme,
 };
+
+function normalizeAccountExclusions(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const ids = [...new Set(raw.filter((v): v is string => typeof v === "string" && v.length > 0))];
+	return ids.length ? ids : undefined;
+}

@@ -2,11 +2,13 @@ import { useState, useEffect, useRef, type Dispatch } from "react";
 import type { AgentCheckResult, CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
 import { getTaskTitle } from "../../shared/types";
 import { launchFailureHintKey } from "../../shared/launch-failure";
+import { isAgentNotInstalledError } from "../../shared/agent-install";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { useToggleFavorite } from "../hooks/useToggleFavorite";
 import type { AppAction } from "../state";
 import { api } from "../rpc";
 import { useT } from "../i18n";
+import { useDialogKeyboardGuard } from "../utils/dialog-keyboard-guard";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import { useReducedMotion } from "../utils/useReducedMotion";
 import HelpSpot from "./HelpSpot";
@@ -19,6 +21,9 @@ import AgentConfigPicker, {
 import SchedulePicker from "./SchedulePicker";
 import MemoryPressureBanner from "./MemoryPressureBanner";
 import { SendLaterIcon, WatchIcon, WatchingIcon } from "./TaskIcons";
+import AgentInstallNotice, { findMissingVariantAgent, type AgentCheckState } from "./AgentInstallNotice";
+
+const AGENT_NOTICE_ID = "launch-agent-install-notice";
 
 interface VariantRow {
 	agentId: string | null;
@@ -106,6 +111,8 @@ function LaunchVariantsModal({
 	const [launching, setLaunching] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [agentAvailability, setAgentAvailability] = useState<AgentCheckResult[]>([]);
+	const [agentCheckState, setAgentCheckState] = useState<AgentCheckState>("checking");
+	const [installedNow, setInstalledNow] = useState<string | null>(null);
 	// A freshly created task has no explicit `watched` flag → fall back to the
 	// remembered preference; an existing task with an explicit value keeps it.
 	const [watched, setWatched] = useState(task.watched ?? globalSettings.watchByDefault ?? false);
@@ -115,14 +122,37 @@ function LaunchVariantsModal({
 	const reducedMotion = useReducedMotion();
 	const errorRef = useRef<HTMLDivElement>(null);
 
+	// Asked of the bun process, i.e. the machine that will run the agent — in
+	// remote mode that is the host, never the browser's machine.
+	function recheckAgents() {
+		const missingBefore = findMissingVariantAgent(variants, agents, agentAvailability)?.agent.name ?? null;
+		setAgentCheckState("checking");
+		setInstalledNow(null);
+		api.request.checkAgentAvailability()
+			.then((next) => {
+				setAgentAvailability(next);
+				setAgentCheckState("ready");
+				if (findMissingVariantAgent(variants, agents, next)) return;
+				if (missingBefore) setInstalledNow(missingBefore);
+				// A refusal the host sent for a harness that is now present is history.
+				setError((prev) => (isAgentNotInstalledError(prev) ? null : prev));
+			})
+			.catch(() => setAgentCheckState("unknown"));
+	}
+
 	useEffect(() => {
-		api.request.checkAgentAvailability().then(setAgentAvailability).catch(() => {});
+		recheckAgents();
+	// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
+
+	const missingAgent = findMissingVariantAgent(variants, agents, agentAvailability);
 
 	// Keep Tab/Shift+Tab inside the dialog — otherwise focus escapes to the
 	// Kanban board behind the modal (labels, task cards), letting the user
 	// operate hidden UI.
 	const trapRef = useFocusTrap<HTMLDivElement>();
+	// A held Enter from the gesture that opened this must not launch agents.
+	useDialogKeyboardGuard(trapRef);
 
 	useEscapeKey(onClose);
 	// Enter → the dialog's CURRENT default action. With the Schedule panel open the
@@ -150,7 +180,8 @@ function LaunchVariantsModal({
 		window.addEventListener("keydown", handleKey);
 		return () => window.removeEventListener("keydown", handleKey);
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [launching, variants, scheduleOpen, scheduleTarget]);
+	// agentAvailability: the handler's missing-harness guard must see the probe's answer.
+	}, [launching, variants, scheduleOpen, scheduleTarget, agentAvailability]);
 
 	function addVariant() {
 		setVariants((prev) => [...prev, makeDefaultVariant()]);
@@ -189,6 +220,7 @@ function LaunchVariantsModal({
 	}
 
 	async function handleLaunch() {
+		if (missingAgent) return;
 		setLaunching(true);
 		setError(null);
 		try {
@@ -214,6 +246,8 @@ function LaunchVariantsModal({
 			onClose();
 		} catch (err) {
 			setError(String(err));
+			// The host refused: the picker's view was stale, so refresh it.
+			if (isAgentNotInstalledError(String(err))) recheckAgents();
 		}
 		setLaunching(false);
 	}
@@ -223,7 +257,7 @@ function LaunchVariantsModal({
 	// variants captured here when the moment arrives. The in/at picker + its pure
 	// time resolution live in the shared SchedulePicker (also used by "Send later").
 	async function handleSchedule() {
-		if (!scheduleTarget) return;
+		if (!scheduleTarget || missingAgent) return;
 		setLaunching(true);
 		setError(null);
 		try {
@@ -239,6 +273,8 @@ function LaunchVariantsModal({
 			onClose();
 		} catch (err) {
 			setError(String(err));
+			// The host refused: the picker's view was stale, so refresh it.
+			if (isAgentNotInstalledError(String(err))) recheckAgents();
 		}
 		setLaunching(false);
 	}
@@ -259,7 +295,11 @@ function LaunchVariantsModal({
 	const pressClass = reducedMotion ? "transition-colors" : "transition active:scale-[0.96]";
 	// The two disabled meanings must not look the same: "nothing to launch yet"
 	// greys the button out, while an in-flight launch keeps full colour + spinner.
-	const notReady = scheduleOpen ? !scheduleTarget || variants.length === 0 : variants.length === 0;
+	const notReady = !!missingAgent || (scheduleOpen ? !scheduleTarget || variants.length === 0 : variants.length === 0);
+	// Missing harness keeps the button focusable (aria-disabled) so the reason is announced.
+	const blockedProps = missingAgent
+		? { "aria-disabled": true as const, "aria-describedby": AGENT_NOTICE_ID }
+		: {};
 	const primaryClass = `text-sm font-medium px-5 py-2 rounded-xl flex items-center gap-2 border ${pressClass} ${
 		notReady
 			? "bg-elevated text-fg-muted border-edge cursor-not-allowed"
@@ -409,6 +449,19 @@ function LaunchVariantsModal({
 							</div>
 						))}
 					</div>
+					{/* A wrapper that is always in the box tree: when the fieldset gains or loses
+					    a child here (`empty:hidden`, or a bare insert), Chromium leaves the variant
+					    pickers above laid out at 0×0 and the row renders blank. */}
+					<div>
+						<AgentInstallNotice
+							id={AGENT_NOTICE_ID}
+							className="mt-3"
+							state={agentCheckState}
+							missing={missingAgent}
+							installedNow={installedNow}
+							onRecheck={recheckAgents}
+						/>
+					</div>
 				</fieldset>
 
 				{/* Error */}
@@ -474,7 +527,8 @@ function LaunchVariantsModal({
 						{scheduleOpen ? (
 							<button
 								onClick={handleSchedule}
-								disabled={launching || notReady}
+								disabled={launching || (notReady && !missingAgent)}
+								{...blockedProps}
 								className={primaryClass}
 							>
 								{spinner}
@@ -483,7 +537,8 @@ function LaunchVariantsModal({
 						) : (
 							<button
 								onClick={handleLaunch}
-								disabled={launching || notReady}
+								disabled={launching || (notReady && !missingAgent)}
+								{...blockedProps}
 								className={primaryClass}
 							>
 								{spinner}

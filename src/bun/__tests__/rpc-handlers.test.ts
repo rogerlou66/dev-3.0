@@ -81,6 +81,12 @@ vi.mock("../data", () => ({
 	saveLastRoute: vi.fn(),
 }));
 
+vi.mock("../git-init-in-place", () => ({
+	IGNORED_FOLDER_JUNK: new Set([".DS_Store", "Thumbs.db", ".localized"]),
+	probeGitInit: vi.fn(async () => null),
+	initGitInPlace: vi.fn(),
+}));
+
 vi.mock("../git", () => ({
 	removeWorktree: vi.fn(),
 	// A fresh fixture folder: the failure judge clears it.
@@ -91,6 +97,8 @@ vi.mock("../git", () => ({
 	getDefaultBranch: vi.fn(),
 	fetchOrigin: vi.fn().mockResolvedValue(true),
 	fetchCompareRef: vi.fn().mockResolvedValue(true),
+	fetchOriginBranches: vi.fn().mockResolvedValue(true),
+	forkRemoteOf: vi.fn().mockResolvedValue(null),
 	fetchFork: vi.fn().mockResolvedValue(true),
 	listRemotes: vi.fn().mockResolvedValue(["origin"]),
 	hasOriginRemote: vi.fn().mockResolvedValue(true),
@@ -223,6 +231,23 @@ vi.mock("../agent-prompt-native", () => ({
 }));
 
 vi.mock("../codex-task-selection", () => ({ chooseTaskCodexConversations: vi.fn(async () => new Map()) }));
+
+// Unit-tested on its own; here only its place in each handler matters.
+vi.mock("../agent-launch-availability", () => ({
+	assertLaunchAgentsInstalled: vi.fn(async () => undefined),
+	routableLaunchKind: vi.fn(async () => null),
+	resolveAgentLaunchBinary: vi.fn(() => ({ binaryName: "claude", resolvedPath: "/usr/local/bin/claude" })),
+	AgentNotInstalledError: class extends Error {},
+}));
+
+// Routing is unit-tested on its own (account-router.test.ts); here only the
+// handlers' use of it matters.
+vi.mock("../account-router", () => ({
+	autoLaunchDeferral: vi.fn(async () => null),
+	autoRoutingContext: vi.fn(async () => ({ exclusions: [], claudeConfigPinned: false, reservationKey: "k" })),
+	releaseAccountReservation: vi.fn(),
+	previewAutoAccount: vi.fn(async () => null),
+}));
 
 vi.mock("../agents", () => ({
 	ensureClaudeTrust: vi.fn(),
@@ -401,14 +426,17 @@ import { getUserShell } from "../shell-env";
 import { tmux } from "../tmux";
 import * as systemClipboard from "../system-clipboard";
 import * as agents from "../agents";
+import * as launchAvailability from "../agent-launch-availability";
+import * as accountRouter from "../account-router";
 import * as workspaceGuard from "../task-workspace-guard";
 import * as updater from "../updater";
 import { setupAgentHooks } from "../agent-hooks";
 import { loadSettings, loadSettingsSync, saveSettings } from "../settings";
 import * as repoConfig from "../repo-config";
 import * as cowClone from "../cow-clone";
+import * as gitInit from "../git-init-in-place";
 import { Utils } from "electrobun/bun";
-import { accessSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { claudeEncodePath } from "../../shared/conversation-search-core";
 import {
 	createTaskPreparation,
@@ -1702,13 +1730,37 @@ describe("handlers.setTaskHidden", () => {
 // ================================================================
 
 describe("handlers.addProject", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(null);
+	});
 
 	it("returns error when path is not a git repo", async () => {
 		vi.mocked(git.isGitRepo).mockResolvedValue(false);
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(null);
 
 		const result = await handlers.addProject({ path: "/tmp/not-a-repo", name: "Test" });
 		expect(result).toEqual({ ok: false, error: "Selected folder is not a git repository" });
+		expect(data.addProject).not.toHaveBeenCalled();
+	});
+
+	it("offers to initialize git when the plain folder allows it", async () => {
+		const offer = { path: "/tmp/plain", mode: "init" as const, placeholder: "create" as const, existingEntries: 3 };
+		vi.mocked(git.isGitRepo).mockResolvedValue(false);
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(offer);
+
+		const result = await handlers.addProject({ path: "/tmp/plain" });
+		expect(result).toEqual({ ok: false, error: "Selected folder is not a git repository", gitInit: offer });
+		expect(data.addProject).not.toHaveBeenCalled();
+	});
+
+	it("offers a first commit instead of registering a repo without one", async () => {
+		const offer = { path: "/tmp/unborn", mode: "first-commit" as const, placeholder: "create" as const, existingEntries: 1 };
+		vi.mocked(git.isGitRepo).mockResolvedValue(true);
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(offer);
+
+		const result = await handlers.addProject({ path: "/tmp/unborn" });
+		expect(result).toEqual({ ok: false, error: "This Git repository has no commits yet", gitInit: offer });
 		expect(data.addProject).not.toHaveBeenCalled();
 	});
 
@@ -1820,7 +1872,10 @@ describe("handlers.addVirtualProject", () => {
 // ================================================================
 
 describe("handlers.cloneAndAddProject", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(null);
+	});
 
 	it("clones repo and adds as project on success", async () => {
 		const project = makeProject({ path: "/base/my-repo", name: "my-repo" });
@@ -1941,6 +1996,20 @@ describe("handlers.cloneAndAddProject", () => {
 			error: "Directory already exists: /base/my-repo",
 		});
 	});
+
+	// A URL pasted into "Repository name" once cloned to `<base>/https://host/group/repo`.
+	it("refuses a URL or a path as the repository folder name, touching nothing", async () => {
+		for (const repoName of ["https://gitlab.example.com/group/notes-app", "group/notes-app", ".."]) {
+			const result = await handlers.cloneAndAddProject({
+				url: "https://gitlab.example.com/group/notes-app.git",
+				baseDir: "/base",
+				repoName,
+			});
+			expect(result.ok).toBe(false);
+		}
+		expect(git.cloneRepo).not.toHaveBeenCalled();
+		expect(data.addProject).not.toHaveBeenCalled();
+	});
 });
 
 // ================================================================
@@ -1995,98 +2064,82 @@ describe("handlers.createDirectory", () => {
 // ================================================================
 
 describe("handlers.initAndAddProject", () => {
+	const offer = { path: "/tmp/messy", mode: "init" as const, placeholder: "create" as const, existingEntries: 2 };
+
 	beforeEach(() => {
 		vi.clearAllMocks();
 		// Default: path exists and is a directory.
 		vi.mocked(existsSync).mockReturnValue(true);
 		vi.mocked(statSync).mockReturnValue({ isDirectory: () => true, size: 0 } as any);
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(null);
 	});
 
-	it("passes through to addProject when the folder is already a git repo", async () => {
-		const project = makeProject();
+	function registerSucceeds(project: Project) {
 		vi.mocked(git.isGitRepo).mockResolvedValue(true);
 		vi.mocked(data.addProject).mockResolvedValue(project);
 		vi.mocked(git.getDefaultBranch).mockResolvedValue("main");
 		vi.mocked(data.updateProject).mockResolvedValue(project);
+	}
+
+	it("passes through to addProject when the folder is already a git repo", async () => {
+		const project = makeProject();
+		registerSucceeds(project);
 
 		const result = await handlers.initAndAddProject({ path: "/tmp/existing-repo", name: "Existing" });
 		expect(result).toEqual({ ok: true, project });
-		// Did not run git init on an existing repo.
-		expect(git.run).not.toHaveBeenCalledWith(["git", "init"], expect.anything());
+		expect(gitInit.initGitInPlace).not.toHaveBeenCalled();
 	});
 
-	it("runs git init + commit + addProject when folder is empty", async () => {
+	it("initializes an empty folder without asking", async () => {
 		const project = makeProject({ path: "/tmp/fresh" });
-		// First call (inside initAndAddProject): not a repo yet → trigger init.
-		// Second call (inside addProjectImpl after init ran): now it IS a repo.
-		vi.mocked(git.isGitRepo).mockResolvedValueOnce(false).mockResolvedValue(true);
-		vi.mocked(readdirSync).mockReturnValue([] as any);
-		vi.mocked(git.run).mockResolvedValue({ ok: true, stdout: "", stderr: "" });
-		vi.mocked(data.addProject).mockResolvedValue(project);
-		vi.mocked(git.getDefaultBranch).mockResolvedValue("main");
-		vi.mocked(data.updateProject).mockResolvedValue(project);
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue({ ...offer, path: "/tmp/fresh", existingEntries: 0 });
+		vi.mocked(readdirSync).mockReturnValue([".DS_Store"] as any);
+		vi.mocked(gitInit.initGitInPlace).mockResolvedValue({ ok: true, offer: { ...offer, path: "/tmp/fresh" } });
+		registerSucceeds(project);
 
 		const result = await handlers.initAndAddProject({ path: "/tmp/fresh", name: "Fresh" });
 		expect(result).toEqual({ ok: true, project });
-
-		// Verify the init sequence happened in the right order.
-		expect(git.run).toHaveBeenCalledWith(["git", "init"], "/tmp/fresh");
-		expect(git.run).toHaveBeenCalledWith(["git", "add", "."], "/tmp/fresh");
-		expect(git.run).toHaveBeenCalledWith(["git", "commit", "-m", "init"], "/tmp/fresh");
-		// Placeholder file materialised under .dev3/.
-		expect(mkdirSync).toHaveBeenCalledWith(expect.stringContaining("/tmp/fresh/.dev3"), expect.anything());
-		expect(writeFileSync).toHaveBeenCalledWith(
-			expect.stringContaining("/tmp/fresh/.dev3/README.md"),
-			expect.any(String),
-			"utf8",
-		);
+		expect(gitInit.initGitInPlace).toHaveBeenCalledWith("/tmp/fresh");
 		expect(data.addProject).toHaveBeenCalledWith("/tmp/fresh", "Fresh");
 	});
 
-	it("treats .DS_Store as empty", async () => {
-		const project = makeProject({ path: "/tmp/fresh" });
-		vi.mocked(git.isGitRepo).mockResolvedValueOnce(false).mockResolvedValue(true);
-		vi.mocked(readdirSync).mockReturnValue([".DS_Store"] as any);
-		vi.mocked(git.run).mockResolvedValue({ ok: true, stdout: "", stderr: "" });
-		vi.mocked(data.addProject).mockResolvedValue(project);
-		vi.mocked(git.getDefaultBranch).mockResolvedValue("main");
-		vi.mocked(data.updateProject).mockResolvedValue(project);
-
-		const result = await handlers.initAndAddProject({ path: "/tmp/fresh", name: "Fresh" });
-		expect(result).toEqual({ ok: true, project });
-	});
-
-	it("refuses a non-empty folder that is not a git repo", async () => {
-		vi.mocked(git.isGitRepo).mockResolvedValue(false);
+	it("asks before touching a non-empty folder, returning what would happen", async () => {
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(offer);
 		vi.mocked(readdirSync).mockReturnValue(["src", "package.json"] as any);
 
 		const result = await handlers.initAndAddProject({ path: "/tmp/messy", name: "Messy" });
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error).toMatch(/not empty/i);
-		expect(git.run).not.toHaveBeenCalled();
+		expect(result).toEqual({ ok: false, error: expect.stringMatching(/not empty/i), gitInit: offer });
+		expect(gitInit.initGitInPlace).not.toHaveBeenCalled();
+		expect(data.addProject).not.toHaveBeenCalled();
 	});
 
-	it("surfaces a git init failure", async () => {
-		vi.mocked(git.isGitRepo).mockResolvedValue(false);
-		vi.mocked(readdirSync).mockReturnValue([] as any);
-		vi.mocked(git.run).mockResolvedValueOnce({ ok: false, stdout: "", stderr: "git not found" });
+	it("initializes a non-empty folder once the user confirmed", async () => {
+		const project = makeProject({ path: "/tmp/messy" });
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(offer);
+		vi.mocked(readdirSync).mockReturnValue(["src", "package.json"] as any);
+		vi.mocked(gitInit.initGitInPlace).mockResolvedValue({ ok: true, offer });
+		registerSucceeds(project);
 
-		const result = await handlers.initAndAddProject({ path: "/tmp/fresh", name: "Fresh" });
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error).toMatch(/git init failed/i);
+		const result = await handlers.initAndAddProject({ path: "/tmp/messy", name: "Messy", initNonEmpty: true });
+		expect(result).toEqual({ ok: true, project, gitInit: offer });
 	});
 
-	it("surfaces a git commit failure (e.g. missing user.email)", async () => {
-		vi.mocked(git.isGitRepo).mockResolvedValue(false);
-		vi.mocked(readdirSync).mockReturnValue([] as any);
-		vi.mocked(git.run)
-			.mockResolvedValueOnce({ ok: true, stdout: "", stderr: "" })  // git init
-			.mockResolvedValueOnce({ ok: true, stdout: "", stderr: "" })  // git add
-			.mockResolvedValueOnce({ ok: false, stdout: "", stderr: "Please tell me who you are" }); // git commit
+	it("surfaces an initialization failure and registers nothing", async () => {
+		vi.mocked(gitInit.probeGitInit).mockResolvedValue(offer);
+		vi.mocked(readdirSync).mockReturnValue(["src"] as any);
+		vi.mocked(gitInit.initGitInPlace).mockResolvedValue({ ok: false, error: "git init failed: Permission denied" });
 
-		const result = await handlers.initAndAddProject({ path: "/tmp/fresh", name: "Fresh" });
+		const result = await handlers.initAndAddProject({ path: "/tmp/messy", initNonEmpty: true });
+		expect(result).toEqual({ ok: false, error: "git init failed: Permission denied" });
+		expect(data.addProject).not.toHaveBeenCalled();
+	});
+
+	it("refuses a folder git cannot vouch for", async () => {
+		vi.mocked(git.isGitRepo).mockResolvedValue(false);
+
+		const result = await handlers.initAndAddProject({ path: "/tmp/odd", initNonEmpty: true });
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error).toMatch(/git commit failed/i);
+		expect(gitInit.initGitInPlace).not.toHaveBeenCalled();
 	});
 
 	it("rejects a path that does not exist", async () => {
@@ -2186,6 +2239,18 @@ describe("handlers.saveGlobalSettings", () => {
 		expect(saveSettings).toHaveBeenCalledWith(
 			expect.objectContaining({ updateChannel: "beta", analyticsDistinctId: "legacy-analytics-id" }),
 		);
+	});
+
+	// The Auto default is set from the account surfaces, never from this snapshot;
+	// trusting the payload switched Auto off (or back on) on the next unrelated save.
+	it("keeps the stored Auto account default whatever the renderer's snapshot says", async () => {
+		vi.mocked(loadSettings).mockResolvedValue({ autoAccountDefault: { claude: true } } as GlobalSettings);
+		await handlers.saveGlobalSettings({ updateChannel: "beta" } as unknown as GlobalSettings);
+		expect(vi.mocked(saveSettings).mock.lastCall?.[0].autoAccountDefault).toEqual({ claude: true });
+
+		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
+		await handlers.saveGlobalSettings({ autoAccountDefault: { codex: true } } as unknown as GlobalSettings);
+		expect(vi.mocked(saveSettings).mock.lastCall?.[0].autoAccountDefault).toBeUndefined();
 	});
 
 	// The switch has to reach the collector in this session: a diagnostic that
@@ -3057,6 +3122,20 @@ describe("handlers.moveTask", () => {
 		emitTaskSound("completed", "task-1");
 
 		expect(push).toHaveBeenCalledWith("taskSound", { status: "completed", taskId: "task-1" });
+	});
+
+	it("emitTaskSound: gates the needs-you chime on its own opt-in setting", () => {
+		const push = vi.fn();
+		setPushMessage(push);
+
+		vi.mocked(loadSettingsSync).mockReturnValue({ playSoundOnTaskComplete: true } as any);
+		emitTaskSound("review-by-user", "task-3");
+		expect(push).not.toHaveBeenCalled();
+
+		vi.mocked(loadSettingsSync).mockReturnValue({ playSoundOnTaskComplete: false, playSoundOnTaskNeedsYou: true } as any);
+		emitTaskSound("user-questions", "task-3");
+		emitTaskSound("completed", "task-3");
+		expect(push.mock.calls).toEqual([["taskSound", { status: "user-questions", taskId: "task-3" }]]);
 	});
 
 	it("emitTaskSound: stays silent when the setting is disabled", () => {
@@ -4133,6 +4212,52 @@ describe("handlers.spawnVariants", () => {
 		expect(result[0].agentId).toBe("agent-1");
 		expect(data.deleteTask).not.toHaveBeenCalled();
 		expect(data.addTask).not.toHaveBeenCalled();
+	});
+
+	it("defers an Auto launch with no free subscription account to the earliest reset", async () => {
+		const project = makeProject();
+		const sourceTask = makeTask({ status: "todo", seq: 5, worktreePath: null, branchName: null });
+		const resetAt = Date.now() + 2 * 60 * 60 * 1000;
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(sourceTask);
+		vi.mocked(launchAvailability.routableLaunchKind).mockResolvedValueOnce("claude");
+		vi.mocked(accountRouter.autoLaunchDeferral).mockResolvedValueOnce(resetAt);
+		vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...sourceTask, ...updates }) as never);
+
+		const variants = [{ agentId: "agent-1", configId: null, accountId: "auto" }];
+		const result = await handlers.spawnVariants({ taskId: "task-1", projectId: "proj-1", targetStatus: "in-progress", variants });
+
+		expect(result).toHaveLength(1);
+		expect(result[0].status).toBe("todo");
+		expect(data.updateTask).toHaveBeenCalledWith(project, "task-1", {
+			scheduledLaunch: { at: new Date(resetAt).toISOString(), targetStatus: "in-progress", variants },
+		});
+		expect(git.createWorktree).not.toHaveBeenCalled();
+	});
+
+	// A harness the host cannot find must refuse the launch with the To Do card
+	// untouched — not move it to "Agent is Working" over a pane that cannot start.
+	it("refuses a launch whose harness binary is missing, before anything moves", async () => {
+		const project = makeProject();
+		const sourceTask = makeTask({ status: "todo", seq: 5, worktreePath: null, branchName: null });
+		vi.mocked(data.getProject).mockResolvedValue(project);
+		vi.mocked(data.getTask).mockResolvedValue(sourceTask);
+		vi.mocked(launchAvailability.assertLaunchAgentsInstalled).mockRejectedValueOnce(
+			new Error("Ghost Harness is not installed on the machine running dev3"),
+		);
+
+		await expect(handlers.spawnVariants({
+			taskId: "task-1",
+			projectId: "proj-1",
+			targetStatus: "in-progress",
+			variants: [{ agentId: "agent-missing", configId: null }],
+		})).rejects.toThrow("Ghost Harness is not installed on the machine running dev3");
+
+		expect(launchAvailability.assertLaunchAgentsInstalled).toHaveBeenCalledWith([{ agentId: "agent-missing", configId: null }]);
+		expect(data.updateTaskWith).not.toHaveBeenCalled();
+		expect(data.updateTask).not.toHaveBeenCalled();
+		expect(data.addTask).not.toHaveBeenCalled();
+		expect(git.createWorktree).not.toHaveBeenCalled();
 	});
 
 	// A scratch task launches with no prompt — "Agent is Working" would be a lie.
@@ -5604,7 +5729,7 @@ describe("handlers.getTaskDiff base branch resolution", () => {
 		await handlers.getTaskDiff({ taskId: task.id, projectId: project.id, mode: "branch" });
 
 		// Fetch and diff against the real base — never the branch compared to itself.
-		expect(git.fetchCompareRef).toHaveBeenCalledWith(project.path, "main");
+		expect(git.fetchCompareRef).toHaveBeenCalledWith(project.path, "main", undefined, { priority: true });
 		expect(git.getTaskDiff).toHaveBeenCalledWith(
 			"/tmp/wt",
 			"branch",
@@ -6043,7 +6168,8 @@ describe("handlers.getBranchStatus", () => {
 
 			await handlers.getBranchStatus({ taskId: "task-1", projectId: "proj-1" });
 
-			expect(git.refExists).not.toHaveBeenCalled();
+			// Only the fetch helper's origin/<branch> probe; nothing about the base.
+			expect(git.refExists).not.toHaveBeenCalledWith(expect.anything(), "main");
 			expect(git.isRefMergedInto).not.toHaveBeenCalled();
 		});
 	});
@@ -6071,6 +6197,131 @@ describe("handlers.getBranchStatus", () => {
 
 		expect(git.getBranchStatus).toHaveBeenCalledWith("/tmp/wt", "origin/main");
 		expect(git.getBranchDiffStats).toHaveBeenCalledWith("/tmp/wt", "origin/main");
+	});
+
+	describe("remote fetch is off the poll path", () => {
+		afterEach(() => {
+			vi.mocked(git.refExists).mockResolvedValue(true);
+			vi.mocked(git.forkRemoteOf).mockResolvedValue(null);
+		});
+
+		function setup(opts: { pushed?: boolean } = {}) {
+			const project = makeProject({ defaultBaseBranch: "main" });
+			const task = makeTask({ worktreePath: "/tmp/wt", branchName: "dev3/t", baseBranch: "main" });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.getTask).mockResolvedValue(task);
+			vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/t");
+			vi.mocked(git.hasOriginRemote).mockResolvedValue(true);
+			vi.mocked(git.forkRemoteOf).mockResolvedValue(null);
+			vi.mocked(git.fetchOriginBranches).mockResolvedValue(true);
+			vi.mocked(git.refExists).mockImplementation(async (_p: string, ref: string) =>
+				ref === "origin/dev3/t" ? (opts.pushed ?? true) : true);
+			vi.mocked(git.getBranchStatus).mockResolvedValue({ ahead: 0, behind: 2, baseUnreachable: false });
+			vi.mocked(git.getUncommittedChanges).mockResolvedValue({ insertions: 0, deletions: 0 });
+			vi.mocked(git.getUnpreservedCount).mockResolvedValue(0);
+			vi.mocked(git.getBranchDiffStats).mockResolvedValue({ files: 0, insertions: 0, deletions: 0, fileStats: [] });
+			return { project, task };
+		}
+
+		it("the poll answers from local refs without waiting for a hung fetch", async () => {
+			const { project, task } = setup();
+			vi.mocked(git.fetchOriginBranches).mockReturnValue(new Promise<boolean>(() => {}));
+
+			const result = await handlers.getBranchStatus({ taskId: task.id, projectId: project.id });
+
+			expect(result.behind).toBe(2);
+			await vi.waitFor(() => expect(git.fetchOriginBranches).toHaveBeenCalled());
+		});
+
+		it("the poll swallows a failing background fetch", async () => {
+			const { project, task } = setup();
+			vi.mocked(git.fetchOriginBranches).mockRejectedValue(new Error("network down"));
+
+			await expect(handlers.getBranchStatus({ taskId: task.id, projectId: project.id })).resolves.toMatchObject({ behind: 2 });
+		});
+
+		it("fetches base and a pushed task branch in one priority call", async () => {
+			const { project, task } = setup({ pushed: true });
+
+			await handlers.getBranchStatus({ taskId: task.id, projectId: project.id, refresh: true });
+
+			expect(git.fetchOriginBranches).toHaveBeenCalledTimes(1);
+			expect(git.fetchOriginBranches).toHaveBeenCalledWith(
+				project.path, ["main", "dev3/t"], undefined, { force: true, priority: true },
+			);
+			expect(git.fetchCompareRef).not.toHaveBeenCalled();
+		});
+
+		it("does not fetch a task branch that was never pushed", async () => {
+			const { project, task } = setup({ pushed: false });
+
+			await handlers.getBranchStatus({ taskId: task.id, projectId: project.id, refresh: true });
+
+			expect(git.fetchOriginBranches).toHaveBeenCalledWith(
+				project.path, ["main"], undefined, { force: true, priority: true },
+			);
+		});
+
+		it("the poll passes force false with priority", async () => {
+			const { project, task } = setup();
+
+			await handlers.getBranchStatus({ taskId: task.id, projectId: project.id });
+
+			await vi.waitFor(() => expect(git.fetchOriginBranches).toHaveBeenCalledWith(
+				project.path, ["main", "dev3/t"], undefined, { force: false, priority: true },
+			));
+		});
+
+		it("a fork base keeps its own fetchCompareRef call", async () => {
+			const { project, task } = setup();
+			vi.mocked(data.getTask).mockResolvedValue({ ...task, baseBranch: "arditti/feat/x" });
+			vi.mocked(git.forkRemoteOf).mockResolvedValue("arditti");
+
+			await handlers.getBranchStatus({ taskId: task.id, projectId: project.id, refresh: true });
+
+			expect(git.fetchCompareRef).toHaveBeenCalledWith(
+				project.path, "arditti/feat/x", undefined, { force: true, priority: true },
+			);
+			expect(git.fetchOriginBranches).toHaveBeenCalledWith(
+				project.path, ["dev3/t"], undefined, { force: true, priority: true },
+			);
+		});
+
+		it("a refresh waits for the fetch before answering", async () => {
+			const { project, task } = setup();
+			let release: (ok: boolean) => void = () => {};
+			vi.mocked(git.fetchOriginBranches).mockImplementation(() => new Promise<boolean>((resolve) => { release = resolve; }));
+
+			let settled = false;
+			const pending = handlers.getBranchStatus({ taskId: task.id, projectId: project.id, refresh: true })
+				.then(() => { settled = true; });
+			await new Promise((r) => setTimeout(r, 20));
+			expect(settled).toBe(false);
+
+			release(true);
+			await pending;
+			expect(settled).toBe(true);
+		});
+
+		it("a refresh does not reuse an in-flight poll", async () => {
+			const { project, task } = setup();
+			let releasePoll: () => void = () => {};
+			vi.mocked(git.getBranchStatus).mockImplementationOnce(
+				() => new Promise((resolve) => {
+					releasePoll = () => resolve({ ahead: 0, behind: 2, baseUnreachable: false });
+				}),
+			);
+
+			const poll = handlers.getBranchStatus({ taskId: task.id, projectId: project.id });
+			await new Promise((r) => setTimeout(r, 20));
+			await handlers.getBranchStatus({ taskId: task.id, projectId: project.id, refresh: true });
+
+			expect(git.fetchOriginBranches).toHaveBeenCalledWith(
+				project.path, expect.any(Array), undefined, { force: true, priority: true },
+			);
+			releasePoll();
+			await poll;
+		});
 	});
 
 	it("auto-syncs stored branchName when live branch differs", async () => {
@@ -6456,7 +6707,7 @@ describe("handlers.getTaskDiff", () => {
 			compareLabel: "origin/main",
 		});
 
-		expect(git.fetchCompareRef).toHaveBeenCalledWith(project.path, "main");
+		expect(git.fetchCompareRef).toHaveBeenCalledWith(project.path, "main", undefined, { priority: true });
 		expect(git.getTaskDiff).toHaveBeenCalledWith("/tmp/wt", "branch", {
 			baseBranch: "main",
 			compareRef: "origin/main",
@@ -9479,14 +9730,14 @@ describe("handlers.exitCopyModeAllPanes", () => {
 		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
 		setupSpawnRouter({
 			hasSession: 1, // dev-server not running
-			listTaskPanes: { exit: 0, out: "%0\t1\n%1\t0\n%2\t1\n" },
+			listTaskPanes: { exit: 0, out: "%0\t1\temacs\n%1\t0\temacs\n%2\t1\temacs\n" },
 		});
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
-		expect(result).toEqual({ panesExited: 2 });
+		expect(result).toEqual({ panesExited: 2, panesKept: 0 });
 		expect(mockSpawn).toHaveBeenCalledWith(
-			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}"],
+			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}\t#{mode-keys}"],
 			expect.any(Object),
 		);
 		expect(mockSpawn).toHaveBeenCalledWith(
@@ -9508,15 +9759,15 @@ describe("handlers.exitCopyModeAllPanes", () => {
 		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
 		setupSpawnRouter({
 			hasSession: 0, // dev-server IS running
-			listTaskPanes: { exit: 0, out: "%10\t0\n" },
-			listDevPanes: { exit: 0, out: "%99\t1\n" }, // dev-server pane in copy-mode
+			listTaskPanes: { exit: 0, out: "%10\t0\temacs\n" },
+			listDevPanes: { exit: 0, out: "%99\t1\temacs\n" }, // dev-server pane in copy-mode
 		});
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
-		expect(result).toEqual({ panesExited: 1 });
+		expect(result).toEqual({ panesExited: 1, panesKept: 0 });
 		expect(mockSpawn).toHaveBeenCalledWith(
-			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-dev-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}"],
+			["tmux", "-L", "dev3", "list-panes", "-s", "-t", "dev3-dev-abcd1234", "-F", "#{pane_id}\t#{pane_in_mode}\t#{mode-keys}"],
 			expect.any(Object),
 		);
 		expect(mockSpawn).toHaveBeenCalledWith(
@@ -9530,7 +9781,7 @@ describe("handlers.exitCopyModeAllPanes", () => {
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
-		expect(result).toEqual({ panesExited: 0 });
+		expect(result).toEqual({ panesExited: 0, panesKept: 0 });
 		// Only the has-session check (for dev-server) was spawned; no list-panes
 		expect(mockSpawn).not.toHaveBeenCalledWith(
 			expect.arrayContaining(["list-panes"]),
@@ -9547,7 +9798,7 @@ describe("handlers.exitCopyModeAllPanes", () => {
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
-		expect(result).toEqual({ panesExited: 0 });
+		expect(result).toEqual({ panesExited: 0, panesKept: 0 });
 		expect(mockSpawn).not.toHaveBeenCalledWith(
 			expect.arrayContaining(["send-keys"]),
 			expect.any(Object),
@@ -9563,7 +9814,43 @@ describe("handlers.exitCopyModeAllPanes", () => {
 
 		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
 
-		expect(result).toEqual({ panesExited: 0 });
+		expect(result).toEqual({ panesExited: 0, panesKept: 0 });
+	});
+
+	it("keeps copy-mode-vi panes in history for a typed key, where it is a command", async () => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		setupSpawnRouter({
+			hasSession: 1,
+			listTaskPanes: { exit: 0, out: "%0\t1\tvi\n%1\t1\temacs\n" },
+		});
+
+		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id", typedKey: true });
+
+		expect(result).toEqual({ panesExited: 1, panesKept: 1 });
+		expect(mockSpawn).toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "send-keys", "-t", "%1", "-X", "cancel"],
+			expect.any(Object),
+		);
+		expect(mockSpawn).not.toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "send-keys", "-t", "%0", "-X", "cancel"],
+			expect.any(Object),
+		);
+	});
+
+	it("still leaves copy-mode-vi for a click or paste", async () => {
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		setupSpawnRouter({
+			hasSession: 1,
+			listTaskPanes: { exit: 0, out: "%0\t1\tvi\n" },
+		});
+
+		const result = await handlers.exitCopyModeAllPanes({ taskId: "abcd1234-full-id" });
+
+		expect(result).toEqual({ panesExited: 1, panesKept: 0 });
+		expect(mockSpawn).toHaveBeenCalledWith(
+			["tmux", "-L", "dev3", "send-keys", "-t", "%0", "-X", "cancel"],
+			expect.any(Object),
+		);
 	});
 });
 
@@ -10956,6 +11243,124 @@ describe("resumeTaskSession — the Resume Session path dev3 agent resume reuses
 	});
 });
 
+describe("resumeTask gives every Claude pane its own conversation (#1950)", () => {
+	const WORKTREE = "/tmp/resume-multi-wt";
+	const STORE = `${process.env.HOME}/.claude/projects/${claudeEncodePath(WORKTREE)}`;
+	const MAIN = "00000000-0000-4000-8000-00000000a001";
+	const NEWEST = "00000000-0000-4000-8000-00000000a002";
+	const claudePane = (sessionId: string) =>
+		({ agentCmd: "claude", sessionId, agentId: "builtin-claude", configId: "claude-default" });
+
+	/** Transcripts newest first: `files[0]` has the latest mtime. */
+	function seedStore(files: string[]): void {
+		(readdirSync as any).mockImplementation((dir: string) => (String(dir) === STORE ? files.map((id) => `${id}.jsonl`) : []));
+		(existsSync as any).mockImplementation(() => true);
+		(statSync as any).mockImplementation((path: string) => {
+			const rank = files.findIndex((id) => String(path).endsWith(`${id}.jsonl`));
+			return { isDirectory: () => true, isFile: () => true, mode: 0o755, size: 0, mtimeMs: rank === -1 ? 0 : 1_000 - rank };
+		});
+	}
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		const task = makeTask({
+			worktreePath: WORKTREE,
+			sessionState: { panes: [claudePane(MAIN), claudePane("dead-pane-1"), claudePane("dead-pane-2")] },
+		});
+		(data.loadProjects as any).mockResolvedValue([makeProject()]);
+		(data.loadVirtualProjects as any).mockResolvedValue([]);
+		(data.getTask as any).mockResolvedValue(task);
+		(pty.hasSession as any).mockReturnValue(false);
+		(pty.getPtyPort as any).mockReturnValue(9999);
+		vi.mocked(pty.tmuxSessionExists).mockResolvedValue(true);
+		vi.mocked(pty.splitAndRunCommand).mockResolvedValueOnce("%2").mockResolvedValueOnce("%3");
+	});
+
+	afterEach(() => {
+		(readdirSync as any).mockImplementation(() => []);
+		(existsSync as any).mockImplementation(() => true);
+		(statSync as any).mockImplementation(() => ({ isDirectory: () => true, isFile: () => true, mode: 0o755, size: 0 }));
+	});
+
+	it("resumes each pane's own conversation and starts a pane that has none fresh", async () => {
+		// The old per-pane healing sent both dead panes to NEWEST, i.e. pane 1's conversation.
+		seedStore([NEWEST, MAIN]);
+		(data.getTask as any).mockResolvedValue(makeTask({
+			worktreePath: WORKTREE,
+			sessionState: { panes: [claudePane(MAIN), claudePane(NEWEST), claudePane("never-prompted")] },
+		}));
+
+		await handlers.resumeTask({ taskId: "task-1" });
+
+		const options = (agents.resolveCommandForAgent as any).mock.calls.map((call: any[]) => call[3]);
+		expect(options[0]).toMatchObject({ resume: true, sessionId: MAIN });
+		expect(options[1]).toMatchObject({ resume: true, sessionId: NEWEST });
+		// `--continue` here would reopen the newest conversation a second time.
+		expect(options[2].resume).toBeUndefined();
+		expect(options[2].sessionId).toMatch(/^[0-9a-f-]{36}$/);
+		expect([MAIN, NEWEST]).not.toContain(options[2].sessionId);
+	});
+
+	it("reports a pane that started over as `fresh-session`, and resumes it for the CLI too", async () => {
+		// `dev3 agent resume` refuses `agent-latest` because the harness would pick
+		// somebody's conversation; this pane is handed one dev3 minted, so it is safe.
+		const { resumeTaskSession } = await import("../rpc-handlers/tmux-pty");
+		seedStore([NEWEST, MAIN]);
+		(data.getTask as any).mockResolvedValue(makeTask({
+			worktreePath: WORKTREE,
+			sessionState: { panes: [claudePane(MAIN), claudePane(NEWEST), claudePane("never-prompted")] },
+		}));
+
+		const outcome = await resumeTaskSession("task-1", { requireSessionIds: true });
+
+		expect(outcome).toMatchObject({ kind: "resumed", result: { panes: [
+			expect.objectContaining({ index: 0, mode: "exact", sessionId: MAIN }),
+			expect.objectContaining({ index: 1, mode: "exact", sessionId: NEWEST }),
+			expect.objectContaining({ index: 2, mode: "fresh-session", storedSessionId: "never-prompted", status: "resumed" }),
+		] } });
+		const minted = (agents.resolveCommandForAgent as any).mock.calls[2][3].sessionId;
+		expect((outcome as { result: { panes: { sessionId: string | null }[] } }).result.panes[2].sessionId).toBe(minted);
+	});
+
+	it("starts a main pane with nothing of its own on a new conversation, without the brief", async () => {
+		// Its `--continue` would open NEWEST, which pane 1 is resuming at the same time.
+		const { resumeTaskSession } = await import("../rpc-handlers/tmux-pty");
+		seedStore([NEWEST]);
+		(data.getTask as any).mockResolvedValue(makeTask({
+			worktreePath: WORKTREE,
+			description: "the original brief",
+			// The third pane uses up the second split id beforeEach queued.
+			sessionState: { panes: [claudePane("never-prompted-main"), claudePane(NEWEST), claudePane("never-prompted-extra")] },
+		}));
+
+		const outcome = await resumeTaskSession("task-1", { requireSessionIds: true });
+
+		const [mainCall] = (agents.resolveCommandForAgent as any).mock.calls;
+		expect(mainCall[3].resume).toBeUndefined();
+		expect(mainCall[3].sessionId).toMatch(/^[0-9a-f-]{36}$/);
+		expect(mainCall[3].sessionId).not.toBe(NEWEST);
+		expect(mainCall[2].taskDescription).toBe("");
+		expect(outcome).toMatchObject({ kind: "resumed", result: { panes: [
+			expect.objectContaining({ index: 0, mode: "fresh-session", sessionId: mainCall[3].sessionId }),
+			expect.objectContaining({ index: 1, mode: "exact", sessionId: NEWEST }),
+			expect.objectContaining({ index: 2, mode: "fresh-session" }),
+		] } });
+		const persisted = (data.updateTask as any).mock.calls.find((call: any[]) => call[2]?.sessionState)[2];
+		expect(persisted.sessionState.panes[0].sessionId).toBe(mainCall[3].sessionId);
+	});
+
+	it("persists the id each extra pane actually resumed", async () => {
+		seedStore([NEWEST, MAIN]);
+
+		await handlers.resumeTask({ taskId: "task-1" });
+
+		const fresh = (agents.resolveCommandForAgent as any).mock.calls[1][3].sessionId;
+		const fresh2 = (agents.resolveCommandForAgent as any).mock.calls[2][3].sessionId;
+		const last = (data.updateTask as any).mock.calls.filter((call: any[]) => call[2]?.sessionState).at(-1)[2];
+		expect(last.sessionState.panes.slice(1).map((p: any) => [p.paneId, p.sessionId])).toEqual([["%2", fresh], ["%3", fresh2]]);
+	});
+});
+
 describe("restartTask (start fresh) floors the Codex scan", () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -11346,6 +11751,37 @@ describe("launchTaskPty", () => {
 			}),
 			expect.any(String),
 		);
+	});
+
+	it("pins Auto's pick on the task and the pane so later launches never route again", async () => {
+		const project = makeProject();
+		const task = makeTask({ accountId: "auto" });
+		const reason = { code: "lowest-short" as const, short: 20, nextShort: 60 };
+		vi.mocked(agents.resolveCommandForAgent).mockResolvedValueOnce({
+			command: "claude", extraEnv: {}, agent: { baseCommand: "claude" }, resolvedAccountId: "acct-b",
+			accountPick: { accountId: "acct-b", label: "B", reason },
+		} as never);
+
+		await launchTaskPty(project, task, "/tmp/wt", "builtin-claude", "claude-default");
+
+		expect(agents.resolveCommandForAgent).toHaveBeenCalledWith(
+			"builtin-claude", "claude-default", expect.anything(),
+			expect.objectContaining({ accountId: "auto", autoRouting: expect.objectContaining({ reservationKey: "k" }) }),
+		);
+		const patch = vi.mocked(data.updateTask).mock.calls.map(([, , updates]) => updates).find((u) => u.sessionState);
+		expect(patch).toMatchObject({ accountId: "acct-b", accountPick: { reason } });
+		expect(patch?.sessionState?.panes[0].accountId).toBe("acct-b");
+	});
+
+	it("never hands a resume the routing context", async () => {
+		const project = makeProject();
+		const task = makeTask({ accountId: "acct-a" });
+
+		await launchTaskPty(project, task, "/tmp/wt", "builtin-claude", "claude-default", false, true, { sessionId: "s-1" });
+
+		const options = vi.mocked(agents.resolveCommandForAgent).mock.calls[0][3];
+		expect(options).not.toHaveProperty("autoRouting");
+		expect(options).toMatchObject({ accountId: "acct-a", resume: true });
 	});
 
 	it("does not append manual review instructions for Claude launches when automatic review is enabled", async () => {
@@ -15382,22 +15818,24 @@ describe("tmuxPaneNavigate", () => {
 });
 
 // ----------------------------------------------------------------------------
-// handlers.tmuxWindowNavigate (narrow-viewport window switcher)
+// handlers.tmuxWindowNavigate (window navigator: desktop rail/tabs + narrow switcher)
 // ----------------------------------------------------------------------------
 describe("handlers.tmuxWindowNavigate", () => {
 	const TASK_ID = "abcd1234-0000-0000-0000-000000000000";
 	const SESSION = "dev3-abcd1234";
 	const SEP = "\t";
+	const HOST = "mybox";
 
-	// One list-windows row: window_id, window_active, window_name.
-	function row(id: string, active: string, name: string): string {
-		return [id, active, name].join(SEP);
+	// One list-windows row: window_id, index, active, panes, activity, bell, host_short, window_name, pane_title.
+	function row(id: string, active: string, name: string, title = HOST, extra: { panes?: number; activity?: number; bell?: string } = {}): string {
+		const index = id.slice(1);
+		return [id, index, active, String(extra.panes ?? 1), String(extra.activity ?? 100), extra.bell ?? "0", HOST, name, title].join(SEP);
 	}
 	const lay = (...rows: string[]) => rows.join("\n");
 
-	// list-windows output is FIFO: each readWindowLayout consumes the next layout,
-	// falling back to the last. Every other tmux command exits 0.
-	function mockLayouts(layouts: string[]) {
+	// list-windows output is FIFO: each read consumes the next layout, falling back
+	// to the last. list-panes answers with `agentPanes`; every other command exits 0.
+	function mockLayouts(layouts: string[], agentPanes = "", lastAgentPane = "") {
 		const queue = [...layouts];
 		mockSpawn.mockReset();
 		mockSpawn.mockImplementation((args: string[]) => {
@@ -15405,33 +15843,54 @@ describe("handlers.tmuxWindowNavigate", () => {
 				const out = queue.length > 1 ? queue.shift()! : queue[0] ?? "";
 				return { stdout: out, stderr: new Response(""), exited: Promise.resolve(0) };
 			}
+			if (args.includes("list-panes")) return { stdout: agentPanes, stderr: new Response(""), exited: Promise.resolve(0) };
+			if (args.includes("show-options")) return { stdout: lastAgentPane, stderr: new Response(""), exited: Promise.resolve(0) };
 			return { stdout: "", stderr: new Response(""), exited: Promise.resolve(0) };
 		});
 	}
 
 	const calls = () => mockSpawn.mock.calls.map((c) => c[0] as string[]);
 	const called = (needle: string) => calls().some((a) => a.join(" ").includes(needle));
+	const ids = (res: { windows: { windowId: string }[] }) => res.windows.map((w) => w.windowId);
+	const activeId = (res: { windows: { windowId: string; active: boolean }[] }) => res.windows.find((w) => w.active)?.windowId;
 
-	it("read-only (no step/index) returns the layout and never selects", async () => {
-		mockLayouts([lay(row("@1", "1", "claude"), row("@2", "0", "shell"), row("@3", "0", "logs"))]);
+	it("read-only (no step/id) returns the windows and never selects", async () => {
+		mockLayouts([lay(row("@1", "1", "claude"), row("@2", "0", "zsh"), row("@3", "0", "logs"))]);
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID });
-		expect(res).toEqual({ count: 3, activeIndex: 0, labels: ["claude", "shell", "logs"] });
+		expect(ids(res)).toEqual(["@1", "@2", "@3"]);
+		expect(activeId(res)).toBe("@1");
 		expect(called("select-window")).toBe(false);
 	});
 
-	it("labels use the window name (tmux auto-names by command)", async () => {
-		mockLayouts([lay(row("@1", "1", "nvim"), row("@2", "0", "build"))]);
+	it("labels: a real pane title wins, a hostname title falls back to the window name, a status glyph is stripped", async () => {
+		mockLayouts([lay(row("@1", "1", "2.1.3", "✳ Fix auth race"), row("@2", "0", "zsh"), row("@3", "0", "build", "Dev Server"))]);
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID });
-		expect(res.labels).toEqual(["nvim", "build"]);
+		expect(res.windows.map((w) => w.label)).toEqual(["Fix auth race", "zsh", "Dev Server"]);
+	});
+
+	it("marks the window holding the last-focused agent pane as home", async () => {
+		mockLayouts(
+			[lay(row("@1", "0", "a"), row("@2", "1", "b"), row("@3", "0", "c"))],
+			lay(["@1", "0", "%1", "1"].join(SEP), ["@2", "1", "%2", ""].join(SEP), ["@3", "0", "%3", "1"].join(SEP)),
+			"%3",
+		);
+		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID });
+		expect(res.windows.filter((w) => w.home).map((w) => w.windowId)).toEqual(["@3"]);
+	});
+
+	it("passes background signals through (panes, activity, bell)", async () => {
+		mockLayouts([lay(row("@1", "1", "a"), row("@2", "0", "b", HOST, { panes: 3, activity: 555, bell: "1" }))]);
+		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID });
+		expect(res.windows[1]).toMatchObject({ panes: 3, activity: 555, bell: true, index: 2 });
 	});
 
 	it("step next: selects the next window then re-reads", async () => {
 		mockLayouts([
-			lay(row("@1", "1", "claude"), row("@2", "0", "shell"), row("@3", "0", "logs")), // before
-			lay(row("@1", "0", "claude"), row("@2", "1", "shell"), row("@3", "0", "logs")), // after select
+			lay(row("@1", "1", "claude"), row("@2", "0", "shell")),
+			lay(row("@1", "0", "claude"), row("@2", "1", "shell")),
 		]);
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, step: "next" });
-		expect(res).toEqual({ count: 3, activeIndex: 1, labels: ["claude", "shell", "logs"] });
+		expect(activeId(res)).toBe("@2");
 		expect(called(`select-window -t ${SESSION}:+`)).toBe(true);
 	});
 
@@ -15441,28 +15900,34 @@ describe("handlers.tmuxWindowNavigate", () => {
 			lay(row("@1", "1", "claude"), row("@2", "0", "shell")),
 		]);
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, step: "prev" });
-		expect(res.activeIndex).toBe(0);
+		expect(activeId(res)).toBe("@1");
 		expect(called(`select-window -t ${SESSION}:-`)).toBe(true);
 	});
 
-	it("absolute index: selects that window by its id", async () => {
+	it("by window id: selects exactly that window", async () => {
 		mockLayouts([
 			lay(row("@1", "1", "claude"), row("@2", "0", "shell"), row("@3", "0", "logs")),
 			lay(row("@1", "0", "claude"), row("@2", "0", "shell"), row("@3", "1", "logs")),
 		]);
-		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, index: 2 });
-		expect(res.activeIndex).toBe(2);
+		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, windowId: "@3" });
+		expect(activeId(res)).toBe("@3");
 		expect(called("select-window -t @3")).toBe(true);
+	});
+
+	it("an unknown window id (closed meanwhile) selects nothing", async () => {
+		mockLayouts([lay(row("@1", "1", "claude"), row("@2", "0", "shell"))]);
+		await handlers.tmuxWindowNavigate({ taskId: TASK_ID, windowId: "@9" });
+		expect(called("select-window")).toBe(false);
 	});
 
 	it("single window: no navigation even when a step is requested", async () => {
 		mockLayouts([lay(row("@1", "1", "claude"))]);
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, step: "next" });
-		expect(res).toEqual({ count: 1, activeIndex: 0, labels: ["claude"] });
+		expect(ids(res)).toEqual(["@1"]);
 		expect(called("select-window")).toBe(false);
 	});
 
-	it("no session / tmux error: returns an empty layout", async () => {
+	it("no session / tmux error: returns no windows", async () => {
 		mockSpawn.mockReset();
 		mockSpawn.mockImplementation((args: string[]) => {
 			if (args.includes("list-windows")) {
@@ -15471,7 +15936,7 @@ describe("handlers.tmuxWindowNavigate", () => {
 			return { stdout: "", stderr: new Response(""), exited: Promise.resolve(0) };
 		});
 		const res = await handlers.tmuxWindowNavigate({ taskId: TASK_ID, step: "next" });
-		expect(res).toEqual({ count: 0, activeIndex: 0, labels: [] });
+		expect(res).toEqual({ windows: [] });
 		expect(called("select-window")).toBe(false);
 	});
 });

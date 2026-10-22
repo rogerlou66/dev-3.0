@@ -1,5 +1,6 @@
 import type { AgentCancellationRequest, AgentCompletionRequest, AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
+import { isTaskSoundEnabled } from "../../shared/task-sound-statuses";
 import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, reviewTaskTitle } from "../../shared/types";
 import * as data from "../data";
 import * as git from "../git";
@@ -7,13 +8,15 @@ import * as github from "../github";
 import { pendingAgentLaunchDialogs, holdAgentRequestAutoApprove as holdAutoApprove, listPendingAgentRequests, markAgentRequestShown as markShown, resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
 import { loadSettingsSync, recordFavoriteUsages } from "../settings";
 import { emitTaskSound, takeResetBranchOutcome } from "../lifecycle/executor";
-import { getPushMessage, isActive, log } from "./shared";
+import { getPushMessage, isActive, log, pushCliAttention } from "./shared";
+import { autoLaunchDeferral } from "../account-router";
 import { dispatchLifecycleEvent, removeLifecycleActor } from "../lifecycle/service";
 import { assertKnownLabelIds } from "../board-operations/labels";
 import { isScratchPlaceholderDescription, planTitleAndDescription, updateTaskMetadata, withoutUnchanged } from "../board-operations/task-metadata";
 import { boardPorts } from "../board-operations/runtime";
 import { USER_ACTOR } from "../board-operations/types";
 import { getResourceUsage } from "../resource-monitor";
+import { assertLaunchAgentsInstalled, routableLaunchKind } from "../agent-launch-availability";
 import {
 	nativeTerminalAvailability,
 	readTaskTerminalBackendState,
@@ -320,7 +323,7 @@ async function setTaskBlocked(params: { projectId: string; taskId: string; block
  * the backend push or on the renderer's audio pipeline.
  */
 async function debugEmitTaskSound(params: { status: "completed" | "cancelled" }): Promise<{ pushed: boolean }> {
-	const pushed = loadSettingsSync().playSoundOnTaskComplete !== false;
+	const pushed = isTaskSoundEnabled(loadSettingsSync(), params.status);
 	log.info("→ debugEmitTaskSound", { status: params.status, pushed });
 	emitTaskSound(params.status, "debug-probe");
 	return { pushed };
@@ -357,6 +360,7 @@ export async function launchTaskWithAgentChoice(params: {
 	const { variants, priority } = params.choice;
 	const first = variants[0];
 	if (!first) throw new Error("At least one variant is required");
+	if (isActive(params.targetStatus)) await assertLaunchAgentsInstalled(variants);
 	const { agentId, configId, accountId } = first;
 
 	// Priority lands before the move so the card never appears in the wrong sort
@@ -490,6 +494,30 @@ async function moveTaskToProject(params: { taskId: string; fromProjectId: string
 	return moved;
 }
 
+/** Auto never launches into a limit: with no subscription account free, the
+ *  launch becomes a "Start in…" at the earliest reset, keeping `"auto"` so it
+ *  routes again — against the exclusions and readings of that moment. */
+async function deferAutoLaunchUntilReset(
+	project: Project,
+	task: Task,
+	targetStatus: TaskStatus,
+	variants: LaunchVariant[],
+): Promise<Task | null> {
+	const kinds = await Promise.all(variants.map((v) => routableLaunchKind(v)));
+	const at = await autoLaunchDeferral(project, variants, kinds);
+	if (at == null) return null;
+	const when = new Date(Math.max(at, Date.now() + 60_000));
+	const updated = await data.updateTask(project, task.id, { scheduledLaunch: { at: when.toISOString(), targetStatus, variants } });
+	getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+	pushCliAttention({
+		taskId: task.id,
+		projectId: project.id,
+		reason: `No subscription account has room — the launch starts at ${when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+	});
+	log.info("spawnVariants deferred to the earliest account reset", { taskId: task.id.slice(0, 8), at: when.toISOString() });
+	return updated;
+}
+
 async function spawnVariants(params: {
 	taskId: string;
 	projectId: string;
@@ -502,6 +530,13 @@ async function spawnVariants(params: {
 
 	if (sourceTask.status !== "todo") {
 		throw new Error(`Task must be in todo status to spawn variants (got ${sourceTask.status})`);
+	}
+	// Before anything moves: a refused launch leaves the To Do card exactly as it was.
+	if (isActive(params.targetStatus)) await assertLaunchAgentsInstalled(params.variants);
+	// A draft never carries a scheduledLaunch: let the lifecycle machine reject it.
+	if (isActive(params.targetStatus) && sourceTask.draft !== true) {
+		const deferred = await deferAutoLaunchUntilReset(project, sourceTask, params.targetStatus, params.variants);
+		if (deferred) return [deferred];
 	}
 
 	const groupId = crypto.randomUUID();
@@ -666,6 +701,7 @@ async function addAttempts(params: {
 	log.info("→ addAttempts", { taskId: params.taskId, count: params.variants.length });
 	const project = await data.getProject(params.projectId);
 	const sourceTask = await data.getTask(project, params.taskId);
+	await assertLaunchAgentsInstalled(params.variants);
 
 	let groupId = sourceTask.groupId;
 

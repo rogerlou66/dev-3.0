@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { findAgentConfig } from "../../shared/agent-live-models";
 import type { AgentCheckResult, AgentLaunchChoice, AgentLaunchRequest, CodingAgent, GlobalSettings, LaunchVariant, TaskPriority } from "../../shared/types";
 import { api } from "../rpc";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { useToggleFavorite } from "../hooks/useToggleFavorite";
 import { useT } from "../i18n";
+import { UNSOLICITED_DIALOG_QUIET_MS, useDialogKeyboardGuard } from "../utils/dialog-keyboard-guard";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import { useReducedMotion } from "../utils/useReducedMotion";
 import AgentConfigPicker from "./AgentConfigPicker";
@@ -141,6 +143,10 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 		setAutoApproveAt(null);
 		api.request.holdAgentLaunchAutoApprove({ requestId: request.requestId }).catch(() => {});
 	}
+
+	// Arrives while the user may be typing elsewhere: no key answers it until the
+	// keyboard has gone quiet. Those swallowed keys still prove someone is here.
+	useDialogKeyboardGuard(trapRef, { quietMs: UNSOLICITED_DIALOG_QUIET_MS, onKeyActivity: takeOver });
 
 	// The dialog is broadcast to every client; a copy on another window must stop
 	// counting down to a launch that can no longer fire on its own.
@@ -283,7 +289,7 @@ function AgentLaunchRequestModal({ request, onRespond }: AgentLaunchRequestModal
 							<ul className="space-y-1.5">
 								{request.resume.panes.map((pane, index) => {
 									const agent = agents.find((a) => a.id === pane.agentId);
-									const config = agent?.configurations.find((c) => c.id === pane.configId);
+									const config = (agent ? findAgentConfig(agent, pane.configId) : undefined);
 									return (
 										<li key={index} className="flex items-baseline gap-3 px-3 py-2 rounded-lg bg-raised text-sm">
 											<span className="text-fg font-medium shrink-0">

@@ -9,6 +9,15 @@
  *       everything else                            — symlinks into ~/.claude,
  *                                                    minus CLAUDE_PRIVATE_ENTRIES
  *   ~/.dev3.0/agent-accounts/codex/<id>/auth.json  — per-account snapshot of ~/.codex/auth.json
+ *   ~/.dev3.0/agent-accounts/omp-accounts.json     — omp registry (own file: older builds
+ *                                                    rewrite accounts.json and would drop it)
+ *   ~/.dev3.0/agent-accounts/omp/<id>/             — PI_CODING_AGENT_DIR per account: its own
+ *                                                    agent.db + sessions, the rest symlinked
+ *                                                    from ~/.omp/agent
+ *   ~/.dev3.0/agent-accounts/pi-accounts.json      — pi registry (own file, same reason)
+ *   ~/.dev3.0/agent-accounts/pi/<id>/              — PI_CODING_AGENT_DIR per account: its own
+ *                                                    auth.json + sessions, the rest symlinked
+ *                                                    from ~/.pi/agent
  *
  * Swap semantics:
  * - Claude: the active account's dir is injected as CLAUDE_CONFIG_DIR into newly
@@ -30,20 +39,24 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
+	AccountLoginPendingReason,
 	AgentAccount,
 	AgentAccountAuth,
 	AgentAccountKind,
 	AgentAccountsState,
 	AgentAccountIdentity,
 	AgentApiProfileInfo,
+	AgentDirAccountKind,
 	ClaudeSlotModel,
 	ClaudeSlotModels,
+	ProviderLogin,
 } from "../shared/agent-accounts";
 import {
 	CLAUDE_MODEL_SLOTS,
@@ -52,10 +65,16 @@ import {
 	claudeApiProfileEnvKeys,
 	defaultAccountLabel,
 	defaultApiProfileLabel,
+	AGENT_DIR_ACCOUNT_KINDS,
+	isAgentDirAccountKind,
 	parseClaudeIdentity,
 	parseCodexIdentity,
+	parseOmpAccounts,
+	parsePiAuthLogins,
+	providerLoginsIdentity,
 	shortCodexWorkspaceId,
 } from "../shared/agent-accounts";
+import { writePiLoginExtension } from "../shared/pi-login-extension";
 import { createLogger } from "./logger";
 import { DEV3_HOME } from "./paths";
 import { spawn } from "./spawn";
@@ -71,6 +90,10 @@ export interface AccountPaths {
 	claudeJson: string;
 	/** ~/.codex */
 	codexHome: string;
+	/** ~/.omp/agent — omp's default agent dir, the source of shared entries. */
+	ompAgentHome?: string;
+	/** ~/.pi/agent — pi's default agent dir, the source of shared entries. */
+	piAgentHome?: string;
 }
 
 export function defaultAccountPaths(): AccountPaths {
@@ -80,6 +103,8 @@ export function defaultAccountPaths(): AccountPaths {
 		claudeHome: join(home, ".claude"),
 		claudeJson: join(home, ".claude.json"),
 		codexHome: join(home, ".codex"),
+		ompAgentHome: join(home, ".omp", "agent"),
+		piAgentHome: join(home, ".pi", "agent"),
 	};
 }
 
@@ -118,6 +143,31 @@ export function isPrivateClaudeEntry(entry: string): boolean {
  *  source entries are simply skipped — a fresh codex install may have none. */
 export const CODEX_SHARED_ENTRIES = ["config.toml", "prompts"];
 
+/** What an agent-dir account (omp, pi) keeps to itself; every other entry of the
+ *  harness's own agent dir (config, skills, extensions, …) is symlinked in. */
+const AGENT_DIR_PRIVATE: Record<AgentDirAccountKind, { entries: string[]; patterns: RegExp[] }> = {
+	// SQLite files never are shared: a database opened through a link gets its -wal beside the link.
+	omp: {
+		entries: ["sessions", "terminal-sessions", "cache", "blobs"],
+		patterns: [/\.db(-wal|-shm|-journal)?$/i, /credential/i, /^auth/i, /token/i, /\.key$/i],
+	},
+	// models-store.json caches provider catalogs fetched with this account's own keys.
+	pi: {
+		entries: ["sessions", "models-store.json"],
+		patterns: [/credential/i, /^auth/i, /token/i, /\.key$/i, /\.lock$/i, /\.log$/i],
+	},
+};
+
+/** Entries an account starts with as a COPY of the user's own, then keeps.
+ *  pi's /login persists the new provider's default model into settings.json, so a
+ *  linked file would let adding an account rewrite the user's own pi default. */
+const AGENT_DIR_SEEDED: Record<AgentDirAccountKind, string[]> = { omp: [], pi: ["settings.json"] };
+
+export function isPrivateAgentDirEntry(kind: AgentDirAccountKind, entry: string): boolean {
+	const { entries, patterns } = AGENT_DIR_PRIVATE[kind];
+	return entries.includes(entry) || patterns.some((pattern) => pattern.test(entry));
+}
+
 interface RegistryEntry {
 	id: string;
 	label: string;
@@ -128,6 +178,9 @@ interface RegistryEntry {
 	auth?: AgentAccountAuth;
 	createdAt: number;
 }
+
+/** Kinds kept in accounts.json; omp and pi have their own registry files. */
+type RegistryKind = Exclude<AgentAccountKind, AgentDirAccountKind>;
 
 interface Registry {
 	version: 1;
@@ -204,6 +257,117 @@ export function codexAccountDir(id: string, paths: AccountPaths = defaultAccount
 
 function codexAccountAuthFile(id: string, paths: AccountPaths): string {
 	return join(codexAccountDir(id, paths), "auth.json");
+}
+
+export function agentDirAccountDir(kind: AgentDirAccountKind, id: string, paths: AccountPaths = defaultAccountPaths()): string {
+	assertSafeAccountId(id);
+	return join(paths.accountsDir, kind, id);
+}
+
+interface AgentDirRegistryEntry {
+	id: string;
+	label: string;
+	logins: ProviderLogin[];
+	createdAt: number;
+}
+
+interface AgentDirRegistry {
+	version: 1;
+	activeId: string | null;
+	accounts: AgentDirRegistryEntry[];
+}
+
+function agentDirRegistryFile(kind: AgentDirAccountKind, paths: AccountPaths): string {
+	return join(paths.accountsDir, `${kind}-accounts.json`);
+}
+
+function storedProviderLogins(raw: unknown): ProviderLogin[] {
+	if (!Array.isArray(raw)) return [];
+	return raw.flatMap((row) => {
+		const provider = typeof row?.provider === "string" && row.provider ? row.provider : null;
+		if (!provider) return [];
+		const authType = row.authType === "oauth" || row.authType === "api_key" ? row.authType : undefined;
+		return [{
+			provider,
+			identityKey: typeof row.identityKey === "string" && row.identityKey ? row.identityKey : null,
+			orgName: typeof row.orgName === "string" && row.orgName ? row.orgName : null,
+			...(authType ? { authType } : {}),
+		}];
+	});
+}
+
+function loadAgentDirRegistry(kind: AgentDirAccountKind, paths: AccountPaths): AgentDirRegistry {
+	const data = safeReadJson(agentDirRegistryFile(kind, paths)) as { activeId?: unknown; accounts?: unknown } | null;
+	const accounts = Array.isArray(data?.accounts)
+		? (data.accounts as any[])
+				.filter((a) => typeof a?.id === "string" && isSafeAccountId(a.id))
+				.map((a) => ({
+					id: a.id as string,
+					label: typeof a.label === "string" ? a.label : a.id,
+					logins: storedProviderLogins(a.logins),
+					createdAt: typeof a.createdAt === "number" ? a.createdAt : 0,
+				}))
+		: [];
+	return { version: 1, activeId: typeof data?.activeId === "string" ? data.activeId : null, accounts };
+}
+
+function saveAgentDirRegistry(kind: AgentDirAccountKind, registry: AgentDirRegistry, paths: AccountPaths): void {
+	mkdirSync(paths.accountsDir, { recursive: true });
+	const target = agentDirRegistryFile(kind, paths);
+	const tmp = `${target}.tmp`;
+	writeFileSync(tmp, JSON.stringify(registry, null, 2));
+	renameSync(tmp, target);
+}
+
+function agentDirToAccount(kind: AgentDirAccountKind, entry: AgentDirRegistryEntry): AgentAccount {
+	return {
+		id: entry.id,
+		kind,
+		label: entry.label,
+		identity: providerLoginsIdentity(entry.logins),
+		auth: "oauth",
+		api: null,
+		providerLogins: entry.logins,
+		createdAt: entry.createdAt,
+	};
+}
+
+function agentDirSourceHome(kind: AgentDirAccountKind, paths: AccountPaths): string {
+	return (kind === "omp" ? paths.ompAgentHome : paths.piAgentHome) ?? join(homedir(), `.${kind}`, "agent");
+}
+
+/** Make the account dir a usable PI_CODING_AGENT_DIR: create it and symlink
+ *  every non-private entry of the harness's own agent dir, so the user's config
+ *  and dev3's skills stay visible. Idempotent and re-run per launch to pick up
+ *  new entries; an entry already present in the account dir is never replaced. */
+function scaffoldAgentDirAccount(kind: AgentDirAccountKind, id: string, paths: AccountPaths): string {
+	const dir = agentDirAccountDir(kind, id, paths);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const source = agentDirSourceHome(kind, paths);
+	let entries: string[] = [];
+	try {
+		entries = readdirSync(source);
+	} catch {
+		return dir; // the harness never ran yet — nothing to share
+	}
+	for (const entry of entries) {
+		if (isPrivateAgentDirEntry(kind, entry) || CLAUDE_IGNORED_ENTRIES.includes(entry)) continue;
+		const target = join(dir, entry);
+		try {
+			lstatSync(target);
+			continue;
+		} catch {
+			// missing — create below
+		}
+		const seeded = AGENT_DIR_SEEDED[kind].includes(entry);
+		try {
+			if (seeded) copyFileSync(join(source, entry), target);
+			else symlinkSync(join(source, entry), target);
+		} catch (err) {
+			log.warn("Failed to share agent-dir entry", { kind, entry, seeded, error: String(err) });
+		}
+	}
+	return dir;
 }
 
 const CODEX_ACCOUNTS_ENDPOINT = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
@@ -432,7 +596,7 @@ function apiProfileInfo(profile: ApiProfileFile | null): AgentApiProfileInfo | n
 	};
 }
 
-function toAccount(entry: RegistryEntry, kind: AgentAccountKind, paths: AccountPaths): AgentAccount {
+function toAccount(entry: RegistryEntry, kind: RegistryKind, paths: AccountPaths): AgentAccount {
 	const isApi = kind === "claude" && entry.auth === "api";
 	return {
 		id: entry.id,
@@ -504,6 +668,16 @@ export async function listAgentAccounts(paths: AccountPaths = defaultAccountPath
 			activeId: registry.codex.accounts.some((e) => e.id === registry.codex.activeId) ? registry.codex.activeId : null,
 			currentIdentity: currentCodexIdentity(paths, registry),
 		},
+		omp: agentDirAccountsState("omp", paths),
+		pi: agentDirAccountsState("pi", paths),
+	};
+}
+
+function agentDirAccountsState(kind: AgentDirAccountKind, paths: AccountPaths): AgentAccountsState[AgentDirAccountKind] {
+	const registry = loadAgentDirRegistry(kind, paths);
+	return {
+		accounts: registry.accounts.map((entry) => agentDirToAccount(kind, entry)),
+		activeId: registry.accounts.some((e) => e.id === registry.activeId) ? registry.activeId : null,
 	};
 }
 
@@ -513,6 +687,21 @@ export async function listAgentAccounts(paths: AccountPaths = defaultAccountPath
  *  that specific managed account. Shared by both providers' env resolution. */
 function resolveAccountIdOverride(activeId: string | null, accountIdOverride: string | null | undefined): string | null {
 	return accountIdOverride === undefined ? activeId : accountIdOverride;
+}
+
+/** The account a launch really lands on once the default is applied: a managed
+ *  id that exists, or null for the system login. What a pane records so a resume
+ *  cannot drift onto whatever the default became since. */
+export function effectiveAccountId(
+	kind: AgentAccountKind,
+	accountIdOverride: string | null | undefined,
+	paths: AccountPaths = defaultAccountPaths(),
+): string | null {
+	const r = isAgentDirAccountKind(kind) ? loadAgentDirRegistry(kind, paths) : loadRegistry(paths)[kind];
+	const activeId = r.activeId;
+	const ids = r.accounts.map((e) => e.id);
+	const id = resolveAccountIdOverride(activeId, accountIdOverride);
+	return id && ids.includes(id) ? id : null;
 }
 
 /** CLAUDE_CONFIG_DIR to inject into new Claude sessions, or null for ~/.claude.
@@ -639,6 +828,23 @@ export async function getActiveCodexSessionEnv(
 	return { CODEX_HOME: ensureCodexAccountHome(id, paths) };
 }
 
+/** PI_CODING_AGENT_DIR for a new omp or pi session. Same override semantics as
+ *  Codex. omp and pi read the same variable, and a tmux session keeps whatever a
+ *  previous launch in it set, so once an account of EITHER harness exists the
+ *  system login actively unsets it — an omp account dir must never reach pi, nor
+ *  a pi one omp. Empty record while neither has accounts (feature unused). */
+export async function getActiveAgentDirSessionEnv(
+	kind: AgentDirAccountKind,
+	accountIdOverride?: string | null,
+	paths: AccountPaths = defaultAccountPaths(),
+): Promise<Record<string, string>> {
+	const registry = loadAgentDirRegistry(kind, paths);
+	const id = resolveAccountIdOverride(registry.activeId, accountIdOverride);
+	if (id && registry.accounts.some((e) => e.id === id)) return { PI_CODING_AGENT_DIR: scaffoldAgentDirAccount(kind, id, paths) };
+	const anyAccount = AGENT_DIR_ACCOUNT_KINDS.some((k) => (k === kind ? registry : loadAgentDirRegistry(k, paths)).accounts.length > 0);
+	return anyAccount ? { PI_CODING_AGENT_DIR: ENV_UNSET } : {};
+}
+
 /** Create the per-account config dir, symlinking every non-private entry of
  *  ~/.claude into it. Idempotent and re-run on every account resolution, so an
  *  entry that appeared in ~/.claude after the account was created gets picked up
@@ -756,9 +962,103 @@ async function ensureClaudeCredentialsFile(dir: string, paths: AccountPaths): Pr
 	return false;
 }
 
+/** Written into every dir a sign-in stages, so an abandoned one is recognisably ours. */
+export const STAGED_LOGIN_MARKER = ".dev3-staged-login";
+
+function markStagedLogin(dir: string): void {
+	writeFileSync(join(dir, STAGED_LOGIN_MARKER), JSON.stringify({ createdAt: Date.now() }));
+}
+
+function unmarkStagedLogin(dir: string): void {
+	rmSync(join(dir, STAGED_LOGIN_MARKER), { force: true });
+}
+
+export type LoginPendingReason = AccountLoginPendingReason;
+
+/** The provider has not finished the login (or it cannot be confirmed yet) — keep watching, not an error. */
+export class LoginNotReadyError extends Error {
+	constructor(message: string, readonly reason: LoginPendingReason | null = null) {
+		super(message);
+		this.name = "LoginNotReadyError";
+	}
+}
+
+/** Env that authenticates Claude Code without the login being checked. Stripped from
+ *  the sign-in and from its status probe, so neither can pass on a key from the env. */
+export const CLAUDE_ENV_AUTH_KEYS = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_BASE_URL",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_FOUNDRY",
+] as const;
+
+/** Same for Codex: an API key in the env would make `codex login` moot. */
+export const CODEX_ENV_AUTH_KEYS = ["OPENAI_API_KEY", "CODEX_API_KEY"] as const;
+
+/** `claude auth status` (JSON by default) output — never carries a token. Read from
+ *  the 2.1.x binary: `{loggedIn, authMethod, apiProvider, configDirectory, email, …}`,
+ *  `apiKeySource` only when a key source exists; exit 0 iff `loggedIn`. */
+export interface ClaudeAuthStatus {
+	loggedIn?: unknown;
+	authMethod?: unknown;
+	apiProvider?: unknown;
+	apiKeySource?: unknown;
+	configDirectory?: unknown;
+	email?: unknown;
+}
+
+/** Runs `claude auth status` against `configDir`; null when it cannot run or is aborted. */
+export type ClaudeAuthStatusProbe = (configDir: string, signal: AbortSignal) => Promise<{ exitCode: number | null; stdout: string } | null>;
+
+export function parseClaudeAuthStatus(stdout: string): ClaudeAuthStatus | null {
+	const start = stdout.indexOf("{");
+	const end = stdout.lastIndexOf("}");
+	if (start === -1 || end <= start) return null;
+	try {
+		const parsed = JSON.parse(stdout.slice(start, end + 1));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as ClaudeAuthStatus) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Does the provider confirm THIS login in THIS dir? `loggedIn` alone is not enough:
+ * Claude Code also reports it for an env API key, a cloud provider or an
+ * apiKeyHelper. Accepted: a subscription login, or a Console login whose key
+ * `/login` itself manages — first-party, in the staged dir, for the staged email.
+ */
+export function claudeAuthStatusMismatch(status: ClaudeAuthStatus, exitCode: number | null, dir: string, email: string | null): string | null {
+	if (exitCode !== 0 || status.loggedIn !== true) return "not signed in";
+	if (status.apiProvider !== "firstParty") return "not the Anthropic API";
+	const subscription = status.authMethod === "claude.ai";
+	const consoleLogin = status.authMethod === "api_key" && status.apiKeySource === "/login managed key";
+	if (!subscription && !consoleLogin) return "not a /login sign-in";
+	if (typeof status.configDirectory !== "string" || resolve(status.configDirectory) !== resolve(dir)) return "a different config folder";
+	if (!email || status.email !== email) return "a different account";
+	return null;
+}
+
+/** How a staged sign-in is launched; `env` is all that scopes it to its own dir. */
+export interface AccountLoginLaunch {
+	command: string;
+	args: string[];
+	env: Record<string, string>;
+	cwd: string;
+}
+
+export interface PreparedAccountLogin {
+	accountId: string;
+	loginCommand: string;
+	launch: AccountLoginLaunch;
+}
+
 function assertNoDuplicate(
 	registry: Registry,
-	kind: AgentAccountKind,
+	kind: RegistryKind,
 	identity: AgentAccountIdentity | null,
 	paths: AccountPaths,
 	excludeId?: string,
@@ -800,7 +1100,7 @@ function assertNoDuplicate(
 
 function registerAccount(
 	registry: Registry,
-	kind: AgentAccountKind,
+	kind: RegistryKind,
 	id: string,
 	identity: AgentAccountIdentity | null,
 	paths: AccountPaths,
@@ -1019,35 +1319,71 @@ export async function updateClaudeApiProfile(
 	return toAccount(entry, "claude", paths);
 }
 
-/** Scaffold a fresh config dir for a new login and return the command to run.
+/** Scaffold a fresh config dir for a new login and return how to run it.
  *  The dir is NOT registered until the login is verified (completeClaudeLogin). */
-export async function prepareClaudeLogin(paths: AccountPaths = defaultAccountPaths()): Promise<{ accountId: string; loginCommand: string }> {
+export async function prepareClaudeLogin(paths: AccountPaths = defaultAccountPaths()): Promise<PreparedAccountLogin> {
 	const id = crypto.randomUUID();
 	const dir = claudeAccountDir(id, paths);
 	scaffoldClaudeAccountDir(dir, paths);
-	// Seed .claude.json without the identity — its presence after the login is
-	// how completeClaudeLogin verifies success.
-	writeFileSync(join(dir, ".claude.json"), JSON.stringify(seedClaudeJson(paths), null, 2));
-	return { accountId: id, loginCommand: `CLAUDE_CONFIG_DIR='${dir}' claude /login` };
+	// Seed .claude.json without the identity — its appearance is when
+	// completeClaudeLogin starts asking `claude auth status`. The embedded terminal
+	// runs in the staging dir itself, so pre-trust it: a folder-trust prompt there is noise.
+	const seeded = seedClaudeJson(paths);
+	const projects = seeded.projects && typeof seeded.projects === "object" && !Array.isArray(seeded.projects)
+		? { ...(seeded.projects as Record<string, unknown>) }
+		: {};
+	projects[dir] = { ...(projects[dir] as Record<string, unknown> | undefined), hasTrustDialogAccepted: true };
+	seeded.projects = projects;
+	writeFileSync(join(dir, ".claude.json"), JSON.stringify(seeded, null, 2));
+	markStagedLogin(dir);
+	return {
+		accountId: id,
+		loginCommand: `CLAUDE_CONFIG_DIR='${dir}' claude /login`,
+		launch: { command: "claude", args: ["/login"], env: { CLAUDE_CONFIG_DIR: dir }, cwd: dir },
+	};
 }
 
 /** Verify a prepared login dir and register it as an account. */
-export async function completeClaudeLogin(accountId: string, paths: AccountPaths = defaultAccountPaths()): Promise<AgentAccount> {
+/**
+ * Verify a staged sign-in and register it. Success is the provider's own
+ * `claude auth status` for the staged dir, strictly matched — never the identity
+ * alone, and never credentials copied from the system login (on macOS the new
+ * token lives in a Keychain item keyed to this dir, which Claude Code finds by
+ * itself). `stillWanted` guards against a cancel that landed during the probe.
+ */
+export async function completeClaudeLogin(
+	accountId: string,
+	paths: AccountPaths,
+	probe: ClaudeAuthStatusProbe,
+	opts: { signal?: AbortSignal; stillWanted?: () => boolean } = {},
+): Promise<AgentAccount> {
 	const dir = claudeAccountDir(accountId, paths);
 	const identity = parseClaudeIdentity(safeReadJson(join(dir, ".claude.json")));
 	if (!identity) {
-		throw new Error("Login not detected yet. Run the login command, finish the OAuth flow, then verify again.");
+		throw new LoginNotReadyError("Login not detected yet. Finish the sign-in in the terminal.");
 	}
+	assertNoDuplicate(loadRegistry(paths), "claude", identity, paths, accountId);
+	const result = await probe(dir, opts.signal ?? new AbortController().signal);
+	const status = result ? parseClaudeAuthStatus(result.stdout) : null;
+	if (!result || !status) {
+		throw new LoginNotReadyError("dev3 couldn't confirm the sign-in with `claude auth status` yet.", "status-unavailable");
+	}
+	const mismatch = claudeAuthStatusMismatch(status, result.exitCode, dir, identity.email);
+	if (mismatch) {
+		log.info("Claude sign-in not confirmed by auth status", { pendingAccountId: accountId.slice(0, 8), mismatch });
+		throw new LoginNotReadyError(`Claude Code reports ${mismatch} for this sign-in.`, "status-mismatch");
+	}
+	if (opts.stillWanted && !opts.stillWanted()) throw new LoginNotReadyError("This sign-in was closed.");
+	// Reloaded after the probe: the registry may have changed while it ran.
 	const registry = loadRegistry(paths);
 	assertNoDuplicate(registry, "claude", identity, paths, accountId);
-	if (!(await ensureClaudeCredentialsFile(dir, paths))) {
-		throw new Error("Login detected but credentials are missing. Finish the login in the terminal, then verify again.");
-	}
 	if (registry.claude.accounts.some((e) => e.id === accountId)) {
 		saveRegistry(registry, paths);
 		return toAccount(registry.claude.accounts.find((e) => e.id === accountId)!, "claude", paths);
 	}
-	return registerAccount(registry, "claude", accountId, identity, paths);
+	const account = registerAccount(registry, "claude", accountId, identity, paths);
+	unmarkStagedLogin(dir);
+	return account;
 }
 
 /** Import the login currently in ~/.codex/auth.json as a managed snapshot. */
@@ -1081,27 +1417,39 @@ export async function importCurrentCodexAccount(paths: AccountPaths = defaultAcc
 	return account;
 }
 
-/** Scaffold a fresh CODEX_HOME for a new login and return the command to run.
+/** Scaffold a fresh CODEX_HOME for a new login and return how to run it.
  *  The dir is NOT registered until the login is verified (completeCodexLogin) —
- *  the user's ~/.codex is never touched, mirroring the Claude login flow. */
-export async function prepareCodexLogin(paths: AccountPaths = defaultAccountPaths()): Promise<{ accountId: string; loginCommand: string }> {
+ *  the user's ~/.codex is never touched, mirroring the Claude login flow.
+ *  `deviceAuth`: the browser finishing the login is not on this host (a headless
+ *  box, or a remote viewer), so `codex login`'s localhost:1455 callback is a dead
+ *  end — `--device-auth` prints a URL + code that works from any device. */
+export async function prepareCodexLogin(
+	paths: AccountPaths = defaultAccountPaths(),
+	opts: { deviceAuth?: boolean } = {},
+): Promise<PreparedAccountLogin> {
 	const id = crypto.randomUUID();
 	const dir = ensureCodexAccountHome(id, paths);
-	// Headless/remote box (`dev3 remote`) has no local browser, so plain
-	// `codex login` — which opens localhost:1455 + a browser — is a dead end.
-	// Codex's own hint there is `codex login --device-auth`; use it so the
-	// terminal prints a URL + code the user can open on any device.
-	const deviceAuth = process.env.DEV3_HEADLESS === "1" ? " --device-auth" : "";
-	return { accountId: id, loginCommand: `CODEX_HOME='${dir}' codex login${deviceAuth}` };
+	markStagedLogin(dir);
+	const deviceAuth = opts.deviceAuth === true || process.env.DEV3_HEADLESS === "1";
+	const args = deviceAuth ? ["login", "--device-auth"] : ["login"];
+	return {
+		accountId: id,
+		loginCommand: `CODEX_HOME='${dir}' codex ${args.join(" ")}`,
+		launch: { command: "codex", args, env: { CODEX_HOME: dir }, cwd: dir },
+	};
 }
 
 /** Verify a prepared CODEX_HOME login dir and register it as an account. */
-export async function completeCodexLogin(accountId: string, paths: AccountPaths = defaultAccountPaths()): Promise<AgentAccount> {
+export async function completeCodexLogin(
+	accountId: string,
+	paths: AccountPaths = defaultAccountPaths(),
+	opts: { stillWanted?: () => boolean } = {},
+): Promise<AgentAccount> {
 	const authFile = codexAccountAuthFile(accountId, paths);
 	const authJson = safeReadJson(authFile);
 	let identity = parseCodexIdentity(authJson);
 	if (!identity?.accountId) {
-		throw new Error("Login not detected yet. Run the login command, finish the flow, then verify again.");
+		throw new LoginNotReadyError("Login not detected yet. Finish the sign-in in the terminal.");
 	}
 	const registry = loadRegistry(paths);
 	const workspaceNames = await lookupCodexWorkspaceNames(authJson);
@@ -1115,15 +1463,219 @@ export async function completeCodexLogin(accountId: string, paths: AccountPaths 
 		managedCodexAccounts: registry.codex.accounts.length,
 	});
 	assertNoDuplicate(registry, "codex", identity, paths, accountId);
+	// The workspace lookup awaited the network; a cancel may have discarded the dir meanwhile.
+	if (opts.stillWanted && !opts.stillWanted()) throw new LoginNotReadyError("This sign-in was closed.");
 	chmodSync(authFile, 0o600);
 	if (registry.codex.accounts.some((e) => e.id === accountId)) {
 		saveRegistry(registry, paths);
 		return toAccount(registry.codex.accounts.find((e) => e.id === accountId)!, "codex", paths);
 	}
 	const account = registerAccount(registry, "codex", accountId, identity, paths, { workspaceName });
+	unmarkStagedLogin(codexAccountDir(accountId, paths));
 	registry.codex.activeId = accountId; // newly added becomes the default preselect
 	saveRegistry(registry, paths);
 	return account;
+}
+
+/** Has the provider written an identity into a staged login dir yet? Read-only. */
+export function stagedLoginHasIdentity(kind: AgentAccountKind, accountId: string, paths: AccountPaths = defaultAccountPaths()): boolean {
+	if (kind === "claude") return parseClaudeIdentity(safeReadJson(join(claudeAccountDir(accountId, paths), ".claude.json"))) !== null;
+	if (isAgentDirAccountKind(kind)) {
+		return authStoreFingerprint(kind, agentDirAccountDir(kind, accountId, paths)) !== checkedAuthFingerprints.get(accountId);
+	}
+	return Boolean(parseCodexIdentity(safeReadJson(codexAccountAuthFile(accountId, paths)))?.accountId);
+}
+
+function registeredAccountIds(kind: AgentAccountKind, paths: AccountPaths): Set<string> {
+	const accounts = isAgentDirAccountKind(kind) ? loadAgentDirRegistry(kind, paths).accounts : loadRegistry(paths)[kind].accounts;
+	return new Set(accounts.map((e) => e.id));
+}
+
+function stagedAccountDir(kind: AgentAccountKind, accountId: string, paths: AccountPaths): string {
+	if (kind === "claude") return claudeAccountDir(accountId, paths);
+	return isAgentDirAccountKind(kind) ? agentDirAccountDir(kind, accountId, paths) : codexAccountDir(accountId, paths);
+}
+
+/** Delete a staged login dir that never became an account. A registered id is
+ *  refused: its dir IS a saved login, and only an explicit Remove may delete it. */
+export function discardStagedLogin(kind: AgentAccountKind, accountId: string, paths: AccountPaths = defaultAccountPaths()): boolean {
+	if (registeredAccountIds(kind, paths).has(accountId)) return false;
+	rmSync(stagedAccountDir(kind, accountId, paths), { recursive: true, force: true });
+	checkedAuthFingerprints.delete(accountId);
+	return true;
+}
+
+/**
+ * Delete staged sign-in dirs a killed app left behind: only dirs carrying our
+ * marker, never registered, and older than `olderThanMs` — any sign-in that old
+ * has expired in whichever app instance started it. Runs when the user starts a
+ * new sign-in, never at load time.
+ */
+export function sweepAbandonedStagedLogins(
+	kind: AgentAccountKind,
+	olderThanMs: number,
+	now: number = Date.now(),
+	paths: AccountPaths = defaultAccountPaths(),
+): number {
+	const root = join(paths.accountsDir, kind);
+	let entries: string[];
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return 0;
+	}
+	const registered = registeredAccountIds(kind, paths);
+	let swept = 0;
+	for (const id of entries) {
+		if (!isSafeAccountId(id) || registered.has(id)) continue;
+		const marker = safeReadJson(join(root, id, STAGED_LOGIN_MARKER)) as { createdAt?: unknown } | null;
+		if (typeof marker?.createdAt !== "number" || now - marker.createdAt < olderThanMs) continue;
+		rmSync(join(root, id), { recursive: true, force: true });
+		swept += 1;
+	}
+	if (swept > 0) log.info("Abandoned staged sign-ins removed", { kind, swept });
+	return swept;
+}
+
+/** How each agent-dir harness signs in. omp ships `omp login`; pi has no such
+ *  subcommand, so pi starts interactive with a tiny extension that types
+ *  `/login` into its editor (see pi-login-extension.ts). */
+function agentDirLoginLaunch(kind: AgentDirAccountKind, dir: string, paths: AccountPaths): Omit<PreparedAccountLogin, "accountId"> {
+	if (kind === "omp") {
+		return {
+			loginCommand: `PI_CODING_AGENT_DIR='${dir}' omp login`,
+			launch: { command: "omp", args: ["login"], env: { PI_CODING_AGENT_DIR: dir }, cwd: dir },
+		};
+	}
+	// accountsDir is <dev3 home>/agent-accounts; the extension sits beside the status ones.
+	const args = ["--no-session", "-e", writePiLoginExtension(dirname(paths.accountsDir))];
+	return {
+		loginCommand: `PI_CODING_AGENT_DIR='${dir}' pi --no-session   # then type /login`,
+		launch: { command: "pi", args, env: { PI_CODING_AGENT_DIR: dir }, cwd: dir },
+	};
+}
+
+/** Scaffold a fresh agent dir for the harness's own sign-in; its picker chooses
+ *  the provider. The account is not registered until completeAgentDirLogin finds one. */
+export async function prepareAgentDirLogin(kind: AgentDirAccountKind, paths: AccountPaths = defaultAccountPaths()): Promise<PreparedAccountLogin> {
+	const id = crypto.randomUUID();
+	const dir = scaffoldAgentDirAccount(kind, id, paths);
+	markStagedLogin(dir);
+	return { accountId: id, ...agentDirLoginLaunch(kind, dir, paths) };
+}
+
+/** omp keeps its sign-ins in agent.db (WAL mode), pi in auth.json; size and mtime
+ *  change on every write, so a fingerprint tells "worth asking again". */
+const AUTH_STORE_FILES: Record<AgentDirAccountKind, string[]> = {
+	omp: ["agent.db", "agent.db-wal"],
+	pi: ["auth.json"],
+};
+
+function authStoreFingerprint(kind: AgentDirAccountKind, dir: string): string {
+	return AUTH_STORE_FILES[kind]
+		.map((name) => {
+			try {
+				const stat = statSync(join(dir, name));
+				return `${stat.size}:${stat.mtimeMs}`;
+			} catch {
+				return "-";
+			}
+		})
+		.join("|");
+}
+
+/** Fingerprint of the auth store when the last check found no sign-in, per staged
+ *  id: the sign-in watch asks again only after the store changed. */
+const checkedAuthFingerprints = new Map<string, string>();
+
+/** Ask omp which OAuth sign-ins an agent dir holds. omp prints provider and
+ *  identity key only — no token ever reaches dev3. */
+export async function listOmpLogins(agentDir: string | null): Promise<ProviderLogin[]> {
+	const proc = spawn(["omp", "usage", "accounts", "--json"], {
+		env: agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const timer = setTimeout(() => proc.kill(), 20_000);
+	try {
+		const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+		if (code !== 0) throw new Error(`omp usage accounts exited with code ${code}`);
+		return parseOmpAccounts(JSON.parse(out));
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** The sign-ins pi stored in an agent dir's auth.json — OAuth and API keys alike.
+ *  pi also authenticates from env vars and models.json; those are the user's
+ *  own setup, not the account's, so they are deliberately not counted. */
+export async function listPiLogins(agentDir: string | null): Promise<ProviderLogin[]> {
+	const file = join(agentDir ?? join(homedir(), ".pi", "agent"), "auth.json");
+	if (!existsSync(file)) return [];
+	return parsePiAuthLogins(JSON.parse(readFileSync(file, "utf-8")));
+}
+
+export function listAgentDirLogins(kind: AgentDirAccountKind, agentDir: string | null): Promise<ProviderLogin[]> {
+	return kind === "omp" ? listOmpLogins(agentDir) : listPiLogins(agentDir);
+}
+
+/** Verify a prepared agent dir and register (or re-verify) it as an account. */
+export async function completeAgentDirLogin(
+	kind: AgentDirAccountKind,
+	accountId: string,
+	paths: AccountPaths = defaultAccountPaths(),
+	listLogins: (agentDir: string) => Promise<ProviderLogin[]> = (dir) => listAgentDirLogins(kind, dir),
+	opts: { stillWanted?: () => boolean } = {},
+): Promise<AgentAccount> {
+	const dir = agentDirAccountDir(kind, accountId, paths);
+	if (!existsSync(dir)) throw new Error(`Unknown ${kind} account: ${accountId}`);
+	const fingerprint = authStoreFingerprint(kind, dir);
+	let logins: ProviderLogin[];
+	try {
+		logins = await listLogins(dir);
+	} catch (err) {
+		// The watch asks again once the auth store changes; a listing hiccup is not a verdict.
+		log.warn("Agent-dir sign-in listing failed", { kind, accountId: accountId.slice(0, 8), error: String(err) });
+		logins = [];
+	}
+	if (logins.length === 0) {
+		checkedAuthFingerprints.set(accountId, fingerprint);
+		throw new LoginNotReadyError("Login not detected yet. Finish the sign-in in the terminal.");
+	}
+	if (opts.stillWanted && !opts.stillWanted()) throw new LoginNotReadyError("This sign-in was closed.");
+	checkedAuthFingerprints.delete(accountId);
+	const registry = loadAgentDirRegistry(kind, paths);
+	let entry = registry.accounts.find((e) => e.id === accountId);
+	if (entry) {
+		entry.logins = logins;
+	} else {
+		const identity = providerLoginsIdentity(logins);
+		entry = {
+			id: accountId,
+			label: identity?.email ?? `${kind} account ${registry.accounts.length + 1}`,
+			logins,
+			createdAt: Date.now(),
+		};
+		registry.accounts.push(entry);
+		registry.activeId = accountId; // newly added becomes the default preselect
+	}
+	saveAgentDirRegistry(kind, registry, paths);
+	unmarkStagedLogin(dir);
+	log.info("Agent-dir account verified", { kind, accountId: accountId.slice(0, 8), providers: logins.map((l) => l.provider) });
+	return agentDirToAccount(kind, entry);
+}
+
+export async function setActiveAgentDirAccount(
+	kind: AgentDirAccountKind,
+	accountId: string | null,
+	paths: AccountPaths = defaultAccountPaths(),
+): Promise<void> {
+	const registry = loadAgentDirRegistry(kind, paths);
+	if (accountId !== null && !registry.accounts.some((e) => e.id === accountId)) {
+		throw new Error(`Unknown ${kind} account: ${accountId}`);
+	}
+	registry.activeId = accountId;
+	saveAgentDirRegistry(kind, registry, paths);
 }
 
 /** Claude activation is registry-only: new sessions pick up CLAUDE_CONFIG_DIR. */
@@ -1153,6 +1705,15 @@ export async function setActiveCodexAccount(accountId: string | null, paths: Acc
 /** Remove a managed account (stored snapshot/config dir). The provider-side
  *  login is untouched; for Codex the current ~/.codex/auth.json stays as-is. */
 export async function removeAgentAccount(kind: AgentAccountKind, accountId: string, paths: AccountPaths = defaultAccountPaths()): Promise<void> {
+	if (isAgentDirAccountKind(kind)) {
+		const dir = agentDirAccountDir(kind, accountId, paths);
+		const registry = loadAgentDirRegistry(kind, paths);
+		registry.accounts = registry.accounts.filter((e) => e.id !== accountId);
+		if (registry.activeId === accountId) registry.activeId = null;
+		saveAgentDirRegistry(kind, registry, paths);
+		rmSync(dir, { recursive: true, force: true }); // symlinks only — their targets stay
+		return;
+	}
 	const registry = loadRegistry(paths);
 	registry[kind].accounts = registry[kind].accounts.filter((e) => e.id !== accountId);
 	if (registry[kind].activeId === accountId) registry[kind].activeId = null;
@@ -1164,6 +1725,14 @@ export async function removeAgentAccount(kind: AgentAccountKind, accountId: stri
 export async function renameAgentAccount(kind: AgentAccountKind, accountId: string, label: string, paths: AccountPaths = defaultAccountPaths()): Promise<void> {
 	const trimmed = label.trim();
 	if (!trimmed) throw new Error("Label cannot be empty");
+	if (isAgentDirAccountKind(kind)) {
+		const registry = loadAgentDirRegistry(kind, paths);
+		const entry = registry.accounts.find((e) => e.id === accountId);
+		if (!entry) throw new Error(`Unknown ${kind} account: ${accountId}`);
+		entry.label = trimmed;
+		saveAgentDirRegistry(kind, registry, paths);
+		return;
+	}
 	const registry = loadRegistry(paths);
 	const entry = registry[kind].accounts.find((e) => e.id === accountId);
 	if (!entry) throw new Error(`Unknown ${kind} account: ${accountId}`);

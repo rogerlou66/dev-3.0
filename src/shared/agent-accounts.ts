@@ -9,9 +9,49 @@
  * - Codex: `auth.json` → `tokens.id_token` (JWT whose payload carries `email`
  *   and the `https://api.openai.com/auth` claim with `chatgpt_plan_type` +
  *   `chatgpt_account_id`) and `tokens.account_id`.
+ * - Oh My Pi: `omp usage accounts --json` → `{accounts:[{provider,
+ *   identityKey, orgName?}]}` — omp's own token-free listing of its OAuth rows.
+ * - Pi: the provider ids and credential types in the account's `auth.json`
+ *   (pi's documented credential file); values are never read.
  */
 
-export type AgentAccountKind = "claude" | "codex";
+export type AgentAccountKind = "claude" | "codex" | "omp" | "pi";
+
+/** Harnesses whose managed account is an agent dir passed as PI_CODING_AGENT_DIR. */
+export type AgentDirAccountKind = "omp" | "pi";
+export const AGENT_DIR_ACCOUNT_KINDS: readonly AgentDirAccountKind[] = ["omp", "pi"];
+
+export function isAgentDirAccountKind(kind: AgentAccountKind): kind is AgentDirAccountKind {
+	return kind === "omp" || kind === "pi";
+}
+
+/** Launch-time account choice meaning "let the usage-balanced router pick".
+ *  Never persisted on a launched pane: the resolved account id replaces it.
+ *  Real account ids are `crypto.randomUUID()`s, so it cannot collide. */
+export const AUTO_ACCOUNT_ID = "auto";
+
+export function isAutoAccountId(accountId: string | null | undefined): accountId is typeof AUTO_ACCOUNT_ID {
+	return accountId === AUTO_ACCOUNT_ID;
+}
+
+/** Harnesses whose limits dev3 reads, so Auto can balance them. */
+export type RoutableAccountKind = "claude" | "codex";
+
+export function isRoutableAccountKind(kind: AgentAccountKind | null | undefined): kind is RoutableAccountKind {
+	return kind === "claude" || kind === "codex";
+}
+
+/** One provider sign-in held inside a managed agent-dir account. A single agent
+ *  dir can hold several (`/login` to ChatGPT and to Copilot, say). */
+export interface ProviderLogin {
+	/** Provider id, e.g. "openai-codex", "github-copilot". */
+	provider: string;
+	/** omp's `email:…|org:…` identity key; null when the provider reports none. */
+	identityKey: string | null;
+	orgName: string | null;
+	/** pi only: how the provider is signed in. */
+	authType?: "oauth" | "api_key";
+}
 
 /** How a managed account authenticates: an OAuth login (subscription) or an
  *  API profile (custom endpoint / API key / env vars, no login at all). */
@@ -103,6 +143,8 @@ export interface AgentAccount {
 	auth: AgentAccountAuth;
 	/** Present only when auth === "api". */
 	api: AgentApiProfileInfo | null;
+	/** omp and pi accounts only: the provider sign-ins found at the last verification. */
+	providerLogins?: ProviderLogin[];
 	createdAt: number;
 }
 
@@ -116,6 +158,8 @@ export interface AgentAccountsState {
 		systemConfigDir: string;
 		/** Identity of the system login parsed from ~/.claude.json (null when absent). */
 		systemIdentity: AgentAccountIdentity | null;
+		/** New launches left on the default go to Auto (the usage-balanced router). */
+		autoDefault?: boolean;
 	};
 	codex: {
 		accounts: AgentAccount[];
@@ -123,7 +167,58 @@ export interface AgentAccountsState {
 		activeId: string | null;
 		/** Identity currently held by ~/.codex/auth.json (null when absent/unreadable). */
 		currentIdentity: AgentAccountIdentity | null;
+		/** New launches left on the default go to Auto (the usage-balanced router). */
+		autoDefault?: boolean;
 	};
+	omp: {
+		accounts: AgentAccount[];
+		/** Default account for new omp launches; null = omp's own ~/.omp/agent. */
+		activeId: string | null;
+	};
+	pi: {
+		accounts: AgentAccount[];
+		/** Default account for new pi launches; null = pi's own ~/.pi/agent. */
+		activeId: string | null;
+	};
+}
+
+/**
+ * Where an in-app sign-in stands. `running`/`exited`/`missing-executable` keep
+ * watching the staging dir, so a login finished in any terminal still lands;
+ * `succeeded`, `failed` and `expired` are final.
+ */
+export type AccountLoginPhase =
+	| "running"
+	| "verifying"
+	| "succeeded"
+	| "exited"
+	| "missing-executable"
+	| "failed"
+	| "expired";
+
+/** The provider wrote a login, but its own status does not confirm it (yet). */
+export type AccountLoginPendingReason = "status-unavailable" | "status-mismatch";
+
+/** One sign-in owned by the backend host. Never carries terminal output or credentials. */
+export interface AccountLoginState {
+	loginId: string;
+	kind: AgentAccountKind;
+	phase: AccountLoginPhase;
+	/** PTY session key for the embedded terminal; null when no process could start. */
+	sessionKey: string | null;
+	/** The provider's device-code flow (URL + code) instead of a host-side browser callback. */
+	deviceAuth: boolean;
+	/** Fallback for a host where the embedded process cannot start. */
+	manualCommand: string;
+	executable: string;
+	installUrl: string | null;
+	exitCode: number | null;
+	error: string | null;
+	/** Set while an identity exists but is not confirmed — shown, never treated as success. */
+	pending: AccountLoginPendingReason | null;
+	account: AgentAccount | null;
+	startedAt: number;
+	expiresAt: number;
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -232,6 +327,54 @@ export function parseCodexIdentity(authJson: unknown): AgentAccountIdentity | nu
 		planLabel: codexPlanLabel(plan),
 		accountId: accountId ?? asString(authClaim?.chatgpt_account_id),
 	};
+}
+
+/** Parse `omp usage accounts --json` output. Throws on a payload that is not
+ *  that shape, so a changed omp contract fails loudly instead of reading as
+ *  "not signed in". */
+export function parseOmpAccounts(json: unknown): ProviderLogin[] {
+	const rows = asRecord(json)?.accounts;
+	if (!Array.isArray(rows)) throw new Error("Unexpected `omp usage accounts --json` output");
+	const logins: ProviderLogin[] = [];
+	for (const row of rows) {
+		const rec = asRecord(row);
+		const provider = asString(rec?.provider);
+		if (!provider) continue;
+		logins.push({ provider, identityKey: asString(rec?.identityKey), orgName: asString(rec?.orgName) });
+	}
+	return logins;
+}
+
+/** pi's `auth.json` → its stored sign-ins: each top-level provider id with a
+ *  credential `type` pi knows. Only keys and types are read; a key or token
+ *  value never leaves this function. Throws on a payload that is not an object. */
+export function parsePiAuthLogins(json: unknown): ProviderLogin[] {
+	const root = asRecord(json);
+	if (!root) throw new Error("Unexpected pi auth.json content");
+	const logins: ProviderLogin[] = [];
+	for (const [provider, credential] of Object.entries(root)) {
+		const type = asRecord(credential)?.type;
+		if (type !== "oauth" && type !== "api_key") continue;
+		logins.push({ provider, identityKey: null, orgName: null, authType: type });
+	}
+	return logins;
+}
+
+/** `email:a@b.c|org:x` → "a@b.c". omp builds identity keys from these segments. */
+export function providerLoginEmail(login: ProviderLogin): string | null {
+	for (const part of login.identityKey?.split("|") ?? []) {
+		if (part.startsWith("email:") && part.length > 6) return part.slice(6);
+	}
+	return null;
+}
+
+/** Display identity of an agent-dir account: the email of its first sign-in that
+ *  names one, and the signed-in providers as the badge ("openai-codex, …"). */
+export function providerLoginsIdentity(logins: ProviderLogin[]): AgentAccountIdentity | null {
+	const login = logins.find((l) => providerLoginEmail(l)) ?? logins[0];
+	if (!login) return null;
+	const providers = [...new Set(logins.map((l) => l.provider))].join(", ");
+	return { email: providerLoginEmail(login), organization: login.orgName, plan: null, planLabel: providers, accountId: null };
 }
 
 /** Compact, display-safe prefix for a Codex ChatGPT workspace id. */

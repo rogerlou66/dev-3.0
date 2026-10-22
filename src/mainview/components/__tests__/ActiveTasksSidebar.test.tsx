@@ -25,9 +25,14 @@ vi.mock("../../hooks/useTerminalPreview", () => ({
 	useTerminalPreview: () => terminalPreview,
 }));
 
+vi.mock("../../utils/confirmTaskCompletion", () => ({
+	confirmTaskCompletion: vi.fn(() => Promise.resolve(false)),
+}));
+
 vi.mock("../../rpc", () => ({
 	api: {
 		request: {
+			moveTask: vi.fn(),
 			getTerminalPreview: vi.fn(),
 			getAllProjectTasks: vi.fn(() => Promise.resolve([])),
 			getSpaces: vi.fn(() => Promise.resolve({ version: 1, spaces: [], order: [] })),
@@ -360,6 +365,30 @@ function makeTask(overrides?: Partial<Task>): Task {
 			expect(screen.queryByText("Parked task")).not.toBeInTheDocument();
 			expect(screen.queryByText("Live task")).not.toBeInTheDocument();
 			expect(screen.getByTestId("sidebar-show-hidden")).toHaveAttribute("aria-pressed", "false");
+		});
+
+		it("gives a revealed hibernated row ✕ instead of ✓, and a declined ✕ changes nothing", async () => {
+			const user = userEvent.setup();
+			const { confirmTaskCompletion } = await import("../../utils/confirmTaskCompletion");
+			const { api } = await import("../../rpc");
+			const view = renderTasks([
+				makeTask({ id: "live", title: "Live task", status: "review-by-user", groupId: null, variantIndex: null }),
+				makeTask({ id: "sleep", title: "Sleeping task", status: "review-by-user", worktreePath: "/tmp/wt", groupId: null, variantIndex: null, hibernated: true }),
+			]);
+			await user.click(screen.getByTestId("sidebar-show-hidden"));
+			const rail = (id: string) => within(screen.getByTestId(`sidebar-status-rail-${id}`));
+
+			expect(rail("live").getByTestId("task-card-quick-complete")).toBeInTheDocument();
+			expect(rail("live").queryByTestId("task-card-quick-cancel")).not.toBeInTheDocument();
+			expect(rail("sleep").queryByTestId("task-card-quick-complete")).not.toBeInTheDocument();
+
+			await user.click(rail("sleep").getByRole("button", { name: "Cancel task" }));
+
+			expect(vi.mocked(confirmTaskCompletion)).toHaveBeenCalledWith(
+				expect.objectContaining({ id: "sleep" }), expect.anything(), "cancelled", expect.anything(), expect.anything(), { alwaysConfirm: true },
+			);
+			expect(vi.mocked(api.request.moveTask)).not.toHaveBeenCalled();
+			expect(view.container.querySelector('[data-task-id="sleep"]')).not.toBeNull();
 		});
 
 		it("keeps is:hidden about tasks the user hid, not hibernated ones", async () => {
@@ -2099,5 +2128,47 @@ describe("ActiveTasksSidebar — row context menu", () => {
 		fireEvent.contextMenu(screen.getByTestId("sidebar-identity-t1"), { clientX: 30, clientY: 40 });
 
 		expect(screen.queryByTestId("sidebar-task-menu-t1")).not.toBeInTheDocument();
+	});
+});
+
+describe("ActiveTasksSidebar port badges", () => {
+	const ports = Array.from({ length: 60 }, (_, i) => ({ port: 51400 + i, pid: 100 + i, processName: "node" }));
+
+	it("folds a long port list on the row and expands it without opening the task", async () => {
+		const user = userEvent.setup();
+		const navigate = vi.fn();
+		const open = vi.spyOn(window, "open").mockImplementation(() => null);
+		render(
+			<I18nProvider>
+				<ActiveTasksSidebar project={project} tasks={[makeTask()]} dispatch={vi.fn()}
+					navigate={navigate} agents={[claudeAgent]} bellCounts={new Map()} taskPorts={new Map([["t1", ports]])} />
+			</I18nProvider>,
+		);
+
+		const list = screen.getByTestId("sidebar-ports-t1");
+		expect(within(list).getAllByRole("button", { name: /^Open :/ })).toHaveLength(5);
+		const toggle = screen.getByTestId("sidebar-ports-t1-toggle");
+		expect(toggle).toHaveTextContent("+55 more");
+
+		await user.click(toggle);
+		expect(within(list).getAllByRole("button", { name: /^Open :/ })).toHaveLength(60);
+		await user.click(within(list).getByRole("button", { name: "Open :51459 in browser" }));
+		expect(open).toHaveBeenCalledWith("http://localhost:51459", "_blank");
+
+		await user.click(toggle);
+		expect(within(list).getAllByRole("button", { name: /^Open :/ })).toHaveLength(5);
+		expect(navigate).not.toHaveBeenCalled();
+		open.mockRestore();
+	});
+
+	it("leaves a short port list as it was", () => {
+		render(
+			<I18nProvider>
+				<ActiveTasksSidebar project={project} tasks={[makeTask()]} dispatch={vi.fn()}
+					navigate={vi.fn()} agents={[claudeAgent]} bellCounts={new Map()} taskPorts={new Map([["t1", ports.slice(0, 3)]])} />
+			</I18nProvider>,
+		);
+		expect(within(screen.getByTestId("sidebar-ports-t1")).getAllByRole("button")).toHaveLength(3);
+		expect(screen.queryByTestId("sidebar-ports-t1-toggle")).not.toBeInTheDocument();
 	});
 });

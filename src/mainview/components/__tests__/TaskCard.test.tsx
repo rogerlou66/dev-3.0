@@ -2,7 +2,7 @@ import { render, screen, waitFor, fireEvent, act, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import TaskCard from "../TaskCard";
 import { I18nProvider } from "../../i18n";
-import type { CodingAgent, DevServerSummary, Label, Project, Task, TaskPRBadgeInfo, TaskStatus } from "../../../shared/types";
+import type { CodingAgent, DevServerSummary, Label, PortInfo, Project, Task, TaskPRBadgeInfo, TaskStatus } from "../../../shared/types";
 import { getPreparingStageProgress } from "../../../shared/types";
 import type { AppAction, Route } from "../../state";
 
@@ -176,6 +176,7 @@ function renderCard(
 			onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 			compact?: boolean;
 			devServer?: DevServerSummary;
+			ports?: PortInfo[];
 	},
 ) {
 	return render(
@@ -199,6 +200,7 @@ function renderCard(
 					onOpenWorkspaceTask={opts?.onOpenWorkspaceTask}
 					compact={opts?.compact}
 					devServer={opts?.devServer}
+					ports={opts?.ports}
 			/>
 		</I18nProvider>,
 	);
@@ -648,6 +650,80 @@ describe("TaskCard", () => {
 			await user.click(screen.getByText("Agent is Working"));
 
 			expect(onLaunchVariants).toHaveBeenCalledWith(task, "in-progress");
+		});
+	});
+
+	describe("hibernated card quick-cancel", () => {
+		const hibernated = () =>
+			makeTask({ status: "review-by-user", worktreePath: "/tmp/wt", branchName: "dev3/test", hibernated: true });
+
+		it("offers Cancel task and routes it through the always-on confirmation", async () => {
+			const user = userEvent.setup();
+			const navigate = vi.fn();
+			const task = hibernated();
+			mockedApi.request.moveTask.mockResolvedValue({ ...task, status: "cancelled" });
+			renderCard(task, { navigate });
+
+			await user.click(screen.getByRole("button", { name: "Cancel task" }));
+
+			expect(mockedConfirmTaskCompletion).toHaveBeenCalledWith(
+				expect.objectContaining({ id: "t1" }),
+				expect.anything(),
+				"cancelled",
+				expect.anything(),
+				expect.anything(),
+				{ alwaysConfirm: true },
+			);
+			await waitFor(() => {
+				expect(mockedApi.request.moveTask).toHaveBeenCalledWith(
+					expect.objectContaining({ taskId: "t1", newStatus: "cancelled" }),
+				);
+			});
+			expect(navigate).not.toHaveBeenCalled();
+		});
+
+		it("leaves the task untouched when the confirmation is declined", async () => {
+			const user = userEvent.setup();
+			const dispatch = vi.fn();
+			mockedConfirmTaskCompletion.mockResolvedValue(false);
+			renderCard(hibernated(), { dispatch });
+
+			await user.click(screen.getByTestId("task-card-quick-cancel"));
+
+			expect(mockedApi.request.moveTask).not.toHaveBeenCalled();
+			expect(dispatch).not.toHaveBeenCalled();
+			expect(screen.getByTestId("task-card-quick-cancel")).toBeEnabled();
+		});
+
+		it("works from the keyboard without opening the task", async () => {
+			const user = userEvent.setup();
+			const navigate = vi.fn();
+			mockedConfirmTaskCompletion.mockResolvedValue(false);
+			renderCard(hibernated(), { navigate });
+
+			screen.getByTestId("task-card-quick-cancel").focus();
+			await user.keyboard("{Enter}");
+
+			expect(mockedConfirmTaskCompletion).toHaveBeenCalledWith(
+				expect.anything(), expect.anything(), "cancelled", expect.anything(), expect.anything(), { alwaysConfirm: true },
+			);
+			expect(navigate).not.toHaveBeenCalled();
+		});
+
+		it("trades the ✓ for the ✕ — a parked card offers no one-click complete", () => {
+			renderCard(hibernated());
+
+			expect(screen.queryByTestId("task-card-quick-complete")).not.toBeInTheDocument();
+			expect(screen.getByTestId("task-card-quick-cancel")).toBeInTheDocument();
+		});
+
+		it.each([
+			["a live task", makeTask({ status: "review-by-user", worktreePath: "/tmp/wt" })],
+			["a todo task", makeTask({ status: "todo" })],
+			["a completed task", makeTask({ status: "completed" })],
+		])("is absent on %s", (_name, task) => {
+			renderCard(task);
+			expect(screen.queryByTestId("task-card-quick-cancel")).not.toBeInTheDocument();
 		});
 	});
 
@@ -2260,10 +2336,11 @@ describe("hibernated card", () => {
 		expect(trigger).toBeDisabled();
 	});
 
-	it("keeps the quick-complete checkmark live", () => {
+	it("keeps a terminal move live on the rail: ✕ Cancel in the ✓'s place", () => {
 		renderCard(hibernated());
 
-		expect(screen.getByTestId("task-card-quick-complete")).toBeInTheDocument();
+		expect(screen.getByTestId("task-card-quick-cancel")).toBeEnabled();
+		expect(screen.queryByTestId("task-card-quick-complete")).toBeNull();
 	});
 
 	it("leaves a live card draggable and un-greyed", () => {
@@ -2442,5 +2519,27 @@ describe("TaskCard dev-server control", () => {
 		// `all`: a card-level stop is coarse on purpose — it takes down every dev
 		// server of the task, never one of several.
 		expect(api.request.stopDevServer).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1", all: true });
+	});
+});
+
+describe("TaskCard ports popover", () => {
+	it("lists every port in a popover bounded to the viewport, without opening the task", async () => {
+		const navigate = vi.fn();
+		const open = vi.spyOn(window, "open").mockImplementation(() => null);
+		const ports = Array.from({ length: 60 }, (_, i) => ({ port: 51400 + i, pid: 100 + i, processName: "node" }));
+		renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/wt" }), { ports, navigate });
+
+		await userEvent.click(screen.getByRole("button", { name: "60 ports" }));
+		const popover = screen.getByTestId("task-card-ports-popover");
+		// A test suite opens dozens of listeners; the list scrolls instead of
+		// running off the screen.
+		expect(popover.className).toMatch(/max-h-\[min\(24rem,calc\(100vh-2rem\)\)\]/);
+		expect(popover).toHaveClass("overflow-y-auto");
+		expect(within(popover).getAllByRole("button")).toHaveLength(60);
+
+		await userEvent.click(within(popover).getByText(":51459"));
+		expect(open).toHaveBeenCalledWith("http://localhost:51459", "_blank");
+		expect(navigate).not.toHaveBeenCalled();
+		open.mockRestore();
 	});
 });

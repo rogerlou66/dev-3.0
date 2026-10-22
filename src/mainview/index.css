@@ -614,6 +614,17 @@ body, #root {
 	display: none;
 }
 
+/* ---- Terminal window navigator (rail / tabs): scrolls, no visible bar ---- */
+
+.window-nav-scroll {
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+}
+
+.window-nav-scroll::-webkit-scrollbar {
+	display: none;
+}
+
 /* ---- Artifact viewer toolbar: scrolls sideways, no visible bar ----
    A 7px always-on bar inside a 40px toolbar would eat the row's height and
    clip the icons it is supposed to give access to. */
@@ -706,10 +717,44 @@ button {
 	transition: none;
 }
 
+/* ---- Agent-message burst: the next message lands in place, the old one sinks into the deck ---- */
+@keyframes toast-burst-in {
+	from { transform: translateX(14px); opacity: 0; }
+	to { transform: none; opacity: 1; }
+}
+
+@keyframes toast-deck-settle {
+	from { transform: none; opacity: 0.6; }
+}
+
+.toast-burst-in {
+	animation: toast-burst-in 0.22s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.toast-deck-layer {
+	transform-origin: 50% 100%;
+}
+
+.toast-deck-settle {
+	animation: toast-deck-settle 0.24s cubic-bezier(0.2, 0, 0, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.toast-swipe {
 		transition: none;
 	}
+
+	.toast-burst-in {
+		animation: toast-fade-in 0.12s linear both;
+	}
+
+	.toast-deck-settle {
+		animation: none;
+	}
+}
+
+@keyframes toast-fade-in {
+	from { opacity: 0; }
 }
 
 /* ---- Tip card rotation progress bar (drives auto-rotate via animationend) ---- */
@@ -1567,6 +1612,16 @@ svg .hdr-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 	92%, 100% { transform: rotate(0deg); }
 }
 .header-anim:is(:hover, :focus-visible) .hdr-needle { transform-origin: 12px 14px; animation: hdr-needle 2.6s ease-in-out infinite; }
+
+/* -- Agent sessions: the live dots pulse down the list -- */
+@keyframes hdr-sess-pulse {
+	0%, 100% { transform: scale(1); opacity: 1; }
+	30% { transform: scale(1.6); opacity: .55; }
+	60% { transform: scale(1); opacity: 1; }
+}
+.header-anim:is(:hover, :focus-visible) .hdr-sess1 { transform-box: fill-box; transform-origin: center; animation: hdr-sess-pulse 1.8s ease-in-out infinite; }
+.header-anim:is(:hover, :focus-visible) .hdr-sess2 { transform-box: fill-box; transform-origin: center; animation: hdr-sess-pulse 1.8s ease-in-out .3s infinite; }
+.header-anim:is(:hover, :focus-visible) .hdr-sess3 { transform-box: fill-box; transform-origin: center; animation: hdr-sess-pulse 1.8s ease-in-out .6s infinite; }
 
 /* -- GitHub: the octocat takes a polite bow -- */
 @keyframes hdr-gh {

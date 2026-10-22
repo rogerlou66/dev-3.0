@@ -44,6 +44,7 @@ import GhWarningBanner, { isGhWarningDismissed } from "./components/GhWarningBan
 import Changelog from "./components/Changelog";
 import GaugeDemo from "./components/gauges/GaugeDemo";
 import ProductivityStatsView from "./components/ProductivityStatsView";
+import SessionsScreen from "./components/SessionsScreen";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
 import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
@@ -1111,6 +1112,7 @@ function App() {
 		[currentProjectTasks, projects, openTaskFromNotification, navigateToProject],
 	);
 
+	const isToastTaskInView = useCallback((taskId: string) => routeShowsTaskWorkspace(routeRef.current, taskId), []);
 	const cycleVariant = useCallback((direction: -1 | 1): boolean => {
 		const taskId = routeTaskId(state.route);
 		const projectId = projectIdForRoute(state.route);
@@ -1884,6 +1886,16 @@ function App() {
 		}
 		window.addEventListener("rpc:projectUpdated", onProjectUpdated);
 		return () => window.removeEventListener("rpc:projectUpdated", onProjectUpdated);
+	}, [dispatch]);
+
+	// `addProject` upserts, so a push for a project this window already shows is harmless.
+	useEffect(() => {
+		function onProjectAdded(e: Event) {
+			const { project } = (e as CustomEvent).detail;
+			dispatch({ type: "addProject", project });
+		}
+		window.addEventListener("rpc:projectAdded", onProjectAdded);
+		return () => window.removeEventListener("rpc:projectAdded", onProjectAdded);
 	}, [dispatch]);
 
 	useEffect(() => {
@@ -3103,6 +3115,7 @@ function App() {
 			case "settings": return t("settings.screenTitle");
 			case "changelog": return t("changelog.screenTitle");
 			case "stats": return t("stats.title");
+			case "sessions": return t("sessions.title");
 			case "agent-traffic": return t("traffic.label");
 			default: return "";
 		}
@@ -3622,7 +3635,7 @@ function App() {
 										setTunnelWanted(want);
 										if (want && remoteQR.tunnelBinaryInstalled && remoteQR.tunnelState === "idle") {
 											startRemoteTunnel();
-										} else if (!want && remoteQR.tunnelState === "connected") {
+										} else if (!want && (tunnelStarting || remoteQR.tunnelState === "connected" || remoteQR.tunnelState === "starting")) {
 											stopRemoteTunnel();
 										}
 									}}
@@ -3853,7 +3866,7 @@ function App() {
 			    must remain clickable so their handler can exit fullscreen first. */}
 			<PushEnrollmentInvite t={t} />
 			<ArtifactFreezeNotice t={t} />
-			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} />
+			<ToastHost onTaskOverflow={handleToastOverflow} resolveOrigin={resolveToastOrigin} isTaskInView={isToastTaskInView} />
 		</div>
 	);
 
@@ -3984,6 +3997,16 @@ function App() {
 						navigate={navigate}
 						goBack={() => dispatch({ type: "goBack" })}
 						canGoBack={state.historyIndex > 0}
+					/>
+				);
+			case "sessions":
+				return (
+					<SessionsScreen
+						// A new entry is a new scope: remount so the old scope state does not survive it.
+						key={route.scopeProjectId ?? "all"}
+						projectId={route.scopeProjectId ?? null}
+						projectName={state.projects.find((p) => p.id === route.scopeProjectId)?.name ?? null}
+						onOpenTask={openTaskFromNotification}
 					/>
 				);
 			case "agent-traffic":

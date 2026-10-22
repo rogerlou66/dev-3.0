@@ -54,13 +54,13 @@ export const PANE_CWD_FORMAT = "#{?pane_current_path,#{pane_current_path},#{sess
 export const TMUX_LAST_AGENT_PANE_OPTION = "@dev3_last_agent_pane";
 
 /**
- * The themed config for one theme and one default dimming choice. The choice is
- * part of the NAME: every dev3 process on the machine writes these shared files
- * at import, and a name that ignored it let another process's default overwrite
- * the file this app later sources into the shared server.
+ * The themed config for one theme and one default dimming and title-bar choice.
+ * The choices are part of the NAME: every dev3 process on the machine writes these
+ * shared files at import, and a name that ignored them let another process's
+ * default overwrite the file this app later sources into the shared server.
  */
-export function tmuxConfigPath(theme: "dark" | "light" | "cmux", dimmed: boolean): string {
-	return dev3TempPath(`dev3-tmux-${theme}-${dimmed ? "dimmed" : "undimmed"}.conf`);
+export function tmuxConfigPath(theme: "dark" | "light" | "cmux", dimmed: boolean, titled = false): string {
+	return dev3TempPath(`dev3-tmux-${theme}-${dimmed ? "dimmed" : "undimmed"}${titled ? "-titled" : ""}.conf`);
 }
 
 let activeTheme: "dark" | "light" | "cmux" = "dark";
@@ -74,9 +74,12 @@ let activeTheme: "dark" | "light" | "cmux" = "dark";
  */
 let dimInactivePanes = true;
 
-/** The config this process sources: its active theme and its own preference. */
+/** The `paneTitles` preference, held here for the same reason as `dimInactivePanes`. */
+let paneTitles = false;
+
+/** The config this process sources: its active theme and its own preferences. */
 export function activeTmuxConfigPath(): string {
-	return tmuxConfigPath(activeTheme, dimInactivePanes);
+	return tmuxConfigPath(activeTheme, dimInactivePanes, paneTitles);
 }
 
 /** Switch the active themed config and return its path. */
@@ -156,6 +159,11 @@ bind -n M-S-Right select-pane -R
 bind -n M-S-Up select-pane -U
 bind -n M-S-Down select-pane -D
 
+# Ctrl+Delete deletes the next word (M-d) at a shell or agent prompt; a full-screen
+# program on the alternate screen (neovim, vim, nano) gets the raw key it decodes itself.
+# See decisions/2026/10/17/terminal-ctrl-backspace-word-delete.md.
+bind -n C-DC if -F '#{alternate_on}' 'send-keys C-DC' 'send-keys M-d'
+
 # Remember the last AGENT pane the user focused, per session. Fires on every
 # pane selection (mouse, Alt+Shift+arrow, programmatic). The conditional keeps the
 # previous value when the newly-focused pane is not an agent pane, so focusing a
@@ -170,11 +178,10 @@ set -g pane-border-lines double
 # Clipboard support
 set -s set-clipboard on
 
-# Explicitly pin the default mouse-copy binding. Merely deleting a bind line
-# does not unbind it on an already-running server (configs are re-sourced by
-# configureTmux), so the reverted #991 copy-selection binding would stick.
-bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
-bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
+# Retain a scrolled history viewport; a live-screen copy must not hold agent input.
+# Explicit bindings also replace old copy-and-cancel on running servers.
+bind -T copy-mode MouseDragEnd1Pane if-shell -F '#{>:#{scroll_position},0}' 'send-keys -X copy-pipe' 'send-keys -X copy-pipe-and-cancel'
+bind -T copy-mode-vi MouseDragEnd1Pane if-shell -F '#{>:#{scroll_position},0}' 'send-keys -X copy-pipe' 'send-keys -X copy-pipe-and-cancel'
 
 # Bell pass-through
 set -g visual-bell off
@@ -257,10 +264,11 @@ set -g status-position top
 set -g status-right "${PANE_ID_BADGE}"
 set -g status-left ""
 
-# A + button right after the last tab opens a window like Cmd+T: same cwd rule.
+# A + button right after the last tab opens a window like Cmd+T: same cwd rule, and
+# it selects the new (last) window, since new-window itself stays in the background.
 # Any other click keeps tmux's default (switch to the clicked tab).
 set -g 'status-format[0]' '${STATUS_FORMAT}'
-bind -n MouseDown1Status if -F '#{==:#{mouse_status_range},${NEW_WINDOW_STATUS_RANGE}}' 'new-window -c "${PANE_CWD_FORMAT}"' 'switch-client -t ='
+bind -n MouseDown1Status if -F '#{==:#{mouse_status_range},${NEW_WINDOW_STATUS_RANGE}}' 'new-window -c "${PANE_CWD_FORMAT}" ; select-window -t "{end}"' 'switch-client -t ='
 
 # The bar stays visible with a single window too. Earlier configs hid it through
 # these hooks, and re-sourcing never drops a hook on a live server — unset them.
@@ -268,6 +276,14 @@ set-hook -gu window-linked
 set-hook -gu window-unlinked
 set-hook -gu client-attached
 set-hook -gu client-session-changed
+
+# A new window never takes the screen on its own: an agent or a script opening
+# one must not hide the agent. Explicit user actions switch on purpose — the app
+# selects the window it created, and ⌃B c selects the new last window itself.
+# Decision: decisions/2026/10/03/new-tmux-windows-open-in-background.md
+set -s command-alias[90] 'new-window=new-window -d'
+set -s command-alias[91] 'neww=new-window -d'
+bind c new-window -c "${PANE_CWD_FORMAT}" \\; select-window -t "{end}"
 `;
 
 /**
@@ -310,7 +326,47 @@ const CMUX_PALETTE = Object.entries({
 	blue: "#7aa2f7", lavender: "#7aa2f7",
 }).map(([name, color]) => `set -gq @thm_${name} "${color}"`).join("\n");
 
-export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true, appearancePreset: "default" | "cmux" = "default"): string {
+/**
+ * Server-global user option holding the pane-title-bar choice (`on`/`off`), shared
+ * across dev3 instances exactly like {@link TMUX_PANE_DIMMING_OPTION}.
+ */
+export const TMUX_PANE_TITLES_OPTION = "@dev3_pane_titles";
+
+/**
+ * Pane label: the title a program set, else `folder │ command` — a plain shell's
+ * title is just the hostname, which says nothing.
+ */
+const PANE_BORDER_LABEL = "#{?#{||:#{||:#{==:#{pane_title},},#{==:#{pane_title},#{host}}},#{==:#{pane_title},#{host_short}}},#{b:pane_current_path} │ #{pane_current_command},#{pane_title}}";
+
+/**
+ * One slanted tab per pane, cut like the window tabs (themes.ts `tabCaps`): green
+ * while focused, grey otherwise. Styles inside a conditional use spaces, not commas,
+ * because a comma would end the branch; caps take only a foreground so they sit on
+ * whatever background the border has.
+ */
+function paneTitleTab(fill: string, text: string, bold: boolean, zoomMarker: string): string {
+	return `#[fg=#{${fill}}]\uE0BA#[fg=#{${text}} bg=#{${fill}}${bold ? " bold" : ""}] #{pane_index} ${zoomMarker}${PANE_BORDER_LABEL} #[default]#[fg=#{${fill}}]\uE0BC#[default]`;
+}
+
+export const PANE_BORDER_FORMAT = `#{?pane_active,${paneTitleTab("@thm_green", "@thm_crust", true, "#{?window_zoomed_flag,󰁌 ,}")},${paneTitleTab("@thm_surface_1", "@thm_subtext_0", false, "")}}`;
+
+/**
+ * Title bars above each pane (Settings → Terminal → Pane title bars). Seeded like
+ * the dimming option, then `pane-border-status` follows the option on every source;
+ * the `off` branch is what turns the bars off on a live server.
+ */
+function paneTitlesConfig(defaultOn: boolean): string {
+	return [
+		"",
+		"# Pane title bars (Settings → Terminal → Pane title bars)",
+		`set -goq ${TMUX_PANE_TITLES_OPTION} ${defaultOn ? "on" : "off"}`,
+		`set -wg pane-border-format "${PANE_BORDER_FORMAT}"`,
+		`if -F "#{==:#{${TMUX_PANE_TITLES_OPTION}},on}" "set -wg pane-border-status top" "set -wg pane-border-status off"`,
+		"",
+	].join("\n");
+}
+
+export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true, paneTitles = false, appearancePreset: "default" | "cmux" = "default"): string {
 	const pluginDir = CATPPUCCIN_PLUGIN_DIR;
 	return [
 		`# dev3 tmux config — Catppuccin ${flavor}`,
@@ -321,6 +377,7 @@ export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = t
 		`source "${pluginDir}/catppuccin_options_tmux.conf"`,
 		`source "${pluginDir}/catppuccin_tmux.conf"`,
 		paneDimConfig(dimInactivePanes),
+		paneTitlesConfig(paneTitles),
 		TMUX_CONFIG_FUNCTIONAL,
 		shellEnvConfig(),
 		TMUX_STATUS_BAR,
@@ -331,17 +388,29 @@ export function setTmuxPaneDimming(enabled: boolean): void {
 	dimInactivePanes = enabled;
 }
 
+export function setTmuxPaneTitles(enabled: boolean): void {
+	paneTitles = enabled;
+}
+
+/** Hand the saved pane preferences to this module at boot, before any pane spawns. */
+export function applySavedTmuxPanePreferences(settings: { dimInactivePanes?: boolean; paneTitles?: boolean }): void {
+	setTmuxPaneDimming(settings.dimInactivePanes !== false);
+	setTmuxPaneTitles(settings.paneTitles === true);
+}
+
 /**
  * Rewrite every themed config — default and cmux, both dimming variants. Called at
  * startup, and again when a setting the config embeds changes: the shell (baked
- * into `default-shell`) and whether inactive panes are dimmed.
+ * into `default-shell`), whether inactive panes are dimmed, and pane title bars.
  */
 export function writeTmuxConfigs(): void {
 	writeShellInit();
 	for (const dimmed of [true, false]) {
-		writeFileSync(tmuxConfigPath("dark", dimmed), buildThemeConfig("mocha", dimmed));
-		writeFileSync(tmuxConfigPath("light", dimmed), buildThemeConfig("latte", dimmed));
-		writeFileSync(tmuxConfigPath("cmux", dimmed), buildThemeConfig("mocha", dimmed, "cmux"));
+		for (const titled of [false, true]) {
+			writeFileSync(tmuxConfigPath("dark", dimmed, titled), buildThemeConfig("mocha", dimmed, titled));
+			writeFileSync(tmuxConfigPath("light", dimmed, titled), buildThemeConfig("latte", dimmed, titled));
+			writeFileSync(tmuxConfigPath("cmux", dimmed, titled), buildThemeConfig("mocha", dimmed, titled, "cmux"));
+		}
 	}
 }
 

@@ -1,4 +1,5 @@
 import { Children, Fragment, useState, useRef, useEffect, useLayoutEffect, type Dispatch } from "react";
+import { findAgentConfig } from "../../shared/agent-live-models";
 import { toast } from "../toast";
 import { createPortal } from "react-dom";
 import type { CodingAgent, DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo, TaskStatus } from "../../shared/types";
@@ -124,6 +125,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const spawnVariantHidden = useIsControlHidden("spawn-variant");
 	const [moving, setMoving] = useState(false);
 	const [quickCompleting, setQuickCompleting] = useState(false);
+	const [quickCancelling, setQuickCancelling] = useState(false);
 	const [cancellingPreparation, setCancellingPreparation] = useState(false);
 	const statusMenu = useStatusMenu(narrow);
 	const { open: menuOpen, setOpen: setMenuOpen } = statusMenu;
@@ -177,7 +179,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// An unfinished draft: not runnable, and a click reopens the New Task popup.
 	const isDraft = task.draft === true;
 	// Parked: agent, terminal and dev server killed, worktree intact. The card is
-	// inert (no drag, no column change) but still opens, and still completes.
+	// inert (no drag, no column change) but still opens, and still cancels.
 	const isHibernated = task.hibernated === true;
 	// Its session died with the app (force quit, reboot). Nothing was lost, but
 	// nothing is running either — the card must not pass for live work.
@@ -286,6 +288,17 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			await handleMove("completed", { alwaysConfirm: true });
 		} finally {
 			setQuickCompleting(false);
+		}
+	}
+
+	// Same contract as the ✓, for the one card whose Move-to menu is off.
+	async function handleQuickCancel(e: React.MouseEvent) {
+		e.stopPropagation();
+		setQuickCancelling(true);
+		try {
+			await handleMove("cancelled", { alwaysConfirm: true });
+		} finally {
+			setQuickCancelling(false);
 		}
 	}
 
@@ -536,16 +549,16 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	const activeCol = task.customColumnId
 		? (project.customColumns ?? []).find((c) => c.id === task.customColumnId)
 		: null;
-	// The rail's ✓ is now a 44px touch target on narrow, so it no longer has to be
-	// desktop-only. Deliberately NOT gated on `isHibernated`: finishing a parked
-	// task must not require waking it first.
-	const canQuickComplete = !isDisabled && getAllowedTransitions(task.status).includes("completed");
+	// A parked task is one the user walked away from, so its rail offers ✕ in the
+	// ✓'s place. Completing it is still one right-click away (Move to).
+	const canQuickComplete = !isDisabled && !isHibernated && getAllowedTransitions(task.status).includes("completed");
+	const canQuickCancel = !isDisabled && isHibernated && getAllowedTransitions(task.status).includes("cancelled");
 	const railColor = isCompleting || isShuttingDown ? "#888" : blocked ? color : activeCol ? activeCol.color : color;
 
 	// ---- IDENTITY zone inputs -----------------------------------------------
 	const agent = task.agentId ? agents.find((a) => a.id === task.agentId) : null;
 	const agentConfig = agent && task.configId
-		? agent.configurations.find((c) => c.id === task.configId)
+		? findAgentConfig(agent, task.configId)
 		: agent?.configurations.find((c) => c.id === agent.defaultConfigId) ?? agent?.configurations[0];
 	const configLabel = agentConfig
 		? (agentConfig.model ? `${agentConfig.name} · ${agentConfig.model}` : agentConfig.name)
@@ -1224,10 +1237,13 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					completing={quickCompleting}
 					onOpenMenu={statusMenu.toggle}
 					onComplete={handleQuickComplete}
-						menuTriggerRef={statusMenu.triggerRef}
-						touch={narrow}
-						autoLabel={compact}
-					/>
+					canCancel={canQuickCancel}
+					cancelling={quickCancelling}
+					onCancel={handleQuickCancel}
+					menuTriggerRef={statusMenu.triggerRef}
+					touch={narrow}
+					autoLabel={compact}
+				/>
 
 					<div className={`flex min-w-0 flex-1 flex-col ${compact ? "px-2 pt-1.5" : "px-3 pt-2.5"}`}>
 					{/* CONTENT */}
@@ -1495,7 +1511,8 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 			{portsPopoverOpen && ports && ports.length > 0 && createPortal(
 				<div
 					ref={portsPopoverRef}
-					className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-2 min-w-[10rem]"
+					className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-2 min-w-[10rem] max-h-[min(24rem,calc(100vh-2rem))] overflow-y-auto overscroll-contain"
+					data-testid="task-card-ports-popover"
 					style={{
 						top: portsPopoverPos.top,
 						left: portsPopoverPos.left,

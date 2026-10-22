@@ -4,14 +4,20 @@ Index of UX architecture decisions — the *why* behind rules in
 `PRODUCT_UX_BIBLE.md` / `ux-architecture.yaml`. Max ~5 lines each; detail lives in git
 history, PRs and `decisions/`. Newest first.
 
-**2026-09-05 — Dashboard shares its header:** Move view/search controls into a Dashboard-only header slot to reclaim the separate row; project/task titles stay unchanged. See `decisions/2026/09/05/dashboard-controls-use-header-slot.md`.
+**2026-09-05 — Dashboard header slot** for view/search. Why: `decisions/2026/09/05/dashboard-controls-use-header-slot.md`.
 
-**2026-09-02 — Blocked reviews:** Persistent hold, formal column/tier, no Inbox/Needs You; existing drag/status menus own it. Why: `decisions/2026/09/02/blocked-review-hold.md`.
+**2026-09-02 — Blocked reviews:** persistent hold with its own column/tier, owned by drag/status menus. Why: `decisions/2026/09/02/blocked-review-hold.md`.
 
 **Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
 
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 **Record-backed entries are pointers:** state the rule, its canonical location and the `decisions/` record. Keep full reasoning only where no record exists; never delete the only explanation.
+
+2026-10-16 — Account sign-in runs in a modal terminal, not a copied command (yaml `modal.observed`): Escape stays with the CLI, X hides, Cancel ends. Why: decisions/2026/10/16/embedded-account-login-terminal.md.
+
+## 2026-10-14 — Agent toast bursts stack as a deck
+
+Bible §5.7, yaml `surfaces.toast`: a replacing agent toast shows what it covered as a ≤2-layer deck in the stack gap plus an exact `+N earlier` tab — covered, not unread; it resets when the slot empties. Why: decisions/2026/10/14/agent-toast-burst-deck.md.
 
 ## 2026-10-08 — The navigation palette gains three modes (projects / tasks / combined)
 
@@ -27,9 +33,7 @@ Bible §5.7: card → sender (inert without one), traffic only via its action; a
 
 Bible §3 / yaml `task_image_viewer`: clips share image history and stage, without another viewer. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md.
 
-## 2026-09-22 — One task context menu, card and sidebar row
-
-Bible §4 / yaml `surfaces.context_menu.task_menu`: shared task menu reuses existing actions; blind access permits repeating visible controls. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
+2026-09-22 — One task context menu for card and sidebar row; yaml `context_menu.task_menu`. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
 
 ## 2026-09-20 — Simplified Mode leads toward the Full interface
 
@@ -277,7 +281,7 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 
 - **Rule:** Every agent-initiated request wears the same identity (accent border, AI-agent-request badge, autofocused decline) while the accepting button takes its role from what the action does — `destructive` for completion, `primary` for a launch; a request needing more than yes/no gets its own modal and `confirm()` stays boolean. Bible §6 row `agent_request`, yaml `surfaces.modal.agent_request`.
 - **Why:** the 2026-06-10 completion rule bundled identity and severity, so a second instance (an agent asking to *start* a task, which is reversible and creates state) would have shipped a red button for a safe action and spent the danger token on nothing. Rejected: extending `confirm()` to host the agent picker — that turns a boolean service into a form host.
-- **Status:** Implemented. Evidence: `AgentLaunchRequestModal.tsx`, `TaskDialogSubjectCard.tsx`, `confirm.tsx`, `agent-requests.ts`, `cli-socket-server.ts`. Extends the 2026-06-10 entry.
+- **Status:** Implemented. Evidence: `AgentLaunchRequestModal.tsx`, `TaskDialogSubjectCard.tsx`, `confirm.tsx`, `agent-requests.ts`, `cli-socket/approvals.ts`. Extends the 2026-06-10 entry.
 
 ## 2026-07-30 — Capacity telemetry is permanent header chrome; faults are not
 
@@ -462,7 +466,7 @@ Folded: rule and reasoning in `decisions/2026/07/03/close-pane-visual-picker.md`
 
 - **Rule:** Agent-surfaced images open in a global lightbox overlay (Modal family, not a destination, not the inspector); arrival raises the attention badge + toast, auto-opens only when the user is already focused on that task; a conditional count badge appears next to the diff badge. Bible §5, §12.3.
 - **Why:** The missing "agent shows the human a picture" channel; mirrors the diff viewer (task-scoped full surface kept out of nav to protect the ≤7 nav budget and inspector density); files stored in the task worktree (`shared-images/`, additive to the frozen `~/.dev3.0/` layout). Rejected: new destination, inspector tab, toast-only (no history). Decision 097.
-- **Status:** Observed (2026-07-02). Evidence: `src/bun/shared-images.ts`, `TaskImageViewer.tsx`, `cli-socket-server.ts`.
+- **Status:** Observed (2026-07-02). Evidence: `src/bun/shared-images.ts`, `TaskImageViewer.tsx`, `cli-socket/ui-commands.ts`.
 
 ## 2026-07-02 — Period navigation on the Velocity Cockpit (temporal nav ≠ a forbidden control)
 
@@ -476,11 +480,9 @@ Folded: rule and reasoning in `decisions/2026/07/03/close-pane-visual-picker.md`
 - **Why:** Audit showed the "narrow = OK" verdict was wrong: non-wrapping icon row, ~28px targets, reorder fully touch-dead (HTML5 drag + `hidden md:flex` steps); the doctrine's kebab→sheet fixes all three with zero desktop change.
 - **Status:** Observed (2026-06-29). Evidence: `ActivityOverview.tsx`.
 
-## 2026-06-29 — Narrow-viewport tmux windows switcher (pairs with the panes switcher)
+## 2026-06-29 — Narrow-viewport tmux windows switcher
 
-- **Rule:** Sub-768px terminals get a windows switcher bar above the panes bar (buttons + dropdown, NO swipe — the pane carousel owns horizontal swipe on that surface), shown only when window count > 1.
-- **Why:** Windows were the one terminal affordance with no mobile form (doctrine §4); reuses the panes-switcher idiom; a dedicated `tmuxWindowNavigate` RPC returns layout (same reason `tmuxPaneNavigate` exists). Decision 093.
-- **Status:** Observed (2026-06-29). Evidence: `MobileWindowCarousel.tsx`, `rpc-handlers/tmux-pty.ts`.
+Folded into bible §12 (terminal windows row).
 
 ## 2026-06-29 — Dev-server button states: green = running only, spinner = transient only
 
@@ -636,7 +638,7 @@ Segmented back/forward at the far left makes the bare chevrons recognizable with
 
 - **Rule:** Agent-requested completion opens the imperative `confirm()` modal with an `agentInitiated` treatment (accent border + "AI agent request" badge, danger-role confirm, autofocused cancel); the CLI blocks ≤10 min; decline = exit code 6; `cancelled` stays CLI-forbidden.
 - **Why:** Completion destroys the worktree + tmux session (destructive → human approval); the AI-identity badge prevents mistaking it for a routine confirm. Zero new chrome. Decision 067.
-- **Status:** Observed. Evidence: `confirm.tsx`, `completion-requests.ts`, `cli-socket-server.ts`.
+- **Status:** Observed. Evidence: `confirm.tsx`, `completion-requests.ts`, `cli-socket/approvals.ts`.
 
 ## 2026-06-03 — Narrow-viewport carousel navigation (mobile / remote)
 
@@ -670,7 +672,7 @@ Segmented back/forward at the far left makes the bare chevrons recognizable with
 
 ## 2026-06-03 — Hide-sidebar affordance inside the Active Tasks sidebar header
 
-Panel controls belong at the far-right edge of their own header (≤4 visible). The sidebar needed a collapse control because the existing top-right control was remote from the panel; mirror the inspector zoom toggle. Implemented in `ActiveTasksSidebar.tsx`.
+Panel controls sit at the far-right of their own header (≤4 visible); the sidebar's collapse mirrors the inspector zoom toggle, since the top-right control was remote from the panel. `ActiveTasksSidebar.tsx`.
 
 ## 2026-06-03 — Compact (≤1600px) layout for header + task toolbar
 
@@ -708,9 +710,7 @@ Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `
 - **Rule:** A space on the route renders as a plain-link crumb between home and the chip (`dev-3.0 / AI / Nanochat`), icon-only below `md`; the tail always carries the switcher — bible §Breadcrumbs.
 - **Why:** `decisions/2026/09/01/space-rides-into-a-task-by-reducer-inheritance.md`. Status: observed, `GlobalHeader.tsx`.
 
-## 2026-09-08 — Touch terminal keys collapse locally
-
-Default-collapse the existing shortcut bar while retaining a local disclosure and the composer; bound key sizes to visible pixels. This reclaims tablet reading space without making terminal-only keys unreachable. See `decisions/2026/09/08/collapsible-terminal-extra-keys.md`; implemented in `ExtraKeyBar.tsx`.
+**2026-09-08 — Touch terminal keys:** shortcut bar collapses behind a local disclosure. Why: `decisions/2026/09/08/collapsible-terminal-extra-keys.md`.
 
 ## 2026-10-01 — Go to Project moves from ⌘K to ⇧⌘K; Find coordinator joins ⇧⌘P
 - **Rule:** the navigation palette is ⇧⌘K (Ctrl+Shift+K off-macOS); plain ⌘K stays free for the terminal (clear, tracked as its own task). Coordinators are found via the ⇧⌘P `Find coordinator…` picker on `PaletteShell`.
@@ -723,3 +723,10 @@ Default-collapse the existing shortcut bar while retaining a local disclosure an
 ## 2026-10-12 — The file explorer lives beside a terminal, never on the board
 - **Rule:** yaml `file_explorer`: task terminal or the Repo screen (`project-terminal`, renamed); on a board ⇧⌘E opens Repo; auto-hide overlays, never reflows.
 - **Why:** "insert path" needs a terminal and the board is task triage. Rejected a Board/Files switch (a destination hidden in a toolbar, IDE drift) and a Files destination (budget spent). `decisions/2026/10/02/file-explorer-panel.md`.
+
+## 2026-10-02 — Desktop tmux windows get an in-app navigator: a tab row on top
+- **Rule:** a task terminal always shows a tab row on top instead of the tmux bar; agent ✦ first; new windows open in the background unless the user asked. Bible §12.
+- **Why:** a new window hid the agent, read as "my task vanished". Rejected breadcrumb, overview-only, and a vertical rail + style setting (tried, dropped 2026-10-14 to keep one layout). User-selected. Evidence: `decisions/2026/10/02/tmux-window-navigator.md`.
+
+## 2026-10-16 — A hibernated rail trades ✓ for ✕ Cancel
+- **Rule/why:** a parked task is one the user walked away from; complete stays in Move to. Rejected ✓+✕ (weak) and the hover-only header ✕. yaml `lifecycle`.

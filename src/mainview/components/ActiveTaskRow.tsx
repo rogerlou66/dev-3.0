@@ -16,6 +16,7 @@ import AgentLauncherBadge from "./AgentLauncherBadge";
 import LabelChip from "./LabelChip";
 import NativeBackendMark, { isNativeBackendTask } from "./NativeBackendMark";
 import PipelineDropdown from "./PipelineDropdown";
+import PortBadgeList from "./PortBadgeList";
 import PriorityBadge from "./PriorityBadge";
 import StatusMenuPortal from "./StatusMenuPortal";
 import TaskCardRail from "./TaskCardRail";
@@ -111,13 +112,15 @@ export default function ActiveTaskRow({
 	const statusMenu = useStatusMenu(narrow);
 	const contextMenu = useContextMenu(task.shuttingDown);
 	const [completing, setCompleting] = useState(false);
+	const [cancelling, setCancelling] = useState(false);
 	const [moving, setMoving] = useState(false);
 	const [hiding, setHiding] = useState(false);
 	const reducedMotion = useReducedMotion();
 
 	const displayTitle = getTaskTitle(task);
 	const agentSummary = [agent?.name, configLabel].filter(Boolean).join(" · ");
-	const disabled = task.shuttingDown || task.preparing || task.hibernated || moving;
+	const busy = task.shuttingDown || task.preparing || moving;
+	const disabled = busy || task.hibernated;
 	// Session gone with the app; the row still opens (that is where recovery is
 	// offered), it just stops counting as one of the sessions running right now.
 	const disconnected = isTaskDisconnected(task);
@@ -168,6 +171,16 @@ export default function ActiveTaskRow({
 			await handleMove("completed", { alwaysConfirm: true });
 		} finally {
 			setCompleting(false);
+		}
+	}
+
+	async function handleCancel(e: React.MouseEvent) {
+		e.stopPropagation();
+		setCancelling(true);
+		try {
+			await handleMove("cancelled", { alwaysConfirm: true });
+		} finally {
+			setCancelling(false);
 		}
 	}
 
@@ -260,6 +273,10 @@ export default function ActiveTaskRow({
 					completing={completing}
 					onOpenMenu={statusMenu.toggle}
 					onComplete={handleComplete}
+					// Same as the board card: a parked row trades its ✓ for ✕.
+					canCancel={!busy && !!task.hibernated && getAllowedTransitions(task.status).includes("cancelled")}
+					cancelling={cancelling}
+					onCancel={handleCancel}
 					menuTriggerRef={statusMenu.triggerRef}
 					touch={narrow}
 					autoLabel
@@ -443,24 +460,7 @@ export default function ActiveTaskRow({
 				)}
 				</div>
 
-				{/* Port indicators */}
-				{ports && ports.length > 0 && (
-					<div className="flex flex-wrap gap-1 mt-1">
-						{ports.map((p) => (
-							<Tooltip key={p.port} content={`${p.processName} (PID ${p.pid})`}>
-								<span
-									className="inline-flex items-center gap-1 text-nano font-mono text-accent bg-accent/10 px-1.5 py-0.5 rounded"
-									onClick={(e) => {
-										e.stopPropagation();
-										window.open(`http://localhost:${p.port}`, "_blank");
-									}}
-								>
-									<span style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{""}</span>:{p.port}
-								</span>
-							</Tooltip>
-						))}
-					</div>
-				)}
+				{ports && ports.length > 0 && <PortBadgeList ports={ports} testId={`sidebar-ports-${task.id}`} />}
 			</div>
 
 			<StatusMenuPortal

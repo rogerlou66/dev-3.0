@@ -32,7 +32,7 @@ const TASK_BACKUPS_DIR = "tasks-backups";
 const TASK_BACKUP_RETENTION_HOURS = 72;
 // `name` is display-only: `path` is deliberately absent, so a rename never moves
 // a data dir, worktree dir or slug (AGENTS.md on-disk invariants).
-type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "reviewModePrompt" | "coordinatorPrompt" | "artifactTemplate" | "artifactTemplatePath" | "env" | "conversationImportOfferedAt">>;
+type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "autoAccountExclusions" | "reviewModePrompt" | "coordinatorPrompt" | "artifactTemplate" | "artifactTemplatePath" | "env" | "conversationImportOfferedAt">>;
 
 export class DataFileReadError extends Error {
 	override name = "DataFileReadError";
@@ -1381,19 +1381,32 @@ function accumulateStatusDuration(currentTask: Task, nowIso: string): Partial<Ta
 }
 
 /**
- * Add real UI attention time (ms) to a task's {@link Task.focusMs}, in place under
- * the file lock. Deliberately minimal — it does NOT touch `updatedAt`, `movedAt`,
+ * Add real UI attention time (ms) to a task's {@link Task.focusMs} — and its
+ * per-hour split to {@link Task.focusByHour} — in place under the file lock. Deliberately minimal — it does NOT touch `updatedAt`, `movedAt`,
  * or the title/overview history, so the focus tracker's periodic flushes don't spam
  * board re-sorts or history entries. No-op for non-positive deltas or unknown ids.
  */
-export async function addTaskFocusMs(project: Project, taskId: string, ms: number): Promise<void> {
+export async function addTaskFocusMs(
+	project: Project,
+	taskId: string,
+	ms: number,
+	byHour: Record<string, number> = {},
+): Promise<void> {
 	if (!(ms > 0)) return;
 	const file = tasksFile(project);
 	return withFileLock(file, async () => {
 		const tasks = await rawLoadTasks(project, { strict: true, persistMigrations: true });
 		const idx = tasks.findIndex((t) => t.id === taskId);
 		if (idx === -1) return;
-		tasks[idx] = { ...tasks[idx], focusMs: (tasks[idx].focusMs ?? 0) + Math.round(ms) };
+		const focusByHour = { ...(tasks[idx].focusByHour ?? {}) };
+		for (const [hour, hourMs] of Object.entries(byHour)) {
+			if (hourMs > 0) focusByHour[hour] = (focusByHour[hour] ?? 0) + Math.round(hourMs);
+		}
+		tasks[idx] = {
+			...tasks[idx],
+			focusMs: (tasks[idx].focusMs ?? 0) + Math.round(ms),
+			...(Object.keys(focusByHour).length > 0 ? { focusByHour } : {}),
+		};
 		await rawSaveTasks(project, tasks);
 	});
 }

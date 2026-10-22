@@ -15,6 +15,7 @@ import { toast } from "../toast";
 import { composeArtifactDocument } from "../utils/artifactDocument";
 import type { ArtifactDraft } from "../utils/artifactBridge";
 import { isMac, isRemote } from "../utils/platform";
+import { PopupBlockedError, openLinkInNewTab } from "../file-open-browser";
 import FindBar, { type FindBarHandle } from "./FindBar";
 import ArtifactVersionPicker from "./ArtifactVersionPicker";
 import ArtifactFrame, { type ArtifactFrameHandle } from "./ArtifactFrame";
@@ -22,6 +23,7 @@ import { registerOverlayLayer } from "../utils/overlay-layers";
 import { isAndroidAppHost, openAndroidHtml, saveAndroidBase64File, saveAndroidRemoteFile } from "../android-client-bridge";
 import { getArtifactDock, subscribeArtifactDock } from "../utils/artifact-dock";
 import { artifactViewerClosed, artifactViewerOpened } from "../artifact-activity";
+import { setArtifactThemeMode, useArtifactThemeMode } from "../artifact-theme-prefs";
 import { assetFileName, downloadBase64, parseDataUrl } from "../utils/downloadBytes";
 
 interface TaskArtifactViewerProps {
@@ -39,8 +41,6 @@ interface TaskArtifactViewerProps {
 	/** The live task record, when the host has it on screen — its `review` is what the pins are drawn from. */
 	task?: Pick<Task, "id" | "review">;
 }
-
-type ArtifactThemeMode = "follow" | "light" | "dark";
 
 const ICON = "'JetBrainsMono Nerd Font Mono'";
 const SEARCH_DEBOUNCE_MS = 150;
@@ -127,7 +127,8 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 	const modal = !offscreen && (!dock || fullscreen);
 	const [downloading, setDownloading] = useState(false);
 	const [downloadKind, setDownloadKind] = useState<"html" | "zip" | null>(null);
-	const [themeMode, setThemeMode] = useState<ArtifactThemeMode>(() => currentTheme());
+	// Light until the user picks; the pick (Light / Follow dev3 / Dark) is shared and persisted.
+	const themeMode = useArtifactThemeMode();
 	const [searchOpen, setSearchOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	// null = nothing searched yet (empty query) — the counter stays hidden.
@@ -209,6 +210,8 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 	// input this feature exists to keep. The frame is told instead.
 	const canSendRef = useRef(canSendToAgent);
 	canSendRef.current = canSendToAgent;
+	const themeRef = useRef(themeMode);
+	themeRef.current = themeMode;
 
 	useEffect(() => {
 		if (!current) return;
@@ -227,7 +230,8 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 				if (cancelled) return;
 				assetsRef.current = payload.assets;
 				setDownloadKind(payload.downloadKind);
-				setSrcDoc(composeArtifactDocument(payload.html, payload.assets, t("artifactViewer.saveImage"), canSendRef.current));
+				const theme = themeRef.current === "follow" ? currentTheme() : themeRef.current;
+				setSrcDoc(composeArtifactDocument(payload.html, payload.assets, t("artifactViewer.saveImage"), canSendRef.current, theme));
 			})
 			.catch(() => { if (!cancelled) setError(true); });
 		return () => { cancelled = true; };
@@ -583,28 +587,20 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 		}
 	};
 	// Desktop hands the stored file to the OS browser, so relative assets keep
-	// resolving. In remote mode that file lives on the host machine, so the tab gets
-	// the already-composed document — opened synchronously, or the popup blocker eats it.
+	// resolving. In remote mode that file lives on the host machine, so the tab
+	// loads it through a sandboxed link over the artifact's stored folder instead.
 	const openInBrowser = () => {
-		if (!isRemote()) {
-			api.request.openArtifactInBrowser({ artifact: current })
-				.catch(() => toast.error(t("artifactViewer.openInBrowserFailed"), { taskId }));
-			return;
-		}
-		if (!srcDoc) return;
-		if (isAndroidAppHost()) {
+		if (isRemote() && isAndroidAppHost()) {
+			if (!srcDoc) return;
 			const fileName = /\.html?$/i.test(current.name) ? current.name : `${current.name || "artifact"}.html`;
 			void openAndroidHtml(fileName, srcDoc)
 				.catch(() => toast.error(t("artifactViewer.openInBrowserFailed"), { taskId }));
 			return;
 		}
-		const url = URL.createObjectURL(new Blob([srcDoc], { type: "text/html" }));
-		if (!window.open(url, "_blank", "noopener,noreferrer")) {
-			URL.revokeObjectURL(url);
-			toast.error(t("artifactViewer.openInBrowserFailed"), { taskId });
-			return;
-		}
-		setTimeout(() => URL.revokeObjectURL(url), 60_000);
+		const opened = isRemote()
+			? openLinkInNewTab(async () => (await api.request.createArtifactLink({ artifact: current })).viewUrl)
+			: api.request.openArtifactInBrowser({ artifact: current });
+		opened.catch((err) => toast.error(t(err instanceof PopupBlockedError ? "imageViewer.popupBlocked" : "artifactViewer.openInBrowserFailed"), { taskId }));
 	};
 	const iconButton = "flex h-11 w-11 sm:h-8 sm:w-8 flex-shrink-0 items-center justify-center rounded-lg text-fg-3 transition-colors hover:bg-elevated-hover hover:text-fg disabled:opacity-40";
 	const themeName = themeMode === "follow"
@@ -612,10 +608,10 @@ export default function TaskArtifactViewer({ artifacts, initialIndex, offscreen 
 		: themeMode === "light" ? t("artifactViewer.themeLight") : t("artifactViewer.themeDark");
 	const themeLabel = t("artifactViewer.themeMode", { mode: themeName });
 	const searchLabel = `${t("artifactViewer.search")} (${isMac() ? "⌘F" : "Ctrl+F"})`;
-	const cycleTheme = () => setThemeMode((mode) => {
-		if (mode === "follow") return currentTheme();
-		return mode === currentTheme() ? (mode === "light" ? "dark" : "light") : "follow";
-	});
+	const cycleTheme = () => {
+		if (themeMode === "follow") setArtifactThemeMode(currentTheme());
+		else setArtifactThemeMode(themeMode === currentTheme() ? (themeMode === "light" ? "dark" : "light") : "follow");
+	};
 	const themeIcon = themeMode === "follow" ? "◐" : themeMode === "light" ? "" : "";
 
 	// One card, three shapes: docked in flow, docked-and-fullscreen over

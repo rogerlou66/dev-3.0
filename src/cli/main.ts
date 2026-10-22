@@ -3,6 +3,7 @@ import { detectContext, resolveInstanceSocket, resolveSocketPath, resolveSocketP
 import { exitAppNotRunning, exitInternalError, exitUsage } from "./output";
 import { handleProjects } from "./commands/projects";
 import { handleIntegration } from "./commands/integration";
+import { handleSpaces } from "./commands/spaces";
 import { handleTasks } from "./commands/tasks";
 import { handleTask } from "./commands/task";
 import { handleCurrent } from "./commands/current";
@@ -39,7 +40,7 @@ import { handleStatusLine } from "./commands/statusline";
 import { handleCodexHook } from "./commands/codex-hook";
 import { handleCopilotHook } from "./commands/copilot-hook";
 import { handleAntigravityHook } from "./commands/antigravity-hook";
-import { handleOmpHook } from "./commands/omp-hook";
+import { handleExtensionHook } from "./commands/extension-hook";
 import { handleClaudePrompt } from "./commands/claude-prompt";
 import { handleClaudeSessionStart, handleNoteRecent } from "./commands/recent-notes";
 import { handleClaudeStopFailure } from "./commands/claude-stop-failure";
@@ -114,7 +115,7 @@ Commands:
   dev3 message --list [--json] [--task <id>]  Pending scheduled messages (id, due in local + UTC, sender)
   dev3 message --cancel <id> [--task <id>]  Cancel one pending scheduled message
   dev3 show-image <path> [--caption "..."] [<path> ...]  Show images (screenshots/renders) in an in-app viewer bound to the task; each --caption annotates the preceding image
-  dev3 show-video <file.mp4|file.webm> [--caption "..."] [<path> ...]  Play MP4/WebM clips (max 25 MB each) in the same viewer as show-image; never autoplays
+  dev3 show-video <file.mp4|file.webm> [--caption "..."] [<path> ...]  Play MP4/WebM clips (max 300 MB each) in the same viewer as show-image; never autoplays
   dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]  Show a task-bound HTML artifact; a directory publishes with every CSS, JS, image, video and audio file under it
   dev3 artifact-template [--task <id>]   Copy this task's dev3 artifact starter into ./dev3-artifact-report — recovery when $DEV3_ARTIFACT_TEMPLATE_DIR is missing
   dev3 inline-html <index.html|dir> -o <out.html> [--json]  Fold a multi-file HTML report into one self-contained file (for a gist / preview URL); refuses on missing assets or embedded credentials
@@ -136,7 +137,14 @@ Commands:
   dev3 doctor --processes [--json]       Which task owns each native terminal host/shell (seq, pane, role, pid, liveness)
   dev3 install-hooks                     Install Claude worktree hooks, stable Codex user hooks and the omp status extension
   dev3 install-skills                    Install agent skills globally
-  dev3 projects list                    List all projects
+  dev3 projects list [--json]           List all projects with the spaces they belong to
+  dev3 projects add <path> [--name "..."] [--space <id|name>]... [--new-space "..."]... [--no-space] [--init] [--json]
+                                         Register a local git repo as a project, optionally in spaces (exit 33 if already registered)
+  dev3 projects clone <git-url> [--dir <parent>] [--name "..."] [--space ...] [--new-space ...] [--no-space] [--json]
+                                         Clone a repo into the app's clone folder (or --dir) and register it
+  dev3 spaces list [--json]             List spaces with their projects and ids
+  dev3 spaces create "name" [--project <id>]...  Create a space (never empty: defaults to the current project)
+  dev3 spaces set|add|remove <space>... [--project <id>]  Change a project's spaces (set REPLACES; set --no-space = none)
   dev3 remote [start|status|url|stop]    Run headless — serve the UI to a browser
                                          (backgrounds by default; manage it with
                                           status / url / restart / logs / stop.
@@ -279,10 +287,11 @@ async function main(): Promise<void> {
 			context,
 		);
 	}
-	if (command === "hook" && subcommand === "omp") {
-		// Internal lifecycle adapter for the generated omp status extension. Same
-		// contract as the Codex one: silent, and successful whatever happens.
-		return await handleOmpHook(
+	if (command === "hook" && (subcommand === "omp" || subcommand === "pi")) {
+		// Internal lifecycle adapter for the generated omp/pi status extensions.
+		// Same contract as the Codex one: silent, and successful whatever happens.
+		return await handleExtensionHook(
+			subcommand,
 			await Bun.stdin.text(),
 			socketPath || context?.socketPath || null,
 			context,
@@ -301,9 +310,9 @@ async function main(): Promise<void> {
 		);
 	}
 	if (command === "hook" && subcommand === "claude-prompt") {
-		// Internal: Claude Code's UserPromptSubmit, read for recording only. It
-		// never blocks or fails the prompt — the status move is a separate entry
-		// on the same event.
+		// Internal: Claude Code's UserPromptSubmit, read for recording and the
+		// pane's resume pointer. It never blocks or fails the prompt — the status
+		// move is a separate entry on the same event.
 		return await handleClaudePrompt(
 			await Bun.stdin.text(),
 			socketPath || context?.socketPath || null,
@@ -429,6 +438,9 @@ async function main(): Promise<void> {
 			// the same forwarding `task list` already does for `tasks list`.
 			case "project":
 				return await handleProjects(subcommand, args, socketPath);
+			case "spaces":
+			case "space":
+				return await handleSpaces(subcommand, args, socketPath, context);
 			case "tasks":
 				return await handleTasks(subcommand, args, socketPath, context);
 			case "task":

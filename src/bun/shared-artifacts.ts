@@ -3,6 +3,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -27,6 +28,8 @@ import { createZip } from "./zip";
 import { inlineHtmlSource } from "../shared/html-inline";
 import { projectSlug } from "./git";
 import { TEXT_ARTIFACT_EXTS, textArtifactHtml } from "./text-artifact";
+import type { FileLinkScope } from "./file-links";
+import { FILE_LINK_PAGE_EXTS, fileLinkExt } from "../shared/file-link-types";
 
 const ASSET_EXTS = new Set(SHARED_ARTIFACT_ASSET_EXTS);
 const MEDIA_EXTS = new Set(SHARED_MEDIA_EXTS);
@@ -57,11 +60,11 @@ function megabytes(bytes: number): string {
 // Every selector sits in :where() so it is a fallback only: it lands after the
 // page's own <style>, and a free-form page's CSS must still win over it.
 const ARTIFACT_THEME_CONTRACT = `<style data-dev3-artifact-shell>
-:where(:root,[data-theme="dark"]){color-scheme:dark;--dev3-surface-base:6 9 21;--dev3-surface-raised:14 18 30;--dev3-surface-elevated:21 26 41;--dev3-text-primary:250 252 255;--dev3-text-secondary:170 187 212;--dev3-text-muted:82 98 121;--dev3-border:32 38 55;--dev3-accent:68 150 255;--dev3-success:74 222 128;--dev3-warning:250 204 21;--dev3-danger:255 130 130;--dev3-on-accent:255 255 255;--dev3-shadow:0 0 0}
-:where([data-theme="light"]){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}
-@media(prefers-color-scheme:light){:where(:root:not([data-theme])){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}}
+:where(:root,[data-theme="light"]){color-scheme:light;--dev3-surface-base:240 242 250;--dev3-surface-raised:255 255 255;--dev3-surface-elevated:237 239 247;--dev3-text-primary:15 23 42;--dev3-text-secondary:71 85 105;--dev3-text-muted:148 163 184;--dev3-border:203 213 225;--dev3-accent:59 130 246;--dev3-success:22 163 74;--dev3-warning:202 138 4;--dev3-danger:220 38 38;--dev3-on-accent:255 255 255;--dev3-shadow:15 23 42}
+:where([data-theme="dark"]){color-scheme:dark;--dev3-surface-base:6 9 21;--dev3-surface-raised:14 18 30;--dev3-surface-elevated:21 26 41;--dev3-text-primary:250 252 255;--dev3-text-secondary:170 187 212;--dev3-text-muted:82 98 121;--dev3-border:32 38 55;--dev3-accent:68 150 255;--dev3-success:74 222 128;--dev3-warning:250 204 21;--dev3-danger:255 130 130;--dev3-on-accent:255 255 255;--dev3-shadow:0 0 0}
+@media(prefers-color-scheme:dark){:where(:root:not([data-theme])){color-scheme:dark;--dev3-surface-base:6 9 21;--dev3-surface-raised:14 18 30;--dev3-surface-elevated:21 26 41;--dev3-text-primary:250 252 255;--dev3-text-secondary:170 187 212;--dev3-text-muted:82 98 121;--dev3-border:32 38 55;--dev3-accent:68 150 255;--dev3-success:74 222 128;--dev3-warning:250 204 21;--dev3-danger:255 130 130;--dev3-on-accent:255 255 255;--dev3-shadow:0 0 0}}
 :where(html){background:rgb(var(--dev3-surface-base));color:rgb(var(--dev3-text-primary));font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}:where(body){margin:0}:where(.dev3-card){background:rgb(var(--dev3-surface-raised));border:1px solid rgb(var(--dev3-border));border-radius:16px;padding:16px}:where(.dev3-grid){display:grid;gap:16px}:where(.dev3-muted){color:rgb(var(--dev3-text-secondary))}:where(.dev3-accent){color:rgb(var(--dev3-accent))}
-</style><script data-dev3-artifact-shell>(function(){function setTheme(theme){if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme}window.addEventListener('message',function(event){if(event.data&&event.data.type==='dev3-artifact-theme')setTheme(event.data.theme)});if(!document.documentElement.dataset.theme)setTheme(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')})();</script>`;
+</style><script data-dev3-artifact-shell>(function(){function setTheme(theme){if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme}window.addEventListener('message',function(event){if(event.data&&event.data.type==='dev3-artifact-theme')setTheme(event.data.theme)});if(!document.documentElement.dataset.theme)setTheme('light')})();</script>`;
 
 /** Validation failure surfaced verbatim by the CLI socket handler. */
 export class SharedArtifactError extends Error {}
@@ -259,6 +262,21 @@ export function sharedArtifactHtmlPath(artifact: SharedArtifact): string {
 	assertStoredArtifactRecord(artifact);
 	if (!existsSync(artifact.storedPath)) throw new SharedArtifactError("Artifact file is missing");
 	return artifact.storedPath;
+}
+
+const ARTIFACT_DIR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The remote tab link's scope: the artifact's own stored folder, so the page's
+ * relative assets resolve as they do when the desktop hands the file to the OS.
+ */
+export function sharedArtifactLinkScope(artifact: SharedArtifact): FileLinkScope {
+	// The record comes from the renderer, so only a real `<slug>/shared-artifacts/<uuid>/` folder of dev3's own qualifies.
+	const page = realpathSync.native(resolvePath(sharedArtifactHtmlPath(artifact)));
+	const parts = relative(realpathSync.native(resolvePath(DEV3_HOME, "worktrees")), dirname(page)).split(sep);
+	const ownFolder = parts.length === 3 && !parts[0].startsWith(".") && !isAbsolute(parts[0]) && parts[1] === "shared-artifacts" && ARTIFACT_DIR_ID.test(parts[2]);
+	if (!ownFolder || !FILE_LINK_PAGE_EXTS.has(fileLinkExt(page))) throw new SharedArtifactError("Invalid stored artifact path");
+	return { kind: "dir", root: dirname(page), entry: basename(page) };
 }
 
 /** Read HTML plus copied assets for the sandboxed renderer. */

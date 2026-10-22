@@ -10,27 +10,68 @@ import {
 	codexAccountIdForHome,
 	completeClaudeLogin,
 	completeCodexLogin,
+	discardStagedLogin,
+	STAGED_LOGIN_MARKER,
+	sweepAbandonedStagedLogins,
+	completeAgentDirLogin,
 	getActiveClaudeConfigDir,
 	getActiveClaudeSessionEnv,
 	getActiveCodexSessionEnv,
+	getActiveAgentDirSessionEnv,
 	getClaudeApiProfileDraft,
 	importCurrentClaudeAccount,
 	importCurrentCodexAccount,
+	isPrivateAgentDirEntry,
 	listAgentAccounts,
+	agentDirAccountDir,
 	prepareClaudeLogin,
 	prepareCodexLogin,
+	LoginNotReadyError,
+	prepareAgentDirLogin,
 	registeredOutputStyleName,
 	removeAgentAccount,
 	renameAgentAccount,
 	setActiveClaudeAccount,
 	setActiveCodexAccount,
+	stagedLoginHasIdentity,
+	setActiveAgentDirAccount,
 	updateClaudeApiProfile,
+	claudeAuthStatusMismatch,
+	parseClaudeAuthStatus,
 	type AccountPaths,
+	type ClaudeAuthStatusProbe,
 } from "../agent-accounts";
-import { claudeApiProfileEnvKeys, ENV_UNSET } from "../../shared/agent-accounts";
+import { claudeApiProfileEnvKeys, ENV_UNSET, type ProviderLogin } from "../../shared/agent-accounts";
 
 let root: string;
 let paths: AccountPaths;
+
+/** Synthetic `claude auth status`: exactly the fields the 2.1.x binary prints for a
+ *  subscription login (no `apiKeySource` — it only appears with a key source). */
+function confirmedStatus(email: string, over: Record<string, unknown> = {}, exitCode = 0): ClaudeAuthStatusProbe {
+	return async (configDir) => ({
+		exitCode,
+		stdout: JSON.stringify(
+			{
+				loggedIn: true,
+				authMethod: "claude.ai",
+				apiProvider: "firstParty",
+				analyticsDisabled: false,
+				projectsDirectory: join(configDir, "projects"),
+				configDirectory: configDir,
+				email,
+				orgId: "org-uuid",
+				orgName: null,
+				subscriptionType: "max",
+				...over,
+			},
+			null,
+			2,
+		),
+	});
+}
+
+const unavailableStatus: ClaudeAuthStatusProbe = async () => null;
 
 function makeJwt(payload: Record<string, unknown>): string {
 	const b64url = (obj: unknown) =>
@@ -103,6 +144,8 @@ beforeEach(() => {
 		claudeHome: join(root, ".claude"),
 		claudeJson: join(root, ".claude.json"),
 		codexHome: join(root, ".codex"),
+		ompAgentHome: join(root, ".omp", "agent"),
+		piAgentHome: join(root, ".pi", "agent"),
 	};
 	vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
 });
@@ -249,23 +292,136 @@ describe("claude login flow", () => {
 	it("complete fails before the login happened", async () => {
 		seedClaudeLogin();
 		const { accountId } = await prepareClaudeLogin(paths);
-		await expect(completeClaudeLogin(accountId, paths)).rejects.toThrow(/Login not detected/);
+		await expect(completeClaudeLogin(accountId, paths, unavailableStatus)).rejects.toThrow(/Login not detected/);
 	});
 
-	it("complete registers the account once identity + credentials exist", async () => {
+	it("before the login lands, complete says not-ready (keep watching) rather than failing", async () => {
 		seedClaudeLogin();
 		const { accountId } = await prepareClaudeLogin(paths);
+		const probe = vi.fn(unavailableStatus);
+		await expect(completeClaudeLogin(accountId, paths, probe)).rejects.toBeInstanceOf(LoginNotReadyError);
+		// No identity yet → the provider CLI is not even started.
+		expect(probe).not.toHaveBeenCalled();
+		expect(stagedLoginHasIdentity("claude", accountId, paths)).toBe(false);
+	});
+
+	it("prepare hands a launch scoped by env to its own dir, and pre-trusts that dir", async () => {
+		seedClaudeLogin();
+		const { accountId, launch } = await prepareClaudeLogin(paths);
+		const dir = claudeAccountDir(accountId, paths);
+		expect(launch).toEqual({ command: "claude", args: ["/login"], env: { CLAUDE_CONFIG_DIR: dir }, cwd: dir });
+		const seeded = JSON.parse(readFileSync(join(dir, ".claude.json"), "utf-8"));
+		expect(seeded.projects[dir].hasTrustDialogAccepted).toBe(true);
+	});
+
+	it("sweeps only marked, unregistered staged dirs older than the TTL", async () => {
+		seedClaudeLogin();
+		const stale = await prepareClaudeLogin(paths);
+		const fresh = await prepareClaudeLogin(paths);
+		const saved = await prepareClaudeLogin(paths);
+		const savedDir = claudeAccountDir(saved.accountId, paths);
+		writeFileSync(join(savedDir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "s@example.com", accountUuid: "claude-acc-s" } }));
+		await completeClaudeLogin(saved.accountId, paths, confirmedStatus("s@example.com"));
+		expect(existsSync(join(savedDir, STAGED_LOGIN_MARKER))).toBe(false);
+		// A dir from an older build has no marker: never ours to judge.
+		const legacy = claudeAccountDir("legacy-unmarked", paths);
+		mkdirSync(legacy, { recursive: true });
+		const staleDir = claudeAccountDir(stale.accountId, paths);
+		writeFileSync(join(staleDir, STAGED_LOGIN_MARKER), JSON.stringify({ createdAt: Date.now() - 60 * 60_000 }));
+
+		expect(sweepAbandonedStagedLogins("claude", 20 * 60_000, Date.now(), paths)).toBe(1);
+		expect(existsSync(staleDir)).toBe(false);
+		expect(existsSync(claudeAccountDir(fresh.accountId, paths))).toBe(true);
+		expect(existsSync(savedDir)).toBe(true);
+		expect(existsSync(legacy)).toBe(true);
+	});
+
+	it("discardStagedLogin deletes an unverified dir but refuses a saved account", async () => {
+		seedClaudeLogin();
+		const staged = await prepareClaudeLogin(paths);
+		expect(discardStagedLogin("claude", staged.accountId, paths)).toBe(true);
+		expect(existsSync(claudeAccountDir(staged.accountId, paths))).toBe(false);
+
+		const saved = await prepareClaudeLogin(paths);
+		const dir = claudeAccountDir(saved.accountId, paths);
+		writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "second@example.com", accountUuid: "claude-acc-2" } }));
+		writeFileSync(join(dir, ".credentials.json"), "{}");
+		expect(stagedLoginHasIdentity("claude", saved.accountId, paths)).toBe(true);
+		await completeClaudeLogin(saved.accountId, paths, confirmedStatus("second@example.com"));
+		expect(discardStagedLogin("claude", saved.accountId, paths)).toBe(false);
+		expect(existsSync(join(dir, ".credentials.json"))).toBe(true);
+	});
+
+	it("complete registers only when the provider's auth status confirms this dir and account", async () => {
+		seedClaudeLogin();
+		const { accountId, launch } = await prepareClaudeLogin(paths);
 		const dir = claudeAccountDir(accountId, paths);
 		writeFileSync(
 			join(dir, ".claude.json"),
 			JSON.stringify({ oauthAccount: { emailAddress: "second@example.com", accountUuid: "claude-acc-2" } }),
 		);
-		writeFileSync(join(dir, ".credentials.json"), "{}");
 
-		const account = await completeClaudeLogin(accountId, paths);
+		const account = await completeClaudeLogin(accountId, paths, confirmedStatus("second@example.com"));
 		expect(account.label).toBe("second@example.com");
 		const state = await listAgentAccounts(paths);
 		expect(state.claude.accounts.map((a) => a.id)).toContain(accountId);
+		// The dir a launch injects is the very dir the login ran in (Claude keys its Keychain item by it).
+		await setActiveClaudeAccount(accountId, paths);
+		expect(await getActiveClaudeConfigDir(undefined, paths)).toBe(launch.env.CLAUDE_CONFIG_DIR);
+	});
+
+	it("REGRESSION: a new login never gets the system login's credentials copied in", async () => {
+		seedClaudeLogin();
+		writeFileSync(join(paths.claudeHome, ".credentials.json"), JSON.stringify({ marker: "SYSTEM-ACCOUNT-TOKEN" }));
+		const { accountId } = await prepareClaudeLogin(paths);
+		const dir = claudeAccountDir(accountId, paths);
+		writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "new@example.com", accountUuid: "claude-acc-new" } }));
+
+		await expect(completeClaudeLogin(accountId, paths, unavailableStatus)).rejects.toMatchObject({ reason: "status-unavailable" });
+		expect(existsSync(join(dir, ".credentials.json"))).toBe(false);
+
+		await completeClaudeLogin(accountId, paths, confirmedStatus("new@example.com"));
+		expect(existsSync(join(dir, ".credentials.json"))).toBe(false);
+	});
+
+	it("identity alone never registers: every status that does not match stays pending", async () => {
+		seedClaudeLogin();
+		const { accountId } = await prepareClaudeLogin(paths);
+		const dir = claudeAccountDir(accountId, paths);
+		writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "new@example.com", accountUuid: "claude-acc-new" } }));
+		const notReady = { reason: "status-mismatch" };
+		const cases: ClaudeAuthStatusProbe[] = [
+			confirmedStatus("new@example.com", { loggedIn: false, authMethod: "none" }, 1),
+			// An env key makes Claude Code report loggedIn with no /login at all.
+			confirmedStatus("new@example.com", { authMethod: "api_key", apiKeySource: "ANTHROPIC_API_KEY", email: undefined }),
+			confirmedStatus("new@example.com", { authMethod: "api_key_helper" }),
+			confirmedStatus("new@example.com", { apiProvider: "bedrock", authMethod: "third_party" }),
+			confirmedStatus("new@example.com", { configDirectory: paths.claudeHome }),
+			confirmedStatus("other@example.com"),
+		];
+		for (const probe of cases) {
+			await expect(completeClaudeLogin(accountId, paths, probe)).rejects.toMatchObject(notReady);
+		}
+		await expect(completeClaudeLogin(accountId, paths, async () => ({ exitCode: 0, stdout: "not json" }))).rejects.toMatchObject({ reason: "status-unavailable" });
+		expect((await listAgentAccounts(paths)).claude.accounts).toHaveLength(0);
+	});
+
+	it("a Console login is accepted only with the key /login itself manages", () => {
+		const status = { loggedIn: true, authMethod: "api_key", apiProvider: "firstParty", apiKeySource: "/login managed key", configDirectory: "/d", email: "c@example.com" };
+		expect(claudeAuthStatusMismatch(status, 0, "/d", "c@example.com")).toBeNull();
+		expect(claudeAuthStatusMismatch({ ...status, apiKeySource: "ANTHROPIC_API_KEY" }, 0, "/d", "c@example.com")).not.toBeNull();
+		expect(parseClaudeAuthStatus("warning: x\n{\"loggedIn\":true}\n")).toEqual({ loggedIn: true });
+	});
+
+	it("a cancel that lands during the status probe registers nothing", async () => {
+		seedClaudeLogin();
+		const { accountId } = await prepareClaudeLogin(paths);
+		const dir = claudeAccountDir(accountId, paths);
+		writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "new@example.com", accountUuid: "claude-acc-new" } }));
+		await expect(
+			completeClaudeLogin(accountId, paths, confirmedStatus("new@example.com"), { stillWanted: () => false }),
+		).rejects.toThrow(/closed/);
+		expect((await listAgentAccounts(paths)).claude.accounts).toHaveLength(0);
 	});
 
 	it("complete rejects a login that duplicates an existing account", async () => {
@@ -279,8 +435,7 @@ describe("claude login flow", () => {
 				oauthAccount: { emailAddress: "main@example.com", organizationName: "Org", accountUuid: "claude-acc-1" },
 			}),
 		);
-		writeFileSync(join(dir, ".credentials.json"), "{}");
-		await expect(completeClaudeLogin(accountId, paths)).rejects.toThrow(/already added/);
+		await expect(completeClaudeLogin(accountId, paths, confirmedStatus("main@example.com"))).rejects.toThrow(/already added/);
 	});
 
 	it("allows the same login in a different organization and disambiguates the label", async () => {
@@ -296,9 +451,8 @@ describe("claude login flow", () => {
 				oauthAccount: { emailAddress: "main@example.com", organizationName: "Org B", accountUuid: "claude-acc-1" },
 			}),
 		);
-		writeFileSync(join(dir, ".credentials.json"), "{}");
 
-		const account = await completeClaudeLogin(accountId, paths);
+		const account = await completeClaudeLogin(accountId, paths, confirmedStatus("main@example.com"));
 		expect(account.label).toBe("main@example.com (Org B)");
 		const state = await listAgentAccounts(paths);
 		expect(state.claude.accounts).toHaveLength(2);
@@ -378,6 +532,18 @@ describe("codex accounts", () => {
 			// Not registered until verified — the user's ~/.codex is untouched.
 			const state = await listAgentAccounts(paths);
 			expect(state.codex.accounts).toHaveLength(0);
+		} finally {
+			if (prevHeadless === undefined) delete process.env.DEV3_HEADLESS;
+			else process.env.DEV3_HEADLESS = prevHeadless;
+		}
+	});
+
+	it("prepareCodexLogin uses device auth when the viewer is remote, even on a desktop host", async () => {
+		const prevHeadless = process.env.DEV3_HEADLESS;
+		delete process.env.DEV3_HEADLESS;
+		try {
+			const { accountId, launch } = await prepareCodexLogin(paths, { deviceAuth: true });
+			expect(launch).toEqual({ command: "codex", args: ["login", "--device-auth"], env: { CODEX_HOME: codexAccountDir(accountId, paths) }, cwd: codexAccountDir(accountId, paths) });
 		} finally {
 			if (prevHeadless === undefined) delete process.env.DEV3_HEADLESS;
 			else process.env.DEV3_HEADLESS = prevHeadless;
@@ -792,7 +958,7 @@ describe("remove / rename", () => {
 
 	it("completeClaudeLogin rejects path-traversal account ids", async () => {
 		seedClaudeLogin();
-		await expect(completeClaudeLogin("../../.claude", paths)).rejects.toThrow(/Invalid account id/);
+		await expect(completeClaudeLogin("../../.claude", paths, unavailableStatus)).rejects.toThrow(/Invalid account id/);
 	});
 
 	it("rename updates the label", async () => {
@@ -827,5 +993,263 @@ describe("listAgentAccounts", () => {
 		writeFileSync(join(paths.accountsDir, "accounts.json"), "{corrupt");
 		const state = await listAgentAccounts(paths);
 		expect(state.claude.accounts).toHaveLength(0);
+	});
+});
+
+describe("omp accounts", () => {
+	const chatgpt: ProviderLogin = { provider: "openai-codex", identityKey: "email:dev@example.com|org:ws-1", orgName: "plus" };
+
+	function seedOmpAgentHome() {
+		const home = paths.ompAgentHome!;
+		mkdirSync(join(home, "skills", "dev3"), { recursive: true });
+		mkdirSync(join(home, "sessions"), { recursive: true });
+		writeFileSync(join(home, "config.yml"), "theme: dark\n");
+		writeFileSync(join(home, "agent.db"), "user's own credentials");
+		writeFileSync(join(home, "agent.db-wal"), "");
+		writeFileSync(join(home, "models.db"), "");
+	}
+
+	async function addOmpAccount(logins: ProviderLogin[] = [chatgpt]) {
+		const { accountId } = await prepareAgentDirLogin("omp", paths);
+		return completeAgentDirLogin("omp", accountId, paths, async () => logins);
+	}
+
+	it("keeps sessions and every SQLite file private, shares the rest", () => {
+		for (const entry of ["agent.db", "agent.db-wal", "models.db-shm", "sessions", "cache", "auth-broker.token"]) {
+			expect(isPrivateAgentDirEntry("omp", entry)).toBe(true);
+		}
+		for (const entry of ["config.yml", "skills", "extensions", "models.yml", "AGENTS.md"]) {
+			expect(isPrivateAgentDirEntry("omp", entry)).toBe(false);
+		}
+	});
+
+	it("prepares a fresh agent dir linking the user's config but not their credentials", async () => {
+		seedOmpAgentHome();
+		const { accountId, loginCommand, launch } = await prepareAgentDirLogin("omp", paths);
+		const dir = agentDirAccountDir("omp", accountId, paths);
+		expect(loginCommand).toBe(`PI_CODING_AGENT_DIR='${dir}' omp login`);
+		expect(launch).toEqual({ command: "omp", args: ["login"], env: { PI_CODING_AGENT_DIR: dir }, cwd: dir });
+		expect(existsSync(join(dir, STAGED_LOGIN_MARKER))).toBe(true);
+		expect(lstatSync(join(dir, "config.yml")).isSymbolicLink()).toBe(true);
+		expect(lstatSync(join(dir, "skills")).isSymbolicLink()).toBe(true);
+		for (const entry of ["agent.db", "agent.db-wal", "models.db", "sessions"]) {
+			expect(existsSync(join(dir, entry))).toBe(false);
+		}
+		// Not registered until a sign-in is verified.
+		expect((await listAgentAccounts(paths)).omp.accounts).toHaveLength(0);
+	});
+
+	it("keeps waiting on an agent dir with no sign-in, and on a listing that fails", async () => {
+		const { accountId } = await prepareAgentDirLogin("omp", paths);
+		await expect(completeAgentDirLogin("omp", accountId, paths, async () => [])).rejects.toBeInstanceOf(LoginNotReadyError);
+		const failing = async (): Promise<ProviderLogin[]> => {
+			throw new Error("omp usage accounts exited with code 1");
+		};
+		await expect(completeAgentDirLogin("omp", accountId, paths, failing)).rejects.toBeInstanceOf(LoginNotReadyError);
+		expect((await listAgentAccounts(paths)).omp.accounts).toHaveLength(0);
+	});
+
+	it("asks omp again only after its auth store changed", async () => {
+		const { accountId } = await prepareAgentDirLogin("omp", paths);
+		const dir = agentDirAccountDir("omp", accountId, paths);
+		expect(stagedLoginHasIdentity("omp", accountId, paths)).toBe(true);
+		await expect(completeAgentDirLogin("omp", accountId, paths, async () => [])).rejects.toBeInstanceOf(LoginNotReadyError);
+		expect(stagedLoginHasIdentity("omp", accountId, paths)).toBe(false);
+		writeFileSync(join(dir, "agent.db"), "x");
+		expect(stagedLoginHasIdentity("omp", accountId, paths)).toBe(true);
+	});
+
+	it("a verified login drops the staged marker and can no longer be discarded", async () => {
+		const account = await addOmpAccount();
+		const dir = agentDirAccountDir("omp", account.id, paths);
+		expect(existsSync(join(dir, STAGED_LOGIN_MARKER))).toBe(false);
+		expect(discardStagedLogin("omp", account.id, paths)).toBe(false);
+		expect(existsSync(dir)).toBe(true);
+	});
+
+	it("discards an unverified staged dir and sweeps an abandoned one", async () => {
+		const { accountId } = await prepareAgentDirLogin("omp", paths);
+		expect(discardStagedLogin("omp", accountId, paths)).toBe(true);
+		expect(existsSync(agentDirAccountDir("omp", accountId, paths))).toBe(false);
+		const stale = await prepareAgentDirLogin("omp", paths);
+		expect(sweepAbandonedStagedLogins("omp", 60_000, Date.now() + 120_000, paths)).toBe(1);
+		expect(existsSync(agentDirAccountDir("omp", stale.accountId, paths))).toBe(false);
+	});
+
+	it("registers a verified login as the default, labelled by its email", async () => {
+		const account = await addOmpAccount([chatgpt, { provider: "github-copilot", identityKey: null, orgName: null }]);
+		expect(account.label).toBe("dev@example.com");
+		expect(account.identity?.planLabel).toBe("openai-codex, github-copilot");
+		const state = await listAgentAccounts(paths);
+		expect(state.omp.accounts.map((a) => a.id)).toEqual([account.id]);
+		expect(state.omp.activeId).toBe(account.id);
+	});
+
+	it("keeps the omp registry out of accounts.json, which older builds rewrite", async () => {
+		await addOmpAccount();
+		expect(existsSync(join(paths.accountsDir, "omp-accounts.json"))).toBe(true);
+		expect(existsSync(join(paths.accountsDir, "accounts.json"))).toBe(false);
+	});
+
+	it("injects nothing while no omp account exists", async () => {
+		expect(await getActiveAgentDirSessionEnv("omp", undefined, paths)).toEqual({});
+	});
+
+	it("points PI_CODING_AGENT_DIR at the selected account and unsets it for the system login", async () => {
+		const account = await addOmpAccount();
+		const dir = agentDirAccountDir("omp", account.id, paths);
+		expect(await getActiveAgentDirSessionEnv("omp", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: dir });
+		expect(await getActiveAgentDirSessionEnv("omp", null, paths)).toEqual({ PI_CODING_AGENT_DIR: ENV_UNSET });
+		await setActiveAgentDirAccount("omp", null, paths);
+		expect(await getActiveAgentDirSessionEnv("omp", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: ENV_UNSET });
+		expect(await getActiveAgentDirSessionEnv("omp", account.id, paths)).toEqual({ PI_CODING_AGENT_DIR: dir });
+	});
+
+	it("links entries that appeared in ~/.omp/agent after the account was created", async () => {
+		const account = await addOmpAccount();
+		mkdirSync(join(paths.ompAgentHome!, "extensions"), { recursive: true });
+		await getActiveAgentDirSessionEnv("omp", account.id, paths);
+		expect(lstatSync(join(agentDirAccountDir("omp", account.id, paths), "extensions")).isSymbolicLink()).toBe(true);
+	});
+
+	it("re-verifying an account refreshes its sign-ins without a second row", async () => {
+		const account = await addOmpAccount();
+		await completeAgentDirLogin("omp", account.id, paths, async () => [chatgpt, { provider: "xai-oauth", identityKey: "email:x@example.com", orgName: null }]);
+		const [row] = (await listAgentAccounts(paths)).omp.accounts;
+		expect(row.providerLogins?.map((l) => l.provider)).toEqual(["openai-codex", "xai-oauth"]);
+		expect((await listAgentAccounts(paths)).omp.accounts).toHaveLength(1);
+	});
+
+	it("renames and removes an omp account without touching ~/.omp/agent", async () => {
+		seedOmpAgentHome();
+		const account = await addOmpAccount();
+		await renameAgentAccount("omp", account.id, "Work ChatGPT", paths);
+		expect((await listAgentAccounts(paths)).omp.accounts[0].label).toBe("Work ChatGPT");
+		await removeAgentAccount("omp", account.id, paths);
+		const state = await listAgentAccounts(paths);
+		expect(state.omp.accounts).toHaveLength(0);
+		expect(state.omp.activeId).toBeNull();
+		expect(existsSync(agentDirAccountDir("omp", account.id, paths))).toBe(false);
+		expect(readFileSync(join(paths.ompAgentHome!, "config.yml"), "utf-8")).toBe("theme: dark\n");
+		expect(existsSync(join(paths.ompAgentHome!, "skills", "dev3"))).toBe(true);
+	});
+});
+
+describe("pi accounts", () => {
+	function seedPiAgentHome() {
+		const home = paths.piAgentHome!;
+		mkdirSync(join(home, "skills", "dev3"), { recursive: true });
+		mkdirSync(join(home, "sessions"), { recursive: true });
+		writeFileSync(join(home, "settings.json"), '{"theme":"dark"}');
+		writeFileSync(join(home, "auth.json"), '{"anthropic":{"type":"oauth","access":"user-own-token"}}');
+		writeFileSync(join(home, "models-store.json"), "{}");
+	}
+
+	/** What pi's /login writes: provider ids with a credential type and a secret. */
+	function signIn(dir: string, auth: Record<string, { type: string; key?: string; access?: string }>) {
+		writeFileSync(join(dir, "auth.json"), JSON.stringify(auth));
+	}
+
+	async function addPiAccount() {
+		const { accountId } = await prepareAgentDirLogin("pi", paths);
+		signIn(agentDirAccountDir("pi", accountId, paths), { openrouter: { type: "api_key", key: "sk-or-secret" } });
+		return completeAgentDirLogin("pi", accountId, paths);
+	}
+
+	it("keeps credentials, sessions and the per-key model catalog private, shares the rest", () => {
+		for (const entry of ["auth.json", "auth.json.lock", "sessions", "models-store.json", "pi-debug.log"]) {
+			expect(isPrivateAgentDirEntry("pi", entry)).toBe(true);
+		}
+		for (const entry of ["settings.json", "skills", "extensions", "models.json", "AGENTS.md", "keybindings.json"]) {
+			expect(isPrivateAgentDirEntry("pi", entry)).toBe(false);
+		}
+	});
+
+	it("signs in through pi itself with /login typed in by an extension, never passed as a prompt", async () => {
+		seedPiAgentHome();
+		const { accountId, launch } = await prepareAgentDirLogin("pi", paths);
+		const dir = agentDirAccountDir("pi", accountId, paths);
+		const extension = join(root, "data", "agent-hooks", "pi-login.ts");
+		expect(launch).toEqual({ command: "pi", args: ["--no-session", "-e", extension], env: { PI_CODING_AGENT_DIR: dir }, cwd: dir });
+		expect(readFileSync(extension, "utf-8")).toContain('setEditorText?.("/login")');
+		expect(lstatSync(join(dir, "skills")).isSymbolicLink()).toBe(true);
+		for (const entry of ["auth.json", "sessions", "models-store.json"]) expect(existsSync(join(dir, entry))).toBe(false);
+		expect((await listAgentAccounts(paths)).pi.accounts).toHaveLength(0);
+	});
+
+	it("starts an account on a copy of the user's pi settings, so /login's new default never reaches theirs", async () => {
+		seedPiAgentHome();
+		const { accountId } = await prepareAgentDirLogin("pi", paths);
+		const accountSettings = join(agentDirAccountDir("pi", accountId, paths), "settings.json");
+		expect(lstatSync(accountSettings).isSymbolicLink()).toBe(false);
+		expect(readFileSync(accountSettings, "utf-8")).toBe('{"theme":"dark"}');
+		writeFileSync(accountSettings, '{"theme":"dark","defaultProvider":"openrouter"}');
+		expect(readFileSync(join(paths.piAgentHome!, "settings.json"), "utf-8")).toBe('{"theme":"dark"}');
+		signIn(agentDirAccountDir("pi", accountId, paths), { openrouter: { type: "api_key", key: "k" } });
+		await completeAgentDirLogin("pi", accountId, paths);
+		await getActiveAgentDirSessionEnv("pi", accountId, paths); // re-scaffolds; the copy is kept
+		expect(readFileSync(accountSettings, "utf-8")).toContain("openrouter");
+	});
+
+	it("waits until pi stores a credential, then registers every provider, OAuth and API key alike", async () => {
+		const { accountId } = await prepareAgentDirLogin("pi", paths);
+		const dir = agentDirAccountDir("pi", accountId, paths);
+		await expect(completeAgentDirLogin("pi", accountId, paths)).rejects.toBeInstanceOf(LoginNotReadyError);
+		expect(stagedLoginHasIdentity("pi", accountId, paths)).toBe(false);
+		signIn(dir, { "openai-codex": { type: "oauth", access: "tok" }, openrouter: { type: "api_key", key: "sk-or-secret" } });
+		expect(stagedLoginHasIdentity("pi", accountId, paths)).toBe(true);
+		const account = await completeAgentDirLogin("pi", accountId, paths);
+		expect(account.kind).toBe("pi");
+		expect(account.label).toBe("pi account 1");
+		expect(account.providerLogins).toEqual([
+			{ provider: "openai-codex", identityKey: null, orgName: null, authType: "oauth" },
+			{ provider: "openrouter", identityKey: null, orgName: null, authType: "api_key" },
+		]);
+		const registry = readFileSync(join(paths.accountsDir, "pi-accounts.json"), "utf-8");
+		expect(registry).not.toContain("sk-or-secret");
+		expect(registry).not.toContain("tok");
+		expect((await listAgentAccounts(paths)).pi.activeId).toBe(account.id);
+	});
+
+	it("never counts the user's own ~/.pi/agent credentials as the new account's", async () => {
+		seedPiAgentHome();
+		const { accountId } = await prepareAgentDirLogin("pi", paths);
+		await expect(completeAgentDirLogin("pi", accountId, paths)).rejects.toBeInstanceOf(LoginNotReadyError);
+	});
+
+	it("keeps the pi registry in its own file, apart from omp's and accounts.json", async () => {
+		await addPiAccount();
+		expect(existsSync(join(paths.accountsDir, "pi-accounts.json"))).toBe(true);
+		expect(existsSync(join(paths.accountsDir, "omp-accounts.json"))).toBe(false);
+		expect(existsSync(join(paths.accountsDir, "accounts.json"))).toBe(false);
+	});
+
+	it("points PI_CODING_AGENT_DIR at the selected pi account and unsets it for the system login", async () => {
+		const account = await addPiAccount();
+		const dir = agentDirAccountDir("pi", account.id, paths);
+		expect(await getActiveAgentDirSessionEnv("pi", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: dir });
+		await setActiveAgentDirAccount("pi", null, paths);
+		expect(await getActiveAgentDirSessionEnv("pi", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: ENV_UNSET });
+	});
+
+	it("never lets one harness's account dir reach the other through the shared variable", async () => {
+		await addPiAccount();
+		expect(await getActiveAgentDirSessionEnv("omp", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: ENV_UNSET });
+		const { accountId } = await prepareAgentDirLogin("omp", paths);
+		await completeAgentDirLogin("omp", accountId, paths, async () => [{ provider: "openai-codex", identityKey: null, orgName: null }]);
+		await setActiveAgentDirAccount("pi", null, paths);
+		expect(await getActiveAgentDirSessionEnv("pi", undefined, paths)).toEqual({ PI_CODING_AGENT_DIR: ENV_UNSET });
+	});
+
+	it("removes a pi account without touching ~/.pi/agent", async () => {
+		seedPiAgentHome();
+		const account = await addPiAccount();
+		await renameAgentAccount("pi", account.id, "Personal OpenRouter", paths);
+		expect((await listAgentAccounts(paths)).pi.accounts[0].label).toBe("Personal OpenRouter");
+		await removeAgentAccount("pi", account.id, paths);
+		expect((await listAgentAccounts(paths)).pi.accounts).toHaveLength(0);
+		expect(existsSync(agentDirAccountDir("pi", account.id, paths))).toBe(false);
+		expect(readFileSync(join(paths.piAgentHome!, "auth.json"), "utf-8")).toContain("user-own-token");
+		expect(existsSync(join(paths.piAgentHome!, "skills", "dev3"))).toBe(true);
 	});
 });

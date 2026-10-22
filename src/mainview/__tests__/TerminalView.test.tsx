@@ -11,6 +11,7 @@ import {
 } from "../terminal-bidi/flag";
 import { isBidiRenderInstalled, uninstallBidiRender } from "../terminal-bidi/proxy";
 import { applyTerminalFontFamily, applyTerminalFontSize } from "../terminal-font";
+import { setShortcutOverrides } from "../keymap-store";
 
 // ── Hoisted mocks (must be before vi.mock factories) ─────────────────────────
 
@@ -133,7 +134,7 @@ vi.mock("../rpc", () => ({
 			taskPaneAction: vi.fn(),
 			tmuxNewWindow: vi.fn(),
 			tmuxAltClickMoveCursor: vi.fn().mockResolvedValue({ moved: true }),
-			exitCopyModeAllPanes: vi.fn().mockResolvedValue({ panesExited: 1 }),
+			exitCopyModeAllPanes: vi.fn().mockResolvedValue({ panesExited: 1, panesKept: 0 }),
 			tmuxPanesInMode: vi.fn().mockResolvedValue({ inMode: true }),
 			logRendererDiagnostic: vi.fn().mockResolvedValue(undefined),
 			copyTerminalSelection: vi.fn().mockResolvedValue({ ok: true, tool: "pbcopy" }),
@@ -253,10 +254,15 @@ beforeEach(() => {
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
-/**
- * Render TerminalView and drive the full async setup chain:
- *   fonts.load() resolves → setup() → ResizeObserver fires → rAF → term.focus()
- */
+async function waitForInitialSocket() {
+	if (vi.isFakeTimers()) {
+		await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+		expect(lastWebSocket).not.toBeNull();
+		return;
+	}
+	await waitFor(() => expect(lastWebSocket).not.toBeNull());
+}
+
 async function renderAndSetup() {
 	let result!: ReturnType<typeof render>;
 	await act(async () => {
@@ -269,6 +275,7 @@ async function renderAndSetup() {
 	await act(async () => {
 		fireResize?.();
 	});
+	await waitForInitialSocket();
 	return result;
 }
 
@@ -687,6 +694,120 @@ describe("TerminalView – keymap shortcuts", () => {
 		target.remove();
 	});
 
+	it("Cmd+Opt+arrows move tmux pane focus in that direction", async () => {
+		(window as Window & { __electrobunWebviewId?: number }).__electrobunWebviewId = 1;
+		try {
+			await renderAndSetup();
+			const target = focusInsideTerminal();
+			const directions = [["ArrowLeft", "left"], ["ArrowRight", "right"], ["ArrowUp", "up"], ["ArrowDown", "down"]] as const;
+			for (const [code, direction] of directions) {
+				mockedTaskPaneAction.mockClear();
+				await act(async () => {
+					window.dispatchEvent(new KeyboardEvent("keydown", { code, metaKey: true, altKey: true, bubbles: true }));
+				});
+				expect(mockedTaskPaneAction).toHaveBeenCalledWith({ taskId: "t1", action: { kind: "focusDirection", direction } });
+			}
+			target.remove();
+		} finally {
+			Reflect.deleteProperty(window, "__electrobunWebviewId");
+		}
+	});
+
+	it("a native host moves pane focus itself instead of asking the server", async () => {
+		const onFocusDirection = vi.fn();
+		await act(async () => {
+			render(<I18nProvider><TerminalView ptyUrl="ws://localhost:1234" taskId="t1" projectId="p1" onFocusDirection={onFocusDirection} /></I18nProvider>);
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		await act(async () => { fireResize?.(); });
+		await waitForInitialSocket();
+		const target = focusInsideTerminal();
+
+		await act(async () => {
+			window.dispatchEvent(new KeyboardEvent("keydown", { code: "ArrowUp", metaKey: true, altKey: true, bubbles: true }));
+		});
+
+		expect(onFocusDirection).toHaveBeenCalledWith("up");
+		expect(mockedTaskPaneAction).not.toHaveBeenCalled();
+		target.remove();
+	});
+
+	it("in the browser a native host moves left/right on Opt+Shift+arrows, not on the browser's Cmd+Opt+arrows", async () => {
+		const onFocusDirection = vi.fn();
+		await act(async () => {
+			render(<I18nProvider><TerminalView ptyUrl="ws://localhost:1234" taskId="t1" projectId="p1" onFocusDirection={onFocusDirection} /></I18nProvider>);
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		await act(async () => { fireResize?.(); });
+		await waitForInitialSocket();
+		const target = focusInsideTerminal();
+
+		const browserOwned = new KeyboardEvent("keydown", { code: "ArrowLeft", metaKey: true, altKey: true, bubbles: true, cancelable: true });
+		await act(async () => { window.dispatchEvent(browserOwned); });
+		expect(onFocusDirection).not.toHaveBeenCalled();
+		expect(browserOwned.defaultPrevented).toBe(false);
+
+		for (const [code, direction] of [["ArrowLeft", "left"], ["ArrowRight", "right"]] as const) {
+			const event = new KeyboardEvent("keydown", { code, altKey: true, shiftKey: true, bubbles: true, cancelable: true });
+			await act(async () => { window.dispatchEvent(event); });
+			expect(onFocusDirection).toHaveBeenLastCalledWith(direction);
+			expect(event.defaultPrevented).toBe(true);
+		}
+		target.remove();
+	});
+
+	it("Cmd+B types the tmux prefix into a tmux session", async () => {
+		await renderAndSetup();
+		act(() => { lastWebSocket?.onmessage?.({ data: "$ " } as MessageEvent); });
+		const target = focusInsideTerminal();
+		lastWebSocket!.send.mockClear();
+
+		const event = new KeyboardEvent("keydown", { code: "KeyB", metaKey: true, bubbles: true, cancelable: true });
+		await act(async () => { window.dispatchEvent(event); });
+
+		expect(lastWebSocket!.send).toHaveBeenCalledWith("\x02");
+		expect(event.defaultPrevented).toBe(true);
+		target.remove();
+	});
+
+	it("the tmux prefix is left alone before any tmux output — a native session has no prefix", async () => {
+		await renderAndSetup();
+		const target = focusInsideTerminal();
+		lastWebSocket!.send.mockClear();
+
+		const event = new KeyboardEvent("keydown", { code: "KeyB", metaKey: true, bubbles: true, cancelable: true });
+		await act(async () => { window.dispatchEvent(event); });
+
+		expect(lastWebSocket!.send).not.toHaveBeenCalled();
+		expect(event.defaultPrevented).toBe(false);
+		target.remove();
+	});
+
+	it("a rebound tmux prefix fires on the new combo only", async () => {
+		setShortcutOverrides({ "tmux-prefix": { primary: "Mod+KeyA" } });
+		try {
+			await renderAndSetup();
+			act(() => { lastWebSocket?.onmessage?.({ data: "$ " } as MessageEvent); });
+			const target = focusInsideTerminal();
+			lastWebSocket!.send.mockClear();
+
+			await act(async () => {
+				window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyB", metaKey: true, bubbles: true }));
+			});
+			expect(lastWebSocket!.send).not.toHaveBeenCalled();
+
+			await act(async () => {
+				window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyA", metaKey: true, bubbles: true }));
+			});
+			expect(lastWebSocket!.send).toHaveBeenCalledWith("\x02");
+			target.remove();
+		} finally {
+			setShortcutOverrides({});
+		}
+	});
+
 	it("plain Enter and plain Cmd+, are left alone — they are the shell's and Settings'", async () => {
 		await renderAndSetup();
 		const target = focusInsideTerminal();
@@ -891,6 +1012,7 @@ describe("TerminalView – scrolled-into-history signal (touch scroll-to-latest)
 			await Promise.resolve();
 		});
 		await act(async () => { fireResize?.(); });
+		await waitForInitialSocket();
 		const wheelCalls = mockTermInstance.attachCustomWheelEventHandler.mock.calls;
 		const wheelHandler = wheelCalls[wheelCalls.length - 1]?.[0] as (event: WheelEvent) => boolean;
 		return { onScrolledIntoHistory, handle: handle!, wheelHandler };
@@ -942,6 +1064,44 @@ describe("TerminalView – scrolled-into-history signal (touch scroll-to-latest)
 		expect(mockedExitCopyModeAllPanes.mock.invocationCallOrder[0]).toBeLessThan(mockPaste.mock.invocationCallOrder[0]);
 	});
 
+	it.each(["extra-key", "clipboard", "ime"] as const)("%s input resumes after copy-mode exits", async (source) => {
+		mockTermInstance.open.mockImplementationOnce((el: HTMLElement) => el.appendChild(document.createElement("textarea")));
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		const { handle, wheelHandler } = await renderWithSignal();
+		act(() => { wheelHandler({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		let release!: () => void;
+		mockedExitCopyModeAllPanes.mockClear();
+		mockedExitCopyModeAllPanes.mockReturnValueOnce(new Promise((resolve) => {
+			release = () => resolve({ panesExited: 1, panesKept: 0 });
+		}));
+		lastWebSocket!.send.mockClear();
+		mockPaste.mockClear();
+		act(() => {
+			if (source === "extra-key") handle.sendInput("x");
+			else if (source === "clipboard") dispatchPaste(document.querySelector('[data-terminal="true"]')!, "x");
+			else document.querySelector('[data-terminal="true"] textarea')!.dispatchEvent(
+				new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true }),
+			);
+		});
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledTimes(1);
+		expect(lastWebSocket!.send).not.toHaveBeenCalled();
+		expect(mockPaste).not.toHaveBeenCalled();
+		await act(async () => { release(); });
+		if (source === "clipboard") expect(mockPaste).toHaveBeenCalledWith("x");
+		else expect(lastWebSocket!.send).toHaveBeenCalledWith("x");
+	});
+
+	it.each(["\x1b", "\x03", "\x1b[A", "q"])("keeps extra-key %j with tmux instead of cancelling first", async (sequence) => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		const { handle, wheelHandler } = await renderWithSignal();
+		act(() => { wheelHandler({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		mockedExitCopyModeAllPanes.mockClear();
+		lastWebSocket!.send.mockClear();
+		act(() => { handle.sendInput(sequence); });
+		expect(mockedExitCopyModeAllPanes).not.toHaveBeenCalled();
+		expect(lastWebSocket!.send.mock.calls).toEqual([[sequence]]);
+	});
+
 	it("without a pending scroll-up, paste stays synchronous and never calls tmux", async () => {
 		const { handle } = await renderWithSignal();
 		mockedExitCopyModeAllPanes.mockClear();
@@ -961,7 +1121,7 @@ describe("TerminalView – scrolled-into-history signal (touch scroll-to-latest)
 		let release!: () => void;
 		mockedExitCopyModeAllPanes.mockClear();
 		mockedExitCopyModeAllPanes.mockReturnValue(
-			new Promise<{ panesExited: number }>((resolve) => { release = () => resolve({ panesExited: 1 }); }),
+			new Promise<{ panesExited: number; panesKept: number }>((resolve) => { release = () => resolve({ panesExited: 1, panesKept: 0 }); }),
 		);
 		mockPaste.mockClear();
 
@@ -972,7 +1132,7 @@ describe("TerminalView – scrolled-into-history signal (touch scroll-to-latest)
 
 		await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
 		expect(mockPaste.mock.calls.map((call) => call[0])).toEqual(["first", "second"]);
-		mockedExitCopyModeAllPanes.mockResolvedValue({ panesExited: 1 });
+		mockedExitCopyModeAllPanes.mockResolvedValue({ panesExited: 1, panesKept: 0 });
 	});
 
 	// The poll is the only tmux traffic this feature adds, and a pointer host
@@ -991,6 +1151,7 @@ describe("TerminalView – scrolled-into-history signal (touch scroll-to-latest)
 			await Promise.resolve();
 		});
 		await act(async () => { fireResize?.(); });
+		await waitForInitialSocket();
 		const wheelCalls = mockTermInstance.attachCustomWheelEventHandler.mock.calls;
 		const wheelHandler = wheelCalls[wheelCalls.length - 1]?.[0] as (event: WheelEvent) => boolean;
 
@@ -1088,6 +1249,155 @@ describe("TerminalView – hidden textarea keeps focus only when nothing else ta
 });
 
 describe("TerminalView – tmux copy-mode focus recovery", () => {
+	it("waits for copy-mode exit before forwarding the first keys, in order", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "$ " } as MessageEvent); });
+		const wheel = mockTermInstance.attachCustomWheelEventHandler.mock.lastCall![0] as (e: WheelEvent) => boolean;
+		act(() => { wheel({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		let release!: () => void;
+		mockedExitCopyModeAllPanes.mockClear();
+		mockedExitCopyModeAllPanes.mockReturnValueOnce(new Promise((resolve) => {
+			release = () => resolve({ panesExited: 1, panesKept: 0 });
+		}));
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		const data = (mockTermInstance.onData.mock.lastCall as unknown as [(s: string) => void])[0];
+		lastWebSocket!.send.mockClear();
+		act(() => {
+			key(new KeyboardEvent("keydown", { key: "a", code: "KeyA" }));
+			data("a");
+			key(new KeyboardEvent("keydown", { key: "b", code: "KeyB" }));
+			data("b");
+		});
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledTimes(1);
+		expect(lastWebSocket!.send).not.toHaveBeenCalled();
+		await act(async () => { release(); });
+		expect(lastWebSocket!.send.mock.calls.map(([s]) => s)).toEqual(["a", "b"]);
+	});
+
+	it.each([
+		[{ key: "Escape", code: "Escape" }, "\x1b"],
+		[{ key: "c", code: "KeyC", ctrlKey: true }, "\x03"],
+		[{ key: "q", code: "KeyQ" }, "q"],
+		[{ key: "ArrowUp", code: "ArrowUp" }, "\x1b[A"],
+		[{ key: "PageUp", code: "PageUp" }, "\x1b[5~"],
+		[{ key: "/", code: "Slash" }, "/"],
+	] as const)("leaves history commands %j to tmux without cancelling first", async (event, sequence) => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "$ " } as MessageEvent); });
+		const wheel = mockTermInstance.attachCustomWheelEventHandler.mock.lastCall![0] as (e: WheelEvent) => boolean;
+		act(() => { wheel({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		const data = (mockTermInstance.onData.mock.lastCall as unknown as [(s: string) => void])[0];
+		mockedExitCopyModeAllPanes.mockClear();
+		lastWebSocket!.send.mockClear();
+		act(() => {
+			expect(key(new KeyboardEvent("keydown", event))).toBe(false);
+			data(sequence);
+		});
+		expect(mockedExitCopyModeAllPanes).not.toHaveBeenCalled();
+		expect(lastWebSocket!.send.mock.calls.map(([s]) => s)).toEqual([sequence]);
+	});
+
+	it("keeps subsequent search text and Enter with tmux after a history command", async () => {
+		await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "history" } as MessageEvent); });
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		const data = (mockTermInstance.onData.mock.lastCall as unknown as [(s: string) => void])[0];
+		mockedExitCopyModeAllPanes.mockClear();
+		lastWebSocket!.send.mockClear();
+		act(() => {
+			key(new KeyboardEvent("keydown", { key: "r", code: "KeyR", ctrlKey: true }));
+			data("\x12");
+			for (const char of "needle") {
+				key(new KeyboardEvent("keydown", { key: char }));
+				data(char);
+			}
+			key(new KeyboardEvent("keydown", { key: "Enter", code: "Enter" }));
+			data("\r");
+		});
+		expect(mockedExitCopyModeAllPanes).not.toHaveBeenCalled();
+		expect(lastWebSocket!.send.mock.calls.map(([s]) => s).join("")).toBe("\x12needle\r");
+	});
+
+	it("resumes inherited copy mode on the first key after a terminal remount", async () => {
+		await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "retained tmux viewport" } as MessageEvent); });
+		mockedExitCopyModeAllPanes.mockClear();
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		act(() => { key(new KeyboardEvent("keydown", { key: "a", code: "KeyA" })); });
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledWith({ taskId: "t1", typedKey: true });
+	});
+
+	it("stays in copy-mode-vi history when tmux keeps the typed key as a command", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		const { container } = await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "$ " } as MessageEvent); });
+		const wheel = mockTermInstance.attachCustomWheelEventHandler.mock.lastCall![0] as (e: WheelEvent) => boolean;
+		act(() => { wheel({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		let release!: () => void;
+		mockedExitCopyModeAllPanes.mockClear();
+		mockedExitCopyModeAllPanes.mockReturnValueOnce(new Promise((resolve) => {
+			release = () => resolve({ panesExited: 0, panesKept: 1 });
+		}));
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		const data = (mockTermInstance.onData.mock.lastCall as unknown as [(s: string) => void])[0];
+		lastWebSocket!.send.mockClear();
+		act(() => {
+			key(new KeyboardEvent("keydown", { key: "k", code: "KeyK" }));
+			data("k");
+		});
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledWith({ taskId: "t1", typedKey: true });
+		await act(async () => { release(); });
+		act(() => {
+			key(new KeyboardEvent("keydown", { key: "j", code: "KeyJ" }));
+			data("j");
+		});
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledTimes(1);
+		expect(lastWebSocket!.send.mock.calls.map(([s]) => s)).toEqual(["k", "j"]);
+		// Still in history, so a plain click must leave it.
+		await act(async () => { fireEvent.click(container.querySelector('[data-terminal="true"]') as HTMLElement); });
+		expect(mockedExitCopyModeAllPanes).toHaveBeenLastCalledWith({ taskId: "t1" });
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledTimes(2);
+	});
+
+	it("a click that leaves history lets the next inherited copy-mode resume on typing", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		const { container } = await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "$ " } as MessageEvent); });
+		const wheel = mockTermInstance.attachCustomWheelEventHandler.mock.lastCall![0] as (e: WheelEvent) => boolean;
+		act(() => { wheel({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		act(() => { key(new KeyboardEvent("keydown", { key: "ArrowUp", code: "ArrowUp" })); });
+		await act(async () => { fireEvent.click(container.querySelector('[data-terminal="true"]') as HTMLElement); });
+		act(() => { window.dispatchEvent(new Event("focus")); });
+		mockedExitCopyModeAllPanes.mockClear();
+		act(() => { key(new KeyboardEvent("keydown", { key: "a", code: "KeyA" })); });
+		expect(mockedExitCopyModeAllPanes).toHaveBeenCalledWith({ taskId: "t1", typedKey: true });
+	});
+
+	it("keeps history for mouse reports, terminal replies and copy modifier keys", async () => {
+		mockTermInstance.hasMouseTracking.mockReturnValue(true);
+		await renderAndSetup();
+		act(() => { lastWebSocket!.onmessage!({ data: "$ " } as MessageEvent); });
+		const wheel = mockTermInstance.attachCustomWheelEventHandler.mock.lastCall![0] as (e: WheelEvent) => boolean;
+		act(() => { wheel({ deltaY: -100, clientX: 20, clientY: 20 } as WheelEvent); });
+		const key = mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+		const data = (mockTermInstance.onData.mock.lastCall as unknown as [(s: string) => void])[0];
+		mockedExitCopyModeAllPanes.mockClear();
+		lastWebSocket!.send.mockClear();
+		act(() => {
+			for (const modifier of ["Shift", "Meta", "Control", "Alt"]) key(new KeyboardEvent("keydown", { key: modifier }));
+			key(new KeyboardEvent("keydown", { key: "c", code: "KeyC", metaKey: true }));
+			key(new KeyboardEvent("keydown", { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }));
+			data("\x1b[<32;4;2M");
+			data("\x1b[1;1R");
+		});
+		expect(mockedExitCopyModeAllPanes).not.toHaveBeenCalled();
+		expect(lastWebSocket!.send.mock.calls.map(([s]) => s)).toEqual(["\x1b[<32;4;2M", "\x1b[1;1R"]);
+	});
+
 	afterEach(() => {
 		mockTermInstance.hasMouseTracking.mockReturnValue(false);
 	});
@@ -1617,6 +1927,7 @@ describe("TerminalView – paste keeps brackets on a tmux stream after remount",
 			await Promise.resolve();
 		});
 		await act(async () => { fireResize?.(); });
+		await waitForInitialSocket();
 		const terminal = result.container.querySelector('[data-terminal="true"]')!;
 		return { handle: handle!, terminal };
 	}
@@ -1639,7 +1950,7 @@ describe("TerminalView – paste keeps brackets on a tmux stream after remount",
 	it("a clipboard paste on a tmux stream goes out bracketed although ghostty lost 2004", async () => {
 		const { terminal } = await renderWithHandle();
 		deliver("tmux redraw");
-		dispatchPaste(terminal, "a\nb");
+		await act(async () => { dispatchPaste(terminal, "a\nb"); });
 		expect(mockInput).toHaveBeenCalledWith(BRACKETED, true);
 		expect(mockPaste).not.toHaveBeenCalled();
 	});
@@ -1647,8 +1958,8 @@ describe("TerminalView – paste keeps brackets on a tmux stream after remount",
 	it("the imperative paste and submit take the same bracketed path, with one immediate Enter", async () => {
 		const { handle } = await renderWithHandle();
 		deliver("tmux redraw");
+		await act(async () => { handle.paste("a\rb"); });
 		vi.useFakeTimers();
-		handle.paste("a\rb");
 		expect(mockInput).toHaveBeenLastCalledWith(BRACKETED, true);
 		const ws = lastWebSocket!;
 		ws.send.mockClear();
@@ -1664,7 +1975,7 @@ describe("TerminalView – paste keeps brackets on a tmux stream after remount",
 		const { terminal } = await renderWithHandle();
 		deliver("tmux redraw");
 		mockTermInstance.hasBracketedPaste.mockReturnValue(true);
-		dispatchPaste(terminal, "a\nb");
+		await act(async () => { dispatchPaste(terminal, "a\nb"); });
 		expect(mockPaste).toHaveBeenCalledWith("a\rb");
 		expect(mockInput).not.toHaveBeenCalled();
 	});
@@ -1794,6 +2105,40 @@ describe("installTerminalImeInputBridge", () => {
 		expect(send).toHaveBeenCalledWith("，");
 		dispose();
 	});
+});
+
+describe("TerminalView – redraw without synthetic geometry", () => {
+	const sizeReports = () =>
+		lastWebSocket!.send.mock.calls.map(([data]) => data as string).filter((data) => data.startsWith("\x1b]resize;"));
+
+	it("waits for initial layout to settle before reporting its size", async () => {
+		vi.useFakeTimers();
+		try {
+			await act(async () => {
+				render(<I18nProvider><TerminalView ptyUrl="ws://localhost:1234" taskId="t1" projectId="p1" /></I18nProvider>);
+			});
+			await act(async () => { fireResize?.(); });
+			await act(async () => { vi.advanceTimersByTime(80); });
+			fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 80, rows: 37 }));
+			await act(async () => { fireResize?.(); });
+			await act(async () => { vi.advanceTimersByTime(99); });
+			expect(lastWebSocket).toBeNull();
+			await act(async () => { vi.advanceTimersByTime(1); });
+			await act(async () => { lastWebSocket!.onopen?.(new Event("open")); });
+			expect(sizeReports()).toEqual(["\x1b]resize;80;37\x07"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("reports the actual size once on socket open", async () => {
+		await renderAndSetup();
+		fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 80, rows: 24 }));
+		lastWebSocket!.send.mockClear();
+		await act(async () => { lastWebSocket!.onopen?.(new Event("open")); });
+		expect(sizeReports()).toEqual(["\x1b]resize;80;24\x07"]);
+	});
+
 });
 
 // ── buildResizeDance — pins the nudge axis (decision 041) ────────────────────
@@ -2039,6 +2384,7 @@ describe("TerminalView – native stream framing", () => {
 		await act(async () => {
 			fireResize?.();
 		});
+		await waitForInitialSocket();
 	}
 
 	function deliver(text: string) {
@@ -2077,6 +2423,23 @@ describe("TerminalView – native stream framing", () => {
 
 		expect(webSockets).toHaveLength(2);
 		expect(webSockets[1].url).toBe(`${PTY_URL}&since=9`);
+	});
+
+	it("reattaches an open native socket on foreground and applies its journal delta", async () => {
+		await renderNative();
+		deliver(frame({ t: "o", seq: 9 }, "screen before background"));
+		mockTermInstance.write.mockClear();
+		await act(async () => {
+			Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+			document.dispatchEvent(new Event("visibilitychange"));
+			Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		expect(webSockets[0].close).toHaveBeenCalledOnce();
+		expect(webSockets[1].url).toBe(`${PTY_URL}&since=9`);
+		deliver(frame({ t: "attach", seq: 10, role: "writer", sessionId: "s", paneId: "s:0", hostPid: 1, shellPid: 2, resumed: true }, "output while hidden"));
+		expect(mockTermInstance.write).toHaveBeenCalledWith("output while hidden");
+		expect(mockTermInstance.write.mock.calls.some(([text]) => text.includes("\x1bc"))).toBe(false);
 	});
 
 	it("replaces the screen in one write when the server rebuilt it", async () => {
@@ -2208,6 +2571,7 @@ describe("TerminalView – native stream framing", () => {
 		await act(async () => {
 			fireResize?.();
 		});
+		await waitForInitialSocket();
 
 		handle!.claimWriter();
 
@@ -2715,5 +3079,221 @@ describe("TerminalView – a selection copies and offers nothing else", () => {
 		expect(clipboardWriteTextMock).toHaveBeenCalledWith("selected in tmux");
 		expect(container.querySelector("[data-testid='terminal-comment-selection']")).toBeNull();
 		expect(container.querySelectorAll("button").length).toBe(buttonsBefore);
+	});
+});
+
+describe("TerminalView – Ctrl+Backspace word delete", () => {
+	const ctrlKey = (key: string, ctrl = true) =>
+		({ type: "keydown", key, code: key, ctrlKey: ctrl, shiftKey: false, altKey: false, metaKey: false }) as unknown as KeyboardEvent;
+	const keyHandler = () => mockTermInstance.attachCustomKeyEventHandler.mock.lastCall![0] as (e: KeyboardEvent) => boolean;
+	const deliver = (data: string) => act(() => { lastWebSocket?.onmessage?.({ data } as MessageEvent); });
+
+	beforeEach(() => { mockInput.mockClear(); });
+
+	it("sends ^W through onData on a tmux stream and leaves Ctrl+Delete to ghostty", async () => {
+		await renderAndSetup();
+		deliver("$ ");
+		expect(keyHandler()(ctrlKey("Backspace"))).toBe(true);
+		expect(keyHandler()(ctrlKey("Delete"))).toBe(false);
+		expect(keyHandler()(ctrlKey("Backspace", false))).toBe(false);
+		expect(mockInput.mock.calls).toEqual([["\x17", true]]);
+	});
+
+	it("leaves Ctrl+Backspace to ghostty on a native stream, where ConPTY reads ^H", async () => {
+		await renderAndSetup();
+		deliver(`\x1b_dev3nt;${JSON.stringify({ v: 1, t: "o", seq: 1 })}\x1b\\native output`);
+		expect(keyHandler()(ctrlKey("Backspace"))).toBe(false);
+		expect(mockInput).not.toHaveBeenCalled();
+	});
+
+	it("leaves Ctrl+Backspace to ghostty before the socket delivered anything", async () => {
+		await renderAndSetup();
+		expect(keyHandler()(ctrlKey("Backspace"))).toBe(false);
+		expect(mockInput).not.toHaveBeenCalled();
+	});
+});
+
+// One tmux PTY, several viewers: it follows the viewer used last
+// (h0x91b/dev-3.0#2000). Every other viewer renders at that grid and takes it
+// back with a click, a keystroke, focus or becoming visible.
+describe("TerminalView – shared tmux size", () => {
+	const ACTIVE = "\x1b]dev3viewer;active\x07";
+	const HIDDEN = "\x1b]dev3viewer;hidden\x07";
+
+	async function renderShared() {
+		let result!: ReturnType<typeof render>;
+		await act(async () => {
+			result = render(
+				<I18nProvider>
+					<TerminalView ptyUrl="ws://localhost:1234" taskId="t1" projectId="p1" />
+				</I18nProvider>,
+			);
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		await act(async () => {
+			fireResize?.();
+		});
+		await waitForInitialSocket();
+		return { container: result.container.querySelector("[data-terminal]") as HTMLElement, pill: () => result.queryByText("Sized for another viewer") };
+	}
+
+	function notice(cols: number, rows: number, sizing: boolean) {
+		act(() => {
+			lastWebSocket?.onmessage?.({ data: `\x1b]dev3sizing;${cols};${rows};${sizing ? 1 : 0}\x07` } as MessageEvent);
+		});
+	}
+
+	function sent(): string[] {
+		return lastWebSocket!.send.mock.calls.map((call) => call[0] as string);
+	}
+
+	it("renders at the shared grid while sized elsewhere, and keeps reporting its own viewport", async () => {
+		const { pill } = await renderShared();
+		fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 100, rows: 30 }));
+		mockTermInstance.resize.mockClear();
+		lastWebSocket!.send.mockClear();
+
+		notice(22, 40, false);
+
+		expect(pill()).toBeInTheDocument();
+		expect(mockTermInstance.resize).toHaveBeenCalledWith(22, 40);
+		expect(sent()).toContain("\x1b]resize;100;30\x07");
+		expect(sent()).not.toContain("\x1b]resize;22;40\x07");
+	});
+
+	// tmux's redraw at the new size follows the notice on the same socket; a fit
+	// deferred to a later frame let that redraw land on the old grid (browser QA).
+	it("re-fits at once on a notice, before any later frame", async () => {
+		const { pill } = await renderShared();
+		vi.stubGlobal("requestAnimationFrame", () => 1);
+		try {
+			mockTermInstance.resize.mockClear();
+			notice(22, 40, false);
+			expect(mockTermInstance.resize).toHaveBeenLastCalledWith(22, 40);
+
+			fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 100, rows: 30 }));
+			notice(100, 30, true);
+			expect(mockTermInstance.resize).toHaveBeenLastCalledWith(100, 30);
+			expect(pill()).not.toBeInTheDocument();
+		} finally {
+			vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+				cb(0);
+				return 1;
+			});
+		}
+	});
+
+	it("never reports the shared grid it follows as its own size", async () => {
+		await renderShared();
+		notice(22, 40, false);
+		lastWebSocket!.send.mockClear();
+
+		const onResize = (mockTermInstance.onResize.mock.calls[0] as unknown[])[0] as (size: { cols: number; rows: number }) => void;
+		onResize({ cols: 22, rows: 40 });
+
+		expect(sent()).toEqual([]);
+	});
+
+	it("goes back to fitting its own container once it is the one sized for", async () => {
+		const { pill } = await renderShared();
+		notice(22, 40, false);
+		fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 100, rows: 30 }));
+		mockTermInstance.resize.mockClear();
+
+		notice(100, 30, true);
+
+		expect(pill()).not.toBeInTheDocument();
+		expect(mockTermInstance.resize).toHaveBeenCalledWith(100, 30);
+	});
+
+	it("takes the size back on a click or keystroke only while another viewer has it", async () => {
+		const { container } = await renderShared();
+		notice(100, 30, true);
+		lastWebSocket!.send.mockClear();
+		fireEvent.pointerDown(container);
+		fireEvent.keyDown(container, { key: "a" });
+		expect(sent()).not.toContain(ACTIVE);
+
+		notice(22, 40, false);
+		fireEvent.pointerDown(container);
+		expect(sent()).toContain(ACTIVE);
+	});
+
+	// The whole pill is the button: a phone tap on its label must take the size too.
+	it("takes the size from anywhere on the pill, and from composer input", async () => {
+		let handle: TerminalHandle | null = null;
+		let result!: ReturnType<typeof render>;
+		await act(async () => {
+			result = render(
+				<I18nProvider>
+					<TerminalView ptyUrl="ws://localhost:1234" taskId="t1" projectId="p1" onReady={(h) => { handle = h; }} />
+				</I18nProvider>,
+			);
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		await act(async () => {
+			fireResize?.();
+		});
+		await waitForInitialSocket();
+		notice(22, 40, false);
+		lastWebSocket!.send.mockClear();
+		fireEvent.click(result.getByText("Sized for another viewer"));
+		expect(sent()).toEqual([ACTIVE]);
+
+		lastWebSocket!.send.mockClear();
+		fireEvent.click(result.getByRole("button", { name: /Fit here/ }));
+		expect(sent()).toEqual([ACTIVE]);
+
+		lastWebSocket!.send.mockClear();
+		handle!.sendInput("x");
+		expect(sent()).toEqual([ACTIVE, "x"]);
+	});
+
+	it("reports going hidden and coming back", async () => {
+		await renderShared();
+		lastWebSocket!.send.mockClear();
+
+		Object.defineProperty(document, "hidden", { configurable: true, value: true });
+		act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+		expect(sent()).toContain(HIDDEN);
+
+		Object.defineProperty(document, "hidden", { configurable: true, value: false });
+		act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+		expect(sent()).toContain(ACTIVE);
+	});
+
+	// A zoom (or terminal-font) change resizes the canvas without touching the
+	// container, so nothing else reports the new viewport: a follower must still
+	// render at the shared grid AND tell the server its own size, or taking over
+	// afterwards applies the pre-zoom geometry.
+	it("still reports its own viewport when zoom changes while sized elsewhere", async () => {
+		await renderShared();
+		notice(22, 40, false);
+		fitAddonHolder.current!.proposeDimensions = vi.fn(() => ({ cols: 90, rows: 28 }));
+		mockTermInstance.resize.mockClear();
+		lastWebSocket!.send.mockClear();
+
+		act(() => { window.dispatchEvent(new CustomEvent("dev3-zoom-changed", { detail: 1.25 })); });
+
+		expect(sent()).toContain("\x1b]resize;90;28\x07");
+		expect(mockTermInstance.resize).toHaveBeenCalledWith(22, 40);
+	});
+
+	it("claims the size on connect only when the user is looking at it", async () => {
+		const hasFocus = vi.spyOn(document, "hasFocus");
+		try {
+			hasFocus.mockReturnValue(false);
+			await renderShared();
+			act(() => { lastWebSocket!.onopen?.(new Event("open")); });
+			expect(sent()).not.toContain(ACTIVE);
+
+			hasFocus.mockReturnValue(true);
+			act(() => { lastWebSocket!.onopen?.(new Event("open")); });
+			expect(sent()).toContain(ACTIVE);
+		} finally {
+			hasFocus.mockRestore();
+		}
 	});
 });

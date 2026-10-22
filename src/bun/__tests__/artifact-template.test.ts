@@ -288,6 +288,7 @@ describe("bundled artifact starter contract", () => {
 		const app = readFileSync(appPath, "utf8");
 
 		expect(html).toContain('data-dev3-artifact-template="v1"');
+		expect(html).toContain('data-theme="light"');
 		expect(html).toContain("DEV3 ARTIFACT · OPERATIONS");
 		expect(html).toContain("Built with dev3 Artifacts");
 		expect(html).toContain('src="dev3-icon.png"');
@@ -408,6 +409,10 @@ describe("bundled artifact starter contract", () => {
 		expect(css).toContain("--choices-font-size-md: .875rem");
 		// A px font size anywhere in the shell would be a block that refuses to scale.
 		expect(css.match(/font(-size)?: *[0-9.]+px/g)).toBeNull();
+		// On screen nothing drops under 11px at 100%; only the print sheet may.
+		const screenCss = css.slice(0, css.indexOf("@media print"));
+		const tooSmall = [...screenCss.matchAll(/font(?:-size)?: *([0-9.]+)rem/g)].filter((m) => Number(m[1]) < 0.6875);
+		expect(tooSmall.map((m) => m[0])).toEqual([]);
 		expect(app).toContain("FONT_SCALE_STEPS");
 		expect(app).toContain("function scaleOptionFonts");
 		expect(app).toContain("dev3-artifact-font-scale");
@@ -443,7 +448,7 @@ describe("bundled artifact starter contract", () => {
 		const css = readFileSync(cssPath, "utf8");
 
 		expect(css).toContain("width: min(100%, clamp(1180px, 88vw, 1840px))");
-		expect(css).toContain(".prose { max-width: 72ch; }");
+		expect(css).toContain(".prose { max-width: 68ch; font-size: 1rem; line-height: 1.6; }");
 		expect(css).toContain(".kpis { grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }");
 		expect(css).toContain("@media (min-width: 1500px)");
 		expect(docs).toContain("`.prose`");
@@ -473,13 +478,33 @@ describe("bundled artifact starter contract", () => {
 		expect(css).toContain("tbody tr:hover { --dev3-row-tint:");
 		expect(css).toContain("top: var(--dev3-table-head-top, 0px)");
 		// hidden would turn the card into a scrollport and unpin the header.
-		expect(css).toContain(".table-card { padding: 0; overflow: clip; }");
+		expect(css).toContain(".table-card { --dev3-table-edge: 18px; padding: 0; overflow: clip; }");
+		// Only the table runs edge to edge; prose beside it keeps the panel inset.
+		expect(css).toContain(".table-card > :not(table, :has(> table), .section-head) { margin-inline: var(--dev3-table-edge); }");
+		// A stacked cell must outrank the class-level column rule and ledger padding.
+		expect(css).toContain("tbody :is(th, td):nth-child(n) { display: block; padding: 4px 0; border: 0;");
 		expect(css).toContain('th[aria-sort="descending"]::after');
 		expect(app).toContain("function trackStickyOffset");
 		expect(app).toContain("--dev3-table-head-top");
 		expect(app).toContain("function initializeSortIndicators");
 		expect(app).toContain('setAttribute("aria-sort", next)');
 		expect(docs).toContain("## Tables");
+	});
+
+	it("keeps media, controls, code and long text inside the panel that holds them", () => {
+		const css = readFileSync(cssPath, "utf8");
+		const body = css.match(/\n {4}body \{([^}]*)\}/)?.[1] || "";
+
+		expect(css).toContain("img, video, canvas { max-width: 100%; height: auto; }");
+		expect(css).toContain("svg, input, textarea, select { max-width: 100%; }");
+		expect(css).toContain("pre { max-width: 100%; overflow-x: auto; }");
+		// `break-word` would not shrink a flex child's min-content, so a URL in a
+		// `.section-head` title would still push its pill out of the card.
+		expect(body).toContain("overflow-wrap: anywhere;");
+		// A pill never wraps, so it is cut to an ellipsis — which needs a block box.
+		const pill = css.match(/\n {4}\.pill \{([^}]*)\}/)?.[1] || "";
+		expect(pill).toContain("display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis;");
+		expect(readFileSync(appPath, "utf8")).toContain("pill.title = pill.textContent.trim();");
 	});
 
 	it("stacks a table into labelled lines instead of scrolling it sideways", () => {
@@ -489,10 +514,11 @@ describe("bundled artifact starter contract", () => {
 		const printBlock = css.slice(css.indexOf("@media print"));
 
 		// No table may reintroduce a horizontal scroller or an unwrappable cell.
-		// `.section-nav` is the one sanctioned inline scroller and is not a table.
+		// `.section-nav` and `pre` are the only sanctioned inline scrollers, and neither
+		// is a table: code keeps its line shape, every table stacks instead.
 		const scrollers = css.match(/[^\n]*overflow-x:\s*auto[^\n]*/g) || [];
-		expect(scrollers).toHaveLength(1);
-		expect(css.slice(0, css.indexOf("overflow-x: auto"))).toMatch(/\.section-nav\s*\{[^}]*$/);
+		expect(scrollers).toEqual(["    pre { max-width: 100%; overflow-x: auto; }", "      overflow-x: auto;"]);
+		expect(css.slice(0, css.lastIndexOf("overflow-x: auto"))).toMatch(/\.section-nav\s*\{[^}]*$/);
 		expect(css).not.toMatch(/width:\s*max-content/);
 		// A cell must be able to wrap, or the table grows past its container.
 		const evidenceCells = css.match(/\.evidence-table th, \.evidence-table td \{([^}]*)\}/)?.[1] || "";

@@ -19,12 +19,13 @@ import {
 	isUpdateAlreadyReady,
 } from "./updater";
 import { loadSettings, loadSettingsSync } from "./settings";
-import { setTmuxPaneDimming, writeTmuxConfigs } from "./tmux/config";
+import { applySavedTmuxPanePreferences, writeTmuxConfigs } from "./tmux/config";
 import { setCurrentUiTheme } from "./theme-state";
 import { shouldAutoOpenDevTools } from "./devtools-auto-open";
 import { installSignalQuitConfirmation, isQuitConfirmed, markQuitConfirmed, markQuitDialogPending } from "./quit-manager";
 import { initNativeNotifications } from "./native-notifications";
 import { adoptNativeWindowsMenu } from "./native-window-menu";
+import { initNativeMouseNav } from "./native-mouse-nav";
 import { handleNotificationClick } from "./notification-click";
 import { createLogger, getLogPath } from "./logger";
 import { writeAppReadyMarker } from "./app-ready-marker";
@@ -551,9 +552,9 @@ setPushMessage((name, payload) => {
 // raise agent notifications. Queued entries flush when Focus Mode is disabled.
 setFocusMode(loadSettingsSync().focusMode === true);
 
-// Restore the saved pane palette and dimming before any pane spawns.
+// Restore the saved pane palette, dimming and title bars before any pane spawns.
 const initialAppearance = loadSettingsSync();
-setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
+applySavedTmuxPanePreferences(initialAppearance);
 writeTmuxConfigs();
 const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
@@ -564,6 +565,9 @@ await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearance
 import("./port-tunnels").then(({ setPortTunnelsPushHook }) => {
 	setPortTunnelsPushHook(pushEverywhere);
 }).catch((err) => log.warn("port-tunnels push hook setup failed", { error: String(err) }));
+import("./account-login-terminal").then(({ setAccountLoginPush }) => {
+	setAccountLoginPush(pushEverywhere);
+}).catch((err) => log.warn("account-login push hook setup failed", { error: String(err) }));
 
 // Diagnostic: log whenever the Bun event loop is blocked for >500ms.
 // Silent during normal operation — only fires on stalls (e.g. accidental
@@ -815,6 +819,8 @@ function runGlobalQuitCleanup(): void {
 	// would orphan tunnels (and trycloudflare quotas) on app exit.
 	import("./port-tunnels").then(({ cleanupAllTunnels }) => cleanupAllTunnels()).catch(() => { /* shutdown — best-effort */ });
 	try { stopTunnel(); } catch (err) { log.warn("stopTunnel failed", { error: String(err) }); }
+	// A sign-in terminal is ours alone: stop it and release its staged dir.
+	import("./account-login-terminal").then(({ accountLogins }) => accountLogins.closeAll()).catch(() => { /* shutdown — best-effort */ });
 	// The model-catalog proxy dies with the app — an orphan would keep holding a
 	// loopback port and the user's provider keys in memory.
 	try { killModelSidecarNow(); } catch (err) { log.warn("killModelSidecarNow failed", { error: String(err) }); }
@@ -885,6 +891,8 @@ const nativeNotificationClicks = initNativeNotifications(() => {
 });
 log.info(`[notif] click channel: ${nativeNotificationClicks ? "native delegate (foreground only)" : "none"}`);
 
+// Mouse Back/Forward buttons that the driver sends as swipes (Logi Options+).
+initNativeMouseNav((action) => sendToFocusedWindow("menuAction", { action }));
 Electrobun.events.on("reopen", () => {
 	// With `exitOnLastWindowClosed: false` the app can sit window-less in the
 	// dock. A dock-icon click (reopen) should bring a window back, like any mac

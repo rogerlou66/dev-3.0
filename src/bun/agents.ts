@@ -7,7 +7,7 @@ import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types
 export { skillInvocationPrefix } from "../shared/types";
 import { buildProviderEnv, getProviderDefinition, providerOmitsModelFlag, providerPinnedModel } from "../shared/llm-provider";
 import { createLogger } from "./logger";
-import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, resetCodexVersionProbe, resetCodexHelpProbe, ensureCodexConfig, ensureCodexProfileFiles, getCodexSyntaxForVersion, type CodexProfileLaunchFlag } from "./codex-config";
+import { backupUnparsableCodexConfig, joinLike as joinLikeHome, detectCodexProfileLaunchFlag, detectCodexVersion, resetCodexVersionProbe, resetCodexHelpProbe, ensureCodexConfig, ensureCodexProfileFiles, getCodexSyntaxForVersion, resolveCodexInstallRoots, type CodexProfileLaunchFlag } from "./codex-config";
 import { agentBinaryPathOverride } from "./executable";
 import { DEV3_HOME } from "./paths";
 // Writer and pruner share one path constant: whatever registers an entry must
@@ -24,8 +24,12 @@ import { loadSettings, saveSettings } from "./settings";
 import { getCodexProfileForCurrentUiTheme, getCodexThemeForCurrentUiTheme } from "./theme-state";
 import { ensureClaudeStatusLineSettings } from "./rate-limit-monitor";
 import { ensureAgentSystemPromptFile } from "./agent-system-prompt-file";
-import { getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveCodexSessionEnv, listClaudeAccountDirs } from "./agent-accounts";
-import { ENV_UNSET, claudeModelFamily } from "../shared/agent-accounts";
+import { effectiveAccountId, getActiveClaudeConfigDir, getActiveClaudeSessionEnv, getActiveAgentDirSessionEnv, getActiveCodexSessionEnv, listClaudeAccountDirs } from "./agent-accounts";
+import { ENV_UNSET, claudeModelFamily, isAutoAccountId, isRoutableAccountKind, type AgentAccountKind } from "../shared/agent-accounts";
+import { isAutoAccountDefault, pickAutoAccount, type AutoAccountPick, type AutoRoutingContext } from "./account-router";
+import { hasOmpFlag } from "../shared/agent-adapters/omp-flags";
+import { findAgentConfig } from "../shared/agent-live-models";
+import { ompDefaultsArgs } from "./omp-launch-defaults";
 export { claudeModelFamily } from "../shared/agent-accounts";
 import { codexModelCatalogArgs, modelRolesForAgent, orphanedRoleBindings, resolveModelRoleLaunch, roleUnsetEnv } from "../shared/model-catalog";
 import { writeCodexModelCatalog } from "./codex-model-catalog";
@@ -252,7 +256,7 @@ function mergeAgentWithDefault(
  *  to warrant a one-time resync of already-onboarded users' stored order
  *  (mergeWithDefaults otherwise preserves stored order forever). See
  *  decisions/ for the write-up. */
-export const AGENTS_LAYOUT_REVISION = 15;
+export const AGENTS_LAYOUT_REVISION = 16;
 
 /** One-time reorder of each built-in agent's configurations to match the
  *  current DEFAULT_AGENTS declared order. Custom (non-default) configs are
@@ -281,6 +285,25 @@ export function applyLayoutResync(agents: CodingAgent[]): CodingAgent[] {
 		}
 
 		return { ...agent, configurations: reordered };
+	});
+}
+
+/** Agent defaults dev3 once shipped and has since replaced. `defaultConfigId`
+ *  survives every merge, so the new default reaches an existing install only
+ *  through this, run once with the layout resync: an install still on the old
+ *  shipped value moves, and a later pick of it by the user is never undone. */
+const RETIRED_AGENT_DEFAULT_CONFIG: Record<string, readonly string[]> = {
+	// omp's default became Bypass (auto-approve) on 2026-10-16.
+	"builtin-omp": ["omp-default"],
+};
+
+export function migrateRetiredAgentDefaults(agents: CodingAgent[]): CodingAgent[] {
+	const defAgentById = new Map(DEFAULT_AGENTS.map((a) => [a.id, a]));
+	return agents.map((agent) => {
+		const def = defAgentById.get(agent.id);
+		const retired = RETIRED_AGENT_DEFAULT_CONFIG[agent.id];
+		if (!def?.defaultConfigId || !retired || !agent.defaultConfigId || !retired.includes(agent.defaultConfigId)) return agent;
+		return { ...agent, defaultConfigId: def.defaultConfigId };
 	});
 }
 
@@ -361,7 +384,7 @@ export async function getAllAgents(): Promise<CodingAgent[]> {
 
 	// One-time resync: existing installs otherwise keep whatever stale order
 	// their configs happened to have from whenever they first ran, forever.
-	const resynced = applyLayoutResync(merged);
+	const resynced = migrateRetiredAgentDefaults(applyLayoutResync(merged));
 	await saveAgents(resynced);
 	await saveSettings({ ...settings, agentsLayoutRevision: AGENTS_LAYOUT_REVISION });
 	return resynced;
@@ -491,6 +514,10 @@ export interface CommandOptions {
 	 *  Threaded into the account env resolution so each spawned session locks to
 	 *  its chosen account instead of a single global active one. */
 	accountId?: string | null;
+	/** Fresh-launch routing context. Present → an `"auto"` account (or a default
+	 *  set to Auto) is resolved by the usage-balanced router. Resume paths never
+	 *  pass it, so a resumed conversation is never re-routed. */
+	autoRouting?: AutoRoutingContext;
 	/** Raw CLI args contributed by the preset's model roles (Codex's `-c` config
 	 *  overrides). Appended after the provider's own routing args; the adapter
 	 *  shell-escapes them. */
@@ -572,8 +599,8 @@ export async function resolveAgentCommand(
  * appears as an ordinary word in that prose matches every running agent, so one
  * agent's routine cleanup SIGTERMed all of its siblings (#1734).
  *
- * Claude (`--append-system-prompt-file`) and omp (`--append-system-prompt`,
- * which reads a file when the value names one) have such a flag. Codex delivers
+ * Claude (`--append-system-prompt-file`), omp and pi (`--append-system-prompt`,
+ * which both read a file when the value names one) have such a flag. Codex delivers
  * the body through `-c developer_instructions=…` and the rest concatenate it
  * onto the prompt, so on Windows those launches are still over the ceiling — a
  * separate per-agent channel, not something this function can paper over.
@@ -581,7 +608,7 @@ export async function resolveAgentCommand(
  * A failed write throws rather than falling back to the inline body: that
  * fallback is the argv exposure being closed.
  */
-const SYSTEM_PROMPT_FILE_COMMANDS = new Set(["claude", "omp"]);
+const SYSTEM_PROMPT_FILE_COMMANDS = new Set(["claude", "omp", "pi"]);
 
 function systemPromptFileFor(adapter: { command: string; skillBody?: string }): string | undefined {
 	if (!SYSTEM_PROMPT_FILE_COMMANDS.has(adapter.command) || !adapter.skillBody) return undefined;
@@ -678,7 +705,7 @@ export function findConfig(
 		agent.configurations.find((c) => c.id === agent.defaultConfigId) ||
 		agent.configurations[0];
 	if (!configId) return fallback();
-	const exact = agent.configurations.find((c) => c.id === configId);
+	const exact = findAgentConfig(agent, configId);
 	if (exact) return exact;
 	// A removed preset id (e.g. "claude-bypass-sonnet") must land on its documented
 	// successor, never on whatever happens to sit first in the list.
@@ -744,6 +771,38 @@ function applyStatusLineOption(
 	return { ...options, statuslineSettingsFile: settingsFile };
 }
 
+/** Which account a launch uses, before any env is built. `"auto"` (or a
+ *  default set to Auto, on a fresh launch) goes to the usage-balanced router;
+ *  everything explicit passes through untouched. A preset that pins its own
+ *  config dir/home bypasses accounts entirely, so it is never routed. Auto with
+ *  a project-pinned Claude login falls back to the default: Auto never adds an
+ *  override on top of a pin. */
+async function resolveLaunchAccount(
+	baseCmd: string,
+	family: AgentFamily | undefined,
+	extraEnv: Record<string, string>,
+	options: CommandOptions | undefined,
+): Promise<{ accountId: string | null | undefined; resolvedAccountId: string | null | undefined; pick?: AutoAccountPick }> {
+	const kind: AgentAccountKind | null = isClaudeCommand(baseCmd, family)
+		? "claude"
+		: agentKey(baseCmd, family) === "codex"
+			? "codex"
+			: agentKey(baseCmd, family) === "omp"
+				? "omp"
+				: null;
+	const requested = options?.accountId;
+	const explicit = isAutoAccountId(requested) ? undefined : requested;
+	const bypassed = kind === "claude" ? !!extraEnv.CLAUDE_CONFIG_DIR : kind === "codex" ? !!extraEnv.CODEX_HOME : kind === "omp" ? !!extraEnv.PI_CODING_AGENT_DIR : true;
+	if (!kind || bypassed) return { accountId: explicit, resolvedAccountId: undefined };
+	const settle = (accountId: string | null | undefined) => ({ accountId, resolvedAccountId: effectiveAccountId(kind, accountId) });
+	const routing = options?.autoRouting;
+	if (!routing || !isRoutableAccountKind(kind)) return settle(explicit);
+	const wantsAuto = isAutoAccountId(requested) || (requested === undefined && (await isAutoAccountDefault(kind)));
+	if (!wantsAuto || (kind === "claude" && routing.claudeConfigPinned)) return settle(explicit);
+	const pick = await pickAutoAccount({ kind, exclusions: routing.exclusions, reservationKey: routing.reservationKey });
+	return { accountId: pick.accountId, resolvedAccountId: pick.accountId, pick };
+}
+
 /** Inject the active managed account's env into Claude-based commands (agent
  *  account switcher): CLAUDE_CONFIG_DIR for OAuth accounts, plus ANTHROPIC_*
  *  and extra vars for API profiles. An explicit CLAUDE_CONFIG_DIR in the
@@ -787,6 +846,48 @@ async function applyCodexAccountEnv(
 		}
 	} catch (err) {
 		log.warn("Failed to resolve active Codex account env", { error: String(err) });
+	}
+}
+
+/** Inject the selected omp or pi account's PI_CODING_AGENT_DIR (its own
+ *  credentials and sessions). Same rules as Codex: an explicit value in the
+ *  config's envVars wins, and only new sessions are affected. */
+async function applyAgentDirAccountEnv(
+	baseCmd: string,
+	extraEnv: Record<string, string>,
+	accountId?: string | null,
+	family?: AgentFamily,
+): Promise<void> {
+	const kind = agentKey(baseCmd, family);
+	if ((kind !== "omp" && kind !== "pi") || extraEnv.PI_CODING_AGENT_DIR) return;
+	try {
+		const accountEnv = await getActiveAgentDirSessionEnv(kind, accountId);
+		for (const [key, value] of Object.entries(accountEnv)) {
+			if (!(key in extraEnv)) extraEnv[key] = value;
+		}
+	} catch (err) {
+		log.warn("Failed to resolve active agent-dir account env", { kind, error: String(err) });
+	}
+}
+
+/** Prepend omp's dev3 defaults (`--config` overlay, see omp-launch-defaults.ts)
+ *  for whatever the user's own omp config leaves unset. Never fails a launch. */
+function withOmpLaunchDefaults(
+	config: AgentConfiguration | undefined,
+	baseCmd: string,
+	extraEnv: Record<string, string>,
+	worktreePath: string,
+	family?: AgentFamily,
+): AgentConfiguration | undefined {
+	if (agentKey(baseCmd, family) !== "omp" || hasOmpFlag(config?.additionalArgs, "--config")) return config;
+	try {
+		const agentDir = extraEnv.PI_CODING_AGENT_DIR === ENV_UNSET ? undefined : extraEnv.PI_CODING_AGENT_DIR;
+		const args = ompDefaultsArgs({ agentDir, worktreePath });
+		if (args.length === 0) return config;
+		return { ...(config ?? { id: "", name: "" }), additionalArgs: [...args, ...(config?.additionalArgs ?? [])] };
+	} catch (err) {
+		log.warn("Failed to apply omp launch defaults", { error: String(err) });
+		return config;
 	}
 }
 
@@ -855,6 +956,12 @@ export interface ResolvedAgentCommand<A extends CodingAgent | null = CodingAgent
 	 *  model via env, since then the request never reaches the vendor endpoint
 	 *  whose version floor the gate knows about. */
 	launchModel: string | undefined;
+	/** The account the launch really uses (default applied): a managed id, null
+	 *  for the system login, undefined when this harness has no account registry
+	 *  or the preset pins its own config dir. What a pane should record. */
+	resolvedAccountId?: string | null;
+	/** Set when the usage-balanced router chose `resolvedAccountId`. */
+	accountPick?: AutoAccountPick;
 }
 
 export async function resolveCommandForAgent(
@@ -887,10 +994,15 @@ export async function resolveCommandForAgent(
 	if (config?.envVars) {
 		Object.assign(extraEnv, config.envVars);
 	}
-	await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
-	await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+	const account = await resolveLaunchAccount(baseCmd, agentWithPath.agentFamily, extraEnv, options);
+	await applyClaudeAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
+	await applyCodexAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
+	await applyAgentDirAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
 	const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
-	const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
+	const launchConfig = withOmpLaunchDefaults(
+		resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
+		baseCmd, extraEnv, ctx.worktreePath, agentWithPath.agentFamily,
+	);
 	const command = await resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
 	// `agent` stays the stored record — callers derive the base command from it,
 	// and swapping in the override path there would change what they persist.
@@ -904,6 +1016,8 @@ export async function resolveCommandForAgent(
 		extraEnv,
 		agentFamily: agentWithPath.agentFamily,
 		launchModel: nativeLaunchModel(launchConfig, providerOpts, routed.pinnedModel),
+		resolvedAccountId: account.resolvedAccountId,
+		...(account.pick ? { accountPick: account.pick } : {}),
 	};
 }
 
@@ -1018,10 +1132,15 @@ export async function resolveCommandForProject(
 			...providerEnvForAgent(agentWithPath, config),
 			...buildTaskEnv(project, taskTitle, "", worktreePath, config),
 		};
-		await applyClaudeAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
-		await applyCodexAccountEnv(baseCmd, extraEnv, options?.accountId, agentWithPath.agentFamily);
+		const account = await resolveLaunchAccount(baseCmd, agentWithPath.agentFamily, extraEnv, options);
+		await applyClaudeAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
+		await applyCodexAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
+		await applyAgentDirAccountEnv(baseCmd, extraEnv, account.accountId, agentWithPath.agentFamily);
 		const routed = await applyModelRoleLaunch(baseCmd, config, extraEnv, providerOpts, agentWithPath.agentFamily);
-		const launchConfig = resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel);
+		const launchConfig = withOmpLaunchDefaults(
+			resolveLaunchConfig(routed.config, agentWithPath, baseCmd, extraEnv, routed.pinnedModel),
+			baseCmd, extraEnv, ctx.worktreePath, agentWithPath.agentFamily,
+		);
 		const command = await resolveAgentCommand(agentWithPath, launchConfig, ctx, routed.options);
 		return {
 			command,
@@ -1030,6 +1149,8 @@ export async function resolveCommandForProject(
 			extraEnv,
 			agentFamily: agentWithPath.agentFamily,
 			launchModel: nativeLaunchModel(launchConfig, providerOpts, routed.pinnedModel),
+			resolvedAccountId: account.resolvedAccountId,
+			...(account.pick ? { accountPick: account.pick } : {}),
 		};
 	}
 
@@ -1203,6 +1324,7 @@ export async function ensureCodexTrust(dirPath: string): Promise<void> {
 
 		const updated = ensureCodexConfig(content, worktreesPath, socketsPath, [worktreesPath, resolved], {
 			codexVersion,
+			codexInstallRoots: await resolveCodexInstallRoots(),
 		});
 		if (updated !== content) {
 			writeFileSync(CODEX_CONFIG, updated, "utf-8");

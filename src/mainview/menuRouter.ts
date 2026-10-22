@@ -191,6 +191,11 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "view-stats":
 			navigate(ctx, { screen: "stats" });
 			break;
+		case "view-sessions": {
+			const projectId = currentProjectId(state);
+			navigate(ctx, projectId ? { screen: "sessions", scopeProjectId: projectId } : { screen: "sessions" });
+			break;
+		}
 		case "open-settings":
 			navigate(ctx, { screen: "settings" });
 			return;
@@ -491,7 +496,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"toggle-streamer-mode",
 	"about", "hard-refresh",
 	// View / navigation
-	"view-dashboard", "view-kanban", "view-changelog", "view-stats", "open-settings",
+	"view-dashboard", "view-kanban", "view-changelog", "view-stats", "view-sessions", "open-settings",
 	"view-agent-traffic-log",
 	"view-toggle-file-explorer",
 	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview",

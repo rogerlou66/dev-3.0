@@ -109,6 +109,16 @@ function resolveDefaultConfigId(stored: unknown): string {
 	return looksBuiltin ? DEFAULT_SETTINGS.defaultConfigId : remapped;
 }
 
+function normalizeAutoAccountDefault(raw: unknown): GlobalSettings["autoAccountDefault"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const r = raw as Record<string, unknown>;
+	const out: NonNullable<GlobalSettings["autoAccountDefault"]> = {
+		...(r.claude === true ? { claude: true as const } : {}),
+		...(r.codex === true ? { codex: true as const } : {}),
+	};
+	return Object.keys(out).length ? out : undefined;
+}
+
 /**
  * Shape the raw file into `GlobalSettings`.
  *
@@ -140,6 +150,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		agentBinaryPaths: d.agentBinaryPaths ?? undefined,
 		agentCustomBinaryPaths: d.agentCustomBinaryPaths ?? undefined,
 		playSoundOnTaskComplete: d.playSoundOnTaskComplete ?? true,
+		playSoundOnTaskNeedsYou: d.playSoundOnTaskNeedsYou === true ? true : undefined,
 		externalApps: Array.isArray(d.externalApps) ? d.externalApps : undefined,
 		tipsDisabled: d.tipsDisabled === true ? true : undefined,
 		helpModeDiscovered: d.helpModeDiscovered === true ? true : undefined,
@@ -179,11 +190,15 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 				: undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		dimInactivePanes: d.dimInactivePanes === false ? false : undefined,
+		// Default-off toggles — only an explicit true is stored.
+		paneTitles: d.paneTitles === true ? true : undefined,
+		confirmClosePane: d.confirmClosePane === true ? true : undefined,
 		shellPrompt: typeof d.shellPrompt === "string" && d.shellPrompt ? d.shellPrompt : undefined,
 		shellPromptCustom: typeof d.shellPromptCustom === "string" && d.shellPromptCustom ? d.shellPromptCustom : undefined,
 		focusMode: d.focusMode === true ? true : undefined,
 		// Default-on toggle — only an explicit false is a stored opt-out.
 		agentRateLimitTracking: d.agentRateLimitTracking === false ? false : undefined,
+		autoAccountDefault: normalizeAutoAccountDefault(d.autoAccountDefault),
 		// Boolean preference — both true (watch) and false (don't watch) are
 		// meaningful stored choices, so preserve either; only undefined drops.
 		watchByDefault: typeof d.watchByDefault === "boolean" ? d.watchByDefault : undefined,

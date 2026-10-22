@@ -15,8 +15,10 @@ import {
 	buildThemeConfig,
 	PANE_CWD_FORMAT,
 	setTmuxPaneDimming,
+	setTmuxPaneTitles,
 	tmuxConfigPath,
 	TMUX_PANE_DIMMING_OPTION,
+	TMUX_PANE_TITLES_OPTION,
 	tmuxClientCwd,
 	writeTmuxConfigs,
 } from "../config";
@@ -79,7 +81,7 @@ describe("buildThemeConfig", () => {
 		expect(STATUS_FORMAT.lastIndexOf("#[nolist]", button)).toBeGreaterThan(list);
 		expect(button).toBeLessThan(STATUS_FORMAT.indexOf("align=right"));
 		expect(config).toContain(
-			`bind -n MouseDown1Status if -F '#{==:#{mouse_status_range},${NEW_WINDOW_STATUS_RANGE}}' 'new-window -c "${PANE_CWD_FORMAT}"' 'switch-client -t ='`,
+			`bind -n MouseDown1Status if -F '#{==:#{mouse_status_range},${NEW_WINDOW_STATUS_RANGE}}' 'new-window -c "${PANE_CWD_FORMAT}" ; select-window -t "{end}"' 'switch-client -t ='`,
 		);
 	});
 
@@ -107,15 +109,14 @@ describe("buildThemeConfig", () => {
 		expect(buildThemeConfig("mocha")).toContain("history-limit 250000");
 	});
 
-	it("pins mouse copies to the default copy-pipe-and-cancel binding", () => {
+	it("retains scrolled history selections but cancels live-screen copies", () => {
 		const config = buildThemeConfig("mocha");
 		expect(config).toContain(
-			"bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel",
+			"bind -T copy-mode MouseDragEnd1Pane if-shell -F '#{>:#{scroll_position},0}' 'send-keys -X copy-pipe' 'send-keys -X copy-pipe-and-cancel'",
 		);
 		expect(config).toContain(
-			"bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel",
+			"bind -T copy-mode-vi MouseDragEnd1Pane if-shell -F '#{>:#{scroll_position},0}' 'send-keys -X copy-pipe' 'send-keys -X copy-pipe-and-cancel'",
 		);
-		expect(config).not.toContain("MouseDragEnd1Pane send-keys -X copy-selection");
 	});
 
 	it("puts prefix-free pane navigation on Alt+Shift+arrow and frees plain Alt+arrow", () => {
@@ -133,6 +134,14 @@ describe("buildThemeConfig", () => {
 				expect(config).toContain(`unbind -n M-${dir[0]}`);
 				expect(config).not.toContain(`bind -n M-${dir[0]} select-pane`);
 			}
+		}
+	});
+
+	it("turns Ctrl+Delete into a word delete only off the alternate screen", () => {
+		for (const flavor of ["mocha", "latte"] as const) {
+			expect(buildThemeConfig(flavor)).toContain(
+				"bind -n C-DC if -F '#{alternate_on}' 'send-keys C-DC' 'send-keys M-d'",
+			);
 		}
 	});
 
@@ -195,6 +204,20 @@ describe("buildThemeConfig", () => {
 		writeTmuxConfigs();
 	});
 
+	it("names and seeds a title-bar variant without renaming the existing files", () => {
+		expect(tmuxConfigPath("dark", true)).toBe(tmuxConfigPath("dark", true, false));
+		expect(tmuxConfigPath("dark", true, true)).toBe(`${process.env.DEV3_TEST_ROOT}/dev3-tmux-dark-dimmed-titled.conf`);
+		writeTmuxConfigs();
+		expect(readFileSync(tmuxConfigPath("light", false, true), "utf-8")).toContain(`set -goq ${TMUX_PANE_TITLES_OPTION} on`);
+		expect(readFileSync(tmuxConfigPath("light", false, false), "utf-8")).toContain(`set -goq ${TMUX_PANE_TITLES_OPTION} off`);
+		try {
+			setTmuxPaneTitles(true);
+			expect(activeTmuxConfigPath()).toBe(tmuxConfigPath("dark", true, true));
+		} finally {
+			setTmuxPaneTitles(false);
+		}
+	});
+
 	// The regression: a second dev3 process imports this module with the default
 	// (dimmed) preference and rewrites the shared files. The file THIS process
 	// sources must still carry its own default.
@@ -212,7 +235,7 @@ describe("buildThemeConfig", () => {
 	});
 
 	it("applies the cmux palette before the plugin computes pane and status styles", () => {
-		const config = buildThemeConfig("mocha", true, "cmux");
+		const config = buildThemeConfig("mocha", true, false, "cmux");
 		expect(config).toContain('set -gq @thm_bg "#24283b"');
 		expect(config).toContain('set -gq @thm_fg "#c0caf5"');
 		expect(config).toContain('set -gq @thm_mantle "#1f2335"');

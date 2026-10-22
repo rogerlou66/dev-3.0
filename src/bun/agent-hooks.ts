@@ -5,7 +5,7 @@
  * so that task status transitions happen automatically via the agent's built-in
  * event system, rather than relying solely on SKILL.md instructions.
  *
- * Currently supports Claude Code, Codex, GitHub Copilot CLI, omp, and Antigravity CLI.
+ * Currently supports Claude Code, Codex, GitHub Copilot CLI, omp, pi and Antigravity CLI.
  * Extensible for Gemini, Cursor, etc.
  */
 
@@ -15,6 +15,7 @@ import { getAgentAdapter } from "../shared/agent-adapters/registry";
 import { writeAntigravityHooks, writeClaudeHooks, writeCodexHooks, writeCopilotHooks } from "../shared/agent-hooks";
 import { quoteIfUnsafe } from "../shared/agent-adapters/shell";
 import { writeOmpStatusExtension } from "../shared/omp-status-extension";
+import { writePiStatusExtension } from "../shared/pi-status-extension";
 import { resolveCopilotHome } from "./copilot-config";
 import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass, resetCodexHelpProbe } from "./codex-config";
 import { join } from "node:path";
@@ -130,6 +131,15 @@ export async function setupAgentHooks(
 			log.warn("Failed to install Antigravity hooks (non-fatal)", { worktreePath, error: String(err) });
 		}
 		return Promise.resolve(null);
+	}
+	if (spec.kind === "pi") {
+		// Same shape as omp's, under pi's own flag: an explicit `--extension` path
+		// loads without the project-trust gate, which covers only discovered
+		// `.pi/` resources. A failed write throws to the caller, which launches
+		// without the flag and logs it.
+		const path = writePiStatusExtension();
+		log.info("pi status extension active", { worktreePath, path });
+		return `--extension ${quoteIfUnsafe(path)}`;
 	}
 
 	// spec.kind === "codex"

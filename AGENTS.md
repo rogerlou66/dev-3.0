@@ -335,12 +335,12 @@ The same text is also injected as the agent's system prompt at launch, and for e
 
 ## Project scripts
 
-Each project has three lifecycle scripts (free-form shell), configurable in Project Settings (`src/mainview/components/ProjectSettings.tsx`), stored as fields on the `Project` type (`src/shared/types.ts`) in `projects.json`, saved via the `updateProjectSettings` handler (`src/bun/rpc-handlers/settings-config.ts`):
+Each project has three lifecycle scripts (free-form shell), configurable in Project Settings (`src/mainview/components/project-settings/ConfigForm.tsx`), stored as fields on the `Project` type (`src/shared/types.ts`) in `projects.json`, saved via the `updateProjectSettings` handler (`src/bun/rpc-handlers/settings-config.ts`):
 
 | Field | When it runs |
 |---|---|
 | `setupScript` | After a new worktree is created for a task |
-| `devScript` | On dev-server start (`dev3 dev-server start` or the UI button; runs in a tmux window — see `src/bun/rpc-handlers/tmux-pty.ts`) |
+| `devScript` | On dev-server start (`dev3 dev-server start` or the UI button; runs in a tmux window — see `src/bun/rpc-handlers/tmux-pty/dev-servers.ts`) |
 | `cleanupScript` | Before worktree removal after `completed`/`cancelled` (and `archived` once added) |
 
 ## Styling & design tokens

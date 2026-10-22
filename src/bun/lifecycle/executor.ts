@@ -24,6 +24,7 @@ import {
 	taskResetConsentMatches,
 } from "../../shared/types";
 import { voidAgentRequest } from "../agent-requests";
+import { assertLaunchAgentsInstalled } from "../agent-launch-availability";
 import { requestGracefulAgentExit } from "../agent-graceful-exit";
 import { clonePaths } from "../cow-clone";
 import { chooseTaskCodexConversations } from "../codex-task-selection";
@@ -43,6 +44,7 @@ import * as pty from "../pty-server";
 import { taskTerminalBackendIdentity } from "../task-terminal-backend";
 import { AuxPaneUnavailableError } from "../task-aux-panes";
 import * as repoConfig from "../repo-config";
+import { isTaskSoundEnabled, type TaskSoundStatus } from "../../shared/task-sound-statuses";
 import { loadSettingsSync } from "../settings";
 import { getUserShell } from "../shell-env";
 import { spawn } from "../spawn";
@@ -410,6 +412,13 @@ async function prepareTask(
 		existingBranch: task.existingBranch ?? undefined,
 	};
 	return withTaskPreparationRunId(task.id, launch.label, effect.runId, async () => {
+		// The board/CLI move path reaches here without an RPC-side check; refuse
+		// before a worktree exists. A reopen keeps its retry pane (it may hold work).
+		if (!effect.isReopen) {
+			await preparationStep(task, effect.runId, "resolving-config", "checkAgentInstalled", () => (
+				assertLaunchAgentsInstalled([{ agentId: launch.agentId, configId: launch.configId }])
+			));
+		}
 		if (project.kind === "virtual") {
 			const workDir = task.opsWorkDir?.trim() || git.virtualWorkDir(project, task);
 			await preparationStep(task, effect.runId, "creating-worktree", "createOpsWorkDir", () => (
@@ -652,8 +661,8 @@ export async function captureCompletedDiffStats(
 	}
 }
 
-export function emitTaskSound(status: "completed" | "cancelled", taskId: string): void {
-	if (loadSettingsSync().playSoundOnTaskComplete === false) return;
+export function emitTaskSound(status: TaskSoundStatus, taskId: string): void {
+	if (!isTaskSoundEnabled(loadSettingsSync(), status)) return;
 	const payload: BunMessagePayload<"taskSound"> = { status, taskId };
 	getPushMessage()?.("taskSound", payload);
 }

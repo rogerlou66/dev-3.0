@@ -16,12 +16,13 @@ import {
 	opencodeAdapter,
 	copilotAdapter,
 	ompAdapter,
+	piAdapter,
 	genericAdapter,
 	shellEscape,
 	type AdapterLaunchOptions,
 	type TemplateContext,
 } from "../../shared/agent-adapters";
-import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY } from "../../shared/agent-skill-content";
+import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY, PI_SKILL_BODY } from "../../shared/agent-skill-content";
 import type { AgentConfiguration } from "../../shared/types";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ function redact(cmd: string): string {
 		.split(shellEscape(CLAUDE_SKILL_BODY)).join("<CLAUDE_BODY>")
 		.split(shellEscape(`developer_instructions=${JSON.stringify(CODEX_SKILL_BODY)}`)).join("<CODEX_DEV_INSTR>")
 		.split(shellEscape(OMP_SKILL_BODY)).join("<OMP_BODY>")
+		.split(shellEscape(PI_SKILL_BODY)).join("<PI_BODY>")
 		.split(genericEscapedInner).join("<GENERIC_BODY>");
 }
 
@@ -66,6 +68,8 @@ describe("registry", () => {
 		expect(getAgentAdapter("opencode")).toBe(opencodeAdapter);
 		expect(getAgentAdapter("/Users/me/.local/bin/copilot")).toBe(copilotAdapter);
 		expect(getAgentAdapter("omp")).toBe(ompAdapter);
+		expect(getAgentAdapter("pi")).toBe(piAdapter);
+		expect(getAgentAdapter("/home/u/.local/bin/pi")).toBe(piAdapter);
 	});
 
 	it("falls back to the generic adapter for unknown / custom commands", () => {
@@ -87,7 +91,7 @@ describe("registry", () => {
 // drag every skill body (~32 KB) along — so families.ts restates those facts as
 // plain data. These are the tests that keep the copy honest.
 describe("agent families (the renderer's copy of the registry)", () => {
-	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, antigravityAdapter, cursorAdapter, opencodeAdapter, copilotAdapter, ompAdapter];
+	const ADAPTERS = [claudeAdapter, codexAdapter, geminiAdapter, antigravityAdapter, cursorAdapter, opencodeAdapter, copilotAdapter, ompAdapter, piAdapter];
 
 	it("lists exactly the commands that have a first-class adapter", () => {
 		expect([...KNOWN_AGENT_COMMANDS].sort()).toEqual(ADAPTERS.map((a) => a.command).sort());
@@ -175,6 +179,7 @@ describe("capability flags", () => {
 		[opencodeAdapter, "opencode", true, false],
 		[copilotAdapter, "copilot", true, true],
 		[ompAdapter, "omp", true, false],
+		[piAdapter, "pi", true, true],
 		[genericAdapter, "", false, false],
 	] as const)("%s", (adapter, command, resume, preassign) => {
 		expect(adapter.command).toBe(command);
@@ -193,6 +198,7 @@ describe("trustKinds", () => {
 		[opencodeAdapter, ["claude"]],
 		[copilotAdapter, ["claude", "copilot"]],
 		[ompAdapter, ["claude"]],
+		[piAdapter, ["claude"]],
 		[genericAdapter, ["claude"]],
 	] as const)("%s", (adapter, kinds) => {
 		expect(adapter.trustKinds).toEqual(kinds);
@@ -214,6 +220,9 @@ describe("hooksSpec", () => {
 	it("omp is a bare omp spec (the executor turns it into --hook <extension>)", () => {
 		expect(ompAdapter.hooksSpec()).toEqual({ kind: "omp" });
 	});
+	it("pi is a bare pi spec (the executor turns it into --extension <extension>)", () => {
+		expect(piAdapter.hooksSpec()).toEqual({ kind: "pi" });
+	});
 	it("Gemini / Cursor / OpenCode / Generic install no hooks", () => {
 		expect(geminiAdapter.hooksSpec()).toBeNull();
 		expect(cursorAdapter.hooksSpec()).toBeNull();
@@ -233,6 +242,7 @@ describe("exitProgram", () => {
 		[cursorAdapter, "/exit"],
 		[opencodeAdapter, "/exit"],
 		[copilotAdapter, "/exit"],
+		[piAdapter, "/quit"],
 	] as const)("%s interrupts, types its quit command, then submits", (adapter, command) => {
 		const program = adapter.exitProgram();
 		expect(program).not.toBeNull();
@@ -259,7 +269,7 @@ describe("buildResumeCommand", () => {
 		[claudeAdapter, "claude", undefined, "claude --continue"],
 		[claudeAdapter, "claude", "sid", "claude --resume sid"],
 		[codexAdapter, "codex", undefined, null],
-		[codexAdapter, "codex", "sid", "codex resume sid"],
+		[codexAdapter, "codex", "sid", "codex resume sid -c check_for_update_on_startup=false"],
 		[geminiAdapter, "gemini", undefined, "gemini --resume latest"],
 		[geminiAdapter, "gemini", "sid", "gemini --resume sid"],
 		[antigravityAdapter, "agy", undefined, "agy --continue"],
@@ -272,6 +282,8 @@ describe("buildResumeCommand", () => {
 		[copilotAdapter, "copilot", "sid", "copilot --resume=sid"],
 		[ompAdapter, "omp", undefined, "omp -c"],
 		[ompAdapter, "omp", "sid", "omp --resume sid"],
+		[piAdapter, "pi", undefined, "pi -c"],
+		[piAdapter, "pi", "0199aaaa-bbbb-7ccc", "pi --session-id 0199aaaa-bbbb-7ccc"],
 		[genericAdapter, "aider", "sid", null],
 	] as const)("%s (sid=%s)", (adapter, base, sid, expected) => {
 		expect(adapter.buildResumeCommand(base, sid ?? undefined)).toBe(expected);
@@ -283,6 +295,7 @@ describe("skillBody", () => {
 		expect(claudeAdapter.skillBody).toBe(CLAUDE_SKILL_BODY);
 		expect(codexAdapter.skillBody).toBe(CODEX_SKILL_BODY);
 		expect(ompAdapter.skillBody).toBe(OMP_SKILL_BODY);
+		expect(piAdapter.skillBody).toBe(PI_SKILL_BODY);
 		// Gemini/Cursor/OpenCode/Generic use the generic body.
 		expect(geminiAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
 		expect(antigravityAdapter.skillBody).toBe(GENERIC_SKILL_BODY);
@@ -333,13 +346,13 @@ describe("launchArgs — Claude", () => {
 describe("launchArgs — Codex", () => {
 	it("theme + developer_instructions + resume subcommand", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c check_for_update_on_startup=false -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol" }), { resume: true, sessionId: "sid", codex: CODEX_RT }))
-			.toBe("codex resume sid --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR>");
+			.toBe("codex resume sid --model gpt-5.6-sol -c 'default_permissions=\"dev3\"' --profile dev3-dark -c 'tui.theme=\"dracula\"' -c check_for_update_on_startup=false -c <CODEX_DEV_INSTR>");
 	});
 	it("rewrites a dev3 profile to the themed profile", () => {
 		expect(launch("codex", cfg({ model: "gpt-5.6-sol", additionalArgs: ["-p", "dev3"] }), { codex: CODEX_RT }))
-			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'default_permissions=\"dev3\"' -c 'tui.theme=\"dracula\"' -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
+			.toBe("codex --model gpt-5.6-sol -p dev3-dark -c 'default_permissions=\"dev3\"' -c 'tui.theme=\"dracula\"' -c check_for_update_on_startup=false -c <CODEX_DEV_INSTR> -- 'Fix the login bug'");
 	});
 
 	// A preset built by hand carries no flags at all. Codex's own default
@@ -538,6 +551,36 @@ describe("launchArgs — omp", () => {
 		expect(launch("omp", cfg(), { resume: true })).toBe("omp -c --approval-mode always-ask");
 		expect(launch("omp", cfg({ model: "sonnet", permissionMode: "bypassPermissions" }), { resume: true, sessionId: "sid" }))
 			.toBe("omp --resume sid --model sonnet --approval-mode yolo");
+	});
+});
+
+describe("launchArgs — pi", () => {
+	it("fresh: pins the session id, carries effort as --thinking, prompt after --", () => {
+		expect(launch("pi", cfg({ model: "anthropic/claude-sonnet-5", effort: "high" }), { sessionId: "sid-1" }))
+			.toBe("pi --session-id sid-1 --model anthropic/claude-sonnet-5 --thinking high --append-system-prompt <PI_BODY> -- 'Fix the login bug'");
+	});
+	it("emits no approval or budget flag: plain pi has neither", () => {
+		for (const permissionMode of ["default", "plan", "auto", "acceptEdits", "bypassPermissions", "dontAsk"] as const) {
+			const cmd = launch("pi", cfg({ permissionMode, maxBudgetUsd: 5 }));
+			expect(cmd).toBe("pi --append-system-prompt <PI_BODY> -- 'Fix the login bug'");
+		}
+	});
+	it("takes the protocol as a file when the backend wrote one", () => {
+		const cmd = launch("pi", cfg(), { systemPromptFile: "/home/u/.dev3.0/data/agent-prompts/pi.md" });
+		expect(cmd).toBe("pi --append-system-prompt /home/u/.dev3.0/data/agent-prompts/pi.md -- 'Fix the login bug'");
+		expect(cmd).not.toContain("<PI_BODY>");
+	});
+	it("resumes the pinned session, or the latest one, without prompt or protocol", () => {
+		expect(launch("pi", cfg({ model: "m" }), { resume: true, sessionId: "sid-1" })).toBe("pi --session-id sid-1 --model m");
+		expect(launch("pi", cfg(), { resume: true })).toBe("pi -c");
+	});
+	it("keeps a description that opens with @ from being read as a file to attach", () => {
+		const cmd = getAgentAdapter("pi").launchArgs("pi", cfg(), { ...CTX, taskDescription: "@src/a.ts is broken" }).join(" ");
+		expect(cmd.endsWith("-- ' @src/a.ts is broken'")).toBe(true);
+	});
+	it("puts the preset's own args before the prompt, after dev3's", () => {
+		expect(launch("pi", cfg({ additionalArgs: ["--provider", "openai"] })))
+			.toBe("pi --append-system-prompt <PI_BODY> --provider openai -- 'Fix the login bug'");
 	});
 });
 

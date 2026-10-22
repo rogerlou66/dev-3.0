@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { AgentAccountsState } from "../../../../shared/agent-accounts";
+import { act } from "react";
+import type { AccountLoginState, AgentAccountsState } from "../../../../shared/agent-accounts";
 import { I18nProvider, useT } from "../../../i18n";
 import AgentAccountsSection from "../AgentAccountsSection";
 
@@ -13,14 +14,21 @@ vi.mock("../../../rpc", () => ({
 			addAgentApiProfile: vi.fn(),
 			getAgentApiProfileDraft: vi.fn(),
 			updateAgentApiProfile: vi.fn(),
-			prepareAgentAccountLogin: vi.fn(),
-			completeAgentAccountLogin: vi.fn(),
+			startAccountLogin: vi.fn(),
+			getAccountLogin: vi.fn().mockResolvedValue(null),
+			restartAccountLogin: vi.fn(),
+			closeAccountLogin: vi.fn().mockResolvedValue(undefined),
+			getAccountLoginPtyUrl: vi.fn().mockResolvedValue("ws://localhost:1/?session=account-login-l1"),
 			setActiveAgentAccount: vi.fn(),
 			removeAgentAccount: vi.fn(),
 			renameAgentAccount: vi.fn(),
 			listPinnedClaudeLogins: vi.fn().mockResolvedValue([]),
 		},
 	},
+}));
+
+vi.mock("../../../TerminalView", () => ({
+	default: ({ ptyUrl }: { ptyUrl: string }) => <div data-testid="terminal-view">{ptyUrl}</div>,
 }));
 
 vi.mock("../../../confirm", () => ({
@@ -63,6 +71,8 @@ function makeState(overrides?: Partial<AgentAccountsState>): AgentAccountsState 
 			},
 		},
 		codex: { accounts: [], activeId: null, currentIdentity: null },
+		omp: { accounts: [], activeId: null },
+		pi: { accounts: [], activeId: null },
 		...overrides,
 	};
 }
@@ -86,6 +96,9 @@ beforeEach(() => {
 	mockedApi.request.setActiveAgentAccount.mockResolvedValue(undefined as any);
 	mockedApi.request.removeAgentAccount.mockResolvedValue(undefined as any);
 	mockedApi.request.renameAgentAccount.mockResolvedValue(undefined as any);
+	mockedApi.request.getAccountLogin.mockResolvedValue(null);
+	mockedApi.request.closeAccountLogin.mockResolvedValue(undefined);
+	mockedApi.request.getAccountLoginPtyUrl.mockResolvedValue("ws://localhost:1/?session=account-login-l1");
 	mockedConfirm.mockResolvedValue(true);
 });
 
@@ -96,8 +109,8 @@ describe("AgentAccountsSection", () => {
 		expect(screen.getByText("work@example.com")).toBeTruthy();
 		expect(screen.getByText("main@example.com")).toBeTruthy();
 		expect(screen.getByText("Max 5x")).toBeTruthy();
-		// System login is the default by default (activeId=null).
-		expect(screen.getByText("Default")).toBeTruthy();
+		// Claude's, omp's and pi's system logins are each their block's default (activeId=null).
+		expect(screen.getAllByText("Default")).toHaveLength(3);
 	});
 
 	it("activates an account on row click", async () => {
@@ -137,6 +150,70 @@ describe("AgentAccountsSection", () => {
 		}
 	});
 
+	it("omp: no import, and Add account runs omp login in the embedded terminal", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue({
+			loginId: "o1",
+			kind: "omp",
+			phase: "running",
+			sessionKey: "account-login-o1",
+			deviceAuth: false,
+			manualCommand: "PI_CODING_AGENT_DIR='/x' omp login",
+			executable: "omp",
+			installUrl: null,
+			exitCode: null,
+			error: null,
+			pending: null,
+			account: null,
+			startedAt: 0,
+			expiresAt: 1,
+		});
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("omp default (~/.omp/agent)");
+		// Claude and Codex import; omp has nothing to import.
+		expect(screen.getAllByText("Import current login")).toHaveLength(2);
+
+		// Blocks render Claude, Codex, omp, pi.
+		await user.click(screen.getAllByText("Add account")[2]);
+		expect(mockedApi.request.startAccountLogin).toHaveBeenCalledWith({ kind: "omp", remoteViewer: true });
+		expect(await screen.findByText("Sign in to Oh My Pi")).toBeTruthy();
+		expect(await screen.findByTestId("terminal-view")).toBeTruthy();
+		expect(mockedApi.request.getAccountLoginPtyUrl).toHaveBeenCalledWith({ sessionKey: "account-login-o1" });
+		// The provider list is explained in remote mode too, next to the host-browser note.
+		expect(screen.getByText(/type a provider’s number.*appears on the host, not here/)).toBeTruthy();
+	});
+
+	it("pi: its own block with no import, and Add account opens pi's sign-in", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue({
+			loginId: "p1",
+			kind: "pi",
+			phase: "running",
+			sessionKey: "account-login-p1",
+			deviceAuth: false,
+			manualCommand: "PI_CODING_AGENT_DIR='/x' pi --no-session   # then type /login",
+			executable: "pi",
+			installUrl: null,
+			exitCode: null,
+			error: null,
+			pending: null,
+			account: null,
+			startedAt: 0,
+			expiresAt: 1,
+		});
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("pi default (~/.pi/agent)");
+		expect(screen.getAllByText("Import current login")).toHaveLength(2);
+
+		const addButtons = screen.getAllByText("Add account");
+		expect(addButtons).toHaveLength(4);
+		await user.click(addButtons[3]);
+		expect(mockedApi.request.startAccountLogin).toHaveBeenCalledWith({ kind: "pi", remoteViewer: true });
+		expect(await screen.findByText("Sign in to Pi")).toBeTruthy();
+		expect(await screen.findByTestId("terminal-view")).toBeTruthy();
+		expect(screen.getByText(/Press Enter to run the \/login already typed in/)).toBeTruthy();
+	});
+
 	it("imports the current login", async () => {
 		mockedApi.request.importAgentAccount.mockResolvedValue({} as any);
 		const user = userEvent.setup();
@@ -149,47 +226,147 @@ describe("AgentAccountsSection", () => {
 		});
 	});
 
-	it("runs the add-account flow: shows the login command and verifies", async () => {
-		mockedApi.request.prepareAgentAccountLogin.mockResolvedValue({
-			accountId: "pending-1",
-			loginCommand: "CLAUDE_CONFIG_DIR='/x' claude /login",
+	function login(overrides?: Partial<AccountLoginState>): AccountLoginState {
+		return {
+			loginId: "l1",
+			kind: "claude",
+			phase: "running",
+			sessionKey: "account-login-l1",
+			deviceAuth: false,
+			manualCommand: "CLAUDE_CONFIG_DIR='/x' claude /login",
+			executable: "claude",
+			installUrl: "https://example.com/install",
+			exitCode: null,
+			error: null,
+			pending: null,
+			account: null,
+			startedAt: 0,
+			expiresAt: 1,
+			...overrides,
+		};
+	}
+
+	function pushLogin(state: AccountLoginState | null, kind: "claude" | "codex" = "claude") {
+		act(() => {
+			window.dispatchEvent(new CustomEvent("rpc:accountLoginChanged", { detail: { kind, state } }));
 		});
-		mockedApi.request.completeAgentAccountLogin.mockResolvedValue({} as any);
+	}
+
+	it("Add account opens the embedded sign-in terminal on the host, not a command to copy", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login());
 		const user = userEvent.setup();
 		renderSection();
 		await screen.findByText("Default login (/home/me/.claude)");
 
-		const addButtons = screen.getAllByText("Add account");
-		await user.click(addButtons[0]);
+		await user.click(screen.getAllByText("Add account")[0]);
 
-		expect(await screen.findByText("CLAUDE_CONFIG_DIR='/x' claude /login")).toBeTruthy();
-		await user.click(screen.getByText("I’ve logged in — verify"));
-		await waitFor(() => {
-			expect(mockedApi.request.completeAgentAccountLogin).toHaveBeenCalledWith({
-				kind: "claude",
-				accountId: "pending-1",
-			});
-		});
+		expect(mockedApi.request.startAccountLogin).toHaveBeenCalledWith({ kind: "claude", remoteViewer: true });
+		expect(await screen.findByText("Sign in to Claude Code")).toBeTruthy();
+		expect(await screen.findByTestId("terminal-view")).toBeTruthy();
+		expect(mockedApi.request.getAccountLoginPtyUrl).toHaveBeenCalledWith({ sessionKey: "account-login-l1" });
+		// A remote viewer is told the CLI's browser tab opens on the host.
+		expect(screen.getByText(/appears on the host, not here/)).toBeTruthy();
+		expect(screen.queryByTestId("account-login-manual")).toBeNull();
 	});
 
-	it("cancelling a claude add-flow cleans up the pending dir", async () => {
-		mockedApi.request.prepareAgentAccountLogin.mockResolvedValue({
-			accountId: "pending-1",
-			loginCommand: "CLAUDE_CONFIG_DIR='/x' claude /login",
-		});
+	it("shows success from the host's verification and Done releases the login", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login());
 		const user = userEvent.setup();
 		renderSection();
 		await screen.findByText("Default login (/home/me/.claude)");
 		await user.click(screen.getAllByText("Add account")[0]);
-		await screen.findByText("CLAUDE_CONFIG_DIR='/x' claude /login");
+		await screen.findByText("Sign in to Claude Code");
+		mockedApi.request.listAgentAccounts.mockClear();
 
-		await user.click(screen.getByText("Cancel"));
-		await waitFor(() => {
-			expect(mockedApi.request.removeAgentAccount).toHaveBeenCalledWith({
-				kind: "claude",
-				accountId: "pending-1",
-			});
+		pushLogin(login({ phase: "succeeded", account: { label: "new@example.com" } as any }));
+
+		expect(await screen.findByText("Signed in as new@example.com")).toBeTruthy();
+		expect(mockedApi.request.listAgentAccounts).toHaveBeenCalled();
+		await user.click(screen.getByTestId("account-login-done"));
+		await waitFor(() => expect(mockedApi.request.closeAccountLogin).toHaveBeenCalledWith({ loginId: "l1" }));
+		await waitFor(() => expect(screen.queryByTestId("account-login-modal")).toBeNull());
+	});
+
+	it("Tab never traps the keyboard inside the sign-in terminal", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login());
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("Default login (/home/me/.claude)");
+		await user.click(screen.getAllByText("Add account")[0]);
+		const terminal = await screen.findByTestId("terminal-view");
+		// Like ghostty's input: it swallows Tab as a keystroke for the PTY.
+		const inner = document.createElement("textarea");
+		inner.addEventListener("keydown", (e) => {
+			if (e.key === "Tab") {
+				e.preventDefault();
+				e.stopPropagation();
+			}
 		});
+		terminal.appendChild(inner);
+		inner.focus();
+
+		await user.keyboard("{Tab}");
+		expect(document.activeElement).toBe(screen.getByTestId("account-login-cancel"));
+		inner.focus();
+		await user.keyboard("{Shift>}{Tab}{/Shift}");
+		expect(document.activeElement).toBe(screen.getByTestId("account-login-hide"));
+	});
+
+	it("an identity the provider has not confirmed is shown as pending, never as success", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login());
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("Default login (/home/me/.claude)");
+		await user.click(screen.getAllByText("Add account")[0]);
+		await screen.findByText("Sign in to Claude Code");
+
+		pushLogin(login({ pending: "status-unavailable" }));
+		expect((await screen.findByTestId("account-login-pending")).textContent).toContain("claude auth status");
+		expect(screen.queryByTestId("account-login-done")).toBeNull();
+	});
+
+	it("hiding keeps the sign-in running and offers Open / Cancel in the list", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login());
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("Default login (/home/me/.claude)");
+		await user.click(screen.getAllByText("Add account")[0]);
+		await screen.findByText("Sign in to Claude Code");
+
+		await user.click(screen.getByTestId("account-login-hide"));
+		expect(screen.queryByTestId("account-login-modal")).toBeNull();
+		expect(mockedApi.request.closeAccountLogin).not.toHaveBeenCalled();
+		const row = screen.getByTestId("account-login-row-claude");
+		expect(row.textContent).toContain("Sign-in in progress");
+
+		await user.click(screen.getByText("Open"));
+		expect(await screen.findByTestId("account-login-modal")).toBeTruthy();
+		await user.click(screen.getByTestId("account-login-cancel"));
+		await waitFor(() => expect(mockedApi.request.closeAccountLogin).toHaveBeenCalledWith({ loginId: "l1" }));
+	});
+
+	it("a missing CLI shows the manual fallback and retries through the host", async () => {
+		mockedApi.request.startAccountLogin.mockResolvedValue(login({ phase: "missing-executable", sessionKey: null }));
+		mockedApi.request.restartAccountLogin.mockResolvedValue(login({ loginId: "l2" }));
+		const user = userEvent.setup();
+		renderSection();
+		await screen.findByText("Default login (/home/me/.claude)");
+		await user.click(screen.getAllByText("Add account")[0]);
+
+		expect(await screen.findByText("claude isn’t installed on the dev3 host")).toBeTruthy();
+		expect(screen.queryByTestId("account-login-terminal")).toBeNull();
+		expect(screen.getByTestId("account-login-manual").textContent).toContain("CLAUDE_CONFIG_DIR='/x' claude /login");
+
+		await user.click(screen.getByTestId("account-login-retry"));
+		await waitFor(() => expect(mockedApi.request.restartAccountLogin).toHaveBeenCalledWith({ loginId: "l1", remoteViewer: true }));
+	});
+
+	it("picks up a sign-in already running on the host when the screen opens", async () => {
+		mockedApi.request.getAccountLogin.mockImplementation(async ({ kind }) => (kind === "codex" ? login({ kind: "codex", phase: "exited" }) : null));
+		renderSection();
+		const row = await screen.findByTestId("account-login-row-codex");
+		expect(row.textContent).toContain("The sign-in command ended before a login was saved");
+		expect(mockedApi.request.startAccountLogin).not.toHaveBeenCalled();
 	});
 
 	it("removes an account after confirmation", async () => {

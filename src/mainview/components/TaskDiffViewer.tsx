@@ -21,6 +21,7 @@ import Tooltip from "./Tooltip";
 import { useResolvedTheme } from "../hooks/useResolvedTheme";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { formatBytes } from "../utils/formatBytes";
+import { anchorScrollRegion } from "../utils/scroll-anchor";
 import BottomSheet from "./BottomSheet";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { resolveAutoDiffViewMode, resolveDiffViewMode } from "./global-settings/utils";
@@ -29,6 +30,7 @@ import { extractReviewSnippet, getReviewFilePath, parseDiffHunkLines, type DiffS
 import { buildReviewPrompt, describeReviewAnchor, type ReviewAnchor, type ReviewComment, type ReviewDiffLineAnchor, type ReviewPromptEntry } from "../../shared/review";
 import { ReviewComposer } from "../review/ReviewComposer";
 import { ReviewThreadView } from "../review/ReviewThreadView";
+import { useReviewSend } from "../review/useReviewSend";
 import { useTaskReview } from "../review/useTaskReview";
 import { dropLegacyReview, pruneLegacyReviews, readLegacyReview } from "../review/legacy-storage";
 import { PrConversationBlock } from "./pr-review/PrConversationBlock";
@@ -59,6 +61,7 @@ import "./TaskDiffViewer.css";
 const LS_DIFF_READ_STATE = "dev3-inline-diff-read-state-v1";
 const LS_DIFF_MODE_PREFERENCE = "dev3-inline-diff-mode-v1";
 const LS_DIFF_FILES_COLLAPSED = "dev3-inline-diff-files-collapsed-v1";
+const LS_DIFF_MD_PREVIEW = "dev3-inline-diff-md-preview-v1";
 const DEFAULT_DIFF_MODE: TaskDiffMode = "uncommitted";
 // `recent` mode: how many trailing commits (`HEAD~N..HEAD`) to diff. The presets
 // the ▾ popover offers, and the default N used on every open. N itself is never
@@ -252,6 +255,7 @@ interface TaskDiffFileSectionProps {
 	onSaveEditComment: (commentId: string, body: string) => void;
 	onDeleteComment: (commentId: string) => void;
 	onReopenComment: (commentId: string) => void;
+	onReplyComment: (commentId: string, body: string) => Promise<boolean>;
 	onSendComment: (commentId: string) => void;
 	sendingCommentIds: Record<string, boolean>;
 	onToggleExpanded: () => void;
@@ -726,6 +730,7 @@ function MarkdownPreviewReview({
 	onSaveEditComment,
 	onDeleteComment,
 	onReopenComment,
+	onReplyComment,
 	onSendComment,
 	sendingCommentIds,
 	registerCommentRef,
@@ -746,6 +751,7 @@ function MarkdownPreviewReview({
 	onSaveEditComment: (commentId: string, body: string) => void;
 	onDeleteComment: (commentId: string) => void;
 	onReopenComment: (commentId: string) => void;
+	onReplyComment: (commentId: string, body: string) => Promise<boolean>;
 	onSendComment: (commentId: string) => void;
 	sendingCommentIds: Record<string, boolean>;
 	registerCommentRef: (commentId: string, element: HTMLDivElement | null) => void;
@@ -927,6 +933,7 @@ function MarkdownPreviewReview({
 								onSaveEdit={onSaveEditComment}
 								onDeleteComment={onDeleteComment}
 								onReopenComment={onReopenComment}
+								onReplyComment={onReplyComment}
 								onSendComment={onSendComment}
 								sendingCommentIds={sendingCommentIds}
 							/>
@@ -966,6 +973,43 @@ function getFileReadSignature(taskId: string, file: TaskDiffFile): string {
 export function getDiffFileContentHash(file: TaskDiffFile): string {
 	const payload = `${file.hunks?.join("\n") ?? ""}\u0001${file.oldContent}\u0000${file.newContent}`;
 	return hashText(payload);
+}
+
+interface StoredMdPreview {
+	last?: boolean;
+	files: Record<string, boolean>;
+}
+
+function readStoredMdPreview(): StoredMdPreview {
+	const result: StoredMdPreview = { files: {} };
+	try {
+		const parsed = JSON.parse(localStorage.getItem(LS_DIFF_MD_PREVIEW) ?? "null");
+		if (typeof parsed?.last === "boolean") {
+			result.last = parsed.last;
+		}
+		if (parsed?.files && typeof parsed.files === "object") {
+			for (const [key, value] of Object.entries(parsed.files)) {
+				if (typeof value === "boolean") {
+					result.files[key] = value;
+				}
+			}
+		}
+	} catch {
+		/* unavailable or corrupt storage — fall back to defaults */
+	}
+	return result;
+}
+
+function writeStoredMdPreview(key: string, preview: boolean): void {
+	try {
+		const stored = readStoredMdPreview();
+		localStorage.setItem(LS_DIFF_MD_PREVIEW, JSON.stringify({
+			last: preview,
+			files: { ...stored.files, [key]: preview },
+		}));
+	} catch {
+		/* ignore quota / privacy-mode errors */
+	}
 }
 
 function getSkippedFileReadSignature(taskId: string, skipped: TaskDiffSkippedFile): string {
@@ -1232,6 +1276,7 @@ function TaskDiffFileSection({
 	onSaveEditComment,
 	onDeleteComment,
 	onReopenComment,
+	onReplyComment,
 	onSendComment,
 	sendingCommentIds,
 	onToggleExpanded,
@@ -1582,6 +1627,7 @@ function TaskDiffFileSection({
 			}}
 			className={`border border-edge rounded-xl ${isRead ? "bg-elevated" : "bg-raised"}`}
 			data-file-id={file.id}
+			data-scroll-anchor-pending={expanded && !showMdPreview && !buildError && !diffFile ? "" : undefined}
 		>
 			{/* Its own query container: what squeezes this row is the pane, not the
 			    window — a phone viewport can hold a full-width diff, while a desktop
@@ -1746,6 +1792,7 @@ function TaskDiffFileSection({
 						onSaveEditComment={onSaveEditComment}
 						onDeleteComment={onDeleteComment}
 						onReopenComment={onReopenComment}
+						onReplyComment={onReplyComment}
 						onSendComment={onSendComment}
 						sendingCommentIds={sendingCommentIds}
 						registerCommentRef={registerCommentRef}
@@ -1825,6 +1872,7 @@ function TaskDiffFileSection({
 										onSaveEdit={onSaveEditComment}
 										onDeleteComment={onDeleteComment}
 										onReopenComment={onReopenComment}
+										onReplyComment={onReplyComment}
 										onSendComment={onSendComment}
 										sendingCommentIds={sendingCommentIds}
 									/>
@@ -1861,6 +1909,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 	const resolvedTheme = useResolvedTheme();
 	const toolbarRef = useRef<HTMLDivElement | null>(null);
 	const scrollRegionRef = useRef<HTMLDivElement | null>(null);
+	const scrollAnchorRef = useRef<ReturnType<typeof anchorScrollRegion> | null>(null);
 	const searchInputRef = useRef<HTMLInputElement | null>(null);
 	const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
 	const fileButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -1887,13 +1936,21 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 	const [showLoadingState, setShowLoadingState] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [viewMode, setViewMode] = useState<DiffViewMode | null>(null);
-	// Per-file markdown source-diff ↔ rendered-preview switch, defaulting to
-	// preview (missing entry = on). Ephemeral view state (like GitHub's rich-diff
-	// toggle): resets on viewer mount, never persisted.
+	// Per-file markdown source-diff ↔ rendered-preview switch. Session entries come
+	// from user toggles and the search flip; the stored snapshot is read once at
+	// mount, so a toggle never changes other files until the next open.
 	const [mdPreviewFiles, setMdPreviewFiles] = useState<Record<string, boolean>>({});
+	const [storedMdPreview] = useState(readStoredMdPreview);
+	function resolveMdPreview(file: TaskDiffFile, session: Record<string, boolean>): boolean {
+		return session[file.id]
+			?? storedMdPreview.files[`${task.id}:${getReviewFilePath(file)}`]
+			?? storedMdPreview.last
+			?? true;
+	}
 	// The review lives on the task record and is shared with the artifact viewer
 	// and the agent's CLI; this viewer only projects it onto the widget map.
 	const review = useTaskReview(task, project.id);
+	const { sendReply } = useReviewSend(task.id, project.id, review);
 	const inlineComments = useMemo(() => buildInlineCommentsState(review.comments), [review.comments]);
 	const importLegacyReview = review.importMany;
 	const [copiedReviewXml, setCopiedReviewXml] = useState(false);
@@ -2314,6 +2371,14 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		}
 	}, [currentRequest.focusFile, importLegacyReview, payload, task.id]);
 
+	useEffect(() => {
+		const region = scrollRegionRef.current;
+		if (!region) return;
+		const handle = anchorScrollRegion(region, "[data-file-id]");
+		scrollAnchorRef.current = handle;
+		return () => handle.dispose();
+	}, []);
+
 	// Scroll spy: as the user scrolls the diff, highlight the file whose section is currently
 	// under the reading line (just below the sticky toolbar). rAF-throttled; only commits a
 	// state change when the active file actually changes.
@@ -2477,6 +2542,11 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 				setThreadSendStates((current) => ({ ...current, [thread.id]: undefined }));
 				toast.error(t("infoPanel.prSendToAgentFailed", { error: String(err) }), { taskId: task.id });
 			});
+	}
+
+	function replyToInlineComment(commentId: string, body: string): Promise<boolean> {
+		const comment = review.comments.find((item) => item.id === commentId);
+		return comment ? sendReply(comment, body) : Promise.resolve(false);
 	}
 
 	function sendInlineCommentToAgent(commentId: string) {
@@ -2700,6 +2770,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 			top: Math.max(0, scrollRegion.scrollTop + offset),
 			behavior,
 		});
+		scrollAnchorRef.current?.reanchor();
 
 		if (retriesLeft <= 0) {
 			pendingScrollFrameRef.current = null;
@@ -2743,6 +2814,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 						behavior: "smooth",
 						block: "start",
 					});
+					scrollAnchorRef.current?.reanchor();
 					pendingCommentScrollFrameRef.current = null;
 					return;
 				}
@@ -2799,6 +2871,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					behavior: "smooth",
 					block: "center",
 				});
+				scrollAnchorRef.current?.reanchor();
 				pendingSearchScrollFrameRef.current = null;
 				return;
 			}
@@ -2825,7 +2898,10 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		// A content hit only exists in the source diff DOM — a file left in
 		// markdown preview mode flips back so the hit can be decorated and scrolled to.
 		if (match.kind === "content") {
-			setMdPreviewFiles((current) => ((current[match.fileId] ?? true) ? { ...current, [match.fileId]: false } : current));
+			const matchFile = payload?.files.find((candidate) => candidate.id === match.fileId);
+			if (matchFile) {
+				setMdPreviewFiles((current) => (resolveMdPreview(matchFile, current) ? { ...current, [matchFile.id]: false } : current));
+			}
 		}
 		scrollToFile(match.fileId, {
 			expand: true,
@@ -3960,7 +4036,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					</BottomSheet>
 				)}
 
-				<div ref={scrollRegionRef} className="flex-1 min-w-0 overflow-auto px-4 pt-1 pb-4" data-testid="inline-diff-scroll-region">
+				<div ref={scrollRegionRef} className="flex-1 min-w-0 overflow-auto px-4 pt-1 pb-4 [overflow-anchor:none]" data-testid="inline-diff-scroll-region">
 				{narrow && (
 					/* Sheds, never stacks (bible §12.6). Four mode chips plus the tests
 					   toggle wrapped into a second row on a phone; the modes are now one
@@ -4077,15 +4153,21 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 								onSaveEditComment={updateInlineComment}
 								onDeleteComment={deleteInlineComment}
 								onReopenComment={reopenInlineComment}
+								onReplyComment={replyToInlineComment}
 								onSendComment={sendInlineCommentToAgent}
 								sendingCommentIds={sendingCommentIds}
 								onToggleExpanded={() => toggleFileExpanded(file.id)}
 								onToggleRead={() => toggleFileRead(file.id)}
-								mdPreview={mdPreviewFiles[file.id] ?? true}
-								onToggleMdPreview={() => setMdPreviewFiles((current) => ({
-									...current,
-									[file.id]: !(current[file.id] ?? true),
-								}))}
+								mdPreview={resolveMdPreview(file, mdPreviewFiles)}
+								onToggleMdPreview={() => {
+									const next = !resolveMdPreview(file, mdPreviewFiles);
+									const headerStuck = (getScrollOffset(file.id) ?? 0) < -4;
+									setMdPreviewFiles((current) => ({ ...current, [file.id]: next }));
+									writeStoredMdPreview(`${task.id}:${getReviewFilePath(file)}`, next);
+									if (headerStuck) {
+										scrollToFile(file.id, { behavior: "auto" });
+									}
+								}}
 								registerCommentRef={registerCommentRef}
 								sectionRef={(element) => {
 									sectionRefs.current[file.id] = element;

@@ -19,6 +19,7 @@ vi.mock("../../rpc", () => ({
 			markReviewCommentsSent: vi.fn().mockResolvedValue(undefined),
 			resolveReviewComment: vi.fn().mockResolvedValue(undefined),
 			reopenReviewComment: vi.fn().mockResolvedValue(undefined),
+			replyReviewComment: vi.fn().mockResolvedValue(undefined),
 			clearTaskReview: vi.fn().mockResolvedValue(undefined),
 			importReviewComments: vi.fn().mockResolvedValue(undefined),
 		},
@@ -1595,12 +1596,11 @@ describe("TaskDiffViewer", () => {
 
 		const targetSection = document.querySelector('[data-file-id="zzz/readme.md"]') as HTMLDivElement | null;
 		expect(targetSection).not.toBeNull();
-		let targetRectCall = 0;
 		Object.defineProperty(targetSection as HTMLDivElement, "getBoundingClientRect", {
 			configurable: true,
 			value: () => {
-				targetRectCall += 1;
-				const top = targetRectCall === 1 ? 840 : targetRectCall === 2 ? 260 : 192;
+				const scrolls = scrollToMock.mock.calls.length;
+				const top = scrolls === 0 ? 840 : scrolls === 1 ? 260 : 192;
 				return {
 					top,
 					bottom: top + 200,
@@ -1923,6 +1923,37 @@ describe("TaskDiffViewer", () => {
 		});
 		expect(screen.getByTestId("inline-comment-thread")).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+	});
+
+	it("sends a comment from the line composer on the send shortcut", async () => {
+		const user = userEvent.setup();
+		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });
+
+		render(
+			<I18nProvider>
+				<TaskDiffViewer
+					task={task}
+					project={project}
+					request={{ mode: "branch", compareRef: "origin/main", compareLabel: "origin/main" }}
+					onBack={vi.fn()}
+				/>
+			</I18nProvider>,
+		);
+
+		await screen.findAllByTestId("mock-diff");
+		const appSection = document.querySelector('[data-file-id="src/app.ts"]') as HTMLElement;
+		await user.click(within(appSection).getByRole("button", { name: "Open inline comment composer" }));
+		await user.type(screen.getByPlaceholderText("Leave a comment on this line..."), "Rename this callback.");
+		// isMac() is false in the test environment, so the combo is Ctrl+Enter.
+		await user.keyboard("{Control>}{Enter}{/Control}");
+
+		await waitFor(() => {
+			expect(api.request.sendAgentMessageNow).toHaveBeenCalledTimes(1);
+		});
+		expect(vi.mocked(api.request.sendAgentMessageNow).mock.calls[0][0].text).toContain("<comment>Rename this callback.</comment>");
+		await waitFor(() => {
+			expect(screen.getByTestId("review-export-sent-marker")).toBeInTheDocument();
+		});
 	});
 
 	it("sends one inline comment on its own and keeps it out of the batch payload", async () => {
@@ -2487,6 +2518,114 @@ describe("TaskDiffViewer", () => {
 		expect(api.request.reopenReviewComment).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1", commentId: "done" });
 		await waitFor(() => {
 			expect(screen.getByTestId("inline-comment-send")).toBeInTheDocument();
+		});
+	});
+
+	describe("answering the agent inside a thread", () => {
+		const awaitingTask = (overrides: Partial<NonNullable<Task["review"]>[number]> = {}): Task => ({
+			...task,
+			review: [{
+				id: "ask",
+				body: "Is get_redis_connection dead?",
+				createdAt: "2026-10-16T09:00:00.000Z",
+				sentAt: "2026-10-16T09:01:00.000Z",
+				replies: [{ id: "r1", author: "agent", body: "Agreed. Details in chat, waiting for OK.", createdAt: "2026-10-16T09:05:00.000Z" }],
+				anchor: { kind: "diff-line", fileId: "src/app.ts", filePath: "src/app.ts", side: "newFile", startLine: 1, endLine: 1 },
+				...overrides,
+			}],
+		});
+		const renderViewer = (stored: Task) => render(
+			<I18nProvider>
+				<TaskDiffViewer
+					task={stored}
+					project={project}
+					request={{ mode: "branch", compareRef: "origin/main", compareLabel: "origin/main" }}
+					onBack={vi.fn()}
+				/>
+			</I18nProvider>,
+		);
+
+		it("sends the whole thread to this task's agent, then stores the reply — without resolving or re-marking", async () => {
+			const user = userEvent.setup();
+			let release: (value: { spilledPath: null }) => void = () => {};
+			vi.mocked(api.request.sendAgentMessageNow).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }) as never);
+			renderViewer(awaitingTask());
+			await screen.findAllByTestId("mock-diff");
+
+			await user.type(screen.getByRole("textbox", { name: "Reply to the agent…" }), "ok, go");
+			await user.click(screen.getByTestId("inline-comment-reply-send"));
+			await user.click(screen.getByTestId("inline-comment-reply-send"));
+			expect(api.request.sendAgentMessageNow).toHaveBeenCalledTimes(1);
+			expect(api.request.replyReviewComment).not.toHaveBeenCalled();
+
+			const { text, taskId, projectId } = vi.mocked(api.request.sendAgentMessageNow).mock.calls[0][0];
+			expect({ taskId, projectId }).toEqual({ taskId: "t1", projectId: "p1" });
+			expect(text).toContain('<review id="ask">');
+			expect(text).toContain('<file src="src/app.ts" line=1>');
+			expect(text).toContain("<comment>Is get_redis_connection dead?</comment>");
+			expect(text).toContain('<reply author="agent">Agreed. Details in chat, waiting for OK.</reply>');
+			expect(text).toContain('<reply author="user">ok, go</reply>');
+
+			await act(async () => release({ spilledPath: null }));
+			await waitFor(() => {
+				expect(api.request.replyReviewComment).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1", commentId: "ask", body: "ok, go", author: "user" });
+			});
+			expect(api.request.resolveReviewComment).not.toHaveBeenCalled();
+			expect(api.request.markReviewCommentsSent).not.toHaveBeenCalled();
+			// The user now has the last word: the field stays, offering an addition instead of a reply.
+			await waitFor(() => {
+				expect(screen.getByRole("textbox", { name: "Add to this comment…" })).toHaveValue("");
+			});
+			expect(screen.getByTestId("inline-comment-reply-send")).toHaveTextContent("Add");
+			expect(screen.getAllByTestId("inline-comment-reply")[1]).toHaveTextContent("ok, go");
+		});
+
+		it("keeps the draft and stores nothing when delivery is refused", async () => {
+			const user = userEvent.setup();
+			vi.mocked(api.request.sendAgentMessageNow).mockRejectedValueOnce(new Error("no live agent"));
+			renderViewer(awaitingTask());
+			await screen.findAllByTestId("mock-diff");
+
+			const field = screen.getByRole("textbox", { name: "Reply to the agent…" });
+			await user.type(field, "ok");
+			await user.click(screen.getByTestId("inline-comment-reply-send"));
+			await waitFor(() => {
+				expect(api.request.sendAgentMessageNow).toHaveBeenCalledTimes(1);
+			});
+			await waitFor(() => {
+				expect(field).not.toBeDisabled();
+			});
+			expect(field).toHaveValue("ok");
+			expect(api.request.replyReviewComment).not.toHaveBeenCalled();
+		});
+
+		it("lets the user add to a sent comment the agent has not answered yet", async () => {
+			const user = userEvent.setup();
+			vi.mocked(api.request.sendAgentMessageNow).mockResolvedValueOnce({ spilledPath: null } as never);
+			renderViewer(awaitingTask({ replies: undefined }));
+			await screen.findAllByTestId("mock-diff");
+
+			await user.type(screen.getByRole("textbox", { name: "Add to this comment…" }), "also rename it");
+			await user.click(screen.getByTestId("inline-comment-reply-send"));
+			await waitFor(() => {
+				expect(api.request.replyReviewComment).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1", commentId: "ask", body: "also rename it", author: "user" });
+			});
+			const { text } = vi.mocked(api.request.sendAgentMessageNow).mock.calls[0][0];
+			expect(text).toContain("<comment>Is get_redis_connection dead?</comment>");
+			expect(text).toContain('<reply author="user">also rename it</reply>');
+			expect(api.request.markReviewCommentsSent).not.toHaveBeenCalled();
+		});
+
+		it("offers no field on a resolved thread or on a comment the agent never received", async () => {
+			const { unmount } = renderViewer(awaitingTask({ resolvedAt: "2026-10-16T09:06:00.000Z", resolvedBy: "agent" }));
+			await screen.findAllByTestId("mock-diff");
+			expect(screen.queryByTestId("inline-comment-reply-form")).not.toBeInTheDocument();
+			unmount();
+
+			renderViewer(awaitingTask({ sentAt: undefined, replies: undefined }));
+			await screen.findAllByTestId("mock-diff");
+			expect(screen.getByTestId("inline-comment-send")).toBeInTheDocument();
+			expect(screen.queryByTestId("inline-comment-reply-form")).not.toBeInTheDocument();
 		});
 	});
 
@@ -3777,6 +3916,25 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			expect(blockByText(preview, "bold").className).toContain("dev3-md-commented");
 		});
 
+		it("sends a preview comment on the send shortcut", async () => {
+			const user = userEvent.setup();
+			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+			vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue(undefined as never);
+			renderViewer();
+
+			const preview = await screen.findByTestId("diff-md-preview");
+			selectBlock(blockByText(preview, "bold"));
+			await user.click(within(preview).getByTestId("md-preview-add-comment"));
+			await user.type(screen.getByPlaceholderText("Leave a comment on this line..."), "tighten this");
+			await user.keyboard("{Control>}{Enter}{/Control}");
+
+			await waitFor(() => {
+				expect(api.request.sendAgentMessageNow).toHaveBeenCalledTimes(1);
+			});
+			expect(vi.mocked(api.request.sendAgentMessageNow).mock.calls[0][0].text).toContain("<comment>tighten this</comment>");
+			expect((await screen.findByTestId("md-preview-comments")).textContent).toContain("tighten this");
+		});
+
 		it("comments the old side when the selection sits in a removed block", async () => {
 			const user = userEvent.setup();
 			vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
@@ -3828,6 +3986,123 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			});
 			expect(screen.getAllByTestId("mock-diff").length).toBeGreaterThan(0);
 			expect(screen.getByRole("button", { name: /toggle markdown preview/i })).toHaveAttribute("aria-pressed", "false");
+		});
+
+		describe("remembered choice", () => {
+			function twoMarkdownFiles(): TaskDiffResponse {
+				const base = markdownFilePayload({});
+				const guide = base.files[0];
+				const other = { ...guide, id: "docs/other.md", displayPath: "docs/other.md", oldPath: "docs/other.md", newPath: "docs/other.md" };
+				return { ...base, summary: { files: 2, insertions: 6, deletions: 2 }, files: [guide, other] };
+			}
+
+			const toggleFor = (path: string) => screen.getByRole("button", { name: new RegExp(`toggle markdown preview for ${path.replace(/\./g, "\\.")}`, "i") });
+
+			async function renderTwo() {
+				vi.mocked(api.request.getTaskDiff).mockResolvedValue(twoMarkdownFiles());
+				const view = renderViewer();
+				await screen.findByRole("button", { name: /toggle markdown preview for docs\/other\.md/i });
+				return view;
+			}
+
+			it("reopens a file in source mode after the user switched its preview off", async () => {
+				const user = userEvent.setup();
+				const first = await renderTwo();
+				await user.click(toggleFor("docs/guide.md"));
+				first.unmount();
+
+				await renderTwo();
+				expect(toggleFor("docs/guide.md")).toHaveAttribute("aria-pressed", "false");
+			});
+
+			it("applies the last choice to other markdown files on the next open, not live", async () => {
+				const user = userEvent.setup();
+				const first = await renderTwo();
+				await user.click(toggleFor("docs/guide.md"));
+				expect(toggleFor("docs/other.md")).toHaveAttribute("aria-pressed", "true");
+				first.unmount();
+
+				await renderTwo();
+				expect(toggleFor("docs/other.md")).toHaveAttribute("aria-pressed", "false");
+			});
+
+			it("lets an explicit per-file choice win over the last choice", async () => {
+				const user = userEvent.setup();
+				const first = await renderTwo();
+				await user.click(toggleFor("docs/guide.md"));
+				await user.click(toggleFor("docs/other.md"));
+				await user.click(toggleFor("docs/other.md"));
+				first.unmount();
+
+				await renderTwo();
+				expect(toggleFor("docs/guide.md")).toHaveAttribute("aria-pressed", "false");
+				expect(toggleFor("docs/other.md")).toHaveAttribute("aria-pressed", "true");
+			});
+
+			it("does not persist the flip a search hit makes", async () => {
+				const user = userEvent.setup();
+				vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({
+					newContent: "# Title\n\nfindme unique\n",
+					hunks: ["diff --git a/docs/guide.md b/docs/guide.md\n@@ -1 +1,3 @@\n-# Old\n+# Title\n+\n+findme unique\n"],
+				}));
+				const first = renderViewer();
+				await screen.findByTestId("diff-md-preview");
+				await user.keyboard("{Meta>}f{/Meta}");
+				await user.type(screen.getByPlaceholderText("Search diff..."), "findme");
+				await waitFor(() => expect(screen.queryByTestId("diff-md-preview")).toBeNull());
+				first.unmount();
+
+				renderViewer();
+				expect(await screen.findByTestId("diff-md-preview")).toBeInTheDocument();
+			});
+
+			it("falls back to preview when the stored value is garbage", async () => {
+				localStorage.setItem("dev3-inline-diff-md-preview-v1", JSON.stringify({ last: "no", files: { "task-1:docs/guide.md": 3 } }));
+				vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+				renderViewer();
+				expect(await screen.findByTestId("diff-md-preview")).toBeInTheDocument();
+			});
+
+			it("falls back to preview when the stored value is not JSON", async () => {
+				localStorage.setItem("dev3-inline-diff-md-preview-v1", "{not json");
+				vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+				renderViewer();
+				expect(await screen.findByTestId("diff-md-preview")).toBeInTheDocument();
+			});
+
+			describe("scroll alignment", () => {
+				async function mountWithSectionTop(top: number) {
+					const user = userEvent.setup();
+					vi.mocked(api.request.getTaskDiff).mockResolvedValue(markdownFilePayload({}));
+					renderViewer();
+					await screen.findByTestId("diff-md-preview");
+					const rect = (rectTop: number, height: number) => () => ({
+						top: rectTop, bottom: rectTop + height, left: 0, right: 900, width: 900, height, x: 0, y: rectTop, toJSON: () => ({}),
+					});
+					const scrollRegion = screen.getByTestId("inline-diff-scroll-region");
+					const scrollTo = vi.fn();
+					Object.defineProperty(scrollRegion, "scrollTo", { configurable: true, value: scrollTo });
+					Object.defineProperty(scrollRegion, "getBoundingClientRect", { configurable: true, value: rect(100, 600) });
+					Object.defineProperty(screen.getByTestId("inline-diff-toolbar"), "getBoundingClientRect", { configurable: true, value: rect(100, 40) });
+					const section = document.querySelector('[data-file-id="docs/guide.md"]') as HTMLElement;
+					Object.defineProperty(section, "getBoundingClientRect", { configurable: true, value: rect(top, 400) });
+					await user.click(toggleFor("docs/guide.md"));
+					return scrollTo;
+				}
+
+				it("re-aligns to the file start when its sticky header is stuck above the toolbar", async () => {
+					const scrollTo = await mountWithSectionTop(-300);
+					await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+				});
+
+				it("leaves the scroll alone when the file start is visible", async () => {
+					const scrollTo = await mountWithSectionTop(200);
+					await act(async () => {
+						await new Promise((resolve) => setTimeout(resolve, 50));
+					});
+					expect(scrollTo).not.toHaveBeenCalled();
+				});
+			});
 		});
 	});
 });

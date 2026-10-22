@@ -4,6 +4,7 @@
  */
 
 import type {
+	AccountLoginState,
 	AgentAccount,
 	AgentAccountKind,
 	AgentAccountsState,
@@ -12,9 +13,14 @@ import type {
 	ProjectClaudeLogin,
 } from "../../shared/agent-accounts";
 import type { ClaudeApiProfileDraft } from "../agent-accounts";
-import { parseEnvLines, shortCodexWorkspaceId } from "../../shared/agent-accounts";
+import { isAgentDirAccountKind, isAutoAccountId, isRoutableAccountKind, parseEnvLines, shortCodexWorkspaceId, type RoutableAccountKind } from "../../shared/agent-accounts";
+import type { AutoAccountPreview } from "../../shared/account-routing";
+import { previewAutoAccount as previewAutoAccountNow } from "../account-router";
+import { loadSettings, saveSettings } from "../settings";
 import { pinnedClaudeConfigDir } from "../../shared/claude-config-dir";
 import * as accounts from "../agent-accounts";
+import { ACCOUNT_LOGIN_SESSION_PREFIX, accountLogins } from "../account-login-terminal";
+import { getPtyPort } from "../pty-server";
 import * as data from "../data";
 import { resolveProjectEnv } from "../repo-config";
 import { homedir } from "node:os";
@@ -32,8 +38,13 @@ function accountLogDetails(account: AgentAccount) {
 async function listAgentAccounts(): Promise<AgentAccountsState> {
 	log.info("→ listAgentAccounts");
 	const state = await accounts.listAgentAccounts();
+	const autoDefault = (await loadSettings()).autoAccountDefault;
+	if (autoDefault?.claude) state.claude.autoDefault = true;
+	if (autoDefault?.codex) state.codex.autoDefault = true;
 	log.info("← listAgentAccounts", {
 		claude: state.claude.accounts.length,
+		omp: state.omp.accounts.length,
+		pi: state.pi.accounts.length,
 		codex: {
 			count: state.codex.accounts.length,
 			activeId: state.codex.activeId?.slice(0, 8) ?? null,
@@ -45,6 +56,7 @@ async function listAgentAccounts(): Promise<AgentAccountsState> {
 
 async function importAgentAccount(params: { kind: AgentAccountKind }): Promise<AgentAccount> {
 	log.info("→ importAgentAccount", params);
+	if (isAgentDirAccountKind(params.kind)) throw new Error(`${params.kind} accounts are added with a fresh login, not imported`);
 	const account =
 		params.kind === "claude"
 			? await accounts.importCurrentClaudeAccount()
@@ -110,44 +122,74 @@ async function updateAgentApiProfile(params: {
 	return account;
 }
 
-async function prepareAgentAccountLogin(params: { kind: AgentAccountKind }): Promise<{ accountId: string | null; loginCommand: string }> {
-	log.info("→ prepareAgentAccountLogin", params);
-	const result =
-		params.kind === "claude" ? await accounts.prepareClaudeLogin() : await accounts.prepareCodexLogin();
-	log.info("← prepareAgentAccountLogin", { accountId: result.accountId });
-	return result;
+/** Start (or join) the in-app sign-in for `kind`. `remoteViewer`: the page asking is
+ *  not on the host, so a host-side browser callback cannot reach the user. */
+async function startAccountLogin(params: { kind: AgentAccountKind; remoteViewer: boolean }): Promise<AccountLoginState> {
+	log.info("→ startAccountLogin", params);
+	const state = await accountLogins.start(params.kind, { remoteViewer: params.remoteViewer });
+	log.info("← startAccountLogin", { loginId: state.loginId.slice(0, 8), phase: state.phase });
+	return state;
 }
 
-async function completeAgentAccountLogin(params: { kind: AgentAccountKind; accountId?: string | null }): Promise<AgentAccount> {
-	log.info("→ completeAgentAccountLogin", params);
-	if (!params.accountId) throw new Error(`accountId is required for ${params.kind} login verification`);
-	try {
-		const account =
-			params.kind === "claude"
-				? await accounts.completeClaudeLogin(params.accountId)
-				: await accounts.completeCodexLogin(params.accountId);
-		log.info("← completeAgentAccountLogin", accountLogDetails(account));
-		return account;
-	} catch (error) {
-		log.warn("← completeAgentAccountLogin failed", {
-			kind: params.kind,
-			pendingAccountId: params.accountId.slice(0, 8),
-			error: String(error),
-		});
-		throw error;
-	}
+async function getAccountLogin(params: { kind: AgentAccountKind }): Promise<AccountLoginState | null> {
+	return accountLogins.get(params.kind);
+}
+
+async function restartAccountLogin(params: { loginId: string; remoteViewer: boolean }): Promise<AccountLoginState> {
+	log.info("→ restartAccountLogin", { loginId: params.loginId.slice(0, 8) });
+	return accountLogins.restart(params.loginId, { remoteViewer: params.remoteViewer });
+}
+
+/** Loopback URL of a sign-in terminal; the browser transport swaps in its proxied `/pty`. */
+async function getAccountLoginPtyUrl(params: { sessionKey: string }): Promise<string> {
+	if (!params.sessionKey.startsWith(ACCOUNT_LOGIN_SESSION_PREFIX)) throw new Error("Not a sign-in terminal");
+	return `ws://localhost:${getPtyPort()}?session=${encodeURIComponent(params.sessionKey)}`;
+}
+
+/** Cancel a sign-in in progress, or dismiss a finished one. */
+async function closeAccountLogin(params: { loginId: string }): Promise<void> {
+	log.info("→ closeAccountLogin", { loginId: params.loginId.slice(0, 8) });
+	accountLogins.close(params.loginId);
 }
 
 async function setActiveAgentAccount(params: { kind: AgentAccountKind; accountId: string | null }): Promise<void> {
 	log.info("→ setActiveAgentAccount", params);
+	if (isAutoAccountId(params.accountId)) {
+		if (!isRoutableAccountKind(params.kind)) throw new Error(`Auto is not available for ${params.kind} accounts`);
+		await setAutoAccountDefault(params.kind, true);
+		log.info("← setActiveAgentAccount done (auto)");
+		return;
+	}
 	// Both kinds now accept null = "default to the system login" (~/.claude /
 	// ~/.codex). Codex no longer swaps auth.json — this only moves the default.
 	if (params.kind === "claude") {
 		await accounts.setActiveClaudeAccount(params.accountId);
+	} else if (isAgentDirAccountKind(params.kind)) {
+		await accounts.setActiveAgentDirAccount(params.kind, params.accountId);
 	} else {
 		await accounts.setActiveCodexAccount(params.accountId);
 	}
+	if (isRoutableAccountKind(params.kind)) await setAutoAccountDefault(params.kind, false);
 	log.info("← setActiveAgentAccount done");
+}
+
+/** Auto as the default lives in settings, not the registry, so an older build
+ *  reading accounts.json still finds a specific, valid default. */
+async function setAutoAccountDefault(kind: RoutableAccountKind, on: boolean): Promise<void> {
+	const settings = await loadSettings();
+	const current = settings.autoAccountDefault ?? {};
+	if ((current[kind] === true) === on) return;
+	const next = { ...current };
+	if (on) next[kind] = true;
+	else delete next[kind];
+	await saveSettings({ ...settings, autoAccountDefault: Object.keys(next).length ? next : undefined });
+}
+
+/** What Auto would pick for a launch in this project right now. Reserves nothing. */
+async function previewAutoAccount(params: { kind: AgentAccountKind; projectId?: string | null }): Promise<AutoAccountPreview | null> {
+	if (!isRoutableAccountKind(params.kind)) return null;
+	const project = params.projectId ? await data.getProject(params.projectId).catch(() => null) : null;
+	return previewAutoAccountNow({ kind: params.kind, exclusions: project?.autoAccountExclusions ?? [] });
 }
 
 async function removeAgentAccount(params: { kind: AgentAccountKind; accountId: string }): Promise<void> {
@@ -203,9 +245,13 @@ export const agentAccountHandlers = {
 	addAgentApiProfile,
 	getAgentApiProfileDraft,
 	updateAgentApiProfile,
-	prepareAgentAccountLogin,
-	completeAgentAccountLogin,
+	startAccountLogin,
+	getAccountLogin,
+	restartAccountLogin,
+	getAccountLoginPtyUrl,
+	closeAccountLogin,
 	setActiveAgentAccount,
+	previewAutoAccount,
 	removeAgentAccount,
 	renameAgentAccount,
 };

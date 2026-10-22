@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, resolvePresetPrompt, reviewTaskTitle, reviewTitleTopic } from "../../shared/types";
 import { CLI_EXIT_CODE_LAUNCH_DECLINED } from "../../shared/cli-exit-codes";
+import { COORDINATOR_PROMPT_LIMIT } from "../../shared/agent-command-line-budget";
 
 const BUILTIN = "Review the code changes on this branch.";
 
@@ -45,10 +46,14 @@ describe("COORDINATOR_PROMPT", () => {
 		expect(COORDINATOR_PROMPT).toContain("create it and request its launch in the same step");
 		expect(COORDINATOR_PROMPT).toContain("the dialog IS that question");
 		expect(COORDINATOR_PROMPT).toContain("never a launch that skips it");
-		expect(COORDINATOR_PROMPT).toContain("To Do only when the user says park");
+		expect(COORDINATOR_PROMPT).toContain("To Do only when the user says park or prefers it");
+		// The standing preference is asked once, kept durably, and never outranks a per-task word.
+		expect(COORDINATOR_PROMPT).toContain("No preference at first delegation: ask once — start at once (recommended) or To Do");
+		expect(COORDINATOR_PROMPT).toContain("and `dev3 note` it");
+		expect(COORDINATOR_PROMPT).toContain("A per-task word binds only that task, never waiting on the question");
 		expect(COORDINATOR_PROMPT).toContain("never start unrelated backlog or re-create a running task");
 		// A launch is not a licence for anything downstream of it.
-		expect(COORDINATOR_PROMPT).toContain("a launch approval is not one of them");
+		expect(COORDINATOR_PROMPT).toContain("A launch approval grants nothing");
 	});
 
 	// The other half: a decline is a choice, and silence is not a decline.
@@ -161,10 +166,18 @@ describe("COORDINATOR_PROMPT", () => {
 		expect(COORDINATOR_PROMPT).toMatch(/consolidate only on the user's word/);
 	});
 
+	// A relay used to authorise nothing, so children refused what the user had
+	// granted through the coordinator; it now carries the grant, with its scope.
+	it("tells the coordinator to relay a grant with its scope, not to withhold it", () => {
+		expect(COORDINATOR_PROMPT).not.toContain("your relay authorises nothing");
+		expect(COORDINATOR_PROMPT).toMatch(/their words verbatim, the operation, exact targets, limits, the child's seq/);
+		expect(COORDINATOR_PROMPT).toMatch(/anything wider goes back to the user/);
+	});
+
 	it("keeps the four rules that were learned from a specific failure", () => {
 		expect(COORDINATOR_PROMPT).toContain("RELAY THE RULING, NOT YOUR READING OF IT");
 		expect(COORDINATOR_PROMPT).toContain("NEVER ATTRIBUTE WORDS THE USER DID NOT SAY");
-		expect(COORDINATOR_PROMPT).toContain("PERMISSION DOES NOT TRAVEL");
+		expect(COORDINATOR_PROMPT).toContain("RELAYED PERMISSION IS SCOPED AND SPENT WHEN USED");
 		expect(COORDINATOR_PROMPT).toContain("Priority and task type are the user's call");
 		expect(COORDINATOR_PROMPT).toContain("ANNOUNCE A REVERSAL AS A REVERSAL");
 	});
@@ -263,15 +276,11 @@ describe("COORDINATOR_PROMPT", () => {
 	// length is launch capacity spent (`agent-command-line-budget.ts`) — and it is
 	// already over the 5 000-character reserve, which nothing enforces on input.
 	//
-	// 6 210 is not a round number: it is what this prompt measured BEFORE the events
-	// block was added. Adding the block cost 1 700 characters and the rest of the
-	// prompt was condensed to pay for all of them, so no coordinator task that
-	// launched before stops launching. The cap keeps that property: a new section
-	// is paid for out of existing prose, never out of the user's task description.
-	// The create-and-launch default (2026-09-12) was paid for the same way — folded
-	// into the rules it belongs to, with illustrations and justifications cut.
-	it("costs no more launch capacity than it did before the events block", () => {
-		expect(COORDINATOR_PROMPT.length).toBeLessThanOrEqual(6210);
+	// COORDINATOR_PROMPT_LIMIT is a ratchet, not an OS ceiling: raising it shrinks every coordinator
+	// task's description room by the same amount, and the Windows launch-room test is re-baselined with
+	// it (decisions/2026/10/16/coordinator-prompt-cap-6500.md). Headroom, not an invitation to pad.
+	it("stays within the coordinator prompt cap", () => {
+		expect(COORDINATOR_PROMPT.length).toBeLessThanOrEqual(COORDINATOR_PROMPT_LIMIT);
 	});
 
 	it("never assumes the user's gender — it ships to every install as the default", () => {

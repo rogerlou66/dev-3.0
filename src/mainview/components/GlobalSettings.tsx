@@ -383,6 +383,13 @@ function GlobalSettings({
 		[persistSettingChange],
 	);
 
+	const handleNeedsYouSoundToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange({ playSoundOnTaskNeedsYou: enabled });
+		},
+		[persistSettingChange],
+	);
+
 	const handleWatchByDefaultToggle = useCallback(
 		(enabled: boolean) => {
 			persistSettingChange({ watchByDefault: enabled });
@@ -491,6 +498,20 @@ function GlobalSettings({
 	const handleTerminalPathOpenModeChange = useCallback(
 		(mode: TerminalPathOpenMode) => {
 			persistSettingChange({ terminalPathOpenMode: mode });
+		},
+		[persistSettingChange],
+	);
+
+	const handlePaneTitlesToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange({ paneTitles: enabled });
+		},
+		[persistSettingChange],
+	);
+
+	const handleConfirmClosePaneToggle = useCallback(
+		(enabled: boolean) => {
+			persistSettingChange({ confirmClosePane: enabled });
 		},
 		[persistSettingChange],
 	);
@@ -848,6 +869,7 @@ function GlobalSettings({
 						t={t}
 						globalSettings={globalSettings}
 						onSoundToggle={handleSoundToggle}
+						onNeedsYouSoundToggle={handleNeedsYouSoundToggle}
 						onFocusModeToggle={handleFocusModeToggle}
 						onWatchByDefaultToggle={handleWatchByDefaultToggle}
 					/>
@@ -872,6 +894,8 @@ function GlobalSettings({
 						terminalShell={globalSettings.terminalShell}
 						shellAvailability={shellAvailability}
 						dimInactivePanes={globalSettings.dimInactivePanes}
+						paneTitles={globalSettings.paneTitles}
+						confirmClosePane={globalSettings.confirmClosePane}
 						shellPrompt={globalSettings.shellPrompt}
 						shellPromptCustom={globalSettings.shellPromptCustom}
 						onShellPromptChange={handleShellPromptChange}
@@ -880,6 +904,8 @@ function GlobalSettings({
 						onTerminalPathOpenModeChange={handleTerminalPathOpenModeChange}
 						onTerminalShellChange={handleTerminalShellChange}
 						onDimInactivePanesToggle={handleDimInactivePanesToggle}
+						onPaneTitlesToggle={handlePaneTitlesToggle}
+						onConfirmClosePaneToggle={handleConfirmClosePaneToggle}
 					/>
 				);
 			case "agents":

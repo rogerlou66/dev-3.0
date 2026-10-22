@@ -7,7 +7,7 @@
 // hand-written help inside their handlers and are NOT listed here (see
 // `OWNS_HELP` below).
 
-import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES, MAX_SCHEDULED_MESSAGE_LENGTH } from "../shared/types";
+import { AGENT_MESSAGE_SPILL_THRESHOLD_BYTES, MAX_SCHEDULED_MESSAGE_LENGTH, MAX_SHARED_VIDEO_BYTES, formatMediaCap } from "../shared/types";
 import { MAX_MESSAGE_SUBJECT_LENGTH, MESSAGE_SUBJECT_WORD_GUIDANCE } from "../shared/agent-message-subject";
 import { CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_PANE_NO_ROOM, CLI_EXIT_CODE_RESUME_ALREADY_RUNNING, CLI_EXIT_CODE_RESUME_UNAVAILABLE } from "../shared/cli-exit-codes";
 
@@ -98,9 +98,11 @@ const COMMANDS: CommandHelp[] = [
 				summary: "Resume a task's saved agent session when its terminal is gone — the app's Resume Session.",
 				details: [
 					"Same path as the Resume Session button: same worktree, branch, files and conversations,",
-					"each saved pane under its saved agent, config and account. Never a fresh session or a reset.",
+					"each saved pane under its saved agent, config and account. Never a reset, never the brief again.",
 					"Restores every saved pane; the result lists each one with the conversation id it resumed",
-					"and how it was chosen (exact, substituted = newest surviving transcript, unverified).",
+					"and how it was chosen (exact, substituted = newest surviving transcript, unverified,",
+					"fresh-session = nothing of that pane's survives and every transcript is another pane's,",
+					"so it opens a new empty conversation instead of duplicating one).",
 					`A pane whose agent CLI cannot resume would start over; that always exits ${CLI_EXIT_CODE_RESUME_UNAVAILABLE}.`,
 					"The native backend restores only the main pane; extra panes are reported as skipped.",
 					"A hibernated task is woken, same as Wake & resume.",
@@ -642,12 +644,92 @@ const COMMANDS: CommandHelp[] = [
 	},
 	{
 		name: "projects",
-		summary: "Inspect configured projects.",
+		summary: "List, add and clone projects — the CLI side of the app's Add Project dialog.",
 		subcommands: [
 			{
 				name: "list",
-				usage: "dev3 projects list",
-				summary: "List all configured projects (default subcommand).",
+				usage: "dev3 projects list [--json]",
+				summary: "List all configured projects with their spaces (default subcommand).",
+				details: [
+					"--json   One object per project: id, name, path, kind, defaultBaseBranch, spaces [{id, name}].",
+				],
+			},
+			{
+				name: "add",
+				usage: 'dev3 projects add <path> [--name "..."] [--space <id|name>]... [--new-space "..."]... [--no-space] [--init] [--json]',
+				summary: "Register an existing local git repo as a project, optionally placing it in spaces.",
+				details: [
+					"<path>                 The repo folder; relative paths resolve against the current directory.",
+					"                       A git URL is refused — use `dev3 projects clone <url>`.",
+					"--name \"...\"           Project name (default: the folder name).",
+					"--space <id|name>      Join an existing space: its id, an sp_ prefix from `spaces list`,",
+					"                       or its name (case-insensitive). Repeatable — spaces are many-to-many.",
+					"--new-space \"...\"      Create a space with this project as its first member. Repeatable.",
+					"--no-space             Leave it in no space. Without any space flag a new project joins none,",
+					"                       but one removed earlier and added again keeps the spaces it had.",
+					"--init                 Not a git repo, or no commit yet: git init and make a first commit",
+					"                       holding only a placeholder .dev3/README.md (none of your files).",
+					"--json                 Print {outcome, project, createdSpaces}.",
+					"Spaces are checked before anything is written: a bad --space adds nothing (exit 34).",
+					"A folder that already is a project changes nothing and exits 33, printing that project.",
+				],
+			},
+			{
+				name: "clone",
+				usage: 'dev3 projects clone <git-url> [--dir <parent folder>] [--name "..."] [--space <id|name>]... [--new-space "..."]... [--no-space] [--json]',
+				summary: "Clone a git URL into a parent folder and register the clone as a project.",
+				details: [
+					"--dir <parent>         Folder the clone goes into (default: the clone folder set in the app's",
+					"                       Add Project → Clone tab). The clone lands in <parent>/<name>.",
+					"--name \"...\"           Folder and project name (default: derived from the URL). One folder",
+					"                       name only — a URL or a path here is refused.",
+					"Space flags, --json and exit codes 33 / 34 work exactly as for `projects add`.",
+					"An existing git repo already at <parent>/<name> is registered without cloning.",
+				],
+			},
+		],
+	},
+	{
+		name: "spaces",
+		summary: "List and create spaces, and change which spaces a project belongs to.",
+		subcommands: [
+			{
+				name: "list",
+				usage: "dev3 spaces list [--json]",
+				summary: "List spaces in display order with their member projects and ids (default subcommand).",
+				details: [
+					"--json   One object per space: id, name, sensitive, projects [{id, name, path}].",
+				],
+			},
+			{
+				name: "create",
+				usage: 'dev3 spaces create "name" [--project <id>]... [--json]',
+				summary: "Create a space. A space is never empty: it starts with the named projects, else the current one.",
+				details: [
+					"--project <id>   Member project (repeatable); default: the project of the current directory.",
+					"A name another space already uses (case-insensitive) is refused with exit 34.",
+				],
+			},
+			{
+				name: "set",
+				usage: "dev3 spaces set <space> [<space>...] [--project <id>] [--json]",
+				summary: "REPLACE the project's spaces with exactly these. `--no-space` instead of spaces leaves them all.",
+				details: [
+					"<space>          A space id, an sp_ prefix from `spaces list`, or a name (case-insensitive).",
+					"--project <id>   Target project (8-char id from `projects list`); default: the current directory's.",
+					"A space whose last project leaves is deleted, exactly as in the app — the output says so.",
+					"An unknown or ambiguous space changes nothing (exit 34).",
+				],
+			},
+			{
+				name: "add",
+				usage: "dev3 spaces add <space> [<space>...] [--project <id>] [--json]",
+				summary: "Add the project to these spaces, keeping its existing ones.",
+			},
+			{
+				name: "remove",
+				usage: "dev3 spaces remove <space> [<space>...] [--project <id>] [--json]",
+				summary: "Take the project out of only these spaces. A space left empty is deleted.",
 			},
 		],
 	},
@@ -730,7 +812,8 @@ const COMMANDS: CommandHelp[] = [
 		details: [
 			"Same history, badge and viewer as show-image: the viewer switches to a player for a clip.",
 			"Each --caption annotates the clip it immediately follows. Up to 20 files per call.",
-			"MP4 or WebM, 25 MB per file — trim or re-encode longer clips. H.264/AAC MP4 is the safest codec choice;",
+			`MP4 or WebM, up to ${formatMediaCap(MAX_SHARED_VIDEO_BYTES)} (${MAX_SHARED_VIDEO_BYTES.toLocaleString("en-US")} bytes) per file — trim or re-encode larger clips.`,
+			"The viewer streams the clip and can seek before it fully loads. H.264/AAC MP4 is the safest codec choice;",
 			"whether a codec plays depends on the engine (only Chromium playback of H.264, VP8 and VP9 was measured).",
 			"A codec the engine cannot decode (HEVC in Chromium, for one) shows a notice pointing at Open in default app.",
 			"Files are copied into the task's shared store, so the original may be deleted afterwards. Never autoplays.",
@@ -950,6 +1033,7 @@ const COMMAND_INDEX: Map<string, CommandHelp> = new Map(COMMANDS.map((c) => [c.n
 // Command aliases: the singular `project` forwards to `projects` in main.ts, so
 // its help must resolve too — otherwise the hint and the command disagree.
 COMMAND_INDEX.set("project", COMMAND_INDEX.get("projects") as CommandHelp);
+COMMAND_INDEX.set("space", COMMAND_INDEX.get("spaces") as CommandHelp);
 
 /** Whether the registry knows how to render help for this command. */
 export function hasCommandHelp(command: string): boolean {

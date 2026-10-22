@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentAccountIdentity, AgentAccountKind, AgentAccountsState, PinnedClaudeLogin } from "../../shared/agent-accounts";
-import { shortClaudeConfigDir } from "../../shared/agent-accounts";
+import type { AgentAccountIdentity, AgentAccountKind, AgentAccountsState, AgentDirAccountKind, PinnedClaudeLogin } from "../../shared/agent-accounts";
+import { AUTO_ACCOUNT_ID, shortClaudeConfigDir } from "../../shared/agent-accounts";
 import type { AgentRateLimitSnapshot, AgentRateLimitsReport } from "../../shared/rate-limits";
 import { findRateLimitSnapshot, hasReportedLimits, isUnlimitedRateLimitSnapshot } from "../../shared/rate-limits";
 import { api } from "../rpc";
 import { toast } from "../toast";
 import { useT, type TFunction } from "../i18n";
 import { notifyAgentAccountsChanged } from "./AgentAccountIndicator";
+import UsageSessionsStrip from "./UsageSessionsStrip";
 import {
 	ACCOUNT_CARD_CLASS,
 	AccountCardHeader,
@@ -19,12 +20,14 @@ import {
 	resolveAccount,
 } from "./rate-limit-ui";
 
-const KINDS: AgentAccountKind[] = ["claude", "codex"];
+/** Kinds with limit windows to show; omp and pi report none to dev3. */
+type UsageKind = Exclude<AgentAccountKind, AgentDirAccountKind>;
+const KINDS: UsageKind[] = ["claude", "codex"];
 
 /** One card in the panel: an account (or a leftover reading) plus its usage. */
 interface UsageRow {
 	key: string;
-	kind: AgentAccountKind;
+	kind: UsageKind;
 	accountId: string | null;
 	/** Set on a project-pinned `CLAUDE_CONFIG_DIR` login; such rows are informational. */
 	configDir: string | null;
@@ -36,6 +39,8 @@ interface UsageRow {
 	/** false for informational rows: codex's unmanaged login and readings whose
 	 *  account is gone — there is nothing to make default. */
 	selectable: boolean;
+	/** The "Auto (balanced)" row: making it default routes launches by usage. */
+	auto?: boolean;
 }
 
 function identityLine(identity: AgentAccountIdentity | null): AccountLine | null {
@@ -64,16 +69,18 @@ function spokenName(row: UsageRow, fallback: string): string {
  *  logins projects pin via `CLAUDE_CONFIG_DIR`, then any reading left over from
  *  an account or pin that no longer exists. */
 function rowsForKind(
-	kind: AgentAccountKind,
+	kind: UsageKind,
 	accounts: AgentAccountsState | null,
 	report: AgentRateLimitsReport,
 	pinnedLogins: PinnedClaudeLogin[],
-	labels: { systemLogin: string; unmanaged: string; projectLogin: (dir: string) => string },
+	labels: { systemLogin: string; unmanaged: string; projectLogin: (dir: string) => string; auto: string },
 	projectPinned = false,
 ): UsageRow[] {
 	const rows: UsageRow[] = [];
 	const kindState = accounts?.[kind] ?? null;
-	const activeId = kindState?.activeId ?? null;
+	const autoDefault = kindState?.autoDefault === true;
+	// With Auto as the default no single account is: their radios all read off.
+	const activeId = autoDefault ? AUTO_ACCOUNT_ID : (kindState?.activeId ?? null);
 	const named = (name: string): AccountLine => ({
 		name,
 		email: null,
@@ -81,6 +88,24 @@ function rowsForKind(
 		planLabel: null,
 		isApi: false,
 	});
+
+	// Auto is worth a row once two subscription logins could be balanced.
+	const systemIdentity = kind === "claude" ? accounts?.claude.systemIdentity : accounts?.codex.currentIdentity;
+	const subscriptionLogins = (kindState?.accounts.filter((a) => a.auth !== "api").length ?? 0) + (systemIdentity ? 1 : 0);
+	if (autoDefault || subscriptionLogins >= 2) {
+		rows.push({
+			key: `${kind}:auto`,
+			kind,
+			accountId: AUTO_ACCOUNT_ID,
+			configDir: null,
+			account: named(labels.auto),
+			chip: null,
+			snap: null,
+			isDefault: autoDefault,
+			selectable: true,
+			auto: true,
+		});
+	}
 
 	// The system login is a real default only for Claude; Codex's current login is
 	// unmanaged (dev3 never wrote it), so it stays informational — same rule the
@@ -234,6 +259,7 @@ function UsageRowCard({
 						source={row.kind}
 						account={row.account}
 						unlimited={row.snap ? isUnlimitedRateLimitSnapshot(row.snap) : false}
+						publicName={row.auto}
 					/>
 				</span>
 				{row.chip && !row.configDir ? (
@@ -246,7 +272,7 @@ function UsageRowCard({
 				) : null}
 				{/* An account with nothing to plot says so on its headline instead of
 				    spending a whole second line on three muted words. */}
-				{!row.snap ? <span className="text-fg-muted text-micro shrink-0">{t("rateLimits.noRecentData")}</span> : null}
+				{!row.snap && !row.auto ? <span className="text-fg-muted text-micro shrink-0">{t("rateLimits.noRecentData")}</span> : null}
 				{row.snap && hasReportedLimits(row.snap) && !hasQuotaLines(row.snap) ? (
 					<span className="shrink-0 tabular-nums">
 						<CapturedAgeSuffix capturedAt={row.snap.capturedAt} now={now} />
@@ -299,8 +325,10 @@ export default function AgentUsagePanel({
 	accounts,
 	pinnedLogins = [],
 	projectPinned = false,
+	projectId = null,
 	interactive,
 	onOpenSettings,
+	onOpenSessions,
 }: {
 	report: AgentRateLimitsReport;
 	accounts: AgentAccountsState | null;
@@ -308,10 +336,15 @@ export default function AgentUsagePanel({
 	pinnedLogins?: PinnedClaudeLogin[];
 	/** The screen's project pins its own login, so the default login is left out. */
 	projectPinned?: boolean;
+	/** The screen's project; only its tasks' sessions count. Null counts all. */
+	projectId?: string | null;
 	interactive: boolean;
 	onOpenSettings: () => void;
+	/** Opens the full Sessions screen. A navigation, so the dwell gate does not apply. */
+	onOpenSessions?: () => void;
 }) {
 	const t = useT();
+	const sessions = (report.sessions ?? []).filter((s) => !projectId || s.projectId === projectId);
 	const [busy, setBusy] = useState(false);
 	const [dwelled, setDwelled] = useState(false);
 	const dwellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -342,6 +375,7 @@ export default function AgentUsagePanel({
 		systemLogin: t("settings.accountsDefaultLogin", { dir: accounts?.claude.systemConfigDir ?? "~/.claude" }),
 		unmanaged: t("settings.accountsUnmanaged"),
 		projectLogin: (dir: string) => t("settings.accountsProjectLogin", { dir }),
+		auto: t("launch.accountAuto"),
 	};
 	const blocks = KINDS.map((kind) => ({ kind, rows: rowsForKind(kind, accounts, report, pinnedLogins, labels, projectPinned) })).filter(
 		(block) => block.rows.length > 0,
@@ -443,6 +477,7 @@ export default function AgentUsagePanel({
 					</div>
 				);
 			})}
+			<UsageSessionsStrip sessions={sessions} onOpenAll={onOpenSessions} />
 		</div>
 	);
 }

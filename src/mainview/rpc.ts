@@ -90,11 +90,13 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	taskUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskUpdated", { detail: payload })),
 	taskRemoved: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskRemoved", { detail: payload })),
 	projectUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectUpdated", { detail: payload })),
+	projectAdded: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectAdded", { detail: payload })),
 	spacesUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:spacesUpdated", { detail: payload })),
 	taskSound: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskSound", { detail: payload })),
 	ptyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:ptyDied", { detail: payload })),
 	taskTerminalResumed: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskTerminalResumed", { detail: payload })),
 	projectPtyDied: (payload) => window.dispatchEvent(new CustomEvent("rpc:projectPtyDied", { detail: payload })),
+	accountLoginChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:accountLoginChanged", { detail: payload })),
 	terminalBell: (payload) => window.dispatchEvent(new CustomEvent("rpc:terminalBell", { detail: payload })),
 	gitOpCompleted: (payload) => window.dispatchEvent(new CustomEvent("rpc:gitOpCompleted", { detail: payload })),
 	branchMerged: (payload) => window.dispatchEvent(new CustomEvent("rpc:branchMerged", { detail: payload })),
@@ -660,6 +662,12 @@ function initBrowserApi(): ApiShape {
 			return `${wsProtocol}//${window.location.host}/pty?session=project-${params.projectId}`;
 		},
 
+		async getAccountLoginPtyUrl(params: { sessionKey: string }): Promise<string> {
+			// Same reason as above: the host's loopback URL means nothing on this device.
+			await rpcRequest("getAccountLoginPtyUrl", params);
+			return `${wsProtocol}//${window.location.host}/pty?session=${encodeURIComponent(params.sessionKey)}`;
+		},
+
 		async resumeTask(params: { taskId: string }): Promise<string> {
 			await rpcRequest("resumeTask", params);
 			return `${wsProtocol}//${window.location.host}/pty?session=${params.taskId}`;
@@ -668,6 +676,12 @@ function initBrowserApi(): ApiShape {
 		async restartTask(params: { taskId: string }): Promise<string> {
 			await rpcRequest("restartTask", params);
 			return `${wsProtocol}//${window.location.host}/pty?session=${params.taskId}`;
+		},
+
+		// The host answers with a loopback URL; a remote tab streams the same clip from its own origin.
+		async getSharedVideoUrl(params: { path: string }) {
+			const result = await rpcRequest("getSharedVideoUrl", params);
+			return result ? { url: result.path, path: result.path } : null;
 		},
 
 		async hideApp(): Promise<void> {

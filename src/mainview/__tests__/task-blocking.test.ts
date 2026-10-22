@@ -1,5 +1,6 @@
 import type { Task } from "../../shared/types";
-import { ALL_STATUSES, computeTaskTimeBreakdown } from "../../shared/types";
+import { ALL_STATUSES, type ProductivityStatEvent } from "../../shared/types";
+import { reconstructTimeline } from "../utils/periodTime";
 import { canBlockTask, effectiveTaskColumn, isTaskBlocked } from "../../shared/task-blocking";
 import { isAttentionTask } from "../utils/taskFacets";
 import { matchesTaskQuery, type TaskQueryContext } from "../utils/taskSearch";
@@ -36,8 +37,12 @@ describe("blocked projection", () => {
 		expect(matchesTaskQuery(task, query, context)).toBe(false);
 		expect(matchesTaskQuery({ ...task, blocked: true }, "is:attention", context)).toBe(false);
 	});
-	it("does not count live blocked waiting as human review time", () => {
-		const result = computeTaskTimeBreakdown({ ...task, blocked: true, statusEnteredAt: task.createdAt, statusDurations: { "review-by-user": 5000 } }, Date.parse(task.createdAt) + 60000);
-		expect(result.userMs).toBe(5000);
+	it("does not count live blocked waiting as time in the current status", () => {
+		const enteredMs = Date.parse(task.createdAt);
+		const event = {
+			status: task.status, createdAt: task.createdAt, movedAt: null, lifecycleStartedAt: null, statusEnteredAt: task.createdAt,
+			movements: [], blocked: true, blockedAt: new Date(enteredMs + 5000).toISOString(),
+		} as unknown as ProductivityStatEvent;
+		expect(reconstructTimeline(event, enteredMs + 60000)?.segments).toEqual([{ state: "review-by-user", start: enteredMs, end: enteredMs + 5000 }]);
 	});
 });

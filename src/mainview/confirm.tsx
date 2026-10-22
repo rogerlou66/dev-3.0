@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Label, TaskPriority } from "../shared/types";
 import TaskDialogSubjectCard from "./components/TaskDialogSubjectCard";
 import { useT } from "./i18n";
+import { UNSOLICITED_DIALOG_QUIET_MS, useDialogKeyboardGuard } from "./utils/dialog-keyboard-guard";
 import { useFocusTrap } from "./utils/useFocusTrap";
 
 export interface ConfirmAlternativeAction {
@@ -100,6 +101,12 @@ export interface ConfirmOptions {
 	 * whenever closing without a choice would be ambiguous.
 	 */
 	dismissOnBackdrop?: boolean;
+	/**
+	 * Enter confirms even with no button focused, and the buttons show the keys.
+	 * Opt-in — Enter confirming a destructive dialog is only right where the dialog
+	 * is the user's own quick ask. Letters never answer: typing must not confirm.
+	 */
+	keyboardChoice?: boolean;
 }
 
 interface PendingConfirm extends ConfirmOptions {
@@ -267,6 +274,28 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 	// to be a misclick than an answer — opt those out of backdrop dismissal.
 	const dismissOnBackdrop = pending.dismissOnBackdrop ?? !pending.agentInitiated;
 
+	// Repeats, keys held from before the dialog opened, IME and the quiet window
+	// for agent requests are all handled here, ahead of every handler below.
+	useDialogKeyboardGuard(trapRef, {
+		quietMs: pending.agentInitiated ? UNSOLICITED_DIALOG_QUIET_MS : 0,
+		onEscape: () => close(false),
+	});
+
+	useEffect(() => {
+		if (!pending.keyboardChoice) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "Enter" || e.metaKey || e.ctrlKey || e.altKey || gateActive) return;
+			// Enter on a focused button is that button's. Someone who tabbed to Cancel
+			// and pressed it must get Cancel, not the destructive default.
+			if (document.activeElement?.tagName === "BUTTON") return;
+			e.preventDefault();
+			e.stopPropagation();
+			close(true);
+		};
+		window.addEventListener("keydown", onKey, { capture: true });
+		return () => window.removeEventListener("keydown", onKey, { capture: true });
+	}, [pending.keyboardChoice, gateActive, close]);
+
 	// Auto-close when the caller's signal aborts (task resolved elsewhere).
 	useEffect(() => {
 		const signal = pending.signal;
@@ -405,6 +434,7 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 							className="px-4 py-2 text-sm whitespace-nowrap rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
 						>
 							{cancelLabel}
+							{pending.keyboardChoice && <KeyHint keys="Esc" />}
 						</button>
 						{pending.alternativeAction && (
 							<button
@@ -429,11 +459,21 @@ function ConfirmDialog({ pending, close }: { pending: PendingConfirm; close: (re
 							}`}
 						>
 							{confirmLabel}
+							{pending.keyboardChoice && <KeyHint keys="↵" />}
 						</button>
 					</div>
 				)}
 			</div>
 		</div>
+	);
+}
+
+/** The key that answers a `keyboardChoice` dialog, inside its button. */
+function KeyHint({ keys }: { keys: string }) {
+	return (
+		<kbd className="ml-2 px-1.5 py-0.5 rounded border border-current/30 text-xs font-sans opacity-80" aria-hidden>
+			{keys}
+		</kbd>
 	);
 }
 

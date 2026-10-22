@@ -207,7 +207,7 @@ ux_architecture:
       dashboard_view_search: "Dashboard-only Board/Projects + search beside breadcrumbs; no second row. Tight width uses a magnifier; query stays Dashboard-owned. Header inert covers it; project/task titles unchanged."
       agent_rate_limit_indicator:
         budget: 1
-        spec: "Account-wide Claude/Codex usage, hidden without data. Hover opens a panel; 300ms dwell arms default-account selection for NEW launches, confirmed by toast. Running logins stay unchanged. The gate lives inside the panel, never on a pin; Settings owns all other configuration. See decisions/2026/08/29/arm-the-usage-rows-on-dwell-not-on-a-pin.md."
+        spec: "Account-wide Claude/Codex usage, hidden without data. Hover opens a panel; 300ms dwell arms default-account selection for NEW launches, confirmed by toast; running logins unchanged. Gate lives inside the panel; Settings owns configuration. Below accounts: ONE read-only Sessions strip (summary, <=3 attention rows, link to sessions_screen). Why: decisions/2026/08/29/arm-the-usage-rows-on-dwell-not-on-a-pin.md, decisions/2026/10/01/per-task-claude-session-stats.md."
         narrow: "Folds into the kebab bottom sheet; a sheet is deliberate and has no pointer to dwell, so its rows arm on open."
         status: "observed"
       agent_traffic_readout:
@@ -256,15 +256,15 @@ ux_architecture:
       purpose: "Cross-project daily work: Inbox + compact project swimlanes."
       allowed: ["human_inbox", "object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create", "completed_disclosure"]
       forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
-      contract: "A fixed horizontal Inbox uses a left vertical rail and stays above scrolling grid; AI Review stays distinct. Done counts disclose cards; empty rows retain New Task. Search, lifecycle actions, drag, reorder, Custom, live refresh and narrow carousel remain."
+      contract: "Fixed horizontal Inbox (left rail) above the scrolling grid; AI Review distinct; Done counts disclose cards; empty rows keep New Task. Search, lifecycle, drag, reorder, Custom, refresh, narrow carousel stay."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
-      blocked_reviews: "Both boards retain Blocked after Your Review. Existing drag/status menus hold settled reviews without a required reason or runtime change. Hold excludes Inbox/Needs You and survives hooks; explicit unblock/drag out or todo/terminal cleanup clears it. Search: is:blocked/status:blocked; wait time is separate."
+      blocked_reviews: "Blocked column after Your Review on both boards; drag/status menus hold settled reviews (no reason, no runtime change). Excluded from Inbox/Needs You, survives hooks; unblock, drag out or todo/terminal clears it. Search is:blocked; wait time separate."
     workspace_task_overlay:
       purpose: "Ephemeral coding workspace over the still-mounted Workspace Board."
       allowed: ["task_info", "terminal", "diff", "artifacts", "full_page_handoff", "close"]
       forbidden: ["route_or_breadcrumb", "multiple_windows", "non_live_terminal", "native_dialog", "drag_resize", "persisted_geometry"]
-      contract: "Live/recoverable cards only; renderer-local state preserves board state. Wide 92vw x 88dvh, full-bleed narrow. Background inert; Close/Back/backdrop/Global Kanban restore it; terminal Tab/Escape stay in TUI; guarded full-page handoff remains."
+      contract: "Live/recoverable cards only; board state kept renderer-local. 92vw x 88dvh wide, full-bleed narrow; inert background; Close/Back/backdrop/Global Kanban restore; Tab/Escape stay in the TUI; guarded full-page handoff."
       status: "observed"
       evidence: ["WorkspaceTaskOverlay.tsx", "App.tsx", "TaskWorkspaceView.tsx"]
     task_card:
@@ -274,7 +274,7 @@ ux_architecture:
       zone_model:
         rationale: "The card had no zoning: identity, content, state, signals and actions stacked at one visual weight across up to three badge rows, and every feature added a row. Five zones, each with one admission rule, give a new feature a home instead of a new row."
         order: ["lifecycle", "identity", "content", "signals", "actions"]
-        lifecycle: "The 3px top status strip plus the vertical left rail (TaskCardRail.tsx). Owns ONLY things that change or report which column the task is in: pipeline ring, short upright status name, attention-bell count, quick-complete. Clicking the rail opens Move-to. Nothing informational may enter it."
+        lifecycle: "The 3px top strip + left rail (TaskCardRail.tsx). Owns ONLY what changes or reports the column: pipeline ring, upright status name, bell count, quick-complete (hibernated: quick-cancel in its place). Clicking the rail opens Move-to. Nothing informational may enter it."
         identity: "One full-width header row above the rail: priority (frozen PriorityBadge), #seq, attempt, agent + config, variant dots, scratch/automation/native marks, dismiss. Full width is deliberate — the agent config string had 182px next to a rail and now has 244px. Never grows past one line; overflow goes to the tooltip."
         content: "Epic (future), title (3-line clamp), label chips. The only zone allowed to be the card's visual focus. The show-description affordance is an icon on the label row, never its own row."
         signals: "Read-only facts in the segmented bottom bar, sub-grouped git / run / time with 1px dividers between groups. This is where new badges land."
@@ -413,12 +413,13 @@ ux_architecture:
         closed_by: "The agent via `dev3 review resolve <id> --reply`: reply under the bubble, Send becomes Reopen."
         cleared_by: ["reset_review button", "delete_comment"]
         rule: "Clipboard is transport, not store. Leaving the surface does NOT discard the review — no discard-on-close guard."
-      evidence: ["src/mainview/components/TaskDiffViewer.tsx", "src/mainview/components/task-inline-diff.ts", "src/mainview/components/TaskDiffViewer.css"]
+      evidence: ["src/mainview/components/TaskDiffViewer.tsx", "task-inline-diff.ts", "TaskDiffViewer.css"]
+    sessions_screen: { purpose: "Agent sessions table; per-source rows (Claude now)", allowed: [kpis, sort, search, project_scope, account_scope, row_details, open_task], forbidden: [mutation, configuration], entry: "strip link, palette, View menu, kebab" }
     modal:
       purpose: "Focused create/confirm flows."
       allowed: ["create_flow", "confirm", "destructive_confirm", "focused_config", "agent_request", "onboarding_invitation (§5.10)"]
       forbidden: ["primary_navigation", "persistent_dashboard"]
-      observed: ["CreateTaskModal", "AddProjectModal", "TaskDetailModal", "LaunchVariantsModal", "SpawnAgentModal", "AgentLaunchRequestModal", "GitPullErrorModal", "FolderPickerModal"]
+      observed: ["CreateTaskModal", "AddProjectModal", "TaskDetailModal", "LaunchVariantsModal", "SpawnAgentModal", "AgentLaunchRequestModal", "GitPullErrorModal", "FolderPickerModal", "AccountLoginModal"]
       agent_request:
         rule: "An agent asking the user to act carries the SAME identity treatment wherever it appears: accent border, AI-agent-request badge, refusing button autofocused. Severity is a separate axis, decided by what the action does — destructive role only when it destroys state. A request needing input beyond yes/no gets its own modal (confirm() stays boolean); one dialog at a time, queued."
         identity: ["accent border", "AI agent request badge", "autofocused decline"]
@@ -456,7 +457,7 @@ ux_architecture:
         list_governance: "preset_only_no_individual_ui is closed; grows only with a budget_exception-grade reason."
         status: "observed"
         evidence: ["hideable-controls.ts", "hidden-controls.ts", "global-settings-cache.ts", "HideableControl.tsx", "task-info-panel/PanelRestoreControl.tsx", "AppearanceSettingsSection.tsx", "InterfaceOnboarding.tsx", "useInterfaceOnboarding.ts", "bible §5.10"]
-      evidence: ["src/mainview/components/GlobalSettings.tsx", "src/mainview/components/ProjectSettings.tsx (59.9K)", "src/mainview/components/global-settings/*"]
+      evidence: ["src/mainview/components/GlobalSettings.tsx", "src/mainview/components/ProjectSettings.tsx", "src/mainview/components/project-settings/*", "src/mainview/components/global-settings/*"]
     sidebar:
       purpose: "Active tasks list / quick jump across running agents, with global-scope toggle."
       allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark", "git_status_badge", "task_visibility_toggle", "reveal_hidden_mode", "row_context_menu"]
@@ -488,10 +489,10 @@ ux_architecture:
       anatomy:
         source_line: "WHERE IT CAME FROM, single line, truncate, text-micro font-mono text-fg-muted. Fallback order task -> project -> app area, first match wins: `#seq · project · task title`, else the project name, else a localized area label (Settings/Update/Dashboard/Terminal/Menu). `#seq` leads so the ellipsis eats the title, not the identifier. `contextDetail` appends one more segment (`dev-3.0 · Nightly digest`). Never fabricated from the app's own name — a line that carries nothing is fabrication by another route."
         message: "The sentence. break-words, never truncated."
-        two_identity_exception: "Agent-to-agent `dev3 message` is the ONE event with a sender AND a receiver, and the one toast with several destinations: the source line is `#from -> #to`, each an underlined link to its task (seq/variant never truncates; project names only across boards), plus ONE never-wrapping action row: paper-plane `#N` (sender) / `Agent traffic` (the only label allowed to truncate) / inbox `#N` (recipient); full role names live in aria-label + title. The card click stays Agent traffic (all projects; receiver with the beta off), decided at raise so its accessible name is true. Links/actions are siblings above the card button, never nested; acting dismisses. A gone end says so, a finished one opens as its board card, nothing resumes. Raised from the single delivery seam; dropped when EITHER side is sensitive in streamer mode; silent for human-sent and not-delivered. Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md."
+        two_identity_exception: "`dev3 message` is the one toast with a sender AND a receiver: its source line is `#from -> #to`, each an underlined link to its task (seq/variant never truncates; project names only across boards), plus ONE never-wrapping action row: paper-plane `#N` (sender) / `Agent traffic` (only it truncates) / inbox `#N` (recipient); role names in aria-label + title. Card click -> SENDER (inert without one); traffic only via its action. Burst: the slot keeps its place and shows what it covered as a <=2-layer deck in the stack gap + exact `+N earlier` tab (never unread; all stay in traffic); X/timeout/acting ends it. Links/actions are siblings above the card button, never nested; acting dismisses. A gone end says so, a finished one opens as its board card, nothing resumes. One delivery seam; dropped if EITHER side is sensitive in streamer mode; silent for human-sent and undelivered. Why: decisions/2026/10/02/agent-message-toast-names-every-destination.md, decisions/2026/10/14/agent-toast-burst-deck.md."
         click_target: "The MOST SPECIFIC surface the toast is about (image viewer, diff, settings section). The owning task is the fallback, never an override. Task navigation honours the user's task-open-mode via openTaskFromNotification."
         dismiss: "swipe right (pointer+touch) AND the X button AND auto-timeout — swipe is never the only way (mobile_doctrine.gesture law)."
-        stack_dismiss: "ONE ghost `Clear all (n)` under the stack, only at 2+ visible toasts — a stack-level dismiss, not a persistent_action: it arrives with the pile and leaves with it. Hover/focus pauses every timer so it cannot slip away. The sweep skips onTaskOverflow — that handler preserves what capacity dropped behind the user's back; badges for toasts just swept would defeat the button."
+        stack_dismiss: "ONE ghost `Clear all (n)` under the stack, only at 2+ visible toasts (n counts cards; a burst is one) — a stack-level dismiss that arrives and leaves with the pile. Hover/focus pauses every timer. The sweep skips onTaskOverflow: badges for toasts just swept would defeat the button."
       identity_resolution: "ToastHost resolves one taskId/projectId/source into a source line and default click target once when raised; explicit context/onClick wins. App sources are localized labels with no target. toast.tsx imports no app state, so call sites stay one token long and navigation cannot erase a live toast's identity."
       a11y: "The clickable overlay's accessible name is `context — message`, not the message alone: a screen reader must hear WHICH task it navigates to. Dismiss button label localized (en/ru/es)."
       narrow: "max-w-[calc(100vw-2rem)] + NARROW_MAX_VISIBLE_TOASTS=1 bound total height; the source line adds one truncated line, not a wrap."
@@ -553,7 +554,7 @@ ux_architecture:
       layout: "Fixed-height toolbar and a reserved reset slot on EVERY row (including read-only ones), so no combo shifts when a row gains a reset button or the toolbar gains the changed-count. The filter matches the rendered combo as well as the name."
       storage: "GlobalSettings.keyboardShortcuts — sparse Record<shortcutId, {primary?, alias?}>; a slot that is absent keeps its default and a slot set to null was deliberately emptied. Only overrides are persisted, so a changed default reaches every user who never touched that row."
       rationale: "Rebinding belongs in the eighth Settings category, not the Cmd+/ help overlay or Terminal/Appearance. One discoverable destination consolidates the former iTerm2 preset into four rebindable rows."
-      terminal_shortcuts: "dev3's Cmd-key pane shortcuts (Cmd+D / Cmd+Shift+D / Cmd+W / Cmd+T) are registry rows in the `terminal` conflict group: the renderer dispatches them only while a terminal has focus, so they may share a combo with an app-level shortcut. Pane NAVIGATION is not a registry row — tmux owns it via prefix-free Alt+Shift+arrows; plain Alt+arrows are word motion."
+      terminal_shortcuts: "dev3's Cmd-key pane shortcuts (Cmd+D / Cmd+Shift+D / Cmd+W / Cmd+T) are registry rows in the `terminal` conflict group: the renderer dispatches them only while a terminal has focus, so they may share a combo with an app-level shortcut. Pane focus (Cmd+Alt / Alt+Shift+arrows) is a registry row too, on both backends; plain Alt+arrows are word motion."
       evidence: ["UX_DECISIONS 2026-08-02", "UX_DECISIONS 2026-08-03", "src/mainview/components/global-settings/KeyboardSettingsSection.tsx", "src/mainview/components/global-settings/ShortcutRow.tsx", "src/mainview/keymap.ts", "src/mainview/settings-registry.ts"]
     task_switcher:
       purpose: "Transient keyboard-summoned HUD overlay for hold-cycle jumping between active tasks (Option+Tab project / Option+Shift+Tab global). A presentation of the sidebar's task_jump action, not a command palette."
@@ -600,7 +601,7 @@ ux_architecture:
         elsewhere: "NO focus-steal; toast + attention badge; click either to open."
         toggle: "Settings->Behavior 'Auto-open shared images' (default on)."
       status: "observed"
-      evidence: ["decisions/2026/07/02/show-image-viewer.md", "src/cli/commands/show-image.ts", "src/bun/cli-socket-server.ts (ui.show-image)", "src/bun/shared-images.ts", "src/mainview/components/TaskImageViewer.tsx", "src/mainview/rpc.ts (cliShowImage)", "decisions/2026/04/16/worktree-uploaded-dnd-files.md"]
+      evidence: ["decisions/2026/07/02/show-image-viewer.md", "src/cli/commands/show-image.ts", "src/bun/cli-socket/ui-commands.ts (ui.show-image)", "src/bun/shared-images.ts", "src/mainview/components/TaskImageViewer.tsx", "src/mainview/rpc.ts (cliShowImage)", "decisions/2026/04/16/worktree-uploaded-dnd-files.md"]
     task_artifact_viewer:
       purpose: "Task-bound interactive HTML via dev3 show-artifact; one viewer, three shapes (see layout)."
       feature_class: ["object_action", "data_visualization", "notification"]
@@ -897,9 +898,9 @@ ux_architecture:
       task_move_drag: { narrow: "drag impossible -> 'Move to <status>' bottom action sheet (long-press) on existing status path; completion reuses confirmTaskCompletion", status: proposed }
       board_filters: { narrow: "bottom sheet behind a header funnel button (LabelFilterBar + search)", status: proposed }
       terminal_panes: { narrow: "pane carousel — one pane at a time + axis-arbitrated horizontal swipe + a slim non-overlapping top dots strip + Arrow keys; backend-neutral via taskPaneState / taskPaneAction RPCs; native tasks page the same way; MobileWindowCarousel not rendered for native tasks", status: observed, evidence: "MobilePaneCarousel.tsx, TaskTerminal.tsx, task-panes.ts taskPaneState, decision 089" }
-      terminal_windows: { narrow: "window switcher — a slim 'prev / named dropdown / next' bar ABOVE the pane bar (window = outer workspace, pane = inner split); buttons + dropdown + Arrow-while-focused, NO swipe (terminal swipe is the pane carousel's); tmux tasks only (native tasks have no window concept); renders only when window count > 1; via tmuxWindowNavigate (list-windows + select-window :+/:-)", status: observed, evidence: "MobileWindowCarousel.tsx, TaskTerminal.tsx, tmux-pty.ts tmuxWindowNavigate, decision 093" }
-      terminal_input: { narrow: "touch input is modality-gated, NOT width-gated. Browser touch uses TerminalComposer; Android task and project terminals use a native prompt dock outside the WebView and send whole committed text through the exact-origin bridge. Sticky raw mode returns direct PTY typing.", status: observed, evidence: "TerminalComposer.tsx, android-client-bridge.ts, android/" }
-      android_tablet: { narrow: "Layout follows the resizable app window: wide landscape keeps the split workspace, compact windows use existing sheets/carousels. Touch input stays native at every width. Never apply the phone-browser portrait gate to the Android tablet shell.", status: observed, evidence: "android/app/src/main/AndroidManifest.xml, src/mainview/android-client-bridge.ts" }
+      terminal_windows: { desktop: "always: top tabs replace tmux bar; agent first; output/bell dots", narrow: "window switcher — a slim 'prev / named dropdown / next' bar ABOVE the pane bar; buttons + dropdown + Arrow-while-focused, NO swipe (terminal swipe is the pane carousel's); tmux tasks only (native tasks have no window concept); only at > 1 window; via tmuxWindowNavigate", status: observed, evidence: "MobileWindowCarousel.tsx, TaskTerminal.tsx, tmux-pty/tmux-control.ts tmuxWindowNavigate, decision 093" }
+      terminal_input: { narrow: "modality-gated, NOT width-gated: browser touch uses TerminalComposer; Android uses a native prompt dock outside the WebView (whole committed text via the bridge). Sticky raw mode types into the PTY.", status: observed, evidence: "TerminalComposer.tsx, android-client-bridge.ts, android/" }
+      android_tablet: { narrow: "Layout follows the app window: wide keeps the split workspace, compact uses sheets/carousels; native touch input at every width; never the phone portrait gate.", status: observed, evidence: "android/app/src/main/AndroidManifest.xml, src/mainview/android-client-bridge.ts" }
       active_tasks: { narrow: "No persistent task strip; use TaskSwitcherOverlay for keyboard task switching and the breadcrumb → board carousel on narrow viewports", status: observed, evidence: ["ProjectView.tsx browser/narrow branch", "TaskSwitcherOverlay.tsx", "MobileBoardCarousel.tsx"] }
       task_inspector: { narrow: "2x2 bar grid cannot fit -> one summary bar + 'task actions' bottom sheet (bars become sheet sections); metadata grid already reflows", tight: "ABOVE narrow the bars gate on the PANEL width (useContainerWidth, ResizeObserver — the board eats the viewport in split view): <1280 folds the label strip to +k, clamps the branch name, drops pane-layout/Runtime text labels; <900 also drops the label strip + include-tests toggle. Every bar is boxed min-w-0 overflow-hidden so nothing paints over a neighbour or the pinned chrome (decision 164).", status: observed, evidence: "TaskInfoPanel.tsx, useContainerWidth.ts" }
       diff_viewer: { narrow: "files-aside (22rem) -> bottom-sheet file picker; diff stream owns screen (live-content: explicit nav, no full-surface swipe)", status: proposed, evidence: "TaskDiffViewer.tsx w-[22rem] aside" }
@@ -1026,7 +1027,7 @@ ux_architecture:
   open_questions:
     - "Is there a need for multi-select + a real selection toolbar on the Kanban board, or is per-task action intentional?"
     - "Should an --info semantic token be added, or is reusing accent (blue) for informational state intentional?"
-    - "ProjectSettings (59.9K) is very large. Does it need a documented sub-surface budget or splitting? (TaskInfoPanel is now governed by surfaces.task_info_panel.bar_model.)"
+    - "ProjectSettings is very large. Does it need a documented sub-surface budget or splitting? (TaskInfoPanel is now governed by surfaces.task_info_panel.bar_model.)"
     - "Status colors are hardcoded hex by design; should they migrate to named tokens for theme consistency, or stay as the documented exception?"
 
   resolved_questions:

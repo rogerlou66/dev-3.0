@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { AgentCheckResult, CodingAgent, GlobalSettings, Project, Task } from "../../shared/types";
 import type { HandoffPreview } from "../../shared/conversation-handoff-model";
+import { CONVERSATION_SOURCE_LABELS } from "../../shared/conversation-import-model";
 import { agentPromptMayHaveLanded } from "../../shared/agent-prompt-delivery";
 import { getTaskTitle } from "../../shared/types";
 import { toast } from "../toast";
@@ -14,6 +15,7 @@ import { leaveLaunchForAccountSettings } from "./AgentAccountIndicator";
 import AgentConfigPicker from "./AgentConfigPicker";
 import AgentPickerSkeleton from "./AgentPickerSkeleton";
 import MemoryPressureBanner from "./MemoryPressureBanner";
+import { useDialogKeyboardGuard } from "../utils/dialog-keyboard-guard";
 import { useFocusTrap } from "../utils/useFocusTrap";
 import { requestTaskTerminalFocus } from "../terminal-focus-request";
 import { useReducedMotion } from "../utils/useReducedMotion";
@@ -32,6 +34,8 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 	// focus back to the "+ Agent" button — that is the extra click this removes.
 	const spawnedRef = useRef(false);
 	const trapRef = useFocusTrap<HTMLDivElement>({ shouldRestoreFocus: () => !spawnedRef.current });
+	// A held Enter from the gesture that opened this must not launch agents.
+	useDialogKeyboardGuard(trapRef);
 	const reducedMotion = useReducedMotion();
 	const errorRef = useRef<HTMLDivElement>(null);
 	const [agents, setAgents] = useState<CodingAgent[]>([]);
@@ -47,6 +51,8 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 	// transcript — the option is then not offered rather than offered and failing.
 	const [handoffPreview, setHandoffPreview] = useState<HandoffPreview | null>(null);
 	const [handoff, setHandoff] = useState(false);
+	// The user's next message after the retelling; only ever sent with a handoff.
+	const [instruction, setInstruction] = useState("");
 
 	useEffect(() => {
 		api.request.previewTaskHandoff({ taskId: task.id, projectId: project.id })
@@ -101,7 +107,7 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 		window.addEventListener("keydown", handleKey);
 		return () => window.removeEventListener("keydown", handleKey);
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [spawning, globalSettings, agentId, configId]);
+	}, [spawning, globalSettings, agentId, configId, accountId, handoff, instruction]);
 
 	const handleToggleFavorite = useToggleFavorite(setGlobalSettings);
 
@@ -115,6 +121,7 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 		if (agentNotInstalled) return;
 		setSpawning(true);
 		setError(null);
+		const nextInstruction = handoff ? instruction.trim() : "";
 		try {
 			const result = await api.request.spawnAgentInTask({
 				taskId: task.id,
@@ -123,6 +130,7 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 				configId,
 				accountId,
 				handoff,
+				...(nextInstruction ? { prompt: nextInstruction } : {}),
 			});
 			// The pane is up either way; only the pointer into the retelling can still
 			// have failed, and that is the difference between a takeover and a fresh
@@ -212,7 +220,11 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 									<input
 										type="checkbox"
 										checked={handoff}
-										onChange={(e) => setHandoff(e.target.checked)}
+										onChange={(e) => {
+											setHandoff(e.target.checked);
+											// An unticked handoff sends no instruction, so none may linger to reappear later.
+											if (!e.target.checked) setInstruction("");
+										}}
 										className="w-4 h-4 mt-0.5 rounded accent-accent shrink-0"
 										data-testid="spawn-agent-handoff"
 									/>
@@ -220,12 +232,32 @@ function SpawnAgentModal({ task, project, onClose }: SpawnAgentModalProps) {
 										<span className="text-fg text-sm font-medium block">{t("spawnAgent.handoff")}</span>
 										<span className="text-fg-3 text-xs block mt-0.5">
 											{t.plural("spawnAgent.handoffDesc", handoffPreview.turns, {
-												agent: handoffPreview.source === "claude" ? "Claude Code" : "Codex",
+												agent: CONVERSATION_SOURCE_LABELS[handoffPreview.source],
 												count: handoffPreview.turns,
 											})}
 										</span>
 									</span>
 								</label>
+								{handoff && (
+									<div className="ml-[1.625rem] mt-2.5">
+										<label htmlFor="spawn-agent-instruction" className="text-fg-2 text-xs font-medium block">
+											{t("spawnAgent.instructionLabel")}
+										</label>
+										<textarea
+											id="spawn-agent-instruction"
+											rows={3}
+											value={instruction}
+											onChange={(e) => setInstruction(e.target.value)}
+											placeholder={t("spawnAgent.instructionPlaceholder")}
+											aria-describedby="spawn-agent-instruction-hint"
+											className="mt-1 w-full resize-y rounded-md border border-edge bg-elevated px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-muted outline-none focus:border-accent"
+											data-testid="spawn-agent-instruction"
+										/>
+										<p id="spawn-agent-instruction-hint" className="text-fg-3 text-xs mt-1">
+											{t("spawnAgent.instructionHint")}
+										</p>
+									</div>
+								)}
 							</div>
 						)}
 

@@ -2,7 +2,15 @@ import { access } from "node:fs/promises";
 import { getTaskTitle, type TmuxLayout, type TmuxWindowInfo, type TmuxPaneInfo } from "../shared/types";
 import { ENV_UNSET } from "../shared/agent-accounts";
 import type { TerminalBackendIdentity } from "../shared/terminal-backend-identity";
-import { isResizeSequence, parseResizeSequence, smallestClientSize } from "../shared/resize-protocol";
+import {
+	encodeSizingNotice,
+	isResizeSequence,
+	isViewerSignal,
+	parseResizeSequence,
+	parseViewerSignal,
+	pickSizingViewer,
+	type ViewerSignal,
+} from "../shared/resize-protocol";
 import {
 	attachMessage,
 	decodeNativeStreamMessage,
@@ -15,6 +23,7 @@ import type { NativeStreamRole } from "../shared/native-terminal-stream";
 import { NativeBridgeJournal, NativeClientLease } from "./native-terminal-bridge";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "./logger";
+import { SHARED_VIDEO_ROUTE, serveSharedVideo } from "./shared-video-stream";
 import { spawn } from "./spawn";
 import { getUserShell } from "./shell-env";
 import {
@@ -43,6 +52,7 @@ import {
 	activeTmuxConfigPath,
 	setActiveTmuxTheme,
 	TMUX_PANE_DIMMING_OPTION,
+	TMUX_PANE_TITLES_OPTION,
 	parseWindowLayout,
 	PANE_ID_FORMAT,
 	WINDOW_OVERVIEW_FORMAT,
@@ -58,8 +68,12 @@ const log = createLogger("pty");
 // spawning attached tmux clients, the renderer WebSocket bridge, and
 // per-session lifecycle state.
 
-/** Re-source the appearance on every socket; only explicit dimming toggles override server state. */
-export async function applyTmuxTheme(theme: "dark" | "light", opts: { appearancePreset?: "default" | "cmux"; paneDimming?: boolean } = {}): Promise<void> {
+/**
+ * Re-source the appearance on every socket. `paneDimming` and `paneTitles` are
+ * explicit toggles that override the server-wide choice; without one the server
+ * keeps whatever the last toggle — from this or another dev3 instance — set.
+ */
+export async function applyTmuxTheme(theme: "dark" | "light", opts: { appearancePreset?: "default" | "cmux"; paneDimming?: boolean; paneTitles?: boolean } = {}): Promise<void> {
 	const configPath = setActiveTmuxTheme(theme, opts.appearancePreset);
 	// Source the themed config on every known socket (typically just "dev3")
 	const sockets = new Set<string>();
@@ -74,8 +88,11 @@ export async function applyTmuxTheme(theme: "dark" | "light", opts: { appearance
 				if (opts.paneDimming !== undefined) {
 					await tmux.setGlobalOption(TMUX_PANE_DIMMING_OPTION, opts.paneDimming ? "on" : "off", { socket, bestEffort: true });
 				}
+				if (opts.paneTitles !== undefined) {
+					await tmux.setGlobalOption(TMUX_PANE_TITLES_OPTION, opts.paneTitles ? "on" : "off", { socket, bestEffort: true });
+				}
 				await tmux.sourceFile(configPath, { socket, bestEffort: true });
-				log.info("tmux theme applied", { theme, socket, configPath, paneDimming: opts.paneDimming });
+				log.info("tmux theme applied", { theme, socket, configPath, paneDimming: opts.paneDimming, paneTitles: opts.paneTitles });
 			} catch (err) {
 				log.warn("Failed to apply tmux theme", { theme, socket, error: String(err) });
 			}
@@ -173,14 +190,41 @@ interface PtySession {
 	configureTimer: ReturnType<typeof setTimeout> | null;
 	/** Partial OSC 52 clipboard sequence buffered across PTY chunks. */
 	osc52Buffer: string;
-	/** Size last applied to the shared PTY (min across all clients). Used to
-	 *  detect same-size resizes that need a forced redraw — see applyClientSizes. */
+	/** Size last applied to the shared PTY. Used to detect same-size resizes
+	 *  that need a forced redraw — see applyClientSizes. */
 	appliedCols?: number;
 	appliedRows?: number;
 }
 
 const sessions = new Map<string, PtySession>();
 
+/** A viewer socket as an external session sees it. */
+export interface ExternalPtyViewer {
+	sendText(text: string): void;
+	close(code?: number, reason?: string): void;
+}
+
+/**
+ * A PTY owned outside this module (an account sign-in terminal) and viewed through
+ * the same WebSocket, so the remote proxy reaches it with no transport of its own.
+ * It never joins `sessions`: idle, bell and tmux bookkeeping are not its business.
+ */
+export interface ExternalPtySession {
+	attach(viewer: ExternalPtyViewer): void;
+	input(viewer: ExternalPtyViewer, data: string): void;
+	resize(viewer: ExternalPtyViewer, cols: number, rows: number): void;
+	detach(viewer: ExternalPtyViewer): void;
+}
+
+const externalSessions = new Map<string, ExternalPtySession>();
+
+/** Serve `key` from `session`; the returned function unregisters it. */
+export function registerExternalPtySession(key: string, session: ExternalPtySession): () => void {
+	externalSessions.set(key, session);
+	return () => {
+		if (externalSessions.get(key) === session) externalSessions.delete(key);
+	};
+}
 let onPtyDiedCallback: ((taskId: string) => void) | null = null;
 let onBellCallback: ((taskId: string) => void) | null = null;
 let onIdleCallback: ((taskId: string) => void) | null = null;
@@ -1065,6 +1109,17 @@ export async function syncTmuxTaskTitle(taskId: string, title: string): Promise<
 	});
 }
 
+/**
+ * A task terminal shows its windows in the app's own navigator, so its tmux
+ * window bar goes. Runs after configureTmux clears stale overrides; no hook
+ * turns a session's bar back on, so this per-session `off` holds.
+ */
+async function hideTmuxWindowBar(session: PtySession): Promise<void> {
+	const target = `=${session.tmuxSessionName}:`;
+	const opts = { socket: session.tmuxSocket, bestEffort: true };
+	await tmux.setOption(target, "status", "off", opts);
+}
+
 /** Seed the title on attach — the session may predate dev3 knowing it (app restart, resume). */
 async function syncTmuxTaskTitleFromBoard(session: PtySession): Promise<void> {
 	try {
@@ -1169,26 +1224,6 @@ function checkForBell(data: string, taskId: string): void {
 	}
 }
 
-/**
- * Resize the single shared PTY to the SMALLEST size requested across all
- * currently connected clients.
- *
- * One PTY (one tmux attach client) is shared by every viewer of a session —
- * multiple app windows on the same task, plus any remote/browser clients. The
- * PTY can only be one size, so if two windows of different sizes each sent
- * their own size we'd flip-flop (last write wins) and every window except the
- * most recent one would render against the wrong geometry.
- *
- * Instead we clamp to the min cols and min rows independently — exactly how
- * tmux negotiates a session shared by multiple real clients. The smallest
- * viewer gets a perfect fit; larger viewers letterbox the content (blank
- * margin on the right / bottom) which is the correct, stable behaviour.
- *
- * Each client's last requested size lives on the WS object (`ptyCols`/
- * `ptyRows`); clients that haven't reported a size yet are ignored so a
- * freshly-connected window doesn't shrink everyone to the 80x24 default before
- * its real size arrives.
- */
 /**
  * The session's live write/resize surface, whichever backend owns it. Both are
  * the SAME shape on purpose: the WebSocket bridge, geometry negotiation, and
@@ -1635,7 +1670,58 @@ export function _nativeTakeoversInFlightForTests(): number {
 	return nativeTakeoverInFlight.size;
 }
 
-function applyClientSizes(session: PtySession): void {
+/** Orders viewer gestures across every session; only relative order matters. */
+let viewerActivitySeq = 0;
+
+/** Record a viewer's presence signal on its socket, where applyClientSizes reads it. */
+function noteViewerSignal(ws: any, signal: ViewerSignal): void {
+	if (signal === "hidden") {
+		ws.ptyHidden = true;
+		return;
+	}
+	ws.ptyHidden = false;
+	ws.ptyActiveAt = ++viewerActivitySeq;
+}
+
+/** The tmux viewer the shared PTY is sized for — see pickSizingViewer. */
+function sizingClient(session: PtySession): any | null {
+	const picked = pickSizingViewer(
+		Array.from(session.clients, (client: any) => ({
+			client,
+			cols: client.ptyCols,
+			rows: client.ptyRows,
+			hidden: client.ptyHidden,
+			activeAt: client.ptyActiveAt,
+		})),
+	);
+	return picked?.client ?? null;
+}
+
+/** Tell each tmux viewer the PTY's size and whether it is the one sizing it. */
+function publishSharedSizing(session: PtySession, sizer: any): void {
+	const { appliedCols: cols, appliedRows: rows } = session;
+	if (!cols || !rows) return;
+	for (const client of session.clients as Set<any>) {
+		const notice = encodeSizingNotice({ cols, rows, sizing: client === sizer });
+		if (client.lastSizingNotice === notice) continue;
+		client.lastSizingNotice = notice;
+		sendToClient(client, notice);
+	}
+}
+
+/**
+ * Size the single shared PTY for one viewer.
+ *
+ * One PTY (one tmux attach client) is shared by every viewer of a session —
+ * app windows plus remote/browser tabs — and can only be one size. tmux: the
+ * most recently ACTIVE visible viewer wins (`pickSizingViewer`), and every
+ * other viewer is told to render at that geometry. Native: the writer wins.
+ *
+ * `repaintUnchanged` asks for a same-size client redraw when the size does not
+ * change — wanted for a socket's first resize report (a new viewer needs its
+ * first paint), not for later reports or presence signals.
+ */
+function applyClientSizes(session: PtySession, repaintUnchanged = true): void {
 	const term = sessionShell(session);
 	if (!term) return;
 	// Only the process holding the HOST lease may size the shared PTY. Without this a
@@ -1646,32 +1732,27 @@ function applyClientSizes(session: PtySession): void {
 	// negotiation of its own, so clamping to the smallest viewer would let any
 	// remote tab (a phone in portrait, say) shrink the writer's shell out from
 	// under it. Observers letterbox instead — their zoom stays client-local.
+	const sizer = session.backend === "native" ? null : sizingClient(session);
 	const target = session.backend === "native"
 		? writerClientSize(session)
-		: smallestClientSize(
-			Array.from(session.clients, (c) => ({ cols: (c as any).ptyCols, rows: (c as any).ptyRows })),
-		);
+		: sizer && { cols: sizer.ptyCols as number, rows: sizer.ptyRows as number };
 	if (!target) return;
 	const { cols: minCols, rows: minRows } = target;
 
 	if (session.appliedCols === minCols && session.appliedRows === minRows) {
-		// A native viewer is repainted from the journal on attach, so it never needs
-		// the redraw jiggle below — and jiggling would resize a live shell for a
-		// client that merely reconnected.
+		// A native viewer is repainted from the journal on attach.
 		if (session.backend === "native") return;
-		// Target size is unchanged — typically a new, equal-or-larger viewer just
-		// connected. tmux does NOT emit a SIGWINCH / redraw for a same-size
-		// resize, so that viewer's freshly-mounted blank terminal would never get
-		// its initial paint. Force a full redraw with a one-row jiggle (same trick
-		// as the WKWebView resize nudge in window-manager.ts).
-		try {
-			term.resize(minCols, Math.max(1, minRows - 1));
-			setTimeout(() => {
-				try { term.resize(minCols, minRows); } catch { /* ignore */ }
-			}, 16);
-		} catch (err) {
-			log.debug("applyClientSizes jiggle failed", { error: String(err) });
+		// A fresh viewer needs its first paint: reinitialize the attached client,
+		// including mouse modes, at the SAME size. Unlike resizing its PTY, this
+		// does not send SIGWINCH to the pane's app.
+		if (repaintUnchanged && session.proc) {
+			try {
+				session.proc.kill("SIGWINCH");
+			} catch (err) {
+				log.warn("tmux viewer redraw failed", { error: String(err) });
+			}
 		}
+		publishSharedSizing(session, sizer);
 		return;
 	}
 
@@ -1718,6 +1799,7 @@ function applyClientSizes(session: PtySession): void {
 	} catch (err) {
 		log.debug("applyClientSizes resize failed", { error: String(err) });
 	}
+	publishSharedSizing(session, sizer);
 }
 
 /**
@@ -1974,8 +2056,7 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 	}
 
 	session.proc = proc;
-	// Track the geometry the PTY was spawned with so applyClientSizes can tell a
-	// real size change from a same-size resize (which needs a forced redraw).
+	// Same-size reports request a redraw; only a changed size may resize the PTY.
 	session.appliedCols = cols;
 	session.appliedRows = rows;
 
@@ -2008,7 +2089,10 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 		(async () => {
 			try {
 				await configureTmux(tmuxSessionName, session.tmuxSocket);
-				if (session.sessionType === "task") void syncTmuxTaskTitleFromBoard(session);
+				if (session.sessionType === "task") {
+					void syncTmuxTaskTitleFromBoard(session);
+					void hideTmuxWindowBar(session);
+				}
 				const sessionSocket = session.tmuxSocket;
 				tmux.setEnvironment(tmuxSessionName, "DEV3_WORKTREE_ROOT", session.cwd, { socket: sessionSocket }).catch(() => {});
 				const envKeys = Object.keys(session.env);
@@ -2099,6 +2183,10 @@ function findTaskIdByTmuxSession(tmuxSessionName: string): string | null {
 
 export const PTY_SERVER_HOSTNAME = "127.0.0.1";
 
+function isLoopbackAddress(address: string | undefined): boolean {
+	return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
 const ptyServer = Bun.serve({
 	hostname: PTY_SERVER_HOSTNAME,
 	port: 0,
@@ -2120,6 +2208,16 @@ const ptyServer = Bun.serve({
 					}
 				}
 				return new Response("ok");
+			}
+
+			if (url.pathname.startsWith(SHARED_VIDEO_ROUTE)) {
+				// Loopback only: the server listens on every interface, the token is not the only guard.
+				if (!isLoopbackAddress(server.requestIP(req)?.address)) return new Response("Forbidden", { status: 403 });
+				// The desktop page is a different origin (views://); CORS lets its download fetch read the bytes.
+				return serveSharedVideo(req, url.pathname, { "Access-Control-Allow-Origin": "*" }).catch((err) => {
+					log.error("Shared video stream failed", { error: String(err) });
+					return new Response("Internal error", { status: 500 });
+				});
 			}
 
 			log.debug("PTY server fetch", { url: req.url });
@@ -2149,6 +2247,14 @@ const ptyServer = Bun.serve({
 				if (!sessionId) {
 					log.warn("WS connection without session param");
 					ws.close(PTY_WS_CLOSE.MISSING_SESSION, "Missing session parameter");
+					return;
+				}
+
+				const external = externalSessions.get(sessionId);
+				if (external) {
+					(ws as any).sessionId = sessionId;
+					(ws as any).externalSession = external;
+					external.attach(ws as unknown as ExternalPtyViewer);
 					return;
 				}
 
@@ -2185,14 +2291,8 @@ const ptyServer = Bun.serve({
 				const cols = 80;
 				const rows = 24;
 
-				// If no proc yet, spawn one. If proc exists, just attach
-				// the WS — the freshly-mounted ghostty-web terminal on the
-				// client is already blank, and the client's resize dance
-				// will force tmux to SIGWINCH and emit a full pane redraw
-				// via the natural PTY data path. Any explicit clear or
-				// capture-pane replay here races that redraw and causes
-				// visible flicker on every task switch; sending nothing
-				// is the clean path. See fix: task cb75af7b.
+				// Existing tmux clients redraw on the viewer's first size report.
+				// Replaying capture-pane here would race that redraw at a stale width.
 				if (session.backend === "native") {
 					// Never spawn from here: a native session's host is created by the
 					// launch path and rediscovered by reattach. A missing one means the
@@ -2221,7 +2321,7 @@ const ptyServer = Bun.serve({
 					log.info("No proc, spawning new PTY", { taskId: shortId(sessionId) });
 					spawnPty(session, cols, rows);
 				} else {
-					log.info("Reconnecting to existing PTY, tmux will redraw on resize", {
+					log.info("Reconnecting to existing PTY, tmux will redraw on size report", {
 						taskId: shortId(sessionId),
 					});
 				}
@@ -2236,6 +2336,14 @@ const ptyServer = Bun.serve({
 			try {
 				const sessionId = (ws as any).sessionId as string | undefined;
 				if (!sessionId) return;
+				const external = (ws as any).externalSession as ExternalPtySession | undefined;
+				if (external) {
+					const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+					const size = isResizeSequence(text) ? parseResizeSequence(text) : null;
+					if (size) external.resize(ws as unknown as ExternalPtyViewer, size.cols, size.rows);
+					else if (!isResizeSequence(text) && !isViewerSignal(text)) external.input(ws as unknown as ExternalPtyViewer, text);
+					return;
+				}
 				const session = sessions.get(sessionId);
 				if (!session) return;
 				const shell = sessionShell(session);
@@ -2254,6 +2362,8 @@ const ptyServer = Bun.serve({
 						}
 						return;
 					}
+					// Native sizing follows the writer lease, not presence.
+					if (isViewerSignal(data)) return;
 					// Every viewer reports its own viewport; only the writer's reaches the
 					// PTY (see applyClientSizes), so an observer's zoom stays client-local.
 					if (isResizeSequence(data)) {
@@ -2277,15 +2387,26 @@ const ptyServer = Bun.serve({
 					return;
 				}
 
-				// Handle resize messages. Record this client's requested size and
-				// resize the shared PTY to the smallest across all clients, so
-				// multiple windows on the same task don't fight over the geometry.
+				if (isViewerSignal(data)) {
+					const signal = parseViewerSignal(data);
+					if (signal) {
+						noteViewerSignal(ws, signal);
+						applyClientSizes(session, false);
+					}
+					return;
+				}
+
+				// Record this client's viewport; the shared PTY follows whichever
+				// viewer was active last (applyClientSizes). Only a socket's first
+				// report needs a repaint — a follower re-reporting its own viewport
+				// renders at the shared grid and needs no redraw.
 				if (isResizeSequence(data)) {
 					const size = parseResizeSequence(data);
-					if (size) {
+					if (size && (size.cols !== (ws as any).ptyCols || size.rows !== (ws as any).ptyRows)) {
+						const firstReport = (ws as any).ptyCols === undefined;
 						(ws as any).ptyCols = size.cols;
 						(ws as any).ptyRows = size.rows;
-						applyClientSizes(session);
+						applyClientSizes(session, firstReport);
 					}
 					return;
 				}
@@ -2306,6 +2427,11 @@ const ptyServer = Bun.serve({
 				ptyOutputRecorder.forget(ws);
 				const sessionId = (ws as any).sessionId as string | undefined;
 				if (!sessionId) return;
+				const external = (ws as any).externalSession as ExternalPtySession | undefined;
+				if (external) {
+					external.detach(ws as unknown as ExternalPtyViewer);
+					return;
+				}
 
 				log.info("WS disconnected", {
 					taskId: shortId(sessionId),
@@ -2328,9 +2454,9 @@ const ptyServer = Bun.serve({
 							roleMessage(effectiveNativeRole(session, promoted.writer), false, nativePtyGeometry(session)),
 						);
 					}
-					// A viewer left: the smallest-size constraint may have relaxed,
-					// so grow the PTY back to the smallest of the remaining clients.
-					applyClientSizes(session);
+					// A viewer left: if it was the sizer, the next most recently
+					// active viewer takes the size over. Nobody new needs a first paint.
+					applyClientSizes(session, false);
 				}
 			} catch (err) {
 				log.error("WS close handler error", {

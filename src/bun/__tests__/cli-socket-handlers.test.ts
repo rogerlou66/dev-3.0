@@ -47,7 +47,7 @@ vi.mock("../shared-images", () => ({
 		createdAt: 1,
 		...(caption ? { caption } : {}),
 	})),
-	saveSharedVideo: vi.fn((_projectPath: string, src: string, caption?: string) => ({
+	saveSharedVideos: vi.fn(async (_projectPath: string, items: { path: string; caption?: string }[]) => items.map(({ path: src, caption }) => ({
 		id: `vid-${src}`,
 		storedPath: `/wt/shared-images/${src.split("/").pop()}`,
 		originalPath: src,
@@ -56,7 +56,7 @@ vi.mock("../shared-images", () => ({
 		bytes: 1,
 		createdAt: 1,
 		...(caption ? { caption } : {}),
-	})),
+	}))),
 }));
 
 vi.mock("../shared-artifacts", () => ({
@@ -147,6 +147,14 @@ vi.mock("../board-operations/runtime", async () => {
 
 vi.mock("../notification-log", () => ({
 	appendNotificationLog: vi.fn(),
+}));
+
+vi.mock("../project-registration", () => ({
+	registerProject: vi.fn(async () => ({ outcome: "added" })),
+	cloneProject: vi.fn(async () => ({ outcome: "added" })),
+	listSpaces: vi.fn(async () => ({ version: 1, spaces: [], order: [] })),
+	createSpaceWith: vi.fn(async () => ({ id: "sp_1" })),
+	changeProjectSpaces: vi.fn(async () => ({ deletedSpaces: [] })),
 }));
 
 vi.mock("../task-start-ref", () => ({
@@ -242,7 +250,7 @@ import { flushAndEnd } from "../socket-backpressure";
 import { existsSync, readdirSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { addVent } from "../vents";
 import { getServerPort } from "../remote-access-server";
-import { saveSharedImage, saveSharedVideo } from "../shared-images";
+import { saveSharedImage, saveSharedVideos } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
 import { cancelScheduledMessageByRef, scheduleMessage, sendMessageImmediately } from "../scheduled-message-scheduler";
@@ -1210,6 +1218,51 @@ describe("projects.list", () => {
 	});
 });
 
+describe("projects.add / projects.clone / spaces.*", () => {
+	it("hands projects.add its flags, dropping anything that is not a string list", async () => {
+		const { registerProject } = await import("../project-registration");
+
+		const resp = await handleRequest(makeRequest("projects.add", {
+			path: "/repos/app", init: true, spaces: ["Work / Side", 7], newSpaces: "not-a-list", noSpace: "yes",
+		}));
+
+		expect(resp.ok).toBe(true);
+		expect(registerProject).toHaveBeenCalledWith({
+			path: "/repos/app", name: undefined, init: true, spaces: ["Work / Side"], newSpaces: [], noSpace: false,
+		});
+	});
+
+	it("hands projects.clone its URL, folder and name", async () => {
+		const { cloneProject } = await import("../project-registration");
+
+		await handleRequest(makeRequest("projects.clone", { url: "https://example.com/g/r.git", dir: "/clones", name: "r" }));
+
+		expect(cloneProject).toHaveBeenCalledWith({
+			url: "https://example.com/g/r.git", dir: "/clones", name: "r", spaces: [], newSpaces: [], noSpace: false,
+		});
+	});
+
+	it("rejects an unknown spaces.change mode and a missing project", async () => {
+		const bad = await handleRequest(makeRequest("spaces.change", { projectId: "p1", mode: "move", spaces: [] }));
+		expect(bad.ok).toBe(false);
+		expect(bad.error).toContain("Invalid mode");
+
+		const noProject = await handleRequest(makeRequest("spaces.change", { mode: "add", spaces: ["A"] }));
+		expect(noProject.ok).toBe(false);
+		expect(noProject.error).toContain("projectId is required");
+	});
+
+	it("routes spaces.change and spaces.create", async () => {
+		const { changeProjectSpaces, createSpaceWith } = await import("../project-registration");
+
+		await handleRequest(makeRequest("spaces.change", { projectId: "p1", mode: "remove", spaces: ["A"] }));
+		await handleRequest(makeRequest("spaces.create", { name: "Side", projectIds: ["p1"] }));
+
+		expect(changeProjectSpaces).toHaveBeenCalledWith({ projectId: "p1", mode: "remove", spaces: ["A"] });
+		expect(createSpaceWith).toHaveBeenCalledWith({ name: "Side", projectIds: ["p1"] });
+	});
+});
+
 describe("tasks.list", () => {
 	it("errors when projectId is missing", async () => {
 		const resp = await handleRequest(makeRequest("tasks.list"));
@@ -1962,7 +2015,7 @@ describe("ui.show-image", () => {
 		const pushFn = vi.fn();
 		wireShowImage(project, task, pushFn);
 		const imageSpy = vi.mocked(saveSharedImage);
-		const videoSpy = vi.mocked(saveSharedVideo);
+		const videoSpy = vi.mocked(saveSharedVideos);
 		imageSpy.mockClear();
 		videoSpy.mockClear();
 
@@ -1972,7 +2025,7 @@ describe("ui.show-image", () => {
 
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ delivered: true, stored: 1 });
-		expect(videoSpy).toHaveBeenCalledWith(project.path, "/tmp/demo.mp4", "play me");
+		expect(videoSpy).toHaveBeenCalledWith(project.path, [{ path: "/tmp/demo.mp4", caption: "play me" }]);
 		expect(imageSpy).not.toHaveBeenCalled();
 		const cliPush = pushFn.mock.calls.find((c) => c[0] === "cliShowImage");
 		expect(cliPush?.[1]).toMatchObject({ newKind: "video", newCount: 1 });
@@ -5253,5 +5306,37 @@ describe("review.*", () => {
 		resp = await handleRequest(makeRequest("review.reply", { taskId: task.id, projectId: "proj-1", commentId: "c1234567", body: "  " }));
 		expect(resp.ok).toBe(false);
 		expect(resp.error).toContain("body is required");
+	});
+});
+
+describe("message.send — the sender's role travels to the envelope", () => {
+	// The receiver's auto-mode classifier treats a coordinator's order as the
+	// user's own words; it keys on this role, so the app must stamp it.
+	const SENDER = "cccccccc-1111-2222-3333-444444444444";
+	const TARGET = "dddddddd-1111-2222-3333-444444444444";
+
+	function sendFrom(sender: Task) {
+		const tasks = [sender, makeTask({ id: TARGET, seq: 2 })];
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue(tasks);
+		vi.mocked(data.getTask).mockImplementation(async (_p, id) => tasks.find((t) => t.id === id)!);
+		return handleRequest(
+			makeRequest("message.send", { subject: "merge it", taskId: TARGET, projectId: "proj-1", sourceTaskId: SENDER, text: "merge" }),
+		);
+	}
+
+	it("stamps role coordinator when a coordinator task sends", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1, taskType: "coordinator" }));
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[3]).toMatchObject({ taskId: SENDER, role: "coordinator" });
+	});
+
+	it("stamps no role for an ordinary task", async () => {
+		await sendFrom(makeTask({ id: SENDER, seq: 1 }));
+		const source = vi.mocked(sendMessageImmediately).mock.calls[0]?.[3];
+		expect(source).toMatchObject({ taskId: SENDER });
+		expect(source).not.toHaveProperty("role");
 	});
 });

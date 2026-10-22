@@ -211,7 +211,7 @@ Pull the user back deliberately — enough that they never miss something needin
 
 - \`dev3 attention "reason"\` — red badge on the card until the user opens the task (reasons accumulate, up to 5). Default for anything that needs them. \`--clear\` lowers it the moment the cause is resolved and they never came; a badge outliving its cause trains them to ignore badges.
 - \`dev3 notify "message" [--level info|success|error] [--duration <seconds>]\` — clickable in-app toast (ephemeral, 2s–30s). \`--desktop\` instead sends a native OS notification that shows even when the app is backgrounded; never combine the two flags.
-- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts; \`show-video\` plays MP4/WebM ≤25 MB there); files are copied into the worktree and **each \`--caption\` annotates the file it follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, show them rather than describing them or leaving a path to open.
+- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts; \`show-video\` plays MP4/WebM ≤300 MB there); files are copied into the worktree and **each \`--caption\` annotates the file it follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, show them rather than describing them or leaving a path to open.
 - \`dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]\` — **show an HTML artifact** (see the artifacts section above).
 - \`dev3 ui state\` — focused task/project, app foreground, user idle time (\`userActivity\`). Check BEFORE pinging.
 
@@ -309,7 +309,7 @@ Hooks automatically manage task status transitions (\`in-progress\`, \`user-ques
 Do NOT call \`dev3 task move\` for status changes — hooks handle it. On projects with Automatic AI Review enabled, completed work passes through \`review-by-ai\` before \`review-by-user\`. You can still use \`dev3 task move\` for custom columns.
 ${SKILL_CUSTOM_COLUMNS}${SKILL_COMPLETION_REQUEST}`;
 
-// A hook-owned lifecycle (Codex, omp). Keep manual moves limited to decisions
+// A hook-owned lifecycle (Codex, omp, pi). Keep manual moves limited to decisions
 // that cannot be inferred from native events (semantic questions/custom columns).
 function skillStatusNativeHooks(agent: string): string {
 	return `
@@ -324,6 +324,7 @@ ${SKILL_CUSTOM_COLUMNS}${SKILL_COMPLETION_REQUEST}`;
 }
 const SKILL_STATUS_CODEX_HOOKS = skillStatusNativeHooks("Codex");
 const SKILL_STATUS_OMP_HOOKS = skillStatusNativeHooks("omp");
+const SKILL_STATUS_PI_HOOKS = skillStatusNativeHooks("pi");
 
 const SKILL_CODEX_SHELL = `
 ## Codex shell note
@@ -371,4 +372,5 @@ Approved → actual vs expected behavior, minimal reproduction, dev3 version and
 export const CLAUDE_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_MANUAL_COMPLETION;
 export const CODEX_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_CODEX_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_CODEX_SHELL + SKILL_MANUAL_COMPLETION;
 export const OMP_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_OMP_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_MANUAL_COMPLETION;
+export const PI_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_PI_HOOKS + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_MANUAL_COMPLETION;
 export const GENERIC_SKILL_BODY = SKILL_HEADER + SKILL_BUG_HUNTER_ISOLATION + SKILL_SESSION_START_CHECKLIST + SKILL_BRANCH_NAMING + SKILL_TITLE_GENERATION + SKILL_STATUS_MANUAL + SKILL_OVERVIEW + SKILL_SCRATCH_TASK + SKILL_ASK_TO_LAUNCH + SKILL_NOTES + SKILL_CONVERSATION_SEARCH + SKILL_PEEK + SKILL_DEV_SERVER_CONTROL + SKILL_ARTIFACTS + SKILL_GET_ATTENTION + SKILL_PANES + SKILL_PROJECT_CONFIG_REDIRECT + SKILL_VENT_FEEDBACK + SKILL_CODEX_SHELL + SKILL_MANUAL_COMPLETION;

@@ -9,10 +9,19 @@ vi.mock("../../rpc", () => ({
 	api: {
 		request: {
 			readImageBase64: vi.fn(),
+			getSharedVideoUrl: vi.fn(),
 			openImageFile: vi.fn().mockResolvedValue(undefined),
 		},
 	},
 }));
+
+const platform = vi.hoisted(() => ({ remote: false }));
+vi.mock("../../utils/platform", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../utils/platform")>()),
+	isRemote: () => platform.remote,
+}));
+const fileOpen = vi.hoisted(() => ({ openFileInBrowser: vi.fn(async (_path: string) => {}) }));
+vi.mock("../../file-open-browser", () => fileOpen);
 
 import { api } from "../../rpc";
 const mockedApi = vi.mocked(api, true);
@@ -40,6 +49,10 @@ function renderViewer(onClose = vi.fn(), initialIndex = IMAGES.length - 1) {
 	return onClose;
 }
 
+afterEach(() => {
+	platform.remote = false;
+});
+
 beforeEach(() => {
 	(mockedApi.request.readImageBase64 as ReturnType<typeof vi.fn>).mockResolvedValue({
 		dataUrl: "data:image/png;base64,AAAA",
@@ -47,6 +60,23 @@ beforeEach(() => {
 });
 
 describe("TaskImageViewer", () => {
+	it("opens the file on the host from the desktop, and in this browser from remote mode", async () => {
+		platform.remote = false;
+		renderViewer();
+		await userEvent.click(await screen.findByRole("button", { name: "Open in default app" }));
+		expect(mockedApi.request.openImageFile).toHaveBeenCalledWith({ path: "/wt/shared-images/c.png" });
+		expect(fileOpen.openFileInBrowser).not.toHaveBeenCalled();
+	});
+
+	it("labels the remote open action for what it does and hands the file to the browser", async () => {
+		platform.remote = true;
+		vi.mocked(mockedApi.request.openImageFile).mockClear();
+		renderViewer();
+		await userEvent.click(await screen.findByRole("button", { name: "Open in new tab" }));
+		expect(fileOpen.openFileInBrowser).toHaveBeenCalledWith("/wt/shared-images/c.png");
+		expect(mockedApi.request.openImageFile).not.toHaveBeenCalled();
+	});
+
 	it("opens on the newest image (initialIndex) and shows the counter", async () => {
 		renderViewer();
 		expect(screen.getByText("3 / 3")).toBeInTheDocument();
@@ -337,6 +367,31 @@ describe("TaskImageViewer comment mode", () => {
 		expect(screen.getByTestId("image-review-thread")).toHaveTextContent("Toolbar overlaps here");
 	});
 
+	it("sends a region comment to the agent on the send shortcut", async () => {
+		const user = userEvent.setup();
+		renderCommentable({ id: "t1" });
+		await screen.findByTestId("viewer-main-image");
+		stubLayout();
+		await user.click(screen.getByTestId("image-viewer-comment"));
+
+		const overlay = await screen.findByTestId("image-review-overlay");
+		overlay.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+		overlay.setPointerCapture = () => {};
+		fireEvent.pointerDown(overlay, { button: 0, clientX: 100, clientY: 60, pointerId: 1 });
+		fireEvent.pointerMove(overlay, { clientX: 300, clientY: 150, pointerId: 1 });
+		fireEvent.pointerUp(overlay, { clientX: 300, clientY: 150, pointerId: 1 });
+
+		await screen.findByTestId("image-review-composer");
+		await user.type(screen.getByPlaceholderText("Leave a comment on this line..."), "Toolbar overlaps here");
+		// isMac() is false in the test environment, so the combo is Ctrl+Enter.
+		await user.keyboard("{Control>}{Enter}{/Control}");
+
+		await waitFor(() => expect(reviewApi().sendAgentMessageNow).toHaveBeenCalledTimes(1));
+		const { text } = reviewApi().sendAgentMessageNow.mock.calls[0][0] as { text: string };
+		expect(text).toContain("<comment>Toolbar overlaps here</comment>");
+		await waitFor(() => expect(reviewApi().markReviewCommentsSent).toHaveBeenCalledTimes(1));
+	});
+
 	it("draws regions from the task record even with comment mode off, and a click without a drag becomes a small box", async () => {
 		const user = userEvent.setup();
 		renderCommentable({
@@ -365,7 +420,11 @@ describe("TaskImageViewer with a shared video", () => {
 	let createObjectURL: ReturnType<typeof vi.spyOn>;
 	let revokeObjectURL: ReturnType<typeof vi.spyOn>;
 
+	const STREAM_URL = "http://127.0.0.1:4242/shared-video/tok";
+
 	beforeEach(() => {
+		(mockedApi.request.getSharedVideoUrl as ReturnType<typeof vi.fn>).mockReset();
+		(mockedApi.request.getSharedVideoUrl as ReturnType<typeof vi.fn>).mockResolvedValue({ url: STREAM_URL, path: "/shared-video/tok" });
 		(mockedApi.request.readImageBase64 as ReturnType<typeof vi.fn>).mockClear();
 		(mockedApi.request.readImageBase64 as ReturnType<typeof vi.fn>).mockImplementation(async ({ path }: { path: string }) => ({
 			dataUrl: path.endsWith(".mp4") ? "data:video/mp4;base64,AAAA" : "data:image/png;base64,AAAA",
@@ -389,7 +448,11 @@ describe("TaskImageViewer with a shared video", () => {
 	it("plays the clip in the same stage with controls and no autoplay", async () => {
 		renderMixed(1, { taskId: "t1", projectId: "p1" });
 		const video = (await screen.findByTestId("viewer-main-video")) as HTMLVideoElement;
-		expect(video).toHaveAttribute("src", "blob:clip");
+		// Streamed by URL: no base64 read and no blob copy of the clip.
+		expect(video).toHaveAttribute("src", STREAM_URL);
+		expect(mockedApi.request.getSharedVideoUrl).toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
+		expect(mockedApi.request.readImageBase64).not.toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
+		expect(createObjectURL).not.toHaveBeenCalled();
 		expect(video.controls).toBe(true);
 		expect(video.autoplay).toBe(false);
 		expect(video).toHaveAttribute("preload", "metadata");
@@ -400,18 +463,19 @@ describe("TaskImageViewer with a shared video", () => {
 		expect(screen.getByText("2 / 3")).toBeInTheDocument();
 	});
 
-	it("never reads a clip's bytes for the rail, only when it is on stage", async () => {
+	it("asks for a clip's stream URL only when it is on stage, never reading its bytes", async () => {
 		renderMixed(2);
 		await waitFor(() => {
 			expect(mockedApi.request.readImageBase64).toHaveBeenCalledWith({ path: "/wt/shared-images/a.png" });
 			expect(mockedApi.request.readImageBase64).toHaveBeenCalledWith({ path: "/wt/shared-images/c.png" });
 		});
-		expect(mockedApi.request.readImageBase64).not.toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
+		expect(mockedApi.request.getSharedVideoUrl).not.toHaveBeenCalled();
 		expect(screen.getByTestId("viewer-thumb-video")).toBeInTheDocument();
 
 		await userEvent.click(screen.getByRole("button", { name: "demo.mp4" }));
 		await screen.findByTestId("viewer-main-video");
-		expect(mockedApi.request.readImageBase64).toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
+		expect(mockedApi.request.getSharedVideoUrl).toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
+		expect(mockedApi.request.readImageBase64).not.toHaveBeenCalledWith({ path: "/wt/shared-images/v.mp4" });
 	});
 
 	it("switches back to a picture when stepping off the clip", async () => {
@@ -437,6 +501,13 @@ describe("TaskImageViewer with a shared video", () => {
 		expect(play).toHaveBeenCalledTimes(1);
 	});
 
+	it("shows the load error when the host refuses to stream the clip", async () => {
+		(mockedApi.request.getSharedVideoUrl as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+		renderMixed(1);
+		expect(await screen.findByTestId("viewer-media-error")).toBeInTheDocument();
+		expect(screen.queryByTestId("viewer-main-video")).toBeNull();
+	});
+
 	it("explains an undecodable clip instead of showing a blank player", async () => {
 		renderMixed(1);
 		const video = await screen.findByTestId("viewer-main-video");
@@ -444,18 +515,21 @@ describe("TaskImageViewer with a shared video", () => {
 		expect(await screen.findByTestId("viewer-media-error")).toHaveTextContent(/doesn't support its format or codec/);
 	});
 
-	it("downloads the clip under its own name and frees the blob on close", async () => {
+	it("fetches the clip only on Download, saves it under its own name and frees the blob", async () => {
 		const names: string[] = [];
 		const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
 			names.push(this.download);
 		});
-		const view = renderMixed(1);
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(new Blob([new Uint8Array(4)])));
+		renderMixed(1);
 		await screen.findByTestId("viewer-main-video");
+		expect(fetchSpy).not.toHaveBeenCalled();
 		expect(screen.getByTestId("image-viewer-download")).toHaveAccessibleName("Download video");
 		await userEvent.click(screen.getByTestId("image-viewer-download"));
-		expect(names).toEqual(["demo.mp4"]);
-		view.unmount();
-		expect(revokeObjectURL).toHaveBeenCalledWith("blob:clip");
+		await waitFor(() => expect(names).toEqual(["demo.mp4"]));
+		expect(fetchSpy).toHaveBeenCalledWith(STREAM_URL, { credentials: "same-origin" });
+		await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:clip"));
+		fetchSpy.mockRestore();
 		click.mockRestore();
 	});
 });

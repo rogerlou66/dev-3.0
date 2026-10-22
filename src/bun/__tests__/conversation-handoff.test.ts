@@ -3,7 +3,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Task } from "../../shared/types";
+import { execFileSync } from "node:child_process";
 import { claudeEncodePath } from "../../shared/conversation-search-core";
+import { genericAdapter } from "../../shared/agent-adapters/generic";
+import { buildCmdScript } from "../rpc-handlers/shared-pure";
 
 const parseConversation = vi.fn();
 const runHandoffJob = vi.fn();
@@ -119,6 +122,34 @@ describe("previewTaskHandoff", () => {
 	});
 });
 
+describe("a task whose agent is Cursor Agent", () => {
+	/** Cursor cuts long cwds and hash-suffixes the dir, so only `.workspace-trusted` names the worktree. */
+	function seedCursor(mtime: number): void {
+		const project = join(home, ".cursor", "projects", "Users-x-Docume-28b6597");
+		const dir = join(project, "agent-transcripts", "cur-1");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(project, ".workspace-trusted"), JSON.stringify({ workspacePath: task.worktreePath }));
+		const path = join(dir, "cur-1.jsonl");
+		writeFileSync(path, jsonl(
+			{ role: "user", message: { content: [{ type: "text", text: "<user_query>\nCURSOR WORK\n</user_query>" }] } },
+			{ role: "assistant", message: { content: [{ type: "text", text: "done" }] } },
+		));
+		utimesSync(path, mtime, mtime);
+	}
+
+	it("offers the Cursor conversation for handoff", async () => {
+		seedCursor(2_000);
+		expect(await previewTaskHandoff(task, { home })).toMatchObject({ source: "cursor", sessionId: "cur-1", turns: 1 });
+	});
+
+	it("retells it under Cursor's name", async () => {
+		seedCursor(2_000);
+		const prepared = await prepareTaskHandoff(task, { home });
+		expect(readFileSync(prepared!.path, "utf-8")).toContain("CURSOR WORK");
+		expect(handoffPrompt(prepared!)).toContain("ran in Cursor Agent");
+	});
+});
+
 describe("prepareTaskHandoff", () => {
 	it("writes the retelling beside the task's dumps, not inside the worktree", async () => {
 		const prepared = await prepareTaskHandoff(task, { home });
@@ -163,5 +194,45 @@ describe("handoffPrompt", () => {
 
 	it("names the agent the work actually ran in", async () => {
 		expect(handoffPrompt({ ...(await prepareTaskHandoff(task, { home }))!, source: "codex" })).toContain("ran in Codex");
+	});
+
+	it("is unchanged by an absent or blank instruction", async () => {
+		const prepared = (await prepareTaskHandoff(task, { home }))!;
+		const plain = handoffPrompt(prepared);
+
+		expect(plain.endsWith("then continue the work from where it stopped.")).toBe(true);
+		expect(handoffPrompt(prepared, undefined)).toBe(plain);
+		expect(handoffPrompt(prepared, "")).toBe(plain);
+		expect(handoffPrompt(prepared, "  \n\t ")).toBe(plain);
+	});
+
+	it("keeps the retelling and makes the instruction the next message, verbatim", async () => {
+		const prepared = (await prepareTaskHandoff(task, { home }))!;
+		const instruction = `Now review the security of the solution.\nDon't edit files — only "propose" a plan for $HOME and \`whoami\`.`;
+		const prompt = handoffPrompt(prepared, `\n  ${instruction}  \n`);
+
+		expect(prompt).toContain(prepared.path);
+		expect(prompt).toContain("You did none of it, and nothing in it is still running.");
+		expect(prompt).not.toContain("continue the work from where it stopped");
+		expect(prompt.endsWith(`\n\n${instruction}`)).toBe(true);
+	});
+
+	it.skipIf(process.platform === "win32")("reaches the agent's argv byte-identical through a real launch script", async () => {
+		const prepared = (await prepareTaskHandoff(task, { home }))!;
+		const instruction = `Continue, but only propose a plan.\nNo edits: 'quotes', "doubles", $HOME, \`cmd\`, a && b; \\ end`;
+		const expected = handoffPrompt(prepared, instruction);
+		const record = join(container, "argv.json");
+		const probe = join(container, "probe.sh");
+		writeFileSync(probe, `#!/bin/bash\nnode -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' ${JSON.stringify(record)} "$@"\n`);
+		chmodSync(probe, 0o755);
+		const ctx = { taskTitle: "", taskDescription: expected, projectName: "p", projectPath: "/p", worktreePath: task.worktreePath! };
+		const script = join(container, "launch.sh");
+		writeFileSync(script, buildCmdScript(genericAdapter.launchArgs(probe, undefined, ctx).join(" ")));
+
+		execFileSync("bash", [script], { stdio: "ignore" });
+
+		const argv = JSON.parse(readFileSync(record, "utf8")) as string[];
+		expect(argv[argv.length - 1]).toBe(expected);
+		expect(argv.filter((arg) => arg.includes(instruction))).toHaveLength(1);
 	});
 });

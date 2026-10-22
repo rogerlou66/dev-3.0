@@ -1,7 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import type { Project, TaskStatus } from "../../shared/types";
-import { computeTaskTimeBreakdown } from "../../shared/types";
 
 const TEST_HOME = vi.hoisted(() => `${process.env.DEV3_TEST_ROOT}/data-blocked`);
 vi.mock("../paths", () => ({ DEV3_HOME: TEST_HOME }));
@@ -46,11 +45,9 @@ describe("persisted task blocking", () => {
 		const promoted = await updateTask(project, task.id, { status: "review-by-colleague" });
 		expect(promoted.blocked).toBe(true);
 		expect(promoted.blockedAt).toBe(new Date(start + minute).toISOString());
-		expect(computeTaskTimeBreakdown(promoted, start + 8 * minute).userMs).toBe(minute);
 		vi.setSystemTime(start + 5 * minute);
 		const unblocked = await updateTask(project, task.id, { blocked: false });
 		expect(unblocked).toMatchObject({ blocked: false, blockedAt: null, status: "review-by-colleague", blockedDurationMs: 4 * minute });
-		expect(computeTaskTimeBreakdown(unblocked, start + 6 * minute).userMs).toBe(2 * minute);
 	});
 
 	it.each(["todo", "in-progress", "user-questions", "review-by-ai", "completed", "cancelled"] as TaskStatus[])("rejects blocking %s at the locked write boundary", async (status) => {

@@ -7,7 +7,7 @@
     if (event.data && event.data.type === "dev3-artifact-theme") setTheme(event.data.theme);
   });
   if (!document.documentElement.dataset.theme) {
-    setTheme(matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    setTheme("light");
   }
 
   const prefersReducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -293,6 +293,12 @@
       closePopover(panel, false);
     });
   }, true);
+  // A pill cut to an ellipsis still shows its whole label on hover.
+  document.addEventListener("pointerover", (event) => {
+    const pill = event.target instanceof Element ? event.target.closest(".pill") : null;
+    if (!pill || pill.hasAttribute("title") || pill.scrollWidth <= pill.clientWidth) return;
+    pill.title = pill.textContent.trim();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     popoverTriggers.forEach((_, panel) => { if (panel.dataset.open) closePopover(panel); });
@@ -464,8 +470,8 @@
       textStyle: { fontFamily: CHART_FONT, color: tokenColor("--dev3-text-secondary"), fontSize: scaledFont(12) },
       categoryAxis: { axisLine: { lineStyle: { color: tokenColor("--dev3-border") } }, axisTick: { show: false }, axisLabel, splitLine: { show: false } },
       valueAxis: { axisLine: { show: false }, axisTick: { show: false }, axisLabel, splitLine: softSplit },
-      legend: { textStyle: { color: tokenColor("--dev3-text-secondary"), fontSize: scaledFont(11) }, itemWidth: 14, itemHeight: 9 },
-      radar: { axisName: { color: tokenColor("--dev3-text-muted"), fontSize: scaledFont(10) }, axisLine: { lineStyle: { color: tokenColor("--dev3-border") } }, splitLine: softSplit, splitArea: { show: false } },
+      legend: { textStyle: { color: tokenColor("--dev3-text-secondary"), fontSize: scaledFont(12) }, itemWidth: 14, itemHeight: 9 },
+      radar: { axisName: { color: tokenColor("--dev3-text-secondary"), fontSize: scaledFont(11) }, axisLine: { lineStyle: { color: tokenColor("--dev3-border") } }, splitLine: softSplit, splitArea: { show: false } },
     });
   }
 
@@ -624,7 +630,7 @@
 
   // ---- generic shell controls -----------------------------------------------
   let themeMode = "auto";
-  let hostTheme = document.documentElement.dataset.theme || "dark";
+  let hostTheme = document.documentElement.dataset.theme || "light";
   const artifactTheme = document.getElementById("artifactTheme");
   const toast = document.getElementById("toast");
 

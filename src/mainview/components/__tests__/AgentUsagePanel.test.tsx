@@ -33,6 +33,8 @@ function accounts(): AgentAccountsState {
 			systemConfigDir: "/home/me/.claude", systemIdentity: null,
 		},
 		codex: { accounts: [], activeId: null, currentIdentity: null },
+		omp: { accounts: [], activeId: null },
+		pi: { accounts: [], activeId: null },
 	};
 }
 
@@ -56,6 +58,8 @@ function sameEmailAccounts(): AgentAccountsState {
 			systemConfigDir: "/home/me/.claude", systemIdentity: null,
 		},
 		codex: { accounts: [], activeId: null, currentIdentity: null },
+		omp: { accounts: [], activeId: null },
+		pi: { accounts: [], activeId: null },
 	};
 }
 
@@ -183,6 +187,18 @@ describe("AgentUsagePanel", () => {
 		} finally {
 			window.removeEventListener(AGENT_ACCOUNTS_CHANGED_EVENT, onChanged);
 		}
+	});
+
+	it("offers Auto as a default once two logins exist, and shows it chosen", async () => {
+		renderPanel();
+		await userEvent.click(screen.getByRole("radio", { name: "Make Auto (balanced) the default account" }));
+		expect(setActive).toHaveBeenCalledWith({ kind: "claude", accountId: "auto" });
+
+		const state = accounts();
+		state.claude.autoDefault = true;
+		renderPanel(state);
+		const checked = screen.getAllByRole("radio").filter((r) => r.getAttribute("aria-checked") === "true");
+		expect(checked[checked.length - 1]?.textContent).toContain("Auto (balanced)");
 	});
 
 	it("stays read-only for a pointer that has not settled in the panel", async () => {
@@ -422,5 +438,65 @@ describe("AgentUsagePanel", () => {
 	it("keeps an empty default login beside managed accounts, where it is a real choice", () => {
 		renderPanel();
 		expect(screen.getAllByRole("radio").some((r) => r.textContent?.includes("Default login (/home/me/.claude)"))).toBe(true);
+	});
+
+	it("counts only the current project's sessions, every session outside a project, and opens the full list", async () => {
+		const now = Date.now();
+		const session = (taskId: string, taskTitle: string, projectId: string, contextPercent: number) => ({
+			taskId,
+			taskTitle,
+			taskSeq: 1,
+			projectName: projectId,
+			projectId,
+			capturedAt: now,
+			model: null,
+			effort: null,
+			sessionName: null,
+			thinking: null,
+			contextPercent,
+			contextWindowSize: null,
+			totalTokens: null,
+			cacheReadTokens: null,
+			cacheWriteTokens: null,
+			turnInputTokens: null,
+			turnOutputTokens: null,
+			cache: null,
+			costUsd: null,
+			durationMs: null,
+			apiDurationMs: null,
+			linesAdded: null,
+			linesRemoved: null,
+		});
+		const withSessions = {
+			...report(),
+			sessions: [session("t1", "Alpha task", "p1", 91), session("t2", "Beta task", "p2", 92)],
+		} as AgentRateLimitsReport;
+		const onOpenSessions = vi.fn();
+		const view = render(
+			<I18nProvider>
+				<AgentUsagePanel
+					report={withSessions}
+					accounts={accounts()}
+					projectId="p1"
+					interactive={false}
+					onOpenSettings={() => {}}
+					onOpenSessions={onOpenSessions}
+				/>
+			</I18nProvider>,
+		);
+		expect(screen.getByText("1 session")).toBeTruthy();
+		expect(screen.getByText(/Alpha task/)).toBeTruthy();
+		expect(screen.queryByText(/Beta task/)).toBeNull();
+		// A navigation, so it works before the dwell arms the account rows.
+		await userEvent.click(screen.getByRole("button", { name: "All sessions" }));
+		expect(onOpenSessions).toHaveBeenCalledTimes(1);
+		view.unmount();
+		render(
+			<I18nProvider>
+				<AgentUsagePanel report={withSessions} accounts={accounts()} interactive onOpenSettings={() => {}} />
+			</I18nProvider>,
+		);
+		expect(screen.getByText("2 sessions")).toBeTruthy();
+		expect(screen.getByText(/Beta task/)).toBeTruthy();
 	});
 });

@@ -166,7 +166,7 @@ describe("cli-socket — Codex per-pane session capture (e2e, real data)", () =>
 
 		// The persisted id drives a targeted resume, exactly as resumeTask does.
 		expect(buildResumeCommand("codex", panes[1]!.sessionId ?? undefined))
-			.toBe("codex resume 00000000-0000-4000-8000-0000c0de2704");
+			.toBe("codex resume 00000000-0000-4000-8000-0000c0de2704 -c check_for_update_on_startup=false");
 	});
 
 	it("adopts the lone null-paneId (main) pane when no stored paneId matches", async () => {
@@ -240,6 +240,31 @@ describe("cli-socket — Codex per-pane session capture (e2e, real data)", () =>
 		expect(pane?.sessionId).toBe("00000000-0000-4000-8000-0000c0de4bba");
 		expect(buildResumeCommand("omp", pane!.sessionId ?? undefined))
 			.toBe("omp --resume 00000000-0000-4000-8000-0000c0de4bba");
+	});
+
+	it("accepts a plain pi report as pi and resume targets the session with --session-id", async () => {
+		await import("../data");
+		const { handleRequest } = await import("../cli-socket-server");
+		const { buildResumeCommand } = await import("../agents");
+
+		seed([makeTask({
+			sessionState: { panes: [{ ...codexPane("%3", null), agentCmd: "pi" }] },
+		})]);
+
+		const resp = await handleRequest(agentHook({
+			projectId: "proj-1",
+			taskId: "task-1",
+			harness: "pi",
+			event: "SessionStart",
+			sessionId: "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+			paneId: "%3",
+		}));
+		expect(resp.ok).toBe(true);
+
+		const [pane] = readPanes();
+		expect(pane?.sessionId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001");
+		expect(buildResumeCommand("pi", pane!.sessionId ?? undefined))
+			.toBe("pi --session-id 0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001");
 	});
 
 	it("places a Codex id without a paneId on a task's only pane (native session without a pane suffix)", async () => {
@@ -334,7 +359,7 @@ describe("cli-socket — Codex per-pane session capture (e2e, real data)", () =>
 		expect(panes[0]).toMatchObject({ paneId: "%6", sessionId: "00000000-0000-4000-8000-0000c0de1083", agentId: "builtin-codex", configId: "codex-default", agentCmd: "codex" });
 		// No account is guessed: resume finds the store that holds the conversation.
 		expect(panes[0]?.accountId).toBeUndefined();
-		expect(buildResumeCommand(panes[0]!.agentCmd, panes[0]!.sessionId ?? undefined)).toBe("codex resume 00000000-0000-4000-8000-0000c0de1083");
+		expect(buildResumeCommand(panes[0]!.agentCmd, panes[0]!.sessionId ?? undefined)).toBe("codex resume 00000000-0000-4000-8000-0000c0de1083 -c check_for_update_on_startup=false");
 	});
 
 	it.each([

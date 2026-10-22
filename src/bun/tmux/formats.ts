@@ -177,6 +177,13 @@ export const PANE_IN_MODE_FORMAT = tmuxFormat()
 	.flag("inMode", "pane_in_mode")
 	.build();
 
+/** Copy-mode flag plus the key table it reads (`emacs` / `vi`) — leaving copy-mode for typed keys. */
+export const PANE_COPY_MODE_FORMAT = tmuxFormat()
+	.string("paneId", "pane_id")
+	.flag("inMode", "pane_in_mode")
+	.string("modeKeys", "mode-keys")
+	.build();
+
 /**
  * Copy-mode search state — the terminal ⌘F bar. `search_count` goes STALE
  * after a miss (tmux keeps the previous hit's number), so consumers must
@@ -288,11 +295,21 @@ export const WINDOW_PANE_FORMAT = tmuxFormat()
 	.flag("agent", "@dev3_agent")
 	.build();
 
-/** Window list for the narrow-viewport window switcher. */
+/**
+ * Window list for the in-app window navigator (desktop rail/tabs and the
+ * narrow switcher). Pane fields describe each window's ACTIVE pane; `pane_title`
+ * defaults to the hostname, so `host_short` rides along to detect an unset title.
+ */
 export const WINDOW_SWITCHER_FORMAT = tmuxFormat()
 	.string("windowId", "window_id")
+	.number("index", "window_index")
 	.flag("active", "window_active")
-	.tail("name", "window_name")
+	.number("panes", "window_panes")
+	.number("activity", "window_activity")
+	.flag("bell", "window_bell_flag")
+	.string("hostShort", "host_short")
+	.string("name", "window_name")
+	.tail("title", "pane_title")
 	.build();
 
 /** Session overview for the tmux sessions screen. */

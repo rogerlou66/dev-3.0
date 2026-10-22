@@ -25,14 +25,14 @@ import { dirname, resolve } from "node:path";
 import { handlers, setPushMessage, getPushMessage, handleBellAutoStatus, isTaskInProgress, startMergeDetectionPoller, startPRDetectionPoller, handlePaneExited, setFocusMode, pushTerminalBell } from "./rpc-handlers";
 import { createLogger, getLogPath } from "./logger";
 import { DEV3_HOME } from "./paths";
-import { setTmuxPaneDimming, writeTmuxConfigs } from "./tmux/config";
+import { applySavedTmuxPanePreferences, writeTmuxConfigs } from "./tmux/config";
 import { setCurrentUiTheme } from "./theme-state";
 import { ensureDev3CliSymlink } from "./cli-self-install";
 import { managedCliWriteAllowed } from "./managed-cli-guard";
 import { applyFullShellEnvToProcess, getUserShell, resolveShellEnv } from "./shell-env";
 import { startSocketServer, stopSocketServer } from "./cli-socket-server";
 import { startRemoteAccessServer, pushToBrowserClients, getServerPort, getAccessUrl, getStaticCode } from "./remote-access-server";
-import { startTunnel, stopTunnel, isTunnelBinaryAvailable, getTunnelUrl } from "./cloudflare-tunnel";
+import { startTunnel, stopTunnel, isTunnelBinaryAvailable, getTunnelUrl, retryMainTunnel } from "./cloudflare-tunnel";
 import { renderHeadlessBanner, startQrAutoRefresh, stopQrAutoRefresh, markQrConsumed, printExposedPortsLive } from "./remote-console";
 import { writeRemoteState, clearRemoteStateIfOwnedBy, readRemoteHandoff, readRemoteState, carriedOverState } from "./remote-state";
 import { BUILD_TIME, BUILD_VERSION } from "../shared/build-info.generated";
@@ -295,17 +295,19 @@ setPushMessage((name, payload) => {
 
 // Initialize the backend gate before remote pollers and CLI requests can raise
 // agent notifications for a browser session.
-const initialAppearance = await loadSettings();
-setFocusMode(initialAppearance.focusMode === true);
-setTmuxPaneDimming(initialAppearance.dimInactivePanes !== false);
+const startupSettings = await loadSettings();
+setFocusMode(startupSettings.focusMode === true);
+applySavedTmuxPanePreferences(startupSettings);
 writeTmuxConfigs();
-const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
+const initialUiTheme = startupSettings.appearancePreset === "cmux" ? "dark" : startupSettings.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
-await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: initialAppearance.appearancePreset });
+await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: startupSettings.appearancePreset });
 
 // Port-tunnels module needs the same broadcast hook for `exposedPortsChanged`
 // events so connected browsers see new public URLs appear in real time.
 const { setPortTunnelsPushHook, exposeTaskPort, cleanupAllTunnels, HEADLESS_TASK_ID } = await import("./port-tunnels");
+const { setAccountLoginPush, accountLogins } = await import("./account-login-terminal");
+setAccountLoginPush((name, payload) => pushToBrowserClients(name, payload));
 setPortTunnelsPushHook((name, payload) => {
 	pushToBrowserClients(name, payload);
 	// Reprint the URL list in the headless console — keeps users who ran
@@ -397,7 +399,12 @@ if (wantTunnel && handoff?.tunnel) {
 				}
 			}
 		} else {
-			console.error("[dev3 remote] Tunnel failed to start — falling back to local-only URL");
+			const retrying = retryMainTunnel(getServerPort());
+			console.error(
+				retrying
+					? "[dev3 remote] Tunnel failed to start — serving the local-only URL and retrying in the background"
+					: "[dev3 remote] Tunnel command is misconfigured — serving the local-only URL; fix it in Settings → System → Tunnel provider",
+			);
 		}
 	}
 }
@@ -568,6 +575,7 @@ function shutdown(signal: string): void {
 	stopSocketServer();
 	clearRemoteStateIfOwnedBy(process.pid);
 	cleanupAllTunnels();
+	accountLogins.closeAll();
 	stopTunnel();
 	process.exit(0);
 }
