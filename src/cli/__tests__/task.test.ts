@@ -1584,6 +1584,28 @@ describe("task move --if-status flag", () => {
 });
 
 describe("task move --if-status-not flag", () => {
+	describe("from a pinned column agent", () => {
+		afterEach(() => { delete process.env.DEV3_COLUMN_AGENT_STATUS; });
+
+		it("adds the pinned column to --if-status-not", async () => {
+			process.env.DEV3_COLUMN_AGENT_STATUS = "review-by-colleague";
+			mockSend.mockResolvedValue(okResp(FAKE_TASK));
+
+			await handleTask("move", args(["aaaaaaaa"], { status: "in-progress", "if-status-not": "review-by-ai" }), SOCKET, null);
+
+			expect(mockSend.mock.calls[0]![2]!.ifStatusNot).toBe("review-by-ai,review-by-colleague");
+		});
+
+		it("guards an unguarded hook move too", async () => {
+			process.env.DEV3_COLUMN_AGENT_STATUS = "review-by-colleague";
+			mockSend.mockResolvedValue(okResp(FAKE_TASK));
+
+			await handleTask("move", args(["aaaaaaaa"], { status: "user-questions" }), SOCKET, null);
+
+			expect(mockSend.mock.calls[0]![2]!.ifStatusNot).toBe("review-by-colleague");
+		});
+	});
+
 	it("passes --if-status-not to server when provided", async () => {
 		const moved = { ...FAKE_TASK, status: "in-progress" as const };
 		mockSend.mockResolvedValue(okResp(moved));

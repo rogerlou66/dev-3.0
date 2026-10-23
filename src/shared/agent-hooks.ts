@@ -23,6 +23,12 @@ export const CODEX_STOP_HOOK_SUCCESS_JSON = "{}";
  * started themselves never has it.
  */
 export const CODEX_HOOK_SESSION_ENV = "DEV3_TASK_ID";
+/**
+ * Set on a column agent that must leave its card where it is (PR Review). It
+ * shares the task's hooks file, so without this its own activity would pull the
+ * card back to Agent is Working and then Your Review.
+ */
+export const COLUMN_AGENT_PIN_ENV = "DEV3_COLUMN_AGENT_STATUS";
 
 /**
  * The command dev3 declares for every Codex status hook.

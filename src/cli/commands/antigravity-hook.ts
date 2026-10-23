@@ -2,6 +2,7 @@ import { ANTIGRAVITY_STATUS_HOOK_EVENTS, type AntigravityStatusHookEvent, type A
 import { GENERIC_SKILL_BODY } from "../../shared/agent-skill-content";
 import type { CliContext } from "../context";
 import { sendRequest } from "../socket-client";
+import { columnAgentPinParams } from "../column-agent-pin";
 import { loadRecentNotesBlock } from "./recent-notes";
 
 const ALLOW_JSON = "{}";
@@ -100,6 +101,7 @@ export async function handleAntigravityHook(
 				...(sessionId ? { sessionId } : {}),
 				...(sessionId && agentPid ? { agentPid } : {}),
 				...(sessionId && paneId ? { paneId } : {}),
+				...columnAgentPinParams(),
 			}, { timeoutMs: 3_000, connectAttempts: 2, retryDelayMs: 50 });
 			if (!result.ok) process.stderr.write(`dev3 Antigravity hook: ${result.error || "status update failed"}\n`);
 			subagent = result.ok && (result.data as { ignoredSubagent?: unknown } | undefined)?.ignoredSubagent === true;

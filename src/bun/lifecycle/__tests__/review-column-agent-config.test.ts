@@ -126,3 +126,28 @@ describe("AI Review column launch reads the config Project Settings saved", () =
 		expect(await launchedConfig(project({ builtinColumnAgents: { "review-by-ai": B } }))).toEqual(B);
 	});
 });
+
+describe("PR Review column agent", () => {
+	const PR_REVIEW_COLUMN = { status: "review-by-colleague" as const, customColumnId: null };
+
+	it("launches the configured agent with no hand-back command", async () => {
+		writeConfig(main, "config.json", { builtinColumnAgents: { "review-by-ai": A, "review-by-colleague": B } });
+
+		expect(await launchLifecycleColumnAgent(project(), task(), PR_REVIEW_COLUMN)).toBeNull();
+		expect(launchColumnAgent).toHaveBeenCalledTimes(1);
+		const [, , config, options] = vi.mocked(launchColumnAgent).mock.calls[0];
+		expect(config).toEqual(B);
+		expect(options).toEqual({ paneTitle: "PR Review", onExitCommand: undefined, pinStatus: "review-by-colleague" });
+	});
+
+	it("launches nothing when the project never configured one", async () => {
+		expect(await launchLifecycleColumnAgent(project(), task(), PR_REVIEW_COLUMN)).toBeNull();
+		expect(launchColumnAgent).not.toHaveBeenCalled();
+	});
+
+	it("launches nothing for a blank prompt", async () => {
+		const blank = { ...B, prompt: "   " };
+		expect(await launchLifecycleColumnAgent(project({ builtinColumnAgents: { "review-by-colleague": blank } }), task(), PR_REVIEW_COLUMN)).toBeNull();
+		expect(launchColumnAgent).not.toHaveBeenCalled();
+	});
+});

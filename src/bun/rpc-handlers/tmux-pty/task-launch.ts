@@ -1,5 +1,6 @@
 import { assertTaskWorkspacePresent } from "../../task-workspace-guard";
-import type { AgentFamily, ColumnAgentConfig, PermissionMode, Project, Task } from "../../../shared/types";
+import type { AgentFamily, ColumnAgentConfig, PermissionMode, Project, Task, TaskStatus } from "../../../shared/types";
+import { COLUMN_AGENT_PIN_ENV } from "../../../shared/agent-hooks";
 import * as data from "../../data";
 import * as git from "../../git";
 import * as pty from "../../pty-server";
@@ -676,7 +677,7 @@ export async function launchColumnAgent(
 	project: Project,
 	task: Task,
 	agentConfig: ColumnAgentConfig,
-	options: { paneTitle: string; onExitCommand?: string },
+	options: { paneTitle: string; onExitCommand?: string; pinStatus?: TaskStatus },
 ): Promise<void> {
 	const worktreePath = task.worktreePath;
 	if (!worktreePath) {
@@ -745,6 +746,7 @@ export async function launchColumnAgent(
 		...projectEnv,
 		...buildAgentEnv(extraEnv, task.id),
 		...ensureArtifactTemplateEnv(project, task, worktreePath),
+		...(options.pinStatus ? { [COLUMN_AGENT_PIN_ENV]: options.pinStatus } : {}),
 	};
 	await ensureAgentTrust(worktreePath, project.path, resolvedBaseCmd, launchAccountId, task.foreignCode, resolvedAgentFamily, env);
 	tmuxCmd = await applyAgentHooksToCommand(worktreePath, resolvedBaseCmd, tmuxCmd, {
