@@ -690,6 +690,13 @@ async function columnAgentConfig(
 			onExitCommand: `${DEV3_HOME}/bin/dev3 task move ${task.id} --status review-by-user --if-status review-by-ai`,
 		};
 	}
+	if (column.status === "review-by-colleague" && column.customColumnId === null) {
+		// Opt-in, unlike AI Review: no entry (or an empty prompt) means no agent.
+		const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
+		const configured = resolved.builtinColumnAgents?.["review-by-colleague"];
+		if (!configured?.prompt.trim()) return null;
+		return { config: configured, paneTitle: "PR Review" };
+	}
 	if (!column.customColumnId) return null;
 	const customColumn = providedCustomColumn
 		?? project.customColumns?.find((candidate) => candidate.id === column.customColumnId);

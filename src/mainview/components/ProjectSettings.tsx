@@ -214,6 +214,16 @@ function ProjectSettings({
 		configId: reviewConfig?.configId ?? DEFAULT_REVIEW_CONFIG_ID,
 		prompt: reviewConfig?.prompt || DEFAULT_REVIEW_PROMPT,
 	});
+	// PR Review agent (builtinColumnAgents["review-by-colleague"]) is opt-in: no entry = off.
+	const prReviewConfig = project?.builtinColumnAgents?.["review-by-colleague"];
+	const prReviewFormFrom = (c: ColumnAgentConfig | undefined) => ({
+		enabled: !!c,
+		agentId: c?.agentId ?? DEFAULT_REVIEW_AGENT_ID,
+		configId: c?.configId ?? DEFAULT_REVIEW_CONFIG_ID,
+		prompt: c?.prompt ?? "",
+	});
+	const [prReviewForm, setPrReviewForm] = useState(() => prReviewFormFrom(prReviewConfig));
+	const initialPrReviewRef = useRef(prReviewForm);
 	const [availableAgents, setAvailableAgents] = useState<CodingAgent[]>([]);
 
 	// Review-toggle prompt: blank = inherit the global setting (itself falling back
@@ -339,8 +349,9 @@ function ProjectSettings({
 
 	const isAiReviewDirty = useCallback(() => {
 		const init = initialAiReviewRef.current;
-		return aiReviewAgentId !== init.agentId || aiReviewConfigId !== init.configId || aiReviewPrompt !== init.prompt;
-	}, [aiReviewAgentId, aiReviewConfigId, aiReviewPrompt]);
+		return aiReviewAgentId !== init.agentId || aiReviewConfigId !== init.configId || aiReviewPrompt !== init.prompt
+			|| JSON.stringify(prReviewForm) !== JSON.stringify(initialPrReviewRef.current);
+	}, [aiReviewAgentId, aiReviewConfigId, aiReviewPrompt, prReviewForm]);
 
 	// The form is seeded by useState, which only runs on mount — re-sync when the
 	// project's effective review config changes (initial load, save, push update).
@@ -358,6 +369,14 @@ function ProjectSettings({
 		setAiReviewPrompt(next.prompt);
 		initialAiReviewRef.current = next;
 	}, [reviewConfigKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+	const prReviewConfigKey = JSON.stringify(prReviewConfig ?? null);
+	useEffect(() => {
+		if (isAiReviewDirty()) return;
+		const next = prReviewFormFrom(prReviewConfig);
+		setPrReviewForm(next);
+		initialPrReviewRef.current = next;
+	}, [prReviewConfigKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
 	const isDirty = useCallback(() => {
 		if (activeTab === "project") {
@@ -643,6 +662,9 @@ function ProjectSettings({
 					configId: aiReviewConfigId,
 					prompt: normalizeReviewPrompt(aiReviewPrompt),
 				},
+				...(prReviewForm.enabled && prReviewForm.prompt.trim()
+					? { "review-by-colleague": { agentId: prReviewForm.agentId, configId: prReviewForm.configId, prompt: prReviewForm.prompt } }
+					: {}),
 			};
 			const toSave = {
 				...sanitizeConfigPaths(projectConfig),
@@ -660,6 +682,9 @@ function ProjectSettings({
 			loadedProjectConfig.current = toSave;
 			setProjectConfig(toSave);
 			initialAiReviewRef.current = { agentId: aiReviewAgentId, configId: aiReviewConfigId, prompt: aiReviewPrompt };
+			const savedPrReview = prReviewFormFrom(builtinColumnAgents["review-by-colleague"]);
+			setPrReviewForm(savedPrReview);
+			initialPrReviewRef.current = savedPrReview;
 			initialReviewModePromptRef.current = reviewModePrompt;
 			initialCoordinatorPromptRef.current = coordinatorPrompt;
 		} catch (err) {
@@ -1165,6 +1190,77 @@ function ProjectSettings({
 										/>
 									</div>
 								</div>
+							</div>
+
+							{/* PR Review column agent (opt-in) */}
+							<div className="space-y-4">
+								<div className="flex items-start justify-between gap-4">
+									<div>
+										<span className="block text-fg text-sm font-semibold mb-1">
+											{t("projectSettings.prReviewAgent")}
+										</span>
+										<p className="text-fg-3 text-sm">
+											{t("projectSettings.prReviewAgentDesc")}
+										</p>
+									</div>
+									<ToggleSwitch
+										checked={prReviewForm.enabled}
+										ariaLabel={t("projectSettings.prReviewAgent")}
+										onToggle={() => setPrReviewForm((f) => {
+											// Never save an agent the selects cannot show.
+											const agent = availableAgents.find((a) => a.id === f.agentId) ?? availableAgents[0];
+											if (f.enabled || !agent || agent.id === f.agentId) return { ...f, enabled: !f.enabled };
+											return { ...f, enabled: true, agentId: agent.id, configId: agent.configurations?.[0]?.id ?? f.configId };
+										})}
+									/>
+								</div>
+								{prReviewForm.enabled && (
+									<div className="space-y-3 pl-1">
+										<div className="flex items-center gap-3">
+											<label htmlFor="pr-review-agent" className="text-fg-2 text-sm w-28 flex-shrink-0">{t("projectSettings.prReviewAgentAgent")}</label>
+											<select
+												id="pr-review-agent"
+												value={prReviewForm.agentId}
+												onChange={(e) => {
+													const agent = availableAgents.find((a) => a.id === e.target.value);
+													setPrReviewForm((f) => ({ ...f, agentId: e.target.value, configId: agent?.configurations?.[0]?.id ?? f.configId }));
+												}}
+												className="flex-1 px-3 py-2 bg-raised border border-edge rounded-lg text-fg text-sm outline-none focus:border-accent/40 transition-colors"
+											>
+												{availableAgents.map((a) => (
+													<option key={a.id} value={a.id}>{a.name}</option>
+												))}
+											</select>
+										</div>
+										<div className="flex items-center gap-3">
+											<label htmlFor="pr-review-config" className="text-fg-2 text-sm w-28 flex-shrink-0">{t("projectSettings.prReviewAgentConfig")}</label>
+											<select
+												id="pr-review-config"
+												value={prReviewForm.configId}
+												onChange={(e) => setPrReviewForm((f) => ({ ...f, configId: e.target.value }))}
+												className="flex-1 px-3 py-2 bg-raised border border-edge rounded-lg text-fg text-sm outline-none focus:border-accent/40 transition-colors"
+											>
+												{(availableAgents.find((a) => a.id === prReviewForm.agentId)?.configurations ?? []).map((c) => (
+													<option key={c.id} value={c.id}>{c.name || c.id}</option>
+												))}
+											</select>
+										</div>
+										<div>
+											<label htmlFor="pr-review-prompt" className="block text-fg-2 text-sm mb-2">{t("projectSettings.prReviewAgentPrompt")}</label>
+											<textarea
+												id="pr-review-prompt"
+												value={prReviewForm.prompt}
+												onChange={(e) => setPrReviewForm((f) => ({ ...f, prompt: e.target.value }))}
+												rows={5}
+												placeholder={t("projectSettings.prReviewAgentPromptPlaceholder")}
+												autoCapitalize="off"
+												autoCorrect="off"
+												spellCheck={false}
+												className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm font-mono placeholder-fg-muted outline-none focus:border-accent/40 transition-colors resize-y"
+											/>
+										</div>
+									</div>
+								)}
 							</div>
 
 							{/* Review toggle prompt (create-task popup) */}
