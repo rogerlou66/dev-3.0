@@ -25,6 +25,7 @@ describe("settings registry", () => {
 			"accounts",
 			"models",
 			"workspace",
+			"polling",
 			"system",
 		]);
 		const ids = SETTINGS_ENTRIES.map((entry) => entry.id);

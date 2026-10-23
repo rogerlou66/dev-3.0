@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-	ACTIVE_PROJECT_MERGE_INTERVAL_MS,
-	BACKGROUND_PROJECT_MERGE_INTERVAL_MS,
 	MERGE_POLL_INTERVAL_MS,
 	SCHEDULE_JITTER_MS,
 	intervalForTask,
@@ -16,8 +14,8 @@ const NOW = 1_700_000_000_000;
 
 describe("intervalForTask", () => {
 	it("uses the active interval only for the on-screen foreground project", () => {
-		expect(intervalForTask(true, ACTIVE_PROJECT_MERGE_INTERVAL_MS, BACKGROUND_PROJECT_MERGE_INTERVAL_MS)).toBe(ACTIVE_PROJECT_MERGE_INTERVAL_MS);
-		expect(intervalForTask(false, ACTIVE_PROJECT_MERGE_INTERVAL_MS, BACKGROUND_PROJECT_MERGE_INTERVAL_MS)).toBe(BACKGROUND_PROJECT_MERGE_INTERVAL_MS);
+		expect(intervalForTask(true, 60_000, 600_000)).toBe(60_000);
+		expect(intervalForTask(false, 60_000, 600_000)).toBe(600_000);
 	});
 });
 

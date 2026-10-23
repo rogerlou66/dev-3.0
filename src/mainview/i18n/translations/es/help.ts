@@ -144,6 +144,9 @@ const help = {
 	"help.settings.workspace.title": "Espacio de trabajo",
 	"help.settings.workspace.body":
 		"Dónde viven los worktrees de las tareas en disco, qué editores y aplicaciones externas alimentan open-in, y tus cuentas de GitHub.",
+	"help.settings.polling.title": "Sondeo",
+	"help.settings.polling.body":
+		"Frecuencia en segundo plano de la detección de fusiones, el estado del pull request y los fetch de la barra git y del botón Pull. El proyecto en pantalla se consulta más a menudo; desactiva una comprobación para cortar sus llamadas de red.",
 	"help.settings.devtools.title": "Herramientas de desarrollo",
 	"help.settings.devtools.body": "Presets de teclado de la terminal y el estado de instalación del CLI dev3.",
 	"help.settings.rateLimits.title": "Seguimiento de límites",

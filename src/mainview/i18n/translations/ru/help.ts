@@ -144,6 +144,9 @@ const help = {
 	"help.settings.workspace.title": "Рабочее пространство",
 	"help.settings.workspace.body":
 		"Где на диске живут worktree задач, какие внешние редакторы и приложения доступны в open-in, и ваши GitHub-аккаунты.",
+	"help.settings.polling.title": "Опрос",
+	"help.settings.polling.body":
+		"Частота фоновых проверок: обнаружение слияния, статус pull request, fetch для git-панели и кнопки Pull. Открытый проект проверяется чаще остальных; выключите проверку, чтобы она совсем перестала ходить в сеть.",
 	"help.settings.devtools.title": "Инструменты разработчика",
 	"help.settings.devtools.body": "Пресеты клавиш терминала и статус установки dev3 CLI.",
 	"help.settings.rateLimits.title": "Отслеживание лимитов",

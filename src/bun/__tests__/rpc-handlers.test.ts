@@ -458,6 +458,7 @@ const {
 	getPushMessageLocal,
 	checkOpenPRsForPromotion,
 	_resetPRPollerState,
+	_resetPollingFetchThrottles,
 	_resetMergePollerState,
 	_setScheduleRandomForTest,
 	startMergeDetectionPoller,
@@ -6200,6 +6201,10 @@ describe("handlers.getBranchStatus", () => {
 	});
 
 	describe("remote fetch is off the poll path", () => {
+		beforeEach(() => {
+			_resetPollingFetchThrottles();
+		});
+
 		afterEach(() => {
 			vi.mocked(git.refExists).mockResolvedValue(true);
 			vi.mocked(git.forkRemoteOf).mockResolvedValue(null);
@@ -6231,6 +6236,21 @@ describe("handlers.getBranchStatus", () => {
 
 			expect(result.behind).toBe(2);
 			await vi.waitFor(() => expect(git.fetchOriginBranches).toHaveBeenCalled());
+		});
+
+		it("paces the poll's background fetch by Settings → Polling and skips it when switched off", async () => {
+			const { project, task } = setup();
+			const poll = () => handlers.getBranchStatus({ taskId: task.id, projectId: project.id });
+
+			await poll();
+			await poll();
+			await vi.waitFor(() => expect(git.fetchOriginBranches).toHaveBeenCalledTimes(1));
+
+			_resetPollingFetchThrottles();
+			vi.mocked(git.fetchOriginBranches).mockClear();
+			vi.mocked(loadSettings).mockResolvedValueOnce({ polling: { off: { branchStatusFetch: true } } } as any);
+			await expect(poll()).resolves.toMatchObject({ behind: 2 });
+			expect(git.fetchOriginBranches).not.toHaveBeenCalled();
 		});
 
 		it("the poll swallows a failing background fetch", async () => {
@@ -12303,6 +12323,17 @@ describe("checkOpenPRsForPromotion", () => {
 		return { project, task };
 	}
 
+	it("makes no gh call while PR status polling is switched off in Settings → Polling", async () => {
+		setup();
+		setPushMessage(vi.fn());
+		vi.mocked(loadSettings).mockResolvedValueOnce({ polling: { off: { prStatus: true } } } as any);
+
+		await checkOpenPRsForPromotion();
+
+		expect(github.runGitHub).not.toHaveBeenCalled();
+		expect(data.loadTasks).not.toHaveBeenCalled();
+	});
+
 	it("promotes task to review-by-colleague when open non-draft PR found", async () => {
 		const { project, task } = setup();
 		const promoted = { ...task, status: "review-by-colleague" as const };
@@ -13127,6 +13158,45 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 			fingerprint: "v1:dev3/task-test:abc123",
 			subject: buildTaskDialogSubject(task, project),
 		});
+	});
+
+	it("fetches and checks nothing while merge detection is switched off in Settings → Polling", async () => {
+		const project = makeProject();
+		const task = makeTask({ status: "review-by-colleague", worktreePath: "/tmp/test-worktree", branchName: "dev3/task-test" });
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(loadSettings).mockResolvedValue({ polling: { off: { mergeDetection: true } } } as any);
+		const push = vi.fn();
+		setPushMessage(push);
+
+		startMergeDetectionPoller();
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(git.fetchCompareRef).not.toHaveBeenCalled();
+		expect(git.isContentMergedInto).not.toHaveBeenCalled();
+		expect(push).not.toHaveBeenCalledWith("branchMerged", expect.anything());
+	});
+
+	it("checks an on-screen task again only after its configured merge interval", async () => {
+		const project = makeProject({ id: "proj-1" });
+		const task = makeTask({ status: "review-by-colleague", worktreePath: "/tmp/test-worktree", branchName: "dev3/task-test" });
+		vi.mocked(data.loadProjects).mockResolvedValue([project]);
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(git.getCurrentBranch).mockResolvedValue("dev3/task-test");
+		vi.mocked(git.getUnpushedCount).mockResolvedValue(0);
+		vi.mocked(git.isContentMergedInto).mockResolvedValue(false);
+		vi.mocked(loadSettings).mockResolvedValue({ polling: { minutes: { mergeActive: 3 } } } as any);
+		setPushMessage(vi.fn());
+
+		startMergeDetectionPoller();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(git.isContentMergedInto).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
+		expect(git.isContentMergedInto).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(git.isContentMergedInto).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([

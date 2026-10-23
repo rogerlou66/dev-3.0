@@ -341,6 +341,31 @@ export interface GlobalSettings {
 	 * `null` means "deliberately unbound". See `src/mainview/keymap-store.ts`.
 	 */
 	keyboardShortcuts?: ShortcutOverrides;
+	/**
+	 * Automatic remote-polling cadence (Settings → Polling). Sparse: an absent
+	 * interval or group keeps its default. See src/shared/polling-settings.ts.
+	 */
+	polling?: PollingSettings;
+}
+
+/** A poller the user can switch off as a whole. */
+export type PollingGroup = "mergeDetection" | "prStatus" | "branchStatusFetch" | "pullButtonFetch";
+
+/** One tunable interval, stored in whole minutes. */
+export type PollingIntervalKey =
+	| "mergeActive"
+	| "mergeBackground"
+	| "prActive"
+	| "prBackground"
+	| "prPendingActive"
+	| "prPendingBackground"
+	| "branchStatusFetch"
+	| "pullButtonFetch";
+
+export interface PollingSettings {
+	/** Groups the user switched off; only `true` is ever stored. */
+	off?: Partial<Record<PollingGroup, true>>;
+	minutes?: Partial<Record<PollingIntervalKey, number>>;
 }
 
 /** Every shortcut has one main combo and one optional second way to press it. */

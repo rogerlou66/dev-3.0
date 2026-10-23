@@ -350,6 +350,20 @@ describe("saveSettings", () => {
 		expect((await loadSettings()).keyboardShortcuts).toBeUndefined();
 	});
 
+	it("clamps polling minutes, keeps only `true` off flags, and drops an all-garbage polling block", async () => {
+		writeFileSync(settingsPath, JSON.stringify({
+			...makeSettings(),
+			polling: { off: { mergeDetection: true, prStatus: false, bogus: true }, minutes: { prActive: 0, mergeBackground: 999, branchStatusFetch: 2.4, prBackground: "5" } },
+		}));
+		expect((await loadSettings()).polling).toEqual({
+			off: { mergeDetection: true },
+			minutes: { prActive: 1, mergeBackground: 120, branchStatusFetch: 2 },
+		});
+
+		writeFileSync(settingsPath, JSON.stringify({ ...makeSettings(), polling: { off: { prStatus: false }, minutes: { prActive: null } } }));
+		expect((await loadSettings()).polling).toBeUndefined();
+	});
+
 	it("keeps a custom tunnel provider with a blank command — fail closed, no silent Cloudflare fallback", async () => {
 		writeFileSync(settingsPath, JSON.stringify(makeSettings({
 			remoteTunnel: { provider: "custom", command: "" },
@@ -433,6 +447,7 @@ describe("saveSettings", () => {
 			agentsLayoutRevision: 1,
 			pxpipeProxyEnabled: true,
 			favorites: [{ agentId: "builtin-codex", configId: "codex-default", uses: 3, lastUsedAt: 123 }],
+			polling: { off: { prStatus: true }, minutes: { mergeBackground: 30, pullButtonFetch: 7 } },
 		};
 
 		await saveSettings(full);

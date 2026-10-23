@@ -47,6 +47,7 @@ import DeveloperToolsSection from "./global-settings/DeveloperToolsSection";
 import KeyboardSettingsSection from "./global-settings/KeyboardSettingsSection";
 import ModelCatalogSection from "./global-settings/ModelCatalogSection";
 import NotificationSettingsSection from "./global-settings/NotificationSettingsSection";
+import PollingSettingsSection from "./global-settings/PollingSettingsSection";
 import PxpipeProxySettingsSection from "./global-settings/PxpipeProxySettingsSection";
 import SystemSettingsSection from "./global-settings/SystemSettingsSection";
 import TerminalSettingsSection from "./global-settings/TerminalSettingsSection";
@@ -942,6 +943,14 @@ function GlobalSettings({
 						onDeleteExternalApp={handleDeleteExternalApp}
 						onPickCloneBaseDirectory={handlePickCloneBaseDirectory}
 						onUpdateExternalApp={handleUpdateExternalApp}
+					/>
+				);
+			case "polling":
+				return (
+					<PollingSettingsSection
+						t={t}
+						globalSettings={globalSettings}
+						onChange={(polling) => persistSettingChange({ polling })}
 					/>
 				);
 			case "system":
