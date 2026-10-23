@@ -58,6 +58,7 @@ export {
 	resetTaskToTodo,
 } from "./rpc-handlers/task-lifecycle";
 export { activateTask, runCleanupScript, emitTaskSound } from "./lifecycle/executor";
+export { _resetPollingFetchThrottles } from "./rpc-handlers/git-operations";
 export { triggerColumnAgentIfNeeded } from "./lifecycle/service";
 export { resolveOperationalProjectConfig } from "./rpc-handlers/settings-config";
 export {

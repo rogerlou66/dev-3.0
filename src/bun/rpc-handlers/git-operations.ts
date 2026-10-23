@@ -26,6 +26,8 @@ import {
 } from "../scheduled-message-scheduler";
 import { Semaphore } from "../concurrency";
 import { syncTaskBranchName } from "../task-branch-sync";
+import { loadSettings } from "../settings";
+import { resolvePolling } from "../../shared/polling-settings";
 import { getPushMessage, log } from "./shared";
 import { generatedScriptLaunch, generatedScriptName, writeLaunchScript } from "./shared-pure";
 import {
@@ -209,6 +211,24 @@ async function healDeadCompareBase(project: Project, task: Task, baseBranch: str
 	return projectBase;
 }
 
+// The git bar polls status every 15 s; its background fetch is paced separately
+// (Settings → Polling). An explicit refresh always fetches and restarts the clock.
+const branchStatusFetchLastAttempt = new Map<string, number>();
+
+async function shouldAutoFetchBranchStatus(taskId: string): Promise<boolean> {
+	const { enabled, intervalMs } = resolvePolling(await loadSettings());
+	if (!enabled.branchStatusFetch) return false;
+	const now = Date.now();
+	if (now - (branchStatusFetchLastAttempt.get(taskId) ?? 0) < intervalMs.branchStatusFetch) return false;
+	branchStatusFetchLastAttempt.set(taskId, now);
+	return true;
+}
+
+export function _resetPollingFetchThrottles(): void {
+	branchStatusFetchLastAttempt.clear();
+	behindFetchLastAttempt.clear();
+}
+
 async function getBranchStatusImpl(params: { taskId: string; projectId: string; compareRef?: string; refresh?: boolean }): Promise<BranchStatus> {
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
@@ -255,8 +275,9 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 		}
 	};
 	if (params.refresh) {
+		branchStatusFetchLastAttempt.set(task.id, Date.now());
 		await refreshRemoteRefs();
-	} else {
+	} else if (await shouldAutoFetchBranchStatus(task.id)) {
 		// Fire-and-forget: the poll answers from local refs, the next poll reads the fetched ones.
 		void refreshRemoteRefs().catch((err) => {
 			log.debug("getBranchStatus: background fetch failed (non-fatal)", { taskId: task.id, error: String(err) });
@@ -857,14 +878,15 @@ const PULLABLE_BRANCHES = new Set(["main", "master"]);
 // Background fetch pacing for the pull-button "behind origin" indicator.
 // The renderer polls every ~15s; refreshing remote refs that often would
 // reintroduce the network churn removed in PR #648, so fetch at most once
-// per interval and let the cheap local rev-list pick up the result later.
-const BEHIND_FETCH_INTERVAL_MS = 3 * 60_000;
+// per interval (Settings → Polling) and let the cheap local rev-list pick up the result.
 const behindFetchLastAttempt = new Map<string, number>();
 
-function maybeRefreshOriginRef(projectPath: string, branch: string): void {
+async function maybeRefreshOriginRef(projectPath: string, branch: string): Promise<void> {
+	const { enabled, intervalMs } = resolvePolling(await loadSettings());
+	if (!enabled.pullButtonFetch) return;
 	const now = Date.now();
 	const last = behindFetchLastAttempt.get(projectPath) ?? 0;
-	if (now - last < BEHIND_FETCH_INTERVAL_MS) return;
+	if (now - last < intervalMs.pullButtonFetch) return;
 	behindFetchLastAttempt.set(projectPath, now);
 	// Fire-and-forget: the next poll reads the updated origin/<branch> ref.
 	void git.fetchOrigin(projectPath, branch).catch((err) => {
@@ -882,7 +904,7 @@ async function getProjectCurrentBranch(params: { projectId: string }): Promise<{
 
 	let behindOrigin = 0;
 	if (branch && PULLABLE_BRANCHES.has(branch)) {
-		maybeRefreshOriginRef(project.path, branch);
+		await maybeRefreshOriginRef(project.path, branch);
 		behindOrigin = await git.getBehindOriginCount(project.path, branch);
 	}
 	return { branch, isBaseBranch, isDirty, behindOrigin };

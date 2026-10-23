@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { GlobalSettings, ShortcutOverride } from "../shared/types";
 import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
 import { recordFavoriteUsage, sanitizeFavorites } from "../shared/favorites";
+import { sanitizePollingSettings } from "../shared/polling-settings";
 import { coerceUpdateChannel, DEFAULT_UPDATE_CHANNEL } from "../shared/update-channel";
 import { canaryPublishesFor, hostOsName } from "../shared/canary-publish";
 
@@ -262,6 +263,8 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		coordinatorPrompt: typeof d.coordinatorPrompt === "string" && d.coordinatorPrompt.trim()
 			? d.coordinatorPrompt
 			: undefined,
+		// Polling cadence overrides; sparse, clamped, absent ⇒ every default.
+		polling: sanitizePollingSettings(d.polling),
 	};
 }
 

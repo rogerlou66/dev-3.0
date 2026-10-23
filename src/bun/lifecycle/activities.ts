@@ -12,14 +12,9 @@ import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
 import { loadSettings } from "../settings";
+import { resolvePolling, type ResolvedPolling } from "../../shared/polling-settings";
 import { getActiveContext, getPushMessage, isAppForeground, log } from "../rpc-handlers/shared";
 import {
-	ACTIVE_PROJECT_MERGE_INTERVAL_MS,
-	ACTIVE_PROJECT_PENDING_PR_INTERVAL_MS,
-	ACTIVE_PROJECT_PR_INTERVAL_MS,
-	BACKGROUND_PROJECT_MERGE_INTERVAL_MS,
-	BACKGROUND_PROJECT_PENDING_PR_INTERVAL_MS,
-	BACKGROUND_PROJECT_PR_INTERVAL_MS,
 	MERGE_POLL_INTERVAL_MS,
 	PR_POLL_INTERVAL_MS,
 	intervalForTask,
@@ -161,6 +156,10 @@ async function checkMergedBranches(): Promise<void> {
 	const foreground = isAppForeground();
 	const now = Date.now();
 	const settings = await loadSettings();
+	const polling = resolvePolling(settings);
+	// Switched off in Settings → Polling. The stale tick time makes re-enabling
+	// read as a wake, so overdue tasks are re-spread instead of firing together.
+	if (!polling.enabled.mergeDetection) return;
 	const suggestCompletion = settings.suggestCompletingTasksAfterMerge !== false;
 	// A tick far later than the base interval means the host was suspended
 	// (laptop sleep): re-spread overdue tasks instead of firing them all at once.
@@ -177,7 +176,7 @@ async function checkMergedBranches(): Promise<void> {
 		if (reviewTasks.length === 0) continue;
 
 		const isActiveFg = foreground && project.id === activeProjectId;
-		const interval = intervalForTask(isActiveFg, ACTIVE_PROJECT_MERGE_INTERVAL_MS, BACKGROUND_PROJECT_MERGE_INTERVAL_MS);
+		const interval = intervalForTask(isActiveFg, polling.intervalMs.mergeActive, polling.intervalMs.mergeBackground);
 
 		// Decide which tasks are due this tick; schedule (or re-spread) the rest.
 		const dueTasks = reviewTasks.filter((task) => {
@@ -399,10 +398,11 @@ export async function persistProjectPrIdentities(project: Project, prs: PRInfo[]
 	}
 }
 
-function prPollInterval(isActiveForeground: boolean, taskId: string): number {
+function prPollInterval(polling: ResolvedPolling, isActiveForeground: boolean, taskId: string): number {
+	const { intervalMs } = polling;
 	return lifecycleActorRuntime(taskId).prPending
-		? intervalForTask(isActiveForeground, ACTIVE_PROJECT_PENDING_PR_INTERVAL_MS, BACKGROUND_PROJECT_PENDING_PR_INTERVAL_MS)
-		: intervalForTask(isActiveForeground, ACTIVE_PROJECT_PR_INTERVAL_MS, BACKGROUND_PROJECT_PR_INTERVAL_MS);
+		? intervalForTask(isActiveForeground, intervalMs.prPendingActive, intervalMs.prPendingBackground)
+		: intervalForTask(isActiveForeground, intervalMs.prActive, intervalMs.prBackground);
 }
 
 const REVIEW_THREADS_QUERY = `
@@ -672,6 +672,9 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 
 	const projects = await data.loadProjects();
 	const settings = await loadSettings();
+	const polling = resolvePolling(settings);
+	// Same as the merge poller: off means no `gh` call, and re-enabling re-spreads.
+	if (!polling.enabled.prStatus) return;
 	const suggestCompletion = settings.suggestCompletingTasksAfterMerge !== false;
 	const { projectId: activeProjectId } = getActiveContext();
 	const foreground = isAppForeground();
@@ -694,7 +697,7 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 		const isActiveFg = foreground && project.id === activeProjectId;
 		const dueTasks = candidates.filter((task) => {
 			liveTaskIds.add(task.id);
-			const interval = prPollInterval(isActiveFg, task.id);
+			const interval = prPollInterval(polling, isActiveFg, task.id);
 			const runtime = lifecycleActorRuntime(task.id);
 			let scheduled = runtime.prNextDue;
 			if (scheduled === undefined) {
@@ -717,7 +720,7 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 			} catch (err) {
 				log.warn("PR check failed for task", { taskId: task.id.slice(0, 8), error: String(err) });
 			} finally {
-				lifecycleActorRuntime(task.id).prNextDue = nextDueAfterRun(now, prPollInterval(isActiveFg, task.id), scheduleRandom);
+				lifecycleActorRuntime(task.id).prNextDue = nextDueAfterRun(now, prPollInterval(polling, isActiveFg, task.id), scheduleRandom);
 			}
 		}
 	}
