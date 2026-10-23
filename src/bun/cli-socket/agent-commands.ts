@@ -110,8 +110,6 @@ export const agentHandlers: Record<string, Handler> = {
 		}
 		// A To Do card has no run to report on — not even a pending question.
 		if (task.status === "todo") target = null;
-		// A pinned column agent (PR Review) reports from inside its own column.
-		if (typeof params.pinnedStatus === "string" && params.pinnedStatus === task.status) target = null;
 		const resumeStatus = event === "PermissionRequest"
 			&& (task.status === "in-progress" || task.status === "review-by-ai")
 			? task.status

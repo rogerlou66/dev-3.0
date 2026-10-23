@@ -6,7 +6,6 @@ import {
 } from "../../shared/agent-hooks";
 import type { CliContext } from "../context";
 import { sendRequest } from "../socket-client";
-import { columnAgentPinParams } from "../column-agent-pin";
 import { loadRecentNotesBlock, sessionStartContextOutput } from "./recent-notes";
 
 interface CodexHookPayload {
@@ -110,7 +109,6 @@ export async function handleCodexHook(
 				taskId: context.taskId,
 				projectId: context.projectId,
 				event: payload.event,
-				...columnAgentPinParams(),
 				...(payload.questionIds ? { questionIds: payload.questionIds } : {}),
 				...(payload.answeredQuestionId ? { answeredQuestionId: payload.answeredQuestionId } : {}),
 				...(payload.toolName ? { toolName: payload.toolName } : {}),

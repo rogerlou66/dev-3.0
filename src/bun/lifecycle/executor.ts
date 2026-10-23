@@ -672,7 +672,7 @@ async function columnAgentConfig(
 	task: Task,
 	column: LifecycleColumn,
 	providedCustomColumn?: CustomColumn,
-): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string; pinStatus?: TaskStatus } | null> {
+): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string } | null> {
 	if (!task.worktreePath) return null;
 	if (column.status === "review-by-ai" && column.customColumnId === null) {
 		// Project Settings saves this into the main checkout's .dev3 files, so a
@@ -689,13 +689,6 @@ async function columnAgentConfig(
 			paneTitle: "AI Review",
 			onExitCommand: `${DEV3_HOME}/bin/dev3 task move ${task.id} --status review-by-user --if-status review-by-ai`,
 		};
-	}
-	if (column.status === "review-by-colleague" && column.customColumnId === null) {
-		// Opt-in, unlike AI Review: no entry (or an empty prompt) means no agent.
-		const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
-		const configured = resolved.builtinColumnAgents?.["review-by-colleague"];
-		if (!configured?.prompt.trim()) return null;
-		return { config: configured, paneTitle: "PR Review", pinStatus: "review-by-colleague" };
 	}
 	if (!column.customColumnId) return null;
 	const customColumn = providedCustomColumn
@@ -720,7 +713,6 @@ export async function launchLifecycleColumnAgent(
 		await launchColumnAgent(project, task, configured.config, {
 			paneTitle: configured.paneTitle,
 			onExitCommand: configured.onExitCommand,
-			...(configured.pinStatus ? { pinStatus: configured.pinStatus } : {}),
 		});
 		return null;
 	} catch (error) {

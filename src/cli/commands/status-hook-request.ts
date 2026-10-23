@@ -2,7 +2,6 @@ import type { AgentStatusHookEvent } from "../../shared/agent-hooks";
 import type { PromptSubmitHarness } from "../../shared/agent-terminal-prompt";
 import type { CliContext } from "../context";
 import { sendRequest } from "../socket-client";
-import { columnAgentPinParams } from "../column-agent-pin";
 
 export interface StatusHookReport {
 	harness: Exclude<PromptSubmitHarness, "claude">;
@@ -44,7 +43,6 @@ export async function reportStatusHookEvent(
 			projectId: context.projectId,
 			harness: report.harness,
 			event: report.event,
-			...columnAgentPinParams(),
 			...(report.sessionId ? { sessionId: report.sessionId } : {}),
 			...(paneId ? { paneId } : {}),
 			// Carried on the status hook so a submitted prompt costs the pane no
