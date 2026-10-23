@@ -672,7 +672,7 @@ async function columnAgentConfig(
 	task: Task,
 	column: LifecycleColumn,
 	providedCustomColumn?: CustomColumn,
-): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string } | null> {
+): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string; pinStatus?: TaskStatus } | null> {
 	if (!task.worktreePath) return null;
 	if (column.status === "review-by-ai" && column.customColumnId === null) {
 		// Project Settings saves this into the main checkout's .dev3 files, so a
@@ -695,7 +695,7 @@ async function columnAgentConfig(
 		const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
 		const configured = resolved.builtinColumnAgents?.["review-by-colleague"];
 		if (!configured?.prompt.trim()) return null;
-		return { config: configured, paneTitle: "PR Review" };
+		return { config: configured, paneTitle: "PR Review", pinStatus: "review-by-colleague" };
 	}
 	if (!column.customColumnId) return null;
 	const customColumn = providedCustomColumn
@@ -720,6 +720,7 @@ export async function launchLifecycleColumnAgent(
 		await launchColumnAgent(project, task, configured.config, {
 			paneTitle: configured.paneTitle,
 			onExitCommand: configured.onExitCommand,
+			...(configured.pinStatus ? { pinStatus: configured.pinStatus } : {}),
 		});
 		return null;
 	} catch (error) {

@@ -764,6 +764,21 @@ describe("task.agentHook", () => {
 		},
 	);
 
+	it.each(["UserPromptSubmit", "PreToolUse", "Stop", "PermissionRequest"])(
+		"leaves a PR Review card in place for the pinned column agent's %s", async event => {
+			const project = makeProject();
+			const task = makeTask({ status: "review-by-colleague" });
+			mockAtomicHookUpdate(project, task);
+
+			const response = await handleRequest(makeRequest("task.agentHook", {
+				taskId: task.id, projectId: project.id, sessionId: `pinned-${event}`, event, pinnedStatus: "review-by-colleague",
+			}));
+
+			expect(response.ok).toBe(true);
+			expect((response.data as Task).status).toBe("review-by-colleague");
+		},
+	);
+
 	it.each(["Interrupt", "SessionEnd"])("releases a blocking question on %s", async event => {
 		const project = makeProject();
 		let task = makeTask({ status: "in-progress" });

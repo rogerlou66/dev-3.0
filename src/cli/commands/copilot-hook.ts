@@ -2,6 +2,7 @@ import { copilotStatusEvent } from "../../shared/agent-hooks";
 import { GENERIC_SKILL_BODY } from "../../shared/agent-skill-content";
 import type { CliContext } from "../context";
 import { sendRequest } from "../socket-client";
+import { columnAgentPinParams } from "../column-agent-pin";
 
 interface CopilotHookPayload {
 	/** The submitted text, on `userPromptSubmitted` only. */
@@ -68,6 +69,7 @@ export async function handleCopilotHook(
 				projectId: context.projectId,
 				event: mapped,
 				harness: "copilot",
+				...columnAgentPinParams(),
 				...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
 				...(paneId ? { paneId } : {}),
 				...(event === "userPromptSubmitted" && payload.prompt ? { prompt: payload.prompt } : {}),

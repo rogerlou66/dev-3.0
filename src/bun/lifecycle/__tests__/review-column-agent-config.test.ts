@@ -137,7 +137,7 @@ describe("PR Review column agent", () => {
 		expect(launchColumnAgent).toHaveBeenCalledTimes(1);
 		const [, , config, options] = vi.mocked(launchColumnAgent).mock.calls[0];
 		expect(config).toEqual(B);
-		expect(options).toEqual({ paneTitle: "PR Review", onExitCommand: undefined });
+		expect(options).toEqual({ paneTitle: "PR Review", onExitCommand: undefined, pinStatus: "review-by-colleague" });
 	});
 
 	it("launches nothing when the project never configured one", async () => {

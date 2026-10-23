@@ -6,6 +6,7 @@ import { CLI_EXIT_CODE_APPROVAL_OUTCOME_UNKNOWN, CLI_EXIT_CODE_APPROVAL_STILL_PE
 import { CODEX_STOP_HOOK_FLAG, CODEX_STOP_HOOK_SUCCESS_JSON, TOLERATE_APP_OFFLINE_FLAG } from "../../shared/agent-hooks";
 import { allPullRequests } from "../../shared/task-pull-requests";
 import { sendRequest } from "../socket-client";
+import { withColumnAgentPin } from "../column-agent-pin";
 import { DESTRUCTIVE_APPROVAL_TARGET, isAgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../../shared/agent-approval";
 import { printDetail, exitError, exitUsage } from "../output";
 import type { ParsedArgs } from "../args";
@@ -904,7 +905,7 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	}
 
 	const ifStatus = args.flags["if-status"];
-	const ifStatusNot = args.flags["if-status-not"];
+	const ifStatusNot = withColumnAgentPin(args.flags["if-status-not"]);
 	const codexStopHook = args.flags[CODEX_STOP_HOOK_FLAG.slice(2)] === "true";
 
 	// `completed` is not a direct move — it asks the user for approval in the
