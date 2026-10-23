@@ -244,6 +244,7 @@ import { activateTask, createTask, moveTask, runCleanupScript, emitTaskSound, ge
 import { appendNotificationLog } from "../notification-log";
 import { loadSettings } from "../settings";
 import { deliverAgentPrompt } from "../agent-prompt-delivery";
+import { isPrReviewTurnPinned, pinPrReviewTurn, releasePrReviewTurn } from "../pr-review-turn-pin";
 import { runDevServer, stopDevServer, restartDevServer, getDevServerStatus } from "../rpc-handlers/tmux-pty";
 import { resolveTaskStartRef } from "../task-start-ref";
 import { flushAndEnd } from "../socket-backpressure";
@@ -763,6 +764,38 @@ describe("task.agentHook", () => {
 			expect(storedTask.status).toBe(initialStatus === "review-by-ai" ? "review-by-user" : "review-by-ai");
 		},
 	);
+
+	it.each(["UserPromptSubmit", "PreToolUse", "PermissionRequest"])(
+		"leaves a PR Review card in place during the pinned PR Review turn's %s", async event => {
+			const project = makeProject();
+			const task = makeTask({ status: "review-by-colleague" });
+			mockAtomicHookUpdate(project, task);
+			pinPrReviewTurn(task.id);
+
+			const response = await handleRequest(makeRequest("task.agentHook", {
+				taskId: task.id, projectId: project.id, sessionId: `pinned-${event}`, event,
+			}));
+
+			expect(response.ok).toBe(true);
+			expect((response.data as Task).status).toBe("review-by-colleague");
+			expect(isPrReviewTurnPinned(task)).toBe(true);
+			releasePrReviewTurn(task.id);
+		},
+	);
+
+	it("releases the PR Review pin on the turn's Stop without moving the card", async () => {
+		const project = makeProject();
+		const task = makeTask({ status: "review-by-colleague" });
+		mockAtomicHookUpdate(project, task);
+		pinPrReviewTurn(task.id);
+
+		const response = await handleRequest(makeRequest("task.agentHook", {
+			taskId: task.id, projectId: project.id, sessionId: "pinned-stop", event: "Stop",
+		}));
+
+		expect((response.data as Task).status).toBe("review-by-colleague");
+		expect(isPrReviewTurnPinned(task)).toBe(false);
+	});
 
 	it.each(["Interrupt", "SessionEnd"])("releases a blocking question on %s", async event => {
 		const project = makeProject();
@@ -3630,6 +3663,45 @@ describe("task.move", () => {
 			});
 		});
 	}
+
+	describe("during a pinned PR Review turn", () => {
+		const task = makeTask({ status: "review-by-colleague" });
+		beforeEach(() => {
+			vi.mocked(data.getProject).mockResolvedValue(makeProject());
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			pinPrReviewTurn(task.id);
+		});
+		afterEach(() => releasePrReviewTurn(task.id));
+
+		it.each(["in-progress", "user-questions"])("ignores the task's own hook move to %s", async (newStatus) => {
+			const resp = await handleRequest(makeRequest("task.move", {
+				taskId: task.id, projectId: "proj-1", newStatus, sourceTaskId: task.id,
+			}));
+
+			expect(resp.ok).toBe(true);
+			expect((resp.data as Task).status).toBe("review-by-colleague");
+			expect(moveTask).not.toHaveBeenCalled();
+			expect(isPrReviewTurnPinned(task)).toBe(true);
+		});
+
+		it("treats the Stop hook's review-by-user move as the end of the turn", async () => {
+			const resp = await handleRequest(makeRequest("task.move", {
+				taskId: task.id, projectId: "proj-1", newStatus: "review-by-user", ifStatus: "in-progress", sourceTaskId: task.id,
+			}));
+
+			expect((resp.data as Task).status).toBe("review-by-colleague");
+			expect(moveTask).not.toHaveBeenCalled();
+			expect(isPrReviewTurnPinned(task)).toBe(false);
+		});
+
+		it("still moves the card for a command from outside the task", async () => {
+			vi.mocked(moveTask).mockResolvedValue({ ...task, status: "in-progress" });
+
+			await handleRequest(makeRequest("task.move", { taskId: task.id, projectId: "proj-1", newStatus: "in-progress" }));
+
+			expect(moveTask).toHaveBeenCalledWith(expect.objectContaining({ newStatus: "in-progress" }));
+		});
+	});
 
 	it("errors when taskId is missing", async () => {
 		const resp = await handleRequest(makeRequest("task.move", { newStatus: "todo" }));

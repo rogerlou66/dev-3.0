@@ -24,6 +24,8 @@ import {
 	taskResetConsentMatches,
 } from "../../shared/types";
 import { voidAgentRequest } from "../agent-requests";
+import { deliverAgentPrompt } from "../agent-prompt-delivery";
+import { pinPrReviewTurn, releasePrReviewTurn } from "../pr-review-turn-pin";
 import { assertLaunchAgentsInstalled } from "../agent-launch-availability";
 import { requestGracefulAgentExit } from "../agent-graceful-exit";
 import { clonePaths } from "../cow-clone";
@@ -708,6 +710,10 @@ export async function launchLifecycleColumnAgent(
 ): Promise<Extract<LifecycleEvent, { type: "columnAgentFailed" }> | null> {
 	const identity = columnAgentIdentity(project, column, customColumn);
 	try {
+		if (column.status === "review-by-colleague" && column.customColumnId === null) {
+			await injectPrReviewPrompt(project, task);
+			return null;
+		}
 		const configured = await columnAgentConfig(project, task, column, customColumn);
 		if (!configured) return null;
 		await launchColumnAgent(project, task, configured.config, {
@@ -727,6 +733,21 @@ export async function launchLifecycleColumnAgent(
 			reason: columnAgentFailureReason(error),
 		};
 	}
+}
+
+/**
+ * PR Review has no agent of its own: the project's prompt is typed into the
+ * task's primary agent, and the turn it starts is pinned so its status hooks
+ * leave the card in PR Review (`src/bun/pr-review-turn-pin.ts`).
+ */
+async function injectPrReviewPrompt(project: Project, task: Task): Promise<void> {
+	const prompt = project.prReviewPrompt?.trim();
+	if (!prompt || !task.worktreePath) return;
+	pinPrReviewTurn(task.id);
+	const delivery = await deliverAgentPrompt(task, prompt);
+	if (delivery.status !== "not-delivered") return;
+	releasePrReviewTurn(task.id);
+	throw new Error(`Could not send the PR Review prompt — the task has no live agent session.${delivery.detail ? ` (${delivery.detail})` : ""}`);
 }
 
 /**

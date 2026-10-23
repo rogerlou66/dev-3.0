@@ -222,6 +222,9 @@ function ProjectSettings({
 	const initialReviewModePromptRef = useRef(project?.reviewModePrompt ?? "");
 	const [coordinatorPrompt, setCoordinatorPrompt] = useState(project?.coordinatorPrompt ?? "");
 	const initialCoordinatorPromptRef = useRef(project?.coordinatorPrompt ?? "");
+	// Typed into the task's own agent when its card enters PR Review; blank = off.
+	const [prReviewPrompt, setPrReviewPrompt] = useState(project?.prReviewPrompt ?? "");
+	const initialPrReviewPromptRef = useRef(project?.prReviewPrompt ?? "");
 	const [globalCoordinatorPrompt, setGlobalCoordinatorPrompt] = useState<string | undefined>(undefined);
 	const [globalReviewModePrompt, setGlobalReviewModePrompt] = useState<string | undefined>(undefined);
 	const inheritedReviewModePrompt = resolvePresetPrompt(undefined, globalReviewModePrompt, DEFAULT_PR_REVIEW_PROMPT);
@@ -333,8 +336,9 @@ function ProjectSettings({
 
 	const isReviewModePromptDirty = useCallback(
 		() => reviewModePrompt.trim() !== initialReviewModePromptRef.current.trim()
-			|| coordinatorPrompt.trim() !== initialCoordinatorPromptRef.current.trim(),
-		[reviewModePrompt, coordinatorPrompt],
+			|| coordinatorPrompt.trim() !== initialCoordinatorPromptRef.current.trim()
+			|| prReviewPrompt.trim() !== initialPrReviewPromptRef.current.trim(),
+		[reviewModePrompt, coordinatorPrompt, prReviewPrompt],
 	);
 
 	const isAiReviewDirty = useCallback(() => {
@@ -655,6 +659,7 @@ function ProjectSettings({
 				...toSave,
 				reviewModePrompt: reviewModePrompt.trim() ? reviewModePrompt : "",
 				coordinatorPrompt: coordinatorPrompt.trim() ? coordinatorPrompt : "",
+				prReviewPrompt: prReviewPrompt.trim() ? prReviewPrompt : "",
 			});
 			dispatch({ type: "updateProject", project: updated });
 			loadedProjectConfig.current = toSave;
@@ -662,6 +667,7 @@ function ProjectSettings({
 			initialAiReviewRef.current = { agentId: aiReviewAgentId, configId: aiReviewConfigId, prompt: aiReviewPrompt };
 			initialReviewModePromptRef.current = reviewModePrompt;
 			initialCoordinatorPromptRef.current = coordinatorPrompt;
+			initialPrReviewPromptRef.current = prReviewPrompt;
 		} catch (err) {
 			toast.error(t("projectSettings.failedSave", { error: String(err) }), { projectId });
 		}
@@ -1164,6 +1170,31 @@ function ProjectSettings({
 											className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm font-mono placeholder-fg-muted outline-none focus:border-accent/40 transition-colors resize-y"
 										/>
 									</div>
+								</div>
+							</div>
+
+							{/* PR Review prompt (typed into the task's own session) */}
+							<div className="space-y-4">
+								<div>
+									<label htmlFor="project-pr-review-prompt" className="block text-fg text-sm font-semibold mb-1">
+										{t("projectSettings.prReviewPrompt")}
+									</label>
+									<p className="text-fg-3 text-sm">
+										{t("projectSettings.prReviewPromptDesc")}
+									</p>
+								</div>
+								<div className="pl-1">
+									<textarea
+										id="project-pr-review-prompt"
+										value={prReviewPrompt}
+										onChange={(e) => setPrReviewPrompt(e.target.value)}
+										rows={5}
+										placeholder={t("projectSettings.prReviewPromptPlaceholder")}
+										autoCapitalize="off"
+										autoCorrect="off"
+										spellCheck={false}
+										className="w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm font-mono placeholder-fg-muted outline-none focus:border-accent/40 transition-colors resize-y"
+									/>
 								</div>
 							</div>
 

@@ -1344,3 +1344,41 @@ describe("AI Review column fields", () => {
 		expect(api.request.updateProjectSettings).not.toHaveBeenCalled();
 	});
 });
+
+describe("PR Review prompt", () => {
+	async function render(overrides: Partial<Project>) {
+		(api.request.updateProjectSettings as ReturnType<typeof vi.fn>).mockClear();
+		await renderProjectSettings(mockProject, overrides);
+		await goToProjectTab();
+	}
+
+	const promptField = () => screen.getByLabelText("PR Review Prompt");
+
+	it("saves the prompt typed for the task's own session", async () => {
+		const user = userEvent.setup();
+		await render({});
+		expect(promptField()).toHaveValue("");
+
+		await user.type(promptField(), "SYNTHETIC PR PROMPT");
+		await user.click(screen.getByText("Save"));
+
+		await vi.waitFor(() => {
+			expect(api.request.updateProjectSettings).toHaveBeenCalledWith(expect.objectContaining({
+				prReviewPrompt: "SYNTHETIC PR PROMPT",
+			}));
+		});
+	});
+
+	it("sends a blank prompt when it is cleared, turning it off", async () => {
+		const user = userEvent.setup();
+		await render({ prReviewPrompt: "SYNTHETIC PR PROMPT" });
+		expect(promptField()).toHaveValue("SYNTHETIC PR PROMPT");
+
+		await user.clear(promptField());
+		await user.click(screen.getByText("Save"));
+
+		await vi.waitFor(() => {
+			expect(api.request.updateProjectSettings).toHaveBeenCalledWith(expect.objectContaining({ prReviewPrompt: "" }));
+		});
+	});
+});
