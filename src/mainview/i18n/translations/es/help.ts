@@ -27,7 +27,7 @@ const help = {
 		"El agente terminó y espera tu veredicto. Abre el diff desde el inspector de la tarea, revisa los cambios y completa la tarea — o devuélvela con comentarios.",
 	"help.board.column.reviewByColleague.title": "Revisión de PR",
 	"help.board.column.reviewByColleague.body":
-		"La tarea espera la revisión del pull request por un colega. Sigue la insignia del PR en la tarjeta; completa la tarea cuando el PR se fusione. En los ajustes del proyecto puedes iniciar un agente con tu propio prompt cada vez que una tarea entra en esta columna.",
+		"La tarea espera la revisión del pull request por un colega. Sigue la insignia del PR en la tarjeta; completa la tarea cuando el PR se fusione. La configuración del proyecto puede enviar tu propio prompt a la sesión de la tarea cada vez que una tarea entra en esta columna.",
 	"help.board.column.completed.title": "Completado",
 	"help.board.column.completed.body":
 		"Hecho y entregado. El worktree y la terminal de la tarea fueron destruidos; sus notas, resumen y registro de conversación sobreviven y siguen siendo buscables.",

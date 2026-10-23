@@ -143,6 +143,9 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 		...(params.coordinatorPrompt !== undefined
 			? { coordinatorPrompt: params.coordinatorPrompt.trim() ? params.coordinatorPrompt : undefined }
 			: {}),
+		...(params.prReviewPrompt !== undefined
+			? { prReviewPrompt: params.prReviewPrompt.trim() ? params.prReviewPrompt : undefined }
+			: {}),
 		...(params.artifactTemplate !== undefined
 			? { artifactTemplate: params.artifactTemplate === "inherit" ? undefined : params.artifactTemplate }
 			: {}),

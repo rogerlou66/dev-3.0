@@ -159,6 +159,8 @@ export interface ProjectSettingsUpdate extends Dev3RepoConfig {
 	reviewModePrompt?: string;
 	/** Blank string clears the project override and falls back to global. */
 	coordinatorPrompt?: string;
+	/** Blank string turns the PR Review prompt off. */
+	prReviewPrompt?: string;
 	/** `"inherit"` clears the project override and falls back to global. */
 	artifactTemplate?: ArtifactTemplateMode | "inherit";
 	/** Blank string clears the project folder and falls back to the global one. */
@@ -260,6 +262,12 @@ export interface Project {
 	 * the global setting, then the built-in. See resolvePresetPrompt.
 	 */
 	coordinatorPrompt?: string;
+	/**
+	 * Typed into the task's own agent session when its card enters PR Review
+	 * (`review-by-colleague`). Absent/blank ⇒ nothing is sent. See
+	 * `injectPrReviewPrompt` in `src/bun/lifecycle/executor.ts`.
+	 */
+	prReviewPrompt?: string;
 	/** Project override of {@link GlobalSettings.artifactTemplate}. Absent = follow the global setting. */
 	artifactTemplate?: ArtifactTemplateMode;
 	/** This project's own starter folder when its mode is `"custom"`. Absent = the global folder. */

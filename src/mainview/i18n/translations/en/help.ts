@@ -33,7 +33,7 @@ const help = {
 		"The agent finished and wants your verdict. Open the diff from the task inspector, read the changes, then complete the task — or send it back with comments.",
 	"help.board.column.reviewByColleague.title": "PR Review",
 	"help.board.column.reviewByColleague.body":
-		"The task waits for a teammate's review of its pull request. Track the PR badge on the card; complete the task once the PR lands. Project Settings can start an agent with your own prompt whenever a task enters this column.",
+		"The task waits for a teammate's review of its pull request. Track the PR badge on the card; complete the task once the PR lands. Project Settings can send your own prompt into the task's session whenever a task enters this column.",
 	"help.board.column.completed.title": "Completed",
 	"help.board.column.completed.body":
 		"Done and shipped. The task's worktree and terminal were destroyed; its notes, overview and conversation record survive and stay searchable.",

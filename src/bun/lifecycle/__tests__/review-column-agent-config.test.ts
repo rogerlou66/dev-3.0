@@ -45,9 +45,12 @@ vi.mock("../../worktree-trust", () => ({ forgetWorktreeTrust: vi.fn() }));
 vi.mock("../../board-operations/task-notes", () => ({ addNote: vi.fn() }));
 vi.mock("../../board-operations/runtime", () => ({ boardPorts: {} }));
 vi.mock("../../agent-requests", () => ({ voidAgentRequest: vi.fn() }));
+vi.mock("../../agent-prompt-delivery", () => ({ deliverAgentPrompt: vi.fn(async () => ({ status: "delivered" })) }));
 vi.mock("../../board-operations/types", () => ({ AGENT_ACTOR: { kind: "agent" } }));
 
 import { launchColumnAgent } from "../../rpc-handlers/tmux-pty";
+import { deliverAgentPrompt } from "../../agent-prompt-delivery";
+import { isPrReviewTurnPinned, releasePrReviewTurn } from "../../pr-review-turn-pin";
 import { saveConfigToWinningLayer } from "../../repo-config";
 import { launchLifecycleColumnAgent } from "../executor";
 import type { ColumnAgentConfig, Project, Task } from "../../../shared/types";
@@ -127,27 +130,34 @@ describe("AI Review column launch reads the config Project Settings saved", () =
 	});
 });
 
-describe("PR Review column agent", () => {
+describe("PR Review column prompt", () => {
 	const PR_REVIEW_COLUMN = { status: "review-by-colleague" as const, customColumnId: null };
+	const inPrReview = () => task({ status: "review-by-colleague", customColumnId: null });
+	afterEach(() => releasePrReviewTurn(task().id));
 
-	it("launches the configured agent with no hand-back command", async () => {
-		writeConfig(main, "config.json", { builtinColumnAgents: { "review-by-ai": A, "review-by-colleague": B } });
+	it("types the prompt into the task's own agent and launches no column agent", async () => {
+		const t = inPrReview();
+		expect(await launchLifecycleColumnAgent(project({ prReviewPrompt: "SYNTHETIC PR PROMPT" }), t, PR_REVIEW_COLUMN)).toBeNull();
 
-		expect(await launchLifecycleColumnAgent(project(), task(), PR_REVIEW_COLUMN)).toBeNull();
-		expect(launchColumnAgent).toHaveBeenCalledTimes(1);
-		const [, , config, options] = vi.mocked(launchColumnAgent).mock.calls[0];
-		expect(config).toEqual(B);
-		expect(options).toEqual({ paneTitle: "PR Review", onExitCommand: undefined, pinStatus: "review-by-colleague" });
+		expect(deliverAgentPrompt).toHaveBeenCalledWith(t, "SYNTHETIC PR PROMPT");
+		expect(launchColumnAgent).not.toHaveBeenCalled();
+		expect(isPrReviewTurnPinned(t)).toBe(true);
 	});
 
-	it("launches nothing when the project never configured one", async () => {
-		expect(await launchLifecycleColumnAgent(project(), task(), PR_REVIEW_COLUMN)).toBeNull();
+	it.each([undefined, "   "])("sends nothing for prompt %j", async (prReviewPrompt) => {
+		expect(await launchLifecycleColumnAgent(project({ prReviewPrompt }), inPrReview(), PR_REVIEW_COLUMN)).toBeNull();
+
+		expect(deliverAgentPrompt).not.toHaveBeenCalled();
 		expect(launchColumnAgent).not.toHaveBeenCalled();
 	});
 
-	it("launches nothing for a blank prompt", async () => {
-		const blank = { ...B, prompt: "   " };
-		expect(await launchLifecycleColumnAgent(project({ builtinColumnAgents: { "review-by-colleague": blank } }), task(), PR_REVIEW_COLUMN)).toBeNull();
-		expect(launchColumnAgent).not.toHaveBeenCalled();
+	it("reports a failure and drops the pin when no agent session is live", async () => {
+		vi.mocked(deliverAgentPrompt).mockResolvedValueOnce({ status: "not-delivered", reason: "pane-absent" });
+		const t = inPrReview();
+
+		const failure = await launchLifecycleColumnAgent(project({ prReviewPrompt: "SYNTHETIC PR PROMPT" }), t, PR_REVIEW_COLUMN);
+
+		expect(failure).toMatchObject({ type: "columnAgentFailed", column: { kind: "builtin", status: "review-by-colleague" } });
+		expect(isPrReviewTurnPinned(t)).toBe(false);
 	});
 });

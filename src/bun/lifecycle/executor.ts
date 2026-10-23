@@ -24,6 +24,8 @@ import {
 	taskResetConsentMatches,
 } from "../../shared/types";
 import { voidAgentRequest } from "../agent-requests";
+import { deliverAgentPrompt } from "../agent-prompt-delivery";
+import { pinPrReviewTurn, releasePrReviewTurn } from "../pr-review-turn-pin";
 import { assertLaunchAgentsInstalled } from "../agent-launch-availability";
 import { requestGracefulAgentExit } from "../agent-graceful-exit";
 import { clonePaths } from "../cow-clone";
@@ -672,7 +674,7 @@ async function columnAgentConfig(
 	task: Task,
 	column: LifecycleColumn,
 	providedCustomColumn?: CustomColumn,
-): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string; pinStatus?: TaskStatus } | null> {
+): Promise<{ config: ColumnAgentConfig; paneTitle: string; onExitCommand?: string } | null> {
 	if (!task.worktreePath) return null;
 	if (column.status === "review-by-ai" && column.customColumnId === null) {
 		// Project Settings saves this into the main checkout's .dev3 files, so a
@@ -689,13 +691,6 @@ async function columnAgentConfig(
 			paneTitle: "AI Review",
 			onExitCommand: `${DEV3_HOME}/bin/dev3 task move ${task.id} --status review-by-user --if-status review-by-ai`,
 		};
-	}
-	if (column.status === "review-by-colleague" && column.customColumnId === null) {
-		// Opt-in, unlike AI Review: no entry (or an empty prompt) means no agent.
-		const resolved = await resolveOperationalProjectConfig(project, task.worktreePath, { foreignCode: task.foreignCode });
-		const configured = resolved.builtinColumnAgents?.["review-by-colleague"];
-		if (!configured?.prompt.trim()) return null;
-		return { config: configured, paneTitle: "PR Review", pinStatus: "review-by-colleague" };
 	}
 	if (!column.customColumnId) return null;
 	const customColumn = providedCustomColumn
@@ -715,12 +710,15 @@ export async function launchLifecycleColumnAgent(
 ): Promise<Extract<LifecycleEvent, { type: "columnAgentFailed" }> | null> {
 	const identity = columnAgentIdentity(project, column, customColumn);
 	try {
+		if (column.status === "review-by-colleague" && column.customColumnId === null) {
+			await injectPrReviewPrompt(project, task);
+			return null;
+		}
 		const configured = await columnAgentConfig(project, task, column, customColumn);
 		if (!configured) return null;
 		await launchColumnAgent(project, task, configured.config, {
 			paneTitle: configured.paneTitle,
 			onExitCommand: configured.onExitCommand,
-			...(configured.pinStatus ? { pinStatus: configured.pinStatus } : {}),
 		});
 		return null;
 	} catch (error) {
@@ -735,6 +733,21 @@ export async function launchLifecycleColumnAgent(
 			reason: columnAgentFailureReason(error),
 		};
 	}
+}
+
+/**
+ * PR Review has no agent of its own: the project's prompt is typed into the
+ * task's primary agent, and the turn it starts is pinned so its status hooks
+ * leave the card in PR Review (`src/bun/pr-review-turn-pin.ts`).
+ */
+async function injectPrReviewPrompt(project: Project, task: Task): Promise<void> {
+	const prompt = project.prReviewPrompt?.trim();
+	if (!prompt || !task.worktreePath) return;
+	pinPrReviewTurn(task.id);
+	const delivery = await deliverAgentPrompt(task, prompt);
+	if (delivery.status !== "not-delivered") return;
+	releasePrReviewTurn(task.id);
+	throw new Error(`Could not send the PR Review prompt — the task has no live agent session.${delivery.detail ? ` (${delivery.detail})` : ""}`);
 }
 
 /**

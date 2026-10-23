@@ -17,6 +17,7 @@ import { taskPeek } from "../task-peek";
 import { readTaskTerminalBackendState, switchTaskTerminalBackend } from "../task-terminal-backend-switch";
 import { approvalStatusOf, launchSuggestionRequested, launcherHandoffNote, requestAgentLaunchApproval, requestDestructiveApproval, resolveLaunchSuggestion } from "./approvals";
 import { log, type Handler } from "./shared";
+import { isPinnedHookMove, releasePrReviewTurn } from "../pr-review-turn-pin";
 import { findByIdPrefix, findTaskByRef, resolveAgentMessageSource, resolveTaskAcrossProjects, resolveTaskFromParams, scopedTaskNotFoundError, taskNotFoundError, withArchivedHistory } from "./task-resolution";
 
 // Lazy like `conversationImport` (shared.ts): it reaches the app and spaces handler domains.
@@ -511,6 +512,12 @@ export const taskHandlers: Record<string, Handler> = {
 		// agent is dying, and its hooks (every tool call) must stay a quiet no-op.
 		if (isActivation && task.status === "todo" && sourceTaskId && sourceTaskId === task.id) {
 			log.info("Ignoring own-agent activation of a To Do task", { taskId: task.id.slice(0, 8), to: builtinStatus });
+			return task;
+		}
+		// The PR Review prompt's own turn must not pull its card out of PR Review.
+		if (sourceTaskId === task.id && isPinnedHookMove(task, builtinStatus)) {
+			if (builtinStatus === "review-by-user") releasePrReviewTurn(task.id);
+			log.info("Kept a pinned PR Review card in place", { taskId: task.id.slice(0, 8), to: builtinStatus });
 			return task;
 		}
 		const isLaunch = requester && isActivation && !isStatusGuardBlocked(task.status, { ifStatus, ifStatusNot });

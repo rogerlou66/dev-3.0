@@ -8,6 +8,7 @@ import { CodexQuestionState } from "../codex-question-state";
 import { classifyAntigravityConversation } from "./antigravity-conversations";
 import { capturePaneSession } from "./pane-sessions";
 import { log, type Handler } from "./shared";
+import { isPrReviewTurnPinned, releasePrReviewTurn } from "../pr-review-turn-pin";
 import { requirePaneTask, resolveTaskAcrossProjects, resolveTaskFromParams } from "./task-resolution";
 
 const codexQuestions = new CodexQuestionState();
@@ -110,8 +111,11 @@ export const agentHandlers: Record<string, Handler> = {
 		}
 		// A To Do card has no run to report on — not even a pending question.
 		if (task.status === "todo") target = null;
-		// A pinned column agent (PR Review) reports from inside its own column.
-		if (typeof params.pinnedStatus === "string" && params.pinnedStatus === task.status) target = null;
+		// The PR Review prompt's own turn reports from inside PR Review; its end releases the pin.
+		if (isPrReviewTurnPinned(task)) {
+			target = null;
+			if (event === "Stop" || event === "Interrupt" || event === "SessionEnd") releasePrReviewTurn(task.id);
+		}
 		const resumeStatus = event === "PermissionRequest"
 			&& (task.status === "in-progress" || task.status === "review-by-ai")
 			? task.status
@@ -229,6 +233,7 @@ export const agentHandlers: Record<string, Handler> = {
 			...(typeof params.lastAssistantMessage === "string" ? { lastAssistantMessage: params.lastAssistantMessage } : {}),
 		});
 
+		releasePrReviewTurn(task.id);
 		// A To Do task has no turn to park: the failing agent outlived its run.
 		if (task.status === "completed" || task.status === "cancelled" || task.status === "todo") {
 			return { task, moved: false, reason };
