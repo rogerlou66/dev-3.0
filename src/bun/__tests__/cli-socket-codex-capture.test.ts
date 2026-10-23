@@ -267,6 +267,41 @@ describe("cli-socket — Codex per-pane session capture (e2e, real data)", () =>
 			.toBe("pi --session-id 0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001");
 	});
 
+	it("captures the main agy conversation and ignores a subagent's hooks entirely", async () => {
+		await import("../data");
+		const { handleRequest } = await import("../cli-socket-server");
+		const { buildResumeCommand } = await import("../agents");
+		const { moveTask } = await import("../rpc-handlers");
+
+		seed([makeTask({ sessionState: { panes: [{ ...codexPane("%5", null), agentCmd: "agy" }] } })]);
+		const hook = (event: string, sessionId: string) => handleRequest(agentHook({
+			projectId: "proj-1", taskId: "task-1", harness: "agy", event, sessionId, agentPid: 41_001, paneId: "%5",
+		}));
+
+		await hook("SessionStart", MAIN);
+		await hook("UserPromptSubmit", MAIN);
+		vi.mocked(moveTask).mockClear();
+		const subagentStart = await hook("SessionStart", CONV_X);
+		const subagentStop = await hook("Stop", CONV_X);
+
+		expect(subagentStart.data).toEqual({ ignoredSubagent: true });
+		expect(subagentStop.data).toEqual({ ignoredSubagent: true });
+		expect(moveTask).not.toHaveBeenCalled();
+		const [pane] = readPanes();
+		expect(pane?.sessionId).toBe(MAIN);
+		expect(buildResumeCommand("agy", pane!.sessionId ?? undefined)).toBe(`agy --conversation ${MAIN}`);
+	});
+
+	it("records no agy conversation when the report names no agy process", async () => {
+		await import("../data");
+		const { handleRequest } = await import("../cli-socket-server");
+
+		seed([makeTask({ sessionState: { panes: [{ ...codexPane("%5", null), agentCmd: "agy" }] } })]);
+		await handleRequest(agentHook({ projectId: "proj-1", taskId: "task-1", harness: "agy", event: "SessionStart", sessionId: MAIN, paneId: "%5" }));
+
+		expect(readPanes()[0]?.sessionId).toBeNull();
+	});
+
 	it("places a Codex id without a paneId on a task's only pane (native session without a pane suffix)", async () => {
 		await import("../data");
 		const { handleRequest } = await import("../cli-socket-server");

@@ -3,49 +3,65 @@
 ## Context
 
 Antigravity (`agy`) tasks got the dev3 protocol only if the model chose to open the
-`dev3` skill. agy's rules come from `GEMINI.md`/`AGENTS.md` between the working
-directory and the repo root, so `~/.agents/AGENTS.md` never reaches it. Resume used
-`--continue` because dev3 never learned the conversation id, and agy has no launch-time
-id flag.
+`dev3` skill. agy reads `GEMINI.md`/`AGENTS.md` only from the working directory up to the
+repo root, so `~/.agents/AGENTS.md` never reaches it. Resume used `--continue` because
+dev3 never learned the conversation id, and agy has no launch-time id flag.
 
 ## Investigation
 
 agy 1.4.5's bundled docs (`~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`)
-document a `SessionStart` hook whose stdout may return
-`{"injectSteps":[{"systemMessage":{"systemMessage":"…"}}]}`. Every hook payload
-carries `conversationId`. The CLI now also accepts `--effort xhigh|max` and `--mode auto`,
-and `agy models` prints `<slug>\t<name>` lines. A live probe of the hook payloads was
-not run, so the details below come from the docs.
+document a `SessionStart` hook that can answer
+`{"injectSteps":[{"systemMessage":{"systemMessage":"…"}}]}`, and every payload carries
+`conversationId`. The following was probed against a live agy 1.4.5 in a trusted
+scratch workspace:
+
+- `SessionStart` fires for a fresh conversation. The injected message reaches the model,
+  including the full ~29 KB protocol.
+- It does **not** fire on `--conversation <id>` resume, so nothing is injected twice.
+- **Subagents fire every hook** (`SessionStart`, `PreInvocation`, `Stop` with
+  `fullyIdle: true`) under their own conversation id. Nothing in the payload or the
+  environment (`ANTIGRAVITY_CONVERSATION_ID` is the subagent's own id) names the parent.
+- Every hook's direct parent process is the agy process itself, shared by the main
+  conversation and its subagents. A subagent only starts while the main conversation is
+  mid-turn, between its `PreInvocation` and its final `Stop`.
 
 ## Decision
 
-- `buildAntigravityHooks` (`src/shared/agent-hooks.ts`) adds a `SessionStart` handler
-  (10 s timeout). `handleAntigravityHook` (`src/cli/commands/antigravity-hook.ts`)
-  reports it as `SessionStart` with harness `agy`, the `conversationId` as `sessionId`,
-  and the pane id. It then answers with `GENERIC_SKILL_BODY` plus the recent-notes block
-  as one `systemMessage`. The protocol is still injected when the app is offline.
-- Only `SessionStart` carries the session id. `PreInvocation`/`Stop` may fire inside a
-  subagent's own conversation, and recording that id would make resume open the subagent.
-- `task.agentHook` accepts `harness: "agy"` (`PromptSubmitHarness`), so
-  `capturePaneSession` records the id. The existing resume path then calls
-  `--conversation <id>`.
-- The adapter maps `auto` → `--mode auto`, passes `xhigh` through, probes `agy models`,
-  and quits with `/quit`. A built-in "Auto" preset is added, and the dev3-coordinator,
-  dev3-artifact and dev3-share-artifact skills are now installed under
-  `~/.gemini/config/skills/`.
+- `buildAntigravityHooks` (`src/shared/agent-hooks.ts`) adds a `SessionStart` handler.
+  `handleAntigravityHook` (`src/cli/commands/antigravity-hook.ts`) reports every event
+  with `harness: "agy"`, the `conversationId` as `sessionId`, the pane id, and the agy
+  pid (`process.ppid`). It answers `SessionStart` with `GENERIC_SKILL_BODY` plus the
+  recent-notes block. Offline, it still injects the protocol.
+- `classifyAntigravityConversation` (`src/bun/cli-socket/antigravity-conversations.ts`)
+  keeps in-memory state per task and agy pid. The first conversation seen is the main
+  one. A different conversation while the main one is busy is a subagent. A different
+  conversation while the main one is idle becomes the new main one (`/new`). `task.agentHook`
+  returns `{ ignoredSubagent: true }` for a subagent, so it does not move the task, record
+  a session id, or get the protocol. This also fixes a subagent's `Stop` moving the task to
+  review (and starting auto-review) mid-turn.
+- The main conversation's id goes through `capturePaneSession`. Resume then uses
+  `--conversation <id>`. Without an agy pid (Windows, where the parent is a per-hook
+  `cmd /c`), nothing is recorded and subagents are not filtered.
+- Adapter: `auto` → `--mode auto` (with an "Auto" preset); `xhigh` is passed through;
+  `agy models` is the model probe; quit is `/quit`. The coordinator and artifact skills
+  are installed under `~/.gemini/config/skills/`.
 
 ## Risks
 
-- If agy fires `SessionStart` on `--conversation` resume, the protocol is injected a
-  second time. That costs context but nothing breaks. Unverified.
-- If subagents also fire `SessionStart`, a subagent id could overwrite the pane's id.
-  Unverified; `PreInvocation` would have the same problem, and worse.
-- An agy older than the `xhigh` effort level rejects that preset value; agy auto-updates.
+- The state is in memory. If the app restarts while a subagent runs, that agy process's
+  next event decides which conversation is the main one, and it could be the subagent's.
+  This heals at the next idle `SessionStart`.
+- If the main conversation ever ended a turn without a `Stop` hook, a later `/new`
+  conversation would be misread as a subagent until agy restarts. agy documents
+  `USER_CANCELED` as a `Stop` reason, so Esc still fires it.
+- `--mode auto` is not offered to every account; agy warns and falls back to default mode.
 
 ## Alternatives considered
 
-- **Write a rule file into the worktree** (`.agents/rules` or `AGENTS.md`): rejected.
-  It dirties the user's repository and is capped by agy's 24 KB per-file rule limit.
-- **Skip injection when `transcriptPath` already has content** (to avoid re-injecting on
-  resume): rejected. Whether the file exists at `SessionStart` on a fresh launch is
-  undocumented, and skipping a fresh session is worse than injecting twice.
+- **Capture only on `SessionStart`**: rejected after the probe showed that subagents fire
+  it too.
+- **Look up the parent in agy's files**: rejected. When `SessionStart` fires, the
+  subagent's transcript holds only the injected step, and the parent link appears only
+  later.
+- **A rule file in the worktree**: rejected. It dirties the repository and is capped at
+  24 KB per file.

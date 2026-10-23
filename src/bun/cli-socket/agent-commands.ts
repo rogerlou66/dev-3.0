@@ -5,6 +5,7 @@ import { recordTerminalPromptSubmission } from "../agent-terminal-prompt-log";
 import type { PromptSubmitHarness } from "../../shared/agent-terminal-prompt";
 import { loadSettings } from "../settings";
 import { CodexQuestionState } from "../codex-question-state";
+import { classifyAntigravityConversation } from "./antigravity-conversations";
 import { capturePaneSession } from "./pane-sessions";
 import { log, type Handler } from "./shared";
 import { requirePaneTask, resolveTaskAcrossProjects, resolveTaskFromParams } from "./task-resolution";
@@ -79,6 +80,14 @@ export const agentHandlers: Record<string, Handler> = {
 			? params.harness
 			: "codex";
 		const sessionId = typeof params.sessionId === "string" ? params.sessionId : null;
+		// agy reports its subagents' hooks too; only a known agy process can tell them apart.
+		const agentPid = harness === "agy" && typeof params.agentPid === "number" ? params.agentPid : null;
+		if (agentPid !== null && sessionId
+			&& classifyAntigravityConversation(`${task.id}:${agentPid}`, sessionId, event) === "subagent") {
+			log.debug("Ignored an Antigravity subagent hook", { taskId: task.id, sessionId, event });
+			return { ignoredSubagent: true };
+		}
+		const capturableSessionId = harness === "agy" && agentPid === null ? null : sessionId;
 		const resumeKey = sessionId ? `${task.id}:${sessionId}` : null;
 		const rememberedResumeStatus = getApprovalResumeStatus(resumeKey);
 
@@ -134,8 +143,8 @@ export const agentHandlers: Record<string, Handler> = {
 		// A Codex hook without a pane id (a native session with no pane suffix) is
 		// still placed when the task has only one pane; other harnesses need the id.
 		const paneId = typeof params.paneId === "string" ? params.paneId : null;
-		if (sessionId && (paneId || harness === "codex")) {
-			await capturePaneSession(project, task.id, paneId, sessionId, harness);
+		if (capturableSessionId && (paneId || harness === "codex")) {
+			await capturePaneSession(project, task.id, paneId, capturableSessionId, harness);
 		}
 
 		// The submitted text rides on the same payload, so recording costs the

@@ -56,9 +56,10 @@ export function antigravitySessionStartOutput(notesBlock: string | null): string
  * the reason a turn stalls or a stop is refused.
  *
  * `SessionStart` is agy's only out-of-band instruction channel (it reads no
- * global rule file outside the repository), so it carries the protocol. It is
- * also the one event whose conversation id is reported for exact resume:
- * per-invocation events may come from a subagent's own conversation.
+ * global rule file outside the repository), so it carries the protocol.
+ * Subagents fire the same hooks with their own conversation ids; every event
+ * reports its id plus the agy pid (this hook's parent on POSIX) so the app can
+ * tell them apart, and a subagent gets no protocol.
  */
 export async function handleAntigravityHook(
 	event: string | undefined,
@@ -84,9 +85,12 @@ export async function handleAntigravityHook(
 		? loadRecentNotesBlock(socketPath, context?.taskId, context?.projectId)
 		: null;
 
+	let subagent = false;
 	if (socketPath && context?.taskId) {
-		const sessionId = event === "SessionStart" ? payload.conversationId : undefined;
+		const sessionId = payload.conversationId;
 		const paneId = process.env.TMUX_PANE?.trim() || process.env.DEV3_PANE_ID?.trim() || undefined;
+		// On Windows the parent is a per-hook `cmd /c`, which identifies nothing.
+		const agentPid = process.platform === "win32" ? undefined : process.ppid;
 		try {
 			const result = await sendRequest(socketPath, "task.agentHook", {
 				taskId: context.taskId,
@@ -94,15 +98,17 @@ export async function handleAntigravityHook(
 				event: toAgentEvent(event),
 				harness: "agy",
 				...(sessionId ? { sessionId } : {}),
+				...(sessionId && agentPid ? { agentPid } : {}),
 				...(sessionId && paneId ? { paneId } : {}),
 			}, { timeoutMs: 3_000, connectAttempts: 2, retryDelayMs: 50 });
 			if (!result.ok) process.stderr.write(`dev3 Antigravity hook: ${result.error || "status update failed"}\n`);
+			subagent = result.ok && (result.data as { ignoredSubagent?: unknown } | undefined)?.ignoredSubagent === true;
 		} catch (error) {
 			process.stderr.write(`dev3 Antigravity hook: ${error instanceof Error ? error.message : String(error)}\n`);
 		}
 	}
 
-	if (recentNotes) {
+	if (recentNotes && !subagent) {
 		const notes = await recentNotes;
 		process.stdout.write(antigravitySessionStartOutput(notes.kind === "block" ? notes.block : null));
 		return;

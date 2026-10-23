@@ -74,11 +74,22 @@ describe("Antigravity lifecycle handler", () => {
 		expect(stdout).toBe("{}");
 	});
 
-	it("never reports a per-invocation conversation id (it may be a subagent's)", async () => {
+	it("reports every event's conversation id with the agy pid so the app can spot subagents", async () => {
 		vi.stubEnv("TMUX_PANE", "%7");
-		await handleAntigravityHook("PreInvocation", JSON.stringify({ conversationId: "sub-1" }), context.socketPath, context);
-		expect(vi.mocked(sendRequest).mock.calls[0][2]).not.toHaveProperty("sessionId");
-		expect(vi.mocked(sendRequest).mock.calls[0][2]).not.toHaveProperty("paneId");
+		await handleAntigravityHook("PreInvocation", JSON.stringify({ conversationId: "conv-1" }), context.socketPath, context);
+		expect(vi.mocked(sendRequest).mock.calls[0][2]).toMatchObject({
+			event: "UserPromptSubmit", harness: "agy", sessionId: "conv-1", agentPid: process.ppid, paneId: "%7",
+		});
+	});
+
+	it("injects nothing into a subagent's SessionStart", async () => {
+		vi.mocked(sendRequest).mockImplementation(async (_socket, method) => (
+			method === "note.list"
+				? { id: "2", ok: true, data: [] }
+				: { id: "1", ok: true, data: { ignoredSubagent: true } }
+		));
+		await handleAntigravityHook("SessionStart", JSON.stringify({ conversationId: "sub-1" }), context.socketPath, context);
+		expect(stdout).toBe("{}");
 	});
 
 	it("reports SessionStart with the conversation id and pane, then injects protocol and notes", async () => {
@@ -90,7 +101,7 @@ describe("Antigravity lifecycle handler", () => {
 		));
 		await handleAntigravityHook("SessionStart", JSON.stringify({ conversationId: "conv-1" }), context.socketPath, context);
 		expect(sendRequest).toHaveBeenCalledWith(context.socketPath, "task.agentHook", {
-			taskId: "task-1", projectId: "project-1", event: "SessionStart", harness: "agy", sessionId: "conv-1", paneId: "%7",
+			taskId: "task-1", projectId: "project-1", event: "SessionStart", harness: "agy", sessionId: "conv-1", agentPid: process.ppid, paneId: "%7",
 		}, { timeoutMs: 3_000, connectAttempts: 2, retryDelayMs: 50 });
 		const message = injectedSystemMessage(stdout);
 		expect(message.startsWith(GENERIC_SKILL_BODY)).toBe(true);
