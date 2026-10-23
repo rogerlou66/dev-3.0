@@ -799,7 +799,7 @@ export function writeCodexHooks(worktreePath: string): string | null {
 	return null;
 }
 
-export const ANTIGRAVITY_STATUS_HOOK_EVENTS = ["PreInvocation", "Stop"] as const;
+export const ANTIGRAVITY_STATUS_HOOK_EVENTS = ["SessionStart", "PreInvocation", "Stop"] as const;
 export type AntigravityStatusHookEvent = typeof ANTIGRAVITY_STATUS_HOOK_EVENTS[number];
 
 /**
@@ -817,21 +817,23 @@ function quoteHookCliPath(path: string, dialect: HookCliDialect): string {
 /**
  * Build the `"dev3"` named hook entry for Antigravity's `hooks.json`.
  *
- * Only `PreInvocation`/`Stop` are wired (decision:
- * decisions/2026/09/14/antigravity-worktree-local-hooks.md) — those are the
- * only two lifecycle events agy exposes that map onto a dev3 status move.
- * Handlers run through `sh -c`/`cmd /c` and must always emit valid JSON: agy
- * blocks the agent loop on a hook and expects `{}`/`{"decision":"allow"}`.
+ * `PreInvocation`/`Stop` move the task; `SessionStart` also injects the dev3
+ * protocol and recent notes and reports the conversation id for exact resume
+ * (decisions/2026/09/14/antigravity-worktree-local-hooks.md,
+ * decisions/2026/10/22/antigravity-session-start-hook.md). Handlers run through
+ * `sh -c`/`cmd /c` and must always emit valid JSON: agy blocks its loop on a hook.
  */
 export function buildAntigravityHooks(cliPath?: string, dialect: HookCliDialect = DEFAULT_DIALECT): Record<string, unknown> {
 	const cli = cliPath ? quoteHookCliPath(cliPath, dialect) : dialect.cli;
-	const handler = (event: AntigravityStatusHookEvent): HookEntry => ({
+	const handler = (event: AntigravityStatusHookEvent, timeout = 5): HookEntry => ({
 		type: "command",
 		command: `${cli} hook antigravity --event ${event}`,
-		timeout: 5,
+		timeout,
 	});
 	return {
 		dev3: {
+			// Longer bound: it fetches the task's notes before answering.
+			SessionStart: [handler("SessionStart", 10)],
 			PreInvocation: [handler("PreInvocation")],
 			Stop: [handler("Stop")],
 		},

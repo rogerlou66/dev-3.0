@@ -1367,6 +1367,7 @@ const ASK_DEV3_SKILL_DIRS = [
 const COORDINATOR_SKILL_DIRS = [
 	".cursor/skills/dev3-coordinator",
 	".agents/skills/dev3-coordinator",
+	".gemini/config/skills/dev3-coordinator",
 	".codex/skills/dev3-coordinator",
 	".opencode/skills/dev3-coordinator",
 	".config/opencode/skills/dev3-coordinator",
@@ -1376,6 +1377,7 @@ const COORDINATOR_SKILL_DIRS = [
 const ARTIFACT_SKILL_DIRS = [
 	".cursor/skills/dev3-artifact",
 	".agents/skills/dev3-artifact",
+	".gemini/config/skills/dev3-artifact",
 	".codex/skills/dev3-artifact",
 	".opencode/skills/dev3-artifact",
 	".config/opencode/skills/dev3-artifact",
@@ -1385,6 +1387,7 @@ const ARTIFACT_SKILL_DIRS = [
 const SHARE_ARTIFACT_SKILL_DIRS = [
 	".cursor/skills/dev3-share-artifact",
 	".agents/skills/dev3-share-artifact",
+	".gemini/config/skills/dev3-share-artifact",
 	".codex/skills/dev3-share-artifact",
 	".opencode/skills/dev3-share-artifact",
 	".config/opencode/skills/dev3-share-artifact",

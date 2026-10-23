@@ -1,5 +1,7 @@
 # Antigravity status hooks: worktree-local `.agents/hooks.json`
 
+> Superseded in part on 2026-10-22 by `decisions/2026/10/22/antigravity-session-start-hook.md`: a `SessionStart` handler now also injects the protocol and records the conversation id.
+
 ## Context
 
 `antigravityAdapter.hooksSpec()` returned `null`, so Antigravity (`agy`) tasks

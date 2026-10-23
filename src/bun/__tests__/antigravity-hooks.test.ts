@@ -9,10 +9,13 @@ const temp = () => { const path = mkdtempSync(join(tmpdir(), "dev3-antigravity-h
 afterEach(() => { for (const path of dirs.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
 describe("buildAntigravityHooks", () => {
-	it("builds a single named 'dev3' hook with PreInvocation/Stop as flat handler lists", () => {
+	it("builds a single named 'dev3' hook with SessionStart/PreInvocation/Stop as flat handler lists", () => {
 		const hooks = buildAntigravityHooks() as any;
 		expect(Object.keys(hooks)).toEqual(["dev3"]);
-		expect(Object.keys(hooks.dev3)).toEqual(["PreInvocation", "Stop"]);
+		expect(Object.keys(hooks.dev3)).toEqual(["SessionStart", "PreInvocation", "Stop"]);
+		expect(hooks.dev3.SessionStart).toEqual([
+			{ type: "command", command: "~/.dev3.0/bin/dev3 hook antigravity --event SessionStart", timeout: 10 },
+		]);
 		for (const event of ["PreInvocation", "Stop"]) {
 			expect(hooks.dev3[event]).toEqual([
 				{ type: "command", command: `~/.dev3.0/bin/dev3 hook antigravity --event ${event}`, timeout: 5 },
