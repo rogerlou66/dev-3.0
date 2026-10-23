@@ -457,7 +457,7 @@ ux_architecture:
         list_governance: "preset_only_no_individual_ui is closed; grows only with a budget_exception-grade reason."
         status: "observed"
         evidence: ["hideable-controls.ts", "hidden-controls.ts", "global-settings-cache.ts", "HideableControl.tsx", "task-info-panel/PanelRestoreControl.tsx", "AppearanceSettingsSection.tsx", "InterfaceOnboarding.tsx", "useInterfaceOnboarding.ts", "bible §5.10"]
-      evidence: ["src/mainview/components/GlobalSettings.tsx", "src/mainview/components/ProjectSettings.tsx", "src/mainview/components/project-settings/*", "src/mainview/components/global-settings/*"]
+      evidence: ["GlobalSettings.tsx", "ProjectSettings.tsx", "project-settings/*", "global-settings/*"]
     sidebar:
       purpose: "Active tasks list / quick jump across running agents, with global-scope toggle."
       allowed: ["destination", "task_jump", "terminal_hover_preview", "search", "variant_dots", "native_backend_mark", "git_status_badge", "task_visibility_toggle", "reveal_hidden_mode", "row_context_menu"]
@@ -722,7 +722,7 @@ ux_architecture:
       actions: "object + git + dev-server actions, scoped to the task"
     settings_screen:
       example: "GlobalSettings, ProjectSettings"
-      grouping: "Ten categories: Appearance, Tasks & Board, Notifications, Keyboard, Terminal, Agents, Accounts, API models, Workspace, System. Project Settings keeps tabs; Keyboard owns bindings and Notifications owns alert delivery"
+      grouping: "Eleven categories: Appearance, Tasks & Board, Notifications, Keyboard, Terminal, Agents, Accounts, API models, Workspace, Polling, System. Project Settings keeps tabs; Keyboard owns bindings, Notifications alert delivery, Polling background git/gh cadence"
       registry: "src/mainview/settings-registry.ts is the declarative metadata source for Settings entries, localized search copy, category membership, anchors, and GlobalSettings field integrity"
       search: "localized title + description search groups matches by Settings category and jumps to the registered anchor"
       deep_links: "Route.section accepts current category ids plus legacy appearance/behavior/workspace/agents/proxy/developer ids, normalized by LEGACY_SETTINGS_CATEGORY_MAP"

@@ -13,6 +13,8 @@ history, PRs and `decisions/`. Newest first.
 **2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 **Record-backed entries are pointers:** state the rule, its canonical location and the `decisions/` record. Keep full reasoning only where no record exists; never delete the only explanation.
 
+2026-10-23 — Polling is its own Settings category (yaml `settings_screen.grouping`): background git/gh cadence and off switches; manual refresh always runs. Rejected folding into System (updates, proxy, dev tools). Why: decisions/2026/10/23/configurable-polling-intervals.md.
+
 2026-10-16 — Account sign-in runs in a modal terminal, not a copied command (yaml `modal.observed`): Escape stays with the CLI, X hides, Cancel ends. Why: decisions/2026/10/16/embedded-account-login-terminal.md.
 
 ## 2026-10-14 — Agent toast bursts stack as a deck
@@ -267,9 +269,9 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 
 ## 2026-08-02 — The keymap registry now dispatches, and rebinding lives in Settings, not the ⌘/ overlay
 
-- **Rule:** `keymap.ts` holds machine-readable bindings and drives dispatch (`matchesShortcut(e, id)`); rebinding is `configuration` and belongs to a new eighth Settings category **Keyboard** (which also absorbs the terminal keymap preset), while the ⌘/ overlay stays read-only reference showing the *resolved* combo plus one "Customize…" link. Structural bindings (g-chords, ⌘1–9 families, hold-modifier switcher, Esc) render read-only **with a stated reason**. Bible §5.2, yaml `surfaces.keyboard_shortcuts_editor`.
+- **Rule:** `keymap.ts` holds machine-readable bindings and drives dispatch (`matchesShortcut(e, id)`); rebinding is `configuration` and belongs to a new eighth Settings category **Keyboard** (which also absorbs the terminal keymap preset), while the ⌘/ overlay stays read-only reference showing the *resolved* combo plus one "Customize…" link. Non-remappable rows: yaml `surfaces.keyboard_shortcuts_editor.non_remappable`. Bible §5.2.
 - **Why:** the 2026-06-19 "registry documents, does not dispatch" split made user rebinding impossible without editing two places, so it had to be reversed; a per-shortcut matcher confines the risk that entry feared to one tested function instead of a rewrite. Rejected: editing inside the ⌘/ overlay (durable configuration in a help surface), and hiding non-remappable rows (an editor that silently omits a third of the keymap reads as broken).
-- **Status:** Implemented. Evidence: `keymap.ts`, `keymap-bindings.ts`, `KeyboardSettingsSection.tsx`, `ShortcutRow.tsx`, `settings-registry.ts`, `App.tsx`. Supersedes the dispatch half of the 2026-06-19 entry.
+- **Status:** Implemented (evidence in the yaml). Supersedes the dispatch half of the 2026-06-19 entry.
 
 ## 2026-08-01 — Split resize lives on the boundary, never in a toolbar
 
@@ -286,7 +288,7 @@ Folded: one toast anatomy, origin resolved once at emit by `ToastHost` — owned
 ## 2026-07-30 — Capacity telemetry is permanent header chrome; faults are not
 
 - **Rule:** Host-machine capacity (memory headroom) gets **one** permanent global-header readout at every width — framed as headroom *left*, coloured by the OS's own pressure verdict — plus a non-blocking banner at the launch decision point. Capped at one; a second ambient readout folds into the narrow sheet. Bible §5, §10 row `ambient resource telemetry`, §12.6.
-- **Why:** §5.5 doctrine keeps *faults* (transport health, diagnostics) as conditional chrome so the happy path stays clean, and that reads as forbidding this widget — but capacity is a continuous decision input: the user learns *normal* only by seeing it while nothing is wrong, and needs it with zero tasks running. Same class as the always-on prevent-sleep toggle, not an error indicator. Rejected: a pressure-only conditional pill (too late to inform a launch), folding it into the narrow kebab (kills the signal exactly when screen is scarce and load is high), and colouring by an invented percentage threshold (meaningless across 8 GB and 512 GB machines).
+- **Why:** §5.5 doctrine keeps *faults* (transport health, diagnostics) as conditional chrome so the happy path stays clean, and that reads as forbidding this widget — but capacity is a continuous decision input: the user learns *normal* only by seeing it while nothing is wrong, and needs it with zero tasks running. Same class as the always-on prevent-sleep toggle, not an error indicator. Rejected: a pressure-only pill (too late for a launch), the narrow kebab (hides it when load is high), a percentage threshold (meaningless across machine sizes).
 - **Status:** Proposed. Evidence: `GlobalHeader.tsx`, `PreventSleepToggle.tsx` (`--awake` precedent), `BottomSheet.tsx`, `SiblingPopover.tsx` (popover row → navigate precedent).
 
 ## 2026-07-30 — Hibernated is a card state, not a column or a card action
