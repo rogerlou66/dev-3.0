@@ -331,6 +331,7 @@ describe("DEFAULT_AGENTS", () => {
 			{ id: "antigravity-default", name: "Default", version: 1 },
 			{ id: "antigravity-plan", name: "Plan", permissionMode: "plan", version: 1 },
 			{ id: "antigravity-accept-edits", name: "Accept Edits", permissionMode: "acceptEdits", version: 1 },
+			{ id: "antigravity-auto", name: "Auto", permissionMode: "auto", version: 1 },
 		]);
 	});
 

@@ -23,6 +23,7 @@ import {
 	type TemplateContext,
 } from "../../shared/agent-adapters";
 import { CLAUDE_SKILL_BODY, CODEX_SKILL_BODY, GENERIC_SKILL_BODY, OMP_SKILL_BODY, PI_SKILL_BODY } from "../../shared/agent-skill-content";
+import { parseAntigravityModels } from "../../shared/agent-adapters/antigravity";
 import type { AgentConfiguration } from "../../shared/types";
 
 // ---------------------------------------------------------------------------
@@ -243,6 +244,7 @@ describe("exitProgram", () => {
 		[opencodeAdapter, "/exit"],
 		[copilotAdapter, "/exit"],
 		[piAdapter, "/quit"],
+		[antigravityAdapter, "/quit"],
 	] as const)("%s interrupts, types its quit command, then submits", (adapter, command) => {
 		const program = adapter.exitProgram();
 		expect(program).not.toBeNull();
@@ -450,10 +452,18 @@ describe("launchArgs — Gemini / Cursor / OpenCode / Generic", () => {
 			.toBe("agy --mode accept-edits --prompt-interactive 'Fix the login bug'");
 		expect(launch("agy", cfg({ permissionMode: "bypassPermissions" })))
 			.toBe("agy --dangerously-skip-permissions --prompt-interactive 'Fix the login bug'");
+		expect(launch("agy", cfg({ permissionMode: "auto" })))
+			.toBe("agy --mode auto --prompt-interactive 'Fix the login bug'");
 	});
-	it("Antigravity resumes by conversation id and clamps xhigh effort", () => {
+	it("Antigravity resumes by conversation id and passes xhigh effort through", () => {
 		expect(launch("agy", cfg({ model: "gemini-3.6-pro", effort: "xhigh" }), { resume: true, sessionId: "sid" }))
-			.toBe("agy --conversation sid --model gemini-3.6-pro --effort high");
+			.toBe("agy --conversation sid --model gemini-3.6-pro --effort xhigh");
+	});
+	it("Antigravity probes `agy models` and keeps only tab-separated slugs", () => {
+		expect(antigravityAdapter.modelListProbe?.args).toEqual(["models"]);
+		expect(parseAntigravityModels("gemini-3.8-flash-high\tGemini 3.8 Flash (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6\n"))
+			.toEqual(["gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+		expect(parseAntigravityModels("Fetching available models...\n")).toBeNull();
 	});
 	it("Cursor injects the generic body via the prompt and maps modes", () => {
 		expect(launch("agent", cfg({ permissionMode: "plan" })))
