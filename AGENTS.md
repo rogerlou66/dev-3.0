@@ -145,25 +145,35 @@ Hard rules for any feature that leans on an external binary:
 - **Commit immediately after each logical unit of work — messages in English only.** Don't wait to be asked. Do NOT `git push` automatically — the user decides when to push.
 - **Always commit `.claude/` directory changes** (e.g., `settings.local.json`) — they are modified automatically during agent sessions and are part of your session.
 
-### GitHub CLI (`gh`)
+### This is a fork — mainline is `rl-main` on `origin` (MANDATORY)
 
-The repo is owned by the personal **`h0x91b`** account; the dev machine may also have a second account configured. Before `gh` commands against this repo:
+Both mistakes below have already happened more than once. Check them before every rebase, push, or PR.
+
+| Remote / branch | What it is |
+|---|---|
+| `origin` = `rogerlou66/dev-3.0` | **This fork.** Every push and every PR goes here |
+| `origin/rl-main` | **The fork's mainline** and default branch. Rebase onto it; PRs target it |
+| `origin/main` | A stale upstream snapshot (v1.48.1). **Never** rebase onto it — git starts replaying the whole fork history. If that happens, `git rebase --abort` |
+| `upstream` = `h0x91b/dev-3.0` | The original project, for upstream merges only. Never push or open a PR there |
+
+**`gh` resolves to the upstream by default.** Without a `gh` default repo, the `upstream` remote makes `gh` pick `h0x91b/dev-3.0`, so a bare `gh pr create`, or `dev3 pr create`, which calls `gh`, publicly opens the PR on someone else's repository. The main clone has `gh repo set-default rogerlou66/dev-3.0` applied (stored in the shared `.git/config`, so every worktree inherits it); a fresh clone needs it run once. Still pass the fork explicitly, so a clone without that setting fails safe:
 
 ```bash
-gh auth switch --user h0x91b 2>/dev/null || true
+GH_REPO=rogerlou66/dev-3.0 dev3 pr create --base rl-main --title "..." --description @body.md
+gh pr view <N> -R rogerlou66/dev-3.0     # reads too: -R, or GH_REPO
 ```
 
-(No-op for collaborators without that account.)
+The `gh` account for this fork is `rogerlou66`; do not `gh auth switch` to `h0x91b`. After opening a PR, confirm the URL starts with `https://github.com/rogerlou66/dev-3.0/pull/`.
 
 ### Opening a PR — `dev3 pr`, not `gh` by hand
 
-**`dev3 pr create --title "..." --description "..."`** is the way in. It pushes the branch, opens the pull request through `gh`, targets the task's own base branch. A missing or logged-out `gh` exits `23` before anything is pushed. Long body: `--description @<file>`.
+**`dev3 pr create --title "..." --description "..."`** is the way in — with `GH_REPO=rogerlou66/dev-3.0` and `--base rl-main`, see above. It pushes the branch and opens the pull request through `gh`. A missing or logged-out `gh` exits `23` before anything is pushed. Long body: `--description @<file>`.
 
 **PRs are squash-merged**, and auto-merge is `dev3 pr auto-merge` (squash by default; `--strategy merge|rebase`, `--off` to clear) or `--auto-merge` on `pr create`. Raw `gh pr merge --auto --squash <branch>` still works, but a bare `gh pr merge --auto` fails non-interactively — which is the trap `dev3 pr auto-merge` exists to remove. Reach for `gh` directly only for a flag `dev3 pr` does not pass through (`gh pr view`/`diff`/`checks` are reads and unaffected).
 
 ### Rebase before push / PR
 
-Before `dev3 pr create` (it pushes) or any push of a PR branch, rebase on the live base first: `git fetch origin main && git rebase origin/main` (resolve conflicts before continuing). Keeps PRs conflict-free and CI honest.
+Before `dev3 pr create` (it pushes) or any push of a PR branch, rebase on the live base first: `git fetch origin rl-main && git rebase origin/rl-main` (resolve conflicts before continuing). Not `origin/main` — see [This is a fork](#this-is-a-fork--mainline-is-rl-main-on-origin-mandatory). Keeps PRs conflict-free and CI honest.
 
 ### Task completion
 
