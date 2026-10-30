@@ -208,12 +208,12 @@ function renderCard(
 
 describe("TaskCard", () => {
 	describe("workspace-board compact presentation", () => {
-		it("keeps the title to one truncated line and does not let the rail label set card height", () => {
+		it("clamps the title to two lines in a fixed-height card the rail label does not stretch", () => {
 			renderCard(makeTask({ status: "review-by-user", title: "A very long task title that cannot fit inside one compact card" }), { compact: true });
 
-			expect(screen.getByTestId("workspace-compact-task-card")).toHaveClass("h-[3.25rem]");
-			expect(screen.getByTestId("task-card-title")).toHaveClass("truncate", "whitespace-nowrap");
-			expect(screen.getByTestId("task-card-title")).not.toHaveClass("line-clamp-2");
+			expect(screen.getByTestId("workspace-compact-task-card")).toHaveClass("h-16");
+			expect(screen.getByTestId("task-card-title")).toHaveClass("line-clamp-2", "break-words");
+			expect(screen.getByTestId("task-card-title")).not.toHaveClass("truncate", "whitespace-nowrap");
 			expect(within(screen.getByTestId("task-card-rail")).queryByText("REVIEW")).not.toBeInTheDocument();
 		});
 

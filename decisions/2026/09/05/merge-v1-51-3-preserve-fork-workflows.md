@@ -1,5 +1,7 @@
 # Preserve fork workflows while merging v1.51.3
 
+Partially superseded on 2026-10-30 by `decisions/2026/10/30/board-cards-fit-two-line-titles.md`: board cards are now 64px with a two-line title; the rest of this record stands.
+
 ## Context
 
 Merge upstream release `v1.51.3` (`a6c8979a`) into `rl-main` at `082d7996`. The pre-merge branch is preserved at `codex/backup-rl-main-before-v1.51.3-20260905`. There were 34 conflicted files; the user's untracked design directory and `.DS_Store` were left untouched.

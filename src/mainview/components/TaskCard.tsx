@@ -844,7 +844,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				onMouseEnter={handleCardMouseEnter}
 				onMouseLeave={handleCardMouseLeave}
 				onClick={handleClick}
-				className={`group relative flex h-[3.25rem] min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
+				className={`group relative flex h-16 min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
 					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : "border-edge"
 				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
 					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""
@@ -877,7 +877,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				</button>
 
 				<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1 pr-1.5">
-					<div className="flex min-w-0 items-center gap-1.5">
+					<div className="flex min-w-0 items-start gap-1.5">
 						{compactStateBadge && (
 							<span className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 py-px text-nano font-semibold uppercase tracking-[0.05em] ${compactStateBadge.className}`}>
 								{compactStateBadge.label}
@@ -887,7 +887,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						<span
 							data-testid="task-card-title"
 							onClick={handleTitleClick}
-							className="min-w-0 flex-1 truncate whitespace-nowrap text-xs font-semibold leading-snug text-fg streamer-private"
+							className="min-w-0 flex-1 line-clamp-2 break-words text-xs font-semibold leading-snug text-fg streamer-private"
 						>
 							{displayTitle}
 						</span>
