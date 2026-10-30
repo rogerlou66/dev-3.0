@@ -10,7 +10,6 @@ import {
 	tunnelCommandName,
 	type ResolvedTunnelProvider,
 } from "./tunnel-provider";
-import { customTunnelHostIsStable, recordCustomTunnelUrl } from "./tunnel-host-memory";
 
 const log = createLogger("tunnel");
 
@@ -44,13 +43,6 @@ export interface TunnelEntry {
 	state: TunnelState;
 	url: string | null;
 	process: ReturnType<typeof spawn> | null;
-	/**
-	 * PID of a cloudflared this process did NOT spawn — inherited from the server
-	 * it replaced during a self-update. There is no exit promise for it, so its
-	 * liveness comes from `metricsReadyUrl` alone; `stopEntry` still has to signal
-	 * it or the restart would leak a process.
-	 */
-	adoptedPid: number | null;
 	startedAt: number;
 	subToken: string;
 	metricsReadyUrl: string | null;
@@ -60,12 +52,6 @@ export interface TunnelEntry {
 	 * watch the edge instead of trusting a live process with a dead tunnel.
 	 */
 	publicProbeUrl: string | null;
-	/**
-	 * This custom provider has been observed handing out the same hostname across
-	 * restarts (see tunnel-host-memory.ts), so a self-update can stop the tunnel
-	 * instead of leaking the process to keep the URL alive.
-	 */
-	stableHostname: boolean;
 	consecutiveHealthFailures: number;
 	healthCheckInFlight: boolean;
 	healthCheckTimer: ReturnType<typeof setInterval> | null;
@@ -489,12 +475,10 @@ function newEntry(opts: StartTunnelOptions, recovery: TunnelRecovery | null): Tu
 		state: "starting",
 		url: null,
 		process: null,
-		adoptedPid: null,
 		startedAt: Date.now(),
 		subToken: opts.subToken ?? randomBytes(24).toString("base64url"),
 		metricsReadyUrl: null,
 		publicProbeUrl: null,
-		stableHostname: false,
 		consecutiveHealthFailures: 0,
 		healthCheckInFlight: false,
 		healthCheckTimer: null,
@@ -588,17 +572,12 @@ async function startEntry(opts: StartTunnelOptions, recovery: TunnelRecovery | n
 			entry.url = url;
 			entry.state = "connected";
 			if (opts.kind === "main") mainTunnelFailureReason = null;
-			// Hostname-stability learning belongs to the main tunnel alone: the memory
-			// holds one (command, url) pair, concurrent port tunnels would flip-flop it,
-			// and the stability bit only feeds the main tunnel's self-update handoff.
-			if (isCustom && opts.kind === "main") entry.stableHostname = recordCustomTunnelUrl(provider.command!, url);
 			if (isCustom) warnOnDuplicateUrl(entry);
 			log.info("Tunnel connected", {
 				id: opts.id,
 				url,
 				probe: isCustom ? "public-url" : "metrics-ready",
 				edgeCheck: edgeReady ? "ready" : "unconfirmed",
-				...(isCustom && opts.kind === "main" ? { hostname: entry.stableHostname ? "stable" : "unproven" } : {}),
 			});
 			if (!edgeReady) {
 				log.warn("Tunnel edge not confirmed within timeout; publishing URL best-effort", { id: opts.id, url });
@@ -659,7 +638,6 @@ function stopEntry(id: string): void {
 interface Predecessor {
 	process: TunnelEntry["process"];
 	childPids: number[];
-	adoptedPid: number | null;
 }
 
 /** Signal the entry's processes and free its slot if it still holds it. */
@@ -694,105 +672,8 @@ function teardownEntry(entry: TunnelEntry): Predecessor {
 			// already gone
 		}
 	}
-	if (entry.adoptedPid !== null) {
-		try {
-			process.kill(entry.adoptedPid, "SIGTERM");
-		} catch {
-			// already gone, or owned by someone else — nothing we can do about it
-		}
-	}
 	if (tunnels.get(entry.id) === entry) tunnels.delete(entry.id);
-	return { process: entry.process, childPids, adoptedPid: entry.adoptedPid };
-}
-
-/**
- * Forget the main tunnel WITHOUT killing cloudflared, and report what a successor
- * needs to adopt it. Returns null when there is nothing live to hand over.
- *
- * This is the one place that deliberately leaks a child process, and it is what
- * makes a self-update invisible from the browser: the quick tunnel's hostname is
- * random per cloudflared process, so killing it would change the public URL and
- * invalidate the host-bound session cookie. The successor re-binds the same local
- * port and re-registers this same process; if it cannot, it kills the pid.
- */
-export function releaseMainTunnelForHandoff(): { pid: number; url: string; metricsReadyUrl: string | null } | null {
-	const entry = tunnels.get(MAIN_ID);
-	if (!entry || entry.state !== "connected" || !entry.url) return null;
-	const pid = entry.process?.pid ?? entry.adoptedPid;
-	if (!pid) return null;
-	if (entry.healthCheckTimer) clearInterval(entry.healthCheckTimer);
-	entry.healthCheckTimer = null;
-	// Drop the map entry rather than stopEntry() — that would signal the child.
-	tunnels.delete(MAIN_ID);
-	log.info("Released main tunnel for handoff", { pid, url: entry.url });
-	return { pid, url: entry.url, metricsReadyUrl: entry.metricsReadyUrl };
-}
-
-/**
- * Stop the main tunnel INSTEAD of leaking it across a self-update, for a provider
- * whose hostname is known to be stable. Returns the URL the successor should come
- * back on, or null when this tunnel has to be handed over the leaky way.
- *
- * The leak exists only because a quick tunnel's hostname is random per process.
- * When the same command reliably yields the same hostname, respawning is strictly
- * better: no orphan survives an abandoned restart, the successor owns a process it
- * spawned itself (with output to scrape and an exit promise), and the session
- * cookie still matches because the host did not change.
- */
-export function stopMainTunnelForStableHandoff(): string | null {
-	const entry = tunnels.get(MAIN_ID);
-	if (!entry || entry.state !== "connected" || !entry.url || !entry.stableHostname) return null;
-	const url = entry.url;
-	stopEntry(MAIN_ID);
-	log.info("Stopped a stable-hostname tunnel rather than leaking it across the restart", { url });
-	return url;
-}
-
-/**
- * Register a cloudflared this process did not spawn as the main tunnel.
- *
- * The URL is taken on trust from the handoff record (its writer had it from
- * cloudflared's own stderr, which we can no longer read), and liveness is
- * re-established from `/ready` by the ordinary health monitor — which will
- * restart the tunnel for real if the inherited process turns out to be wedged.
- */
-export function adoptMainTunnel(opts: {
-	pid: number;
-	url: string;
-	metricsReadyUrl: string | null;
-	targetPort: number;
-}): void {
-	stopEntry(MAIN_ID);
-	// An adopted process has no metrics endpoint under a custom provider, and no
-	// exit promise either — without a probe it would be trusted forever. Its own
-	// public URL is the only health signal available, and it is a better one.
-	const provider = resolveRemoteTunnelProvider();
-	const custom = provider.kind === "custom" && !!provider.command;
-	const entry: TunnelEntry = {
-		id: MAIN_ID,
-		kind: "main",
-		targetPort: opts.targetPort,
-		ports: [],
-		taskId: undefined,
-		state: "connected",
-		url: opts.url,
-		process: null,
-		adoptedPid: opts.pid,
-		startedAt: Date.now(),
-		subToken: randomBytes(24).toString("base64url"),
-		metricsReadyUrl: opts.metricsReadyUrl,
-		publicProbeUrl: custom && !opts.metricsReadyUrl ? opts.url : null,
-		stableHostname: custom ? customTunnelHostIsStable(provider.command!) : false,
-		consecutiveHealthFailures: 0,
-		healthCheckInFlight: false,
-		healthCheckTimer: null,
-		failureReason: null,
-		recovery: null,
-		placeholder: false,
-	};
-	tunnels.set(MAIN_ID, entry);
-	log.info("Adopted inherited tunnel", { pid: opts.pid, url: opts.url, port: opts.targetPort });
-	startHealthMonitor(entry);
+	return { process: entry.process, childPids };
 }
 
 function optionsFor(entry: TunnelEntry): StartTunnelOptions {
@@ -814,7 +695,6 @@ function optionsFor(entry: TunnelEntry): StartTunnelOptions {
 async function waitForPredecessor(gone: Predecessor): Promise<void> {
 	const timeoutMs = TUNNEL_RECOVERY.oldProcessExitTimeoutMs;
 	const waits = gone.childPids.map((pid) => waitForPidGone(pid, timeoutMs));
-	if (gone.adoptedPid !== null) waits.push(waitForPidGone(gone.adoptedPid, timeoutMs));
 	if (gone.process) waits.push(waitForChildGone(gone.process, timeoutMs));
 	await Promise.all(waits);
 }
@@ -830,7 +710,7 @@ async function waitForChildGone(proc: NonNullable<TunnelEntry["process"]>, timeo
 	await Promise.race([proc.exited, delay(timeoutMs)]);
 }
 
-/** For a process addressable only by PID: a pipeline's child, or an adopted tunnel. */
+/** For a process addressable only by PID: a pipeline's child. */
 async function waitForPidGone(pid: number, timeoutMs: number): Promise<void> {
 	if (await pidGoneWithin(pid, timeoutMs)) return;
 	try {
@@ -1024,28 +904,7 @@ async function checkHealth(id: string): Promise<void> {
 		return;
 	}
 
-	// AN ADOPTED TUNNEL WITH NO `/ready` URL IS WATCHED BY ITS PID, or not at all.
-	// An entry we spawned has a `process` whose `exited` hook resets it; an inherited
-	// one has `process: null`, so `metricsReadyUrl` is its only liveness signal — and
-	// `startEntry` legitimately produces null there (the URL is published best-effort
-	// when the edge-ready wait cannot confirm). Returning early on that left a dead
-	// cloudflared recorded as "connected" forever, with the banner, `dev3 remote url`
-	// and every browser advertising a hostname that resolves nowhere.
-	if (!entry.metricsReadyUrl) {
-		if (entry.adoptedPid === null || isProcessAlive(entry.adoptedPid)) return;
-		log.warn("Adopted tunnel process is gone and it has no readiness URL; restarting", {
-			id,
-			pid: entry.adoptedPid,
-			url: entry.url,
-		});
-		entry.healthCheckInFlight = true;
-		try {
-			await restartEntry(entry);
-		} finally {
-			entry.healthCheckInFlight = false;
-		}
-		return;
-	}
+	if (!entry.metricsReadyUrl) return;
 
 	entry.healthCheckInFlight = true;
 	try {

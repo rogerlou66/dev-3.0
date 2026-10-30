@@ -64,7 +64,7 @@ describe("UpdateReadyPopover", () => {
 });
 
 describe("UpdateReadyPopover — restart context", () => {
-	function renderWith(props: { tasksInProgress?: number; keepsRemoteLink?: boolean }) {
+	function renderWith(props: { tasksInProgress?: number }) {
 		return render(
 			<I18nProvider>
 				<UpdateReadyPopover
@@ -79,10 +79,9 @@ describe("UpdateReadyPopover — restart context", () => {
 		);
 	}
 
-	it("says nothing extra when nothing is running and this is not a remote box", () => {
+	it("says nothing extra when nothing is running", () => {
 		renderWith({});
 		expect(screen.queryByText(/in progress/)).toBeNull();
-		expect(screen.queryByText(/public link/)).toBeNull();
 	});
 
 	it("warns about tasks in progress but leaves the explicit restart action enabled", () => {
@@ -96,10 +95,5 @@ describe("UpdateReadyPopover — restart context", () => {
 	it("uses the singular for one task", () => {
 		renderWith({ tasksInProgress: 1 });
 		expect(screen.getByText(/1 task is in progress/)).toBeInTheDocument();
-	});
-
-	it("promises the public link survives on a headless box — 'restart' on a phone otherwise reads as losing the link", () => {
-		renderWith({ keepsRemoteLink: true });
-		expect(screen.getByText(/public link and this session are kept/)).toBeInTheDocument();
 	});
 });

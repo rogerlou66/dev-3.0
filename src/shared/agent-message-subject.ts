@@ -194,7 +194,7 @@ export function requireMessageSubject(raw: unknown, body: string): string {
 		subject: check.subject,
 		note:
 			check.problem === "missing"
-				? "If your `dev3` CLI has no --subject flag at all, it is older than the app: run `dev3 update`."
+				? "If your `dev3` CLI has no --subject flag at all, it is older than the app: restart the dev3 app, which reinstalls the CLI."
 				: undefined,
 	});
 	throw new Error(`${message}\n${detail}`);

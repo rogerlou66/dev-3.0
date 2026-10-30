@@ -172,8 +172,7 @@ describe("buildCustomTunnelArgv", () => {
 		if (process.platform === "win32") {
 			expect(argv).toEqual(["cmd", "/c", "ngrok http 18590 --log stdout"]);
 		} else {
-			// exec replaces the wrapper sh, so kill() reaches the tunnel itself and
-			// the pid recorded for the self-update handoff is the real tunnel.
+			// exec replaces the wrapper sh, so kill() reaches the tunnel itself.
 			expect(argv).toEqual(["sh", "-c", "exec ngrok http 18590 --log stdout"]);
 		}
 	});

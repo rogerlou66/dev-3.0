@@ -178,7 +178,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		// Default = the dev3 template, so only the two other modes are stored.
 		artifactTemplate: d.artifactTemplate === "off" || d.artifactTemplate === "custom" ? d.artifactTemplate : undefined,
 		artifactTemplatePath: typeof d.artifactTemplatePath === "string" && d.artifactTemplatePath.trim() ? d.artifactTemplatePath.trim() : undefined,
-		// Default-on toggle — only an explicit false is a stored opt-out.
+		// Retired; an older co-installed build still reads its stored opt-out.
 		remoteSilentUpdate: d.remoteSilentUpdate === false ? false : undefined,
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
 		skipQuitDialog: d.skipQuitDialog === true ? true : undefined,

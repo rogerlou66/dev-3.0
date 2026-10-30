@@ -9,14 +9,10 @@ import {
 	resolveBuildChannel,
 } from "../managed-cli-guard";
 
-const DEV3_HOME = "/Users/x/.dev3.0";
-
 function verdict(over: Partial<Parameters<typeof mayWriteManagedCli>[0]> = {}) {
 	return mayWriteManagedCli({
 		buildChannel: "canary",
 		execPath: "/opt/homebrew/Cellar/dev3/1.48.1/libexec/dev3",
-		dev3Home: DEV3_HOME,
-		platform: "darwin",
 		env: {},
 		...over,
 	});

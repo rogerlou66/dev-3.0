@@ -464,34 +464,29 @@ async function getAgentLiveModels(params: {
 	return getAgentDirLiveModels(kind, params.accountId, { refresh: params.refresh });
 }
 
+/** True in the `dev3 remote` server, which has no updater: it runs whatever was built. */
+function isHeadless(): boolean {
+	return process.env.DEV3_HEADLESS === "1";
+}
+
+const HEADLESS_UPDATE_REFUSAL = "dev3 remote does not update itself — rebuild from source and restart it.";
+
 async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: string; error?: string }> {
 	log.info("-> checkForUpdate");
+	if (isHeadless()) {
+		const local = await updater.getLocalVersion();
+		return { updateAvailable: false, version: local.version, error: HEADLESS_UPDATE_REFUSAL };
+	}
 	const settings = await loadSettings();
 	const result = await updater.checkForUpdateWithChannel(settings.updateChannel);
 	log.info("<- checkForUpdate", { ...result });
 	return result;
 }
 
-/** True in the `dev3 remote` server, where the bundle-swap updater does not exist. */
-function isHeadless(): boolean {
-	return process.env.DEV3_HEADLESS === "1";
-}
-
 async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
 	log.info("-> downloadUpdate");
+	if (isHeadless()) return { ok: false, error: HEADLESS_UPDATE_REFUSAL };
 	const settings = await loadSettings();
-	// Headless has no bundle to download: the update is a brew upgrade or a CLI
-	// tarball, and "download" means pre-fetching it while the server keeps serving.
-	if (isHeadless()) {
-		const { buildPlan, stageUpdate } = await import("../self-update");
-		const { plan } = await buildPlan(settings.updateChannel);
-		if (plan.kind === "refused") return { ok: false, error: plan.reason };
-		if (plan.kind === "up-to-date") return { ok: true };
-		getPushMessage()?.("updateDownloadProgress", { status: "downloading", progress: 0 });
-		const staged = await stageUpdate(plan);
-		getPushMessage()?.("updateDownloadProgress", { status: staged.ok ? "complete" : "error", progress: 100 });
-		return staged.ok ? { ok: true } : { ok: false, error: staged.error };
-	}
 	const result = await updater.downloadUpdateForChannel(
 		settings.updateChannel,
 		(status, progress) => {
@@ -502,28 +497,15 @@ async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
 	return result;
 }
 
-async function applyUpdate(): Promise<{ restarting: boolean; message?: string }> {
+async function applyUpdate(): Promise<void> {
 	log.info("-> applyUpdate");
-	if (isHeadless()) {
-		const settings = await loadSettings();
-		const { runSelfUpdate } = await import("../self-update");
-		const outcome = await runSelfUpdate({ channel: settings.updateChannel, restart: true });
-		// Throwing is how the renderer's Restart button reports a failure (it toasts
-		// the message), and a refusal IS a failure from the button's point of view.
-		if (!outcome.ok) throw new Error(outcome.message);
-		// A SUCCESS THAT IS NOT A RESTART STILL HAS TO BE REPORTED. An interactive
-		// `dev3 remote --no-detach` has no supervisor, so the update is installed and the
-		// process stays alive — resolving silently left the button spinning "Restarting…"
-		// with the sentence explaining the manual restart going nowhere.
-		return { restarting: outcome.restarting, message: outcome.message };
-	}
+	if (isHeadless()) throw new Error(HEADLESS_UPDATE_REFUSAL);
 	await updater.applyUpdate();
-	return { restarting: true };
 }
 
 /**
- * What the update popover needs to warn before restarting: whether this is a
- * headless box at all, whether the app is being reached remotely, and how many
+ * What the update popover needs to warn before restarting: whether the app is
+ * being reached remotely, and how many
  * tasks are mid-flight right now.
  *
  * The task count is a WARNING, not a gate because this is an explicit manual
@@ -534,8 +516,7 @@ async function applyUpdate(): Promise<{ restarting: boolean; message?: string }>
  * browser can see a timer running on the desktop, so it must not fire under them.
  * The manual restart stays available in every state.
  */
-async function getUpdateRestartContext(): Promise<{ headless: boolean; remoteActive: boolean; tasksInProgress: number }> {
-	const headless = isHeadless();
+async function getUpdateRestartContext(): Promise<{ remoteActive: boolean; tasksInProgress: number }> {
 	const { isRemoteAccessActive } = await import("../remote-access-server");
 	const remoteActive = isRemoteAccessActive();
 	let tasksInProgress = 0;
@@ -548,7 +529,7 @@ async function getUpdateRestartContext(): Promise<{ headless: boolean; remoteAct
 	} catch (err) {
 		log.warn("getUpdateRestartContext: could not count in-progress tasks", { error: String(err) });
 	}
-	return { headless, remoteActive, tasksInProgress };
+	return { remoteActive, tasksInProgress };
 }
 
 async function saveLastRoute({ route }: { route: string }): Promise<void> {

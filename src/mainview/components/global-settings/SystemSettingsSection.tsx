@@ -17,7 +17,6 @@ export default function SystemSettingsSection({
 	onUpdateChannelChange,
 	onRemoteTunnelChange,
 	onRemotePortChange,
-	onRemoteSilentUpdateToggle,
 	onStaticAccessCodeChange,
 	onPreventSleepToggle,
 	onConfirmBeforeQuitToggle,
@@ -30,7 +29,6 @@ export default function SystemSettingsSection({
 	onUpdateChannelChange: (channel: UpdateChannel) => void;
 	onRemoteTunnelChange: (tunnel: RemoteTunnelSettings | undefined) => void;
 	onRemotePortChange: (port: number | undefined) => void;
-	onRemoteSilentUpdateToggle: (enabled: boolean) => void;
 	/** Empty string clears the code. */
 	onStaticAccessCodeChange: (code: string) => void;
 	onPreventSleepToggle: (enabled: boolean) => void;
@@ -122,24 +120,6 @@ export default function SystemSettingsSection({
 						{t("settings.remotePortDesc")}
 					</p>
 					<RemotePortField t={t} port={globalSettings.remotePort} onChange={onRemotePortChange} />
-				</div>
-			</SettingsEntry>
-
-			<SettingsEntry anchor="remote-silent-update">
-				<div>
-					<p className="block text-fg text-sm font-semibold mb-2">
-						{t("settings.remoteSilentUpdate")}
-					</p>
-					<p className="text-fg-3 text-sm mb-3">
-						{t("settings.remoteSilentUpdateDesc")}
-					</p>
-					<SettingsToggle
-						checked={globalSettings.remoteSilentUpdate !== false}
-						ariaLabel={t("settings.remoteSilentUpdate")}
-						onLabel={t("settings.on")}
-						offLabel={t("settings.off")}
-						onToggle={() => onRemoteSilentUpdateToggle(globalSettings.remoteSilentUpdate === false)}
-					/>
 				</div>
 			</SettingsEntry>
 

@@ -7690,6 +7690,31 @@ describe("handlers.applyUpdate", () => {
 	});
 });
 
+describe("update handlers in headless mode", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		process.env.DEV3_HEADLESS = "1";
+	});
+	afterEach(() => {
+		delete process.env.DEV3_HEADLESS;
+	});
+
+	// `dev3 remote` runs whatever was built; it must never ask the release feed.
+	it("refuses to check, download or apply without touching the updater", async () => {
+		vi.mocked(updater.getLocalVersion).mockResolvedValue({ version: "1.60.0", hash: "abc", channel: "prod" } as any);
+
+		const check = await handlers.checkForUpdate();
+		const download = await handlers.downloadUpdate();
+
+		expect(check).toEqual(expect.objectContaining({ updateAvailable: false, version: "1.60.0", error: expect.stringContaining("rebuild") }));
+		expect(download).toEqual({ ok: false, error: expect.stringContaining("rebuild") });
+		await expect(handlers.applyUpdate()).rejects.toThrow(/rebuild/);
+		expect(updater.checkForUpdateWithChannel).not.toHaveBeenCalled();
+		expect(updater.downloadUpdateForChannel).not.toHaveBeenCalled();
+		expect(updater.applyUpdate).not.toHaveBeenCalled();
+	});
+});
+
 describe("handlers.getAppVersion", () => {
 	beforeEach(() => vi.clearAllMocks());
 

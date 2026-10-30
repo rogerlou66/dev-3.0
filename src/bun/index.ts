@@ -179,7 +179,7 @@ log.info("Log files", { dir: getLogPath() });
 	// copy owns the CLI every agent on the machine runs, and a worktree build
 	// landing on it silently swaps everyone onto an unmerged branch. See
 	// managed-cli-guard.ts.
-	if (managedCliWriteAllowed(PATHS.VIEWS_FOLDER, DEV3_HOME)) installBinary(cliBinaryName());
+	if (managedCliWriteAllowed(PATHS.VIEWS_FOLDER)) installBinary(cliBinaryName());
 
 	// Install dev3 skill into all supported AI agent directories (~/.claude, ~/.codex, etc.).
 	// Overwritten on every start to match the running app version (same pattern as CLI binary).

@@ -23,7 +23,6 @@ function renderSection(settings: Partial<GlobalSettings> = {}) {
 				onUpdateChannelChange={vi.fn()}
 				onRemoteTunnelChange={onRemoteTunnelChange}
 				onRemotePortChange={onRemotePortChange}
-				onRemoteSilentUpdateToggle={vi.fn()}
 				onStaticAccessCodeChange={onStaticAccessCodeChange}
 				onPreventSleepToggle={vi.fn()}
 				onConfirmBeforeQuitToggle={vi.fn()}

@@ -35,7 +35,7 @@ vi.mock("../../rpc", () => ({
 			applyUpdate: vi.fn(),
 			// The update plaque asks what a restart would interrupt (and whether it keeps
 			// the remote link) as soon as an update is offered.
-			getUpdateRestartContext: vi.fn().mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 }),
+			getUpdateRestartContext: vi.fn().mockResolvedValue({ remoteActive: false, tasksInProgress: 0 }),
 			saveLastRoute: vi.fn(),
 			renameTask: vi.fn(),
 			// `behindOrigin` > 0 keeps the pull button rendered — it hides when there is nothing to pull.
@@ -897,9 +897,9 @@ describe("GlobalHeader — manual update prompt", () => {
 		mockedApi.request.getTasks.mockResolvedValue([]);
 		mockedApi.request.applyUpdate.mockResolvedValue(undefined as any);
 		mockedApi.request.saveLastRoute.mockResolvedValue(undefined as any);
-		// Auto-restart now requires a KNOWN non-headless context, so each test states
-		// it — `clearAllMocks` clears calls but not an implementation a sibling set.
-		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 });
+		// Each test states the context — `clearAllMocks` clears calls but not an
+		// implementation a sibling set.
+		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ remoteActive: false, tasksInProgress: 0 });
 	});
 
 	afterEach(() => {
@@ -963,20 +963,6 @@ describe("GlobalHeader — manual update prompt", () => {
 			[],
 			{ updateVersion: "1.2.3" },
 		);
-
-		act(() => { vi.advanceTimersByTime(300_000); });
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
-	});
-
-	// The auto-restart gate must FAIL CLOSED. It reads the restart context over RPC;
-	// while that is unknown — pending, or failed — the box may be a headless
-	// `dev3 remote` server, where an unattended restart from a phone tab is exactly
-	// what the quiet-window policy refuses. Not knowing means not restarting.
-	it("does NOT auto-restart on a headless box", async () => {
-		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: true, remoteActive: false, tasksInProgress: 0 });
-		renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { updateVersion: "1.2.3" });
 
 		act(() => { vi.advanceTimersByTime(300_000); });
 		await act(async () => { await vi.advanceTimersByTimeAsync(0); });

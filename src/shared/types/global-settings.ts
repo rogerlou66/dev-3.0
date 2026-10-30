@@ -202,12 +202,8 @@ export interface GlobalSettings {
 	/** The user's own starter folder for `"custom"`. Absent = `~/.dev3.0/artifact-template-custom`, seeded from the dev3 template. */
 	artifactTemplatePath?: string;
 	/**
-	 * Let a headless `dev3 remote` box install updates on its own once browser and
-	 * terminal activity are quiet. Default ON — the whole point is that nobody
-	 * ever goes back to a terminal to type `brew upgrade`. Helper restarts preserve
-	 * running agents; supervisor-owned restarts wait until no agent is at risk.
-	 * Turn it off to hold a box on one build while investigating. Has no effect on
-	 * the desktop app, which has its own updater.
+	 * Retained only so older app versions sharing settings.json keep their stored
+	 * value. Current versions have no headless self-update and never read it.
 	 */
 	remoteSilentUpdate?: boolean;
 	preventSleepWhileRunning?: boolean; // keep a sleep inhibitor running while the app is open

@@ -523,15 +523,6 @@ export const SETTINGS_ENTRIES = [
 		storage: "global",
 	},
 	{
-		id: "remote-silent-update",
-		category: "system",
-		titleKey: "settings.remoteSilentUpdate",
-		descriptionKey: "settings.remoteSilentUpdateDesc",
-		anchor: "remote-silent-update",
-		globalField: "remoteSilentUpdate",
-		storage: "global",
-	},
-	{
 		id: "prevent-sleep",
 		category: "system",
 		titleKey: "settings.preventSleep",
@@ -643,6 +634,7 @@ export const SETTINGS_GLOBAL_FIELD_EXCLUSIONS = [
 	"resolvedTheme",
 	// Retired fields preserved for older versions sharing settings.json.
 	"analyticsDistinctId",
+	"remoteSilentUpdate",
 	"prOriginTaskLink",
 	"customBinaryPaths",
 	"agentBinaryPaths",

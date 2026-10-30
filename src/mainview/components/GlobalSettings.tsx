@@ -585,13 +585,6 @@ function GlobalSettings({
 		[persistSettingChange],
 	);
 
-	const handleRemoteSilentUpdateToggle = useCallback(
-		(enabled: boolean) => {
-			persistSettingChange({ remoteSilentUpdate: enabled });
-		},
-		[persistSettingChange],
-	);
-
 	const handlePreventSleepToggle = useCallback(
 		(enabled: boolean) => {
 			persistSettingChange({ preventSleepWhileRunning: enabled });
@@ -964,7 +957,6 @@ function GlobalSettings({
 							onUpdateChannelChange={handleUpdateChannelChange}
 							onRemoteTunnelChange={handleRemoteTunnelChange}
 							onRemotePortChange={handleRemotePortChange}
-							onRemoteSilentUpdateToggle={handleRemoteSilentUpdateToggle}
 							onStaticAccessCodeChange={handleStaticAccessCodeChange}
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}

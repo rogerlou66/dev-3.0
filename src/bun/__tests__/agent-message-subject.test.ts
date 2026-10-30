@@ -125,9 +125,9 @@ describe("requireMessageSubject", () => {
 		expect(requireMessageSubject("  ci  green ", "body")).toBe("ci green");
 	});
 
-	it("throws the readable error, and tells an older CLI to update", () => {
+	it("throws the readable error, and tells an older CLI how to get the new one", () => {
 		expect(() => requireMessageSubject(undefined, "ping")).toThrow(/needs --subject/);
-		expect(() => requireMessageSubject(undefined, "ping")).toThrow(/dev3 update/);
+		expect(() => requireMessageSubject(undefined, "ping")).toThrow(/restart the dev3 app/);
 	});
 
 	it("throws on an over-limit subject too", () => {

@@ -163,7 +163,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	const overflowMenuRef = useRef<HTMLDivElement>(null);
 	const [showUpdateDropdown, setShowUpdateDropdown] = useState(false);
 	const [restarting, setRestarting] = useState(false);
-	const [restartContext, setRestartContext] = useState<{ headless: boolean; remoteActive: boolean; tasksInProgress: number } | null>(null);
+	const [restartContext, setRestartContext] = useState<{ remoteActive: boolean; tasksInProgress: number } | null>(null);
 	const [showToast, setShowToast] = useState(false);
 	const pinnedToastSlot = usePinnedToastSlot();
 	const [showProjectDropdown, setShowProjectDropdown] = useState(false);
@@ -333,14 +333,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 			// here so an update triggered right after a navigation still restores
 			// to the correct surface.
 			await api.request.saveLastRoute({ route: JSON.stringify(route) });
-			const outcome = await api.request.applyUpdate();
-			// Installed, but this process is not being replaced (a foreground headless
-			// server has nothing to relaunch it). Stop pretending a restart is coming.
-			if (outcome && !outcome.restarting) {
-				setRestarting(false);
-				dismissToast();
-				toast.info(outcome.message ?? t("update.installedNoRestart"), { source: "update" });
-			}
+			await api.request.applyUpdate();
 		} catch (err) {
 			setRestarting(false);
 			toast.error(t("update.applyFailed", { error: String(err) }), { source: "update" });
@@ -1098,7 +1091,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 									changelog={updateChangelog}
 									restarting={restarting}
 									tasksInProgress={restartContext?.tasksInProgress ?? 0}
-									keepsRemoteLink={restartContext?.headless ?? false}
 									onRestart={handleRestart}
 									onSeeAllChanges={() => {
 										setShowUpdateDropdown(false);

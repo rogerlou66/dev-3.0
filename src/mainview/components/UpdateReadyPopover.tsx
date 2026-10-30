@@ -67,13 +67,6 @@ interface UpdateReadyPopoverProps {
 	 * nothing.
 	 */
 	tasksInProgress?: number;
-	/**
-	 * True on a headless `dev3 remote` box, where the restart hands the live
-	 * Cloudflare tunnel and the port to the new build — so the public URL and this
-	 * browser session survive it. Worth saying, because "restart" on a phone
-	 * otherwise reads as "lose the link I am holding".
-	 */
-	keepsRemoteLink?: boolean;
 	onRestart: () => void;
 	onSeeAllChanges: () => void;
 	/** Preview (simulator) mode: disable the restart button so it never quits the app. */
@@ -91,7 +84,6 @@ export default function UpdateReadyPopover({
 	changelog,
 	restarting,
 	tasksInProgress = 0,
-	keepsRemoteLink = false,
 	onRestart,
 	onSeeAllChanges,
 	preview = false,
@@ -120,9 +112,6 @@ export default function UpdateReadyPopover({
 				</div>
 			</div>
 			<UpdateWhatsNew version={version} changelog={changelog} onSeeAllChanges={onSeeAllChanges} />
-			{keepsRemoteLink && (
-				<p className="text-fg-3 text-xs">{t("update.remoteLinkSurvives")}</p>
-			)}
 			{tasksInProgress > 0 && (
 				<p className="text-fg-2 text-xs flex items-start gap-1.5">
 					<span aria-hidden="true">⚠️</span>

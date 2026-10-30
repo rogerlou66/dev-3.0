@@ -33,15 +33,6 @@ vi.mock("../tunnel-provider", async () => {
 	return { ...actual, resolveRemoteTunnelProvider: providerMocks.resolveRemoteTunnelProvider };
 });
 
-// Hostname stability is learned from a file on disk; these tests decide the answer
-// rather than the developer's own history of tunnel runs.
-const hostMemoryMocks = vi.hoisted(() => ({
-	recordCustomTunnelUrl: vi.fn<(command: string, url: string) => boolean>(() => false),
-	customTunnelHostIsStable: vi.fn<(command: string) => boolean>(() => false),
-}));
-
-vi.mock("../tunnel-host-memory", () => hostMemoryMocks);
-
 import { spawn as mockSpawn, spawnSync as mockSpawnSync } from "../spawn";
 import {
 	isTunnelBinaryAvailable,
@@ -55,9 +46,6 @@ import {
 	resolveTunnelEdgeBind,
 	buildTunnelArgv,
 	tunnelManager,
-	adoptMainTunnel,
-	releaseMainTunnelForHandoff,
-	stopMainTunnelForStableHandoff,
 	getMainTunnelFailureReason,
 	TUNNEL_EDGE_READY,
 	CUSTOM_TUNNEL_EDGE_READY,
@@ -83,8 +71,6 @@ beforeEach(() => {
 	CUSTOM_TUNNEL_EDGE_READY.timeoutMs = 15;
 	CUSTOM_TUNNEL_EDGE_READY.pollMs = 1;
 	providerMocks.resolveRemoteTunnelProvider.mockReturnValue({ kind: "cloudflare", command: null, urlRegex: null });
-	hostMemoryMocks.recordCustomTunnelUrl.mockReturnValue(false);
-	hostMemoryMocks.customTunnelHostIsStable.mockReturnValue(false);
 });
 afterEach(() => {
 	TUNNEL_EDGE_READY.timeoutMs = REAL_EDGE_READY.timeoutMs;
@@ -1218,122 +1204,6 @@ describe("tunnel recovery", () => {
 });
 
 // ================================================================
-// Handoff — the one place a cloudflared child is deliberately leaked
-// ================================================================
-
-describe("releaseMainTunnelForHandoff / adoptMainTunnel", () => {
-	beforeEach(() => {
-		_resetState();
-		vi.clearAllMocks();
-	});
-
-	function startWithUrl(url: string, pid = 4242) {
-		const killFn = vi.fn();
-		const encoder = new TextEncoder();
-		(mockSpawn as Mock).mockReturnValue({
-			pid,
-			kill: killFn,
-			exited: new Promise<void>(() => {}),
-			stderr: new ReadableStream({
-				start(controller) {
-					controller.enqueue(encoder.encode("INF Starting metrics server on 127.0.0.1:20241/metrics\n"));
-					controller.enqueue(encoder.encode(`INF |  ${url}\n`));
-					controller.close();
-				},
-			}),
-		});
-		return { killFn };
-	}
-
-	it("hands back the pid and URL WITHOUT killing cloudflared — that is the whole point", async () => {
-		const { killFn } = startWithUrl("https://keepme.trycloudflare.com");
-		await startTunnel(8080);
-
-		const released = releaseMainTunnelForHandoff();
-
-		expect(released).toEqual({
-			pid: 4242,
-			url: "https://keepme.trycloudflare.com",
-			metricsReadyUrl: "http://127.0.0.1:20241/ready",
-		});
-		// Killing it would change the public hostname, which is exactly what the
-		// handoff exists to prevent.
-		expect(killFn).not.toHaveBeenCalled();
-		// The manager has forgotten it, so nothing here will try to manage it again.
-		expect(getTunnelState()).toBe("idle");
-	});
-
-	it("returns null when there is no connected tunnel to hand over", () => {
-		expect(releaseMainTunnelForHandoff()).toBeNull();
-	});
-
-	it("registers an inherited process as the live main tunnel", () => {
-		adoptMainTunnel({
-			pid: 5150,
-			url: "https://inherited.trycloudflare.com",
-			metricsReadyUrl: "http://127.0.0.1:20241/ready",
-			targetPort: 8080,
-		});
-
-		expect(getTunnelUrl()).toBe("https://inherited.trycloudflare.com");
-		expect(getTunnelState()).toBe("connected");
-		// Nothing was spawned: the process already exists.
-		expect(mockSpawn).not.toHaveBeenCalled();
-	});
-
-	// An adopted entry has `process: null`, so there is no `exited` hook to notice it
-	// died — and `checkHealth` used to return immediately when `metricsReadyUrl` was
-	// null, which `startEntry` legitimately produces. The entry then advertised a dead
-	// `*.trycloudflare.com` hostname forever, through the banner, `dev3 remote url` and
-	// every connected browser.
-	it("notices an adopted process that died, even with no readiness URL", async () => {
-		const aliveSpy = vi.spyOn(process, "kill").mockImplementation(() => {
-			const err = new Error("no such process") as NodeJS.ErrnoException;
-			err.code = "ESRCH";
-			throw err;
-		});
-		try {
-			adoptMainTunnel({ pid: 5152, url: "https://dead.trycloudflare.com", metricsReadyUrl: null, targetPort: 8080 });
-			expect(getTunnelState()).toBe("connected");
-
-			await tunnelManager.checkHealth("main");
-
-			// The restart re-enters startEntry, which has nothing spawnable mocked here —
-			// what matters is that the dead hostname is no longer advertised as connected.
-			expect(getTunnelUrl()).not.toBe("https://dead.trycloudflare.com");
-		} finally {
-			aliveSpy.mockRestore();
-		}
-	});
-
-	it("leaves a LIVE adopted process alone when it has no readiness URL", async () => {
-		const aliveSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-		try {
-			adoptMainTunnel({ pid: 5153, url: "https://live.trycloudflare.com", metricsReadyUrl: null, targetPort: 8080 });
-
-			await tunnelManager.checkHealth("main");
-
-			expect(getTunnelUrl()).toBe("https://live.trycloudflare.com");
-			expect(getTunnelState()).toBe("connected");
-		} finally {
-			aliveSpy.mockRestore();
-		}
-	});
-
-	it("signals an adopted process on stop, so a restart cannot orphan it", () => {
-		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-		try {
-			adoptMainTunnel({ pid: 5151, url: "https://x.trycloudflare.com", metricsReadyUrl: null, targetPort: 8080 });
-			stopTunnel();
-			expect(killSpy).toHaveBeenCalledWith(5151, "SIGTERM");
-			expect(getTunnelState()).toBe("idle");
-		} finally {
-			killSpy.mockRestore();
-		}
-	});
-});
-
-// ================================================================
 // Custom provider readiness — a public-URL probe stands in for cloudflared's
 // local /ready endpoint, which a bring-your-own tunnel does not have.
 // ================================================================
@@ -1438,112 +1308,6 @@ describe("custom tunnel edge readiness", () => {
 });
 
 // ================================================================
-// Stable hostnames — a custom provider that reuses its hostname does not need
-// the leaked-process handoff at all.
-// ================================================================
-
-describe("custom tunnel hostname stability", () => {
-	const COMMAND = "fake-tunnel {port} --name box";
-
-	beforeEach(() => {
-		_resetState();
-		vi.clearAllMocks();
-		providerMocks.resolveRemoteTunnelProvider.mockReturnValue({
-			kind: "custom",
-			command: COMMAND,
-			urlRegex: GENERIC_TUNNEL_URL_REGEX,
-		});
-		vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
-	});
-
-	function setupCustomSpawn(url: string, pid = 7373) {
-		const killFn = vi.fn();
-		const encoder = new TextEncoder();
-		const stream = (out: string[]) => new ReadableStream<Uint8Array>({
-			start(controller) {
-				for (const line of out) controller.enqueue(encoder.encode(line + "\n"));
-				controller.close();
-			},
-		});
-		(mockSpawn as Mock).mockReturnValue({
-			pid,
-			kill: killFn,
-			exited: new Promise<void>(() => {}),
-			stdout: stream([`Public: ${url}`]),
-			stderr: stream([]),
-		});
-		return { killFn };
-	}
-
-	it("reports an unproven hostname the first time a command's URL is seen", async () => {
-		hostMemoryMocks.recordCustomTunnelUrl.mockReturnValue(false);
-		setupCustomSpawn("https://first-run.example.com");
-
-		await startTunnel(8080);
-
-		expect(hostMemoryMocks.recordCustomTunnelUrl).toHaveBeenCalledWith(COMMAND, "https://first-run.example.com");
-		expect(loggerMocks.info).toHaveBeenCalledWith(
-			"Tunnel connected",
-			expect.objectContaining({ hostname: "unproven" }),
-		);
-	});
-
-	it("reports a stable hostname once the same URL has been observed again", async () => {
-		hostMemoryMocks.recordCustomTunnelUrl.mockReturnValue(true);
-		setupCustomSpawn("https://box-dev3.example.com");
-
-		await startTunnel(8080);
-
-		expect(loggerMocks.info).toHaveBeenCalledWith(
-			"Tunnel connected",
-			expect.objectContaining({ hostname: "stable" }),
-		);
-	});
-
-	it("stops a stable-hostname tunnel for the handoff instead of leaking the process", async () => {
-		hostMemoryMocks.recordCustomTunnelUrl.mockReturnValue(true);
-		const { killFn } = setupCustomSpawn("https://box-dev3.example.com");
-		await startTunnel(8080);
-
-		expect(stopMainTunnelForStableHandoff()).toBe("https://box-dev3.example.com");
-		// Killed on purpose: the successor's own spawn lands on the same hostname.
-		expect(killFn).toHaveBeenCalled();
-		expect(getTunnelState()).toBe("idle");
-	});
-
-	it("refuses the stable shortcut while the hostname is unproven, so the leak still applies", async () => {
-		hostMemoryMocks.recordCustomTunnelUrl.mockReturnValue(false);
-		const { killFn } = setupCustomSpawn("https://rotating.example.com");
-		await startTunnel(8080);
-
-		expect(stopMainTunnelForStableHandoff()).toBeNull();
-		expect(killFn).not.toHaveBeenCalled();
-		expect(releaseMainTunnelForHandoff()).toEqual(
-			expect.objectContaining({ pid: 7373, url: "https://rotating.example.com" }),
-		);
-	});
-
-	it("gives an adopted custom tunnel a public-URL health probe, not blind trust", async () => {
-		const aliveSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-		try {
-			adoptMainTunnel({ pid: 7474, url: "https://inherited-byo.example.com", metricsReadyUrl: null, targetPort: 8080 });
-
-			// The edge is gone while the inherited process is alive — the exact case a
-			// liveness check reads as healthy.
-			vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ENOTFOUND"); }));
-			await tunnelManager.checkHealth("main");
-
-			expect(loggerMocks.warn).toHaveBeenCalledWith(
-				"Tunnel public URL unreachable",
-				expect.objectContaining({ probe: "public-url", consecutiveFailures: 1 }),
-			);
-		} finally {
-			aliveSpy.mockRestore();
-		}
-	});
-});
-
-// ================================================================
 // Custom provider on per-task port tunnels — one provider for every kind
 // ================================================================
 
@@ -1588,15 +1352,6 @@ describe("custom provider on per-task tunnels", () => {
 		const argv = (mockSpawn as Mock).mock.calls[0][0] as string[];
 		expect(argv[argv.length - 1]).toBe("exec fake-tunnel 3000");
 		expect(argv).not.toContain("cloudflared");
-	});
-
-	it("keeps hostname-stability learning out of port tunnels — the memory belongs to the main tunnel", async () => {
-		setupCustomSpawn(["https://p3000.example.com"]);
-
-		const entry = await tunnelManager.start({ id: "task:t1:port:3000", kind: "task-port", targetPort: 3000, taskId: "t1" });
-
-		expect(hostMemoryMocks.recordCustomTunnelUrl).not.toHaveBeenCalled();
-		expect(entry.stableHostname).toBe(false);
 	});
 
 	it("warns when two live tunnels land on one public URL (fixed-hostname command)", async () => {

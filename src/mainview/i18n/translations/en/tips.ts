@@ -233,8 +233,6 @@ const tips = {
 	"tip.agentTrafficLog.body": "Press ⇧⌘M to see the last hour of agent-to-agent messages — press Play to replay it, or widen the time window.",
 	"tip.continueInAnotherAgent.title": "Switch agents mid-task",
 	"tip.continueInAnotherAgent.body": "In + Agent, tick “Continue this task’s conversation” — the new agent gets a retelling of the session so far and picks the work up.",
-	"tip.remoteSelfUpdate.title": "Remote boxes self-update",
-	"tip.remoteSelfUpdate.body": "A `dev3 remote` server installs updates itself once the box goes quiet, keeping its public link — or run `dev3 update` yourself.",
 } as const;
 
 export default tips;
