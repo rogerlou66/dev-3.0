@@ -36,6 +36,7 @@ import {
 	applySparseCheckout,
 	recoverStaleInitializingWorktrees,
 	taskDir,
+	run,
 } from "../git";
 import { createTestRepo, cleanup, makeTaskCommits, g, spawnedCommands, type TestRepo } from "./git-test-helpers";
 
@@ -636,8 +637,24 @@ describe("createWorktree", () => {
 			.slice(before)
 			.filter((cmd) => cmd.join(" ").includes(`branch -D ${branch}`));
 
-		beforeEach(() => _setWorktreeAddRetryPolicy({ baseDelayMs: 40, maxDelayMs: 80 }));
-		afterEach(() => _setWorktreeAddRetryPolicy());
+		// git >= 2.56 itself waits up to core.configLockTimeout (1s) on a held config.lock,
+		// so every attempt cost seconds and the cap test outran the test timeout on those
+		// runners. Pinned to 0, these tests exercise dev3's retry loop on every git version.
+		beforeEach(() => {
+			_setWorktreeAddRetryPolicy({ baseDelayMs: 40, maxDelayMs: 80 });
+			vi.stubEnv("GIT_CONFIG_COUNT", "1");
+			vi.stubEnv("GIT_CONFIG_KEY_0", "core.configLockTimeout");
+			vi.stubEnv("GIT_CONFIG_VALUE_0", "0");
+		});
+		afterEach(() => {
+			_setWorktreeAddRetryPolicy();
+			vi.unstubAllEnvs();
+		});
+
+		it("reaches git with its own config-lock wait disabled", async () => {
+			const result = await run(["git", "config", "--get", "core.configLockTimeout"], repo.local);
+			expect(result.stdout.trim()).toBe("0");
+		});
 
 		it("retries through .git/config lock contention held by another git process", async () => {
 			const project = makeProject(repo.local);
