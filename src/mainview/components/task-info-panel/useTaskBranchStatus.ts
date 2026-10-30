@@ -18,6 +18,7 @@ import { mergeCompletionBlocker } from "./mergeCompletionBlocker";
 import { moveTaskToStatus } from "../../utils/moveTaskToStatus";
 import { offerMergeCompletion } from "../../utils/offerMergeCompletion";
 import { startVisibilityAwarePoll } from "../../utils/poll";
+import { usePollingSettings } from "../../hooks/usePollingSettings";
 
 interface UseTaskBranchStatusParams {
 	task: Task;
@@ -97,6 +98,9 @@ export function useTaskBranchStatus({
 	const [creatingPR, setCreatingPR] = useState(false);
 	const [refreshingStatus, setRefreshingStatus] = useState(false);
 	const mergeDialogShownRef = useRef<string | null>(null);
+	const polling = usePollingSettings();
+	const autoPollEnabled = polling.enabled.branchStatusPoll;
+	const autoPollIntervalMs = polling.intervalMs.branchStatusPoll;
 
 	const baseBranch = resolveTaskCompareBaseBranch(task, project);
 	const defaultCompareRef = getDefaultTaskCompareRef(baseBranch, project);
@@ -176,7 +180,7 @@ export function useTaskBranchStatus({
 			if (!force && status.mergeCompletionFingerprint && mergeDialogShownRef.current === status.mergeCompletionFingerprint) {
 				return;
 			}
-			// Remember this merged head so the 15s poll does not re-offer it every
+			// Remember this merged head so the status poll does not re-offer it every
 			// tick; the primitive re-reserves server-side, this is the client
 			// fast-path guard. Set before the prompt so it also covers notice-only
 			// and suppressed outcomes.
@@ -218,12 +222,17 @@ export function useTaskBranchStatus({
 		offerMergeCompletionIfMergedRef.current = offerMergeCompletionIfMerged;
 	}, [offerMergeCompletionIfMerged]);
 
+	// Its own effect, not part of the poll's: a Settings → Polling change restarts
+	// the poll, and that must not re-arm the merge popup for an already-offered head.
+	useEffect(() => {
+		mergeDialogShownRef.current = null;
+	}, [cacheKey, canShowStatus]);
+
 	useEffect(() => {
 		if (!canShowStatus) {
 			return;
 		}
 
-		mergeDialogShownRef.current = null;
 		let cancelled = false;
 
 		const fetchStatus = async () => {
@@ -244,7 +253,16 @@ export function useTaskBranchStatus({
 			}
 		};
 
-		const stop = startVisibilityAwarePoll({ fn: fetchStatus, intervalMs: 15_000 });
+		// Switched off in Settings → Polling: one load so the git bar is not empty,
+		// then only ↻ and the post-git-op refresh below.
+		if (!autoPollEnabled) {
+			void fetchStatus();
+			return () => {
+				cancelled = true;
+			};
+		}
+
+		const stop = startVisibilityAwarePoll({ fn: fetchStatus, intervalMs: autoPollIntervalMs });
 
 		return () => {
 			cancelled = true;
@@ -252,6 +270,8 @@ export function useTaskBranchStatus({
 		};
 	}, [
 		applyStatus,
+		autoPollEnabled,
+		autoPollIntervalMs,
 		cacheKey,
 		canShowStatus,
 		compareRef,

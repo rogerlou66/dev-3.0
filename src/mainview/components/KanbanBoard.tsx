@@ -153,7 +153,7 @@ function KanbanBoard({
 	// prNumber/prUrl + prStatusCache), refreshed in-session by the `taskPrStatus`
 	// push, plus a per-project branch->PR lookup so a PR whose identity was never
 	// persisted still gets a badge. Virtual (Operations) boards have no git repo,
-	// so they get no lookup instead of a doomed RPC every 60s.
+	// so they get no lookup instead of a doomed RPC every poll.
 	const gitProjectIds = useMemo(
 		() => boardProjects.filter((p) => p.kind !== "virtual").map((p) => p.id),
 		[boardProjects],
