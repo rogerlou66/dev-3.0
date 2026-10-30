@@ -115,7 +115,6 @@ function makeGlobalSettings(overrides?: Partial<GlobalSettings>): GlobalSettings
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-default",
 		taskSortOrder: "oldest-first",
-		updateChannel: "stable",
 		...overrides,
 	};
 }

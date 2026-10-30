@@ -1,5 +1,7 @@
 # Learned hostname stability for custom tunnels
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: hostname stability only fed the self-update handoff; `tunnel-host-memory.ts` is deleted and `tunnel-hosts.json` is no longer written.
+
 ## Context
 
 The self-update handoff deliberately leaks a live `cloudflared` to its successor

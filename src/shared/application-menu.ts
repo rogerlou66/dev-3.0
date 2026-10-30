@@ -15,7 +15,6 @@ import type { ApplicationMenuItemConfig } from "electrobun/bun";
 export const MENU_ACTIONS = {
 	// ── App menu ──
 	about: "about",
-	checkForUpdates: "check-for-updates",
 	openSettings: "open-settings",
 	setThemeLight: "set-theme-light",
 	setThemeDark: "set-theme-dark",
@@ -92,7 +91,6 @@ export const MENU_ACTIONS = {
 	gaugeDemo: "gauge-demo",
 	viewportLab: "viewport-lab",
 	nativePaneLayoutLab: "native-pane-layout-lab",
-	updatePopoverPreview: "update-popover-preview",
 	terminalPerfOverlay: "terminal-perf-overlay",
 	debugPlaySoundCompleted: "debug-play-sound-completed",
 	debugPlaySoundCancelled: "debug-play-sound-cancelled",
@@ -523,7 +521,6 @@ function appMenu(): ApplicationMenuItemConfig {
 		label: "dev-3.0",
 		submenu: [
 			item({ label: "About dev-3.0", action: MENU_ACTIONS.about }),
-			item({ label: "Check for Updates...", action: MENU_ACTIONS.checkForUpdates }),
 			SEP,
 			item({ label: "Settings...", action: MENU_ACTIONS.openSettings, accelerator: "," }),
 			SEP,
@@ -706,7 +703,6 @@ function viewMenu(): ApplicationMenuItemConfig {
 					item({ label: "Gauge Demo", action: MENU_ACTIONS.gaugeDemo }),
 					item({ label: "Viewport Lab", action: MENU_ACTIONS.viewportLab }),
 					item({ label: "Native Pane Layout Lab", action: MENU_ACTIONS.nativePaneLayoutLab }),
-					item({ label: "Update Popover Preview", action: MENU_ACTIONS.updatePopoverPreview }),
 					item({ label: "Terminal Performance (Toggle)", action: MENU_ACTIONS.terminalPerfOverlay }),
 					SEP,
 					// Task-sound probes. The two "client" items call the exact function

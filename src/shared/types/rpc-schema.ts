@@ -15,7 +15,7 @@ import type { AgentMessageLogPage } from "../agent-message-log";
 import type { NotificationLogPage } from "../notification-log";
 import type { TaskPeekSnapshot } from "../task-peek";
 import type { TaskSoundStatus } from "../task-sound-statuses";
-import type { ChangelogEntry, UpdateChangelog, UpdatePopoverPreview } from "./changelog";
+import type { ChangelogEntry } from "./changelog";
 import type { TaskResetConsent, TaskResetResult, TaskStatus, WorktreeAccessState } from "./task-status";
 import type { TaskPriority } from "./task-priority";
 import type { TaskType } from "./task-type";
@@ -869,28 +869,6 @@ export type AppRPCSchema = {
 				params: { path: string; requireGit?: boolean };
 				response: WorktreeAccessState;
 			};
-			checkForUpdate: {
-				params: void;
-				response: { updateAvailable: boolean; version: string; error?: string };
-			};
-			downloadUpdate: {
-				params: void;
-				response: { ok: boolean; error?: string };
-			};
-			applyUpdate: {
-				params: void;
-				/**
-				 * `restarting: false` means the update is INSTALLED but this process is not
-				 * going to be replaced — a headless server with nothing out there to relaunch
-				 * it. The button has to stop spinning and say so, or it reads "Restarting…"
-				 * forever for an update that already succeeded.
-				 */
-				response: { restarting: boolean; message?: string };
-			};
-			getUpdateRestartContext: {
-				params: void;
-				response: { headless: boolean; remoteActive: boolean; tasksInProgress: number };
-			};
 			saveLastRoute: {
 				params: { route: string };
 				response: void;
@@ -901,7 +879,7 @@ export type AppRPCSchema = {
 			};
 			getAppVersion: {
 				params: void;
-				response: { version: string; channel: string; buildChannel: string };
+				response: { version: string; buildChannel: string };
 			};
 			checkSystemRequirements: {
 				params: void;
@@ -935,10 +913,6 @@ export type AppRPCSchema = {
 			getChangelogs: {
 				params: void;
 				response: ChangelogEntry[];
-			};
-			previewUpdatePopover: {
-				params: void;
-				response: UpdatePopoverPreview;
 			};
 			quitApp: {
 				params: { dontShowAgain?: boolean } | void;
@@ -1492,17 +1466,6 @@ export type AppRPCSchema = {
 				response: { available: boolean };
 			};
 			/**
-			 * Does the canary update feed carry a build for THIS machine? Derived from the
-			 * publisher's own platform list, never from a runtime probe: a missing key in the
-			 * release bucket answers 403, so a client could not tell "no build here" from "no
-			 * permission". Asked of the host because browser-side platform sniffing would
-			 * answer for the wrong machine.
-			 */
-			checkCanaryChannelAvailable: {
-				params: void;
-				response: { available: boolean };
-			};
-			/**
 			 * Whether this machine can record freeze diagnostics at all (macOS only)
 			 * and whether the collector is running right now. Asked of the host because
 			 * a remote browser answers for its own machine, not the one that freezes.
@@ -1763,8 +1726,6 @@ export type AppRPCSchema = {
 			accountLoginChanged: { kind: AgentAccountKind; state: AccountLoginState | null };
 			terminalBell: { taskId: string };
 			gitOpCompleted: { taskId: string; projectId: string; operation: string; ok: boolean };
-			/** A manually downloaded update is ready and waits for an explicit restart. */
-			updateAvailable: { version: string; changelog?: UpdateChangelog };
 			branchMerged: { taskId: string; projectId: string; taskTitle: string; branchName: string; fingerprint: string | null; subject: TaskDialogSubject; shouldPrompt?: boolean; shouldNotify?: boolean };
 			manualCompletionChanged: { taskId: string; projectId: string; manualCompletion: boolean; taskSeq?: number; taskTitle?: string; projectName?: string };
 			/**
@@ -1843,7 +1804,6 @@ export type AppRPCSchema = {
 			 * Pushed by the rate-limit monitor whenever the parsed windows change.
 			 */
 			agentRateLimitsUpdated: AgentRateLimitsReport;
-			updateDownloadProgress: { status: string; progress?: number };
 			/**
 			 * Live `git clone` output for the Add Project modal — the last few
 			 * stderr lines, terminal-style (`\r` rewrites collapsed). Correlated
@@ -2054,11 +2014,6 @@ export type AppRPCSchema = {
 			showQuitDialog: {};
 			/** Open the in-app About modal (replaces the native About message box). */
 			showAbout: { version: string; buildChannel?: string };
-			/**
-			 * Result of a manual "Check for Updates" menu action, surfaced as a toast.
-			 * `available` updates flow through `updateAvailable` instead (header plaque).
-			 */
-			updateCheckOutcome: { status: "none" | "error" | "dev"; version?: string; detail?: string };
 		};
 	}>;
 };

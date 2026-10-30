@@ -17,13 +17,10 @@ function renderSection(settings: Partial<GlobalSettings> = {}) {
 		<I18nProvider>
 			<SystemSettingsSection
 				t={t}
-				globalSettings={{ updateChannel: "stable", ...next } as GlobalSettings}
+				globalSettings={{ ...next } as GlobalSettings}
 				caffeinateAvailable
-				canaryAvailable
-				onUpdateChannelChange={vi.fn()}
 				onRemoteTunnelChange={onRemoteTunnelChange}
 				onRemotePortChange={onRemotePortChange}
-				onRemoteSilentUpdateToggle={vi.fn()}
 				onStaticAccessCodeChange={onStaticAccessCodeChange}
 				onPreventSleepToggle={vi.fn()}
 				onConfirmBeforeQuitToggle={vi.fn()}

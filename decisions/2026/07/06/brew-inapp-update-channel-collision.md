@@ -1,5 +1,7 @@
 # 108 — Survive the brew / in-app updater channel collision
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: there is no in-app updater any more; only brew and bundle-only installs remain.
+
 > **Superseded in part by [110](110-no-chdir-pin-child-cwd.md).** The `process.chdir(DEV3_HOME)`
 > piece of this decision (Decision item 1) was wrong and has been reverted: it
 > blanked the desktop window because electrobun resolves the `views://` protocol

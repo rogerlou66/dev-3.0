@@ -35,8 +35,6 @@ import { getZoom, ZOOM_CHANGED_EVENT } from "../zoom";
 import { getScrollSpeed, SCROLL_SPEED_CHANGED_EVENT } from "../scroll-speed";
 import { getTerminalFontFamily, getTerminalFontSize, TERMINAL_FONT_CHANGED_EVENT } from "../terminal-font";
 import { setShortcutOverrides } from "../keymap-store";
-import { confirm } from "../confirm";
-import type { UpdateChannel } from "../../shared/update-channel";
 import AdvancedExperienceSection from "./global-settings/AdvancedExperienceSection";
 import AgentAccountsSection from "./global-settings/AgentAccountsSection";
 import AgentRateLimitSettingsSection from "./global-settings/AgentRateLimitSettingsSection";
@@ -115,9 +113,6 @@ function GlobalSettings({
 	);
 	const [tipsResetDone, setTipsResetDone] = useState(false);
 	const [caffeinateAvailable, setCaffeinateAvailable] = useState(true);
-	// FALSE until the host answers: the channel publishes per platform, and defaulting to
-	// true would flash an enabled control that then leads to a 403 on a platform with no build.
-	const [canaryAvailable, setCanaryAvailable] = useState(false);
 	// Null until the host answers whether this machine can be sampled at all.
 	const [freezeDiagnostics, setFreezeDiagnostics] = useState<
 		{ supported: boolean; running: boolean; directory: string } | null
@@ -304,12 +299,6 @@ function GlobalSettings({
 			.catch(() => {});
 	}, []);
 
-	useEffect(() => {
-		api.request.checkCanaryChannelAvailable()
-			.then((result) => setCanaryAvailable(result.available))
-			.catch(() => {});
-	}, []);
-
 	// Null until the host answers — the freeze row stays inert rather than
 	// claiming a machine can be sampled before anyone has looked.
 	const refreshFreezeDiagnostics = useCallback(() => {
@@ -336,26 +325,6 @@ function GlobalSettings({
 			persistSettingChange({ taskSortOrder: order });
 		},
 		[persistSettingChange],
-	);
-
-	// Switching channels is not an ordinary preference write: it leads to installing a
-	// different bundle, and going back to stable installs an OLDER one that then reads
-	// state a newer build wrote. Both directions are confirmed, and each states its own
-	// consequence — the stable direction is the one nobody would guess.
-	const handleUpdateChannelChange = useCallback(
-		async (channel: UpdateChannel) => {
-			const toCanary = channel === "canary";
-			const ok = await confirm({
-				title: t(toCanary ? "settings.updateChannelSwitchToCanaryTitle" : "settings.updateChannelSwitchToStableTitle"),
-				message: t(toCanary ? "settings.updateChannelSwitchToCanaryBody" : "settings.updateChannelSwitchToStableBody"),
-				confirmLabel: t(
-					toCanary ? "settings.updateChannelSwitchToCanaryConfirm" : "settings.updateChannelSwitchToStableConfirm",
-				),
-			});
-			if (!ok) return;
-			persistSettingChange({ updateChannel: channel });
-		},
-		[persistSettingChange, t],
 	);
 
 	const handleShortcutsChange = useCallback(
@@ -581,13 +550,6 @@ function GlobalSettings({
 			persistSettingChange(
 				{ remotePort: port },
 			);
-		},
-		[persistSettingChange],
-	);
-
-	const handleRemoteSilentUpdateToggle = useCallback(
-		(enabled: boolean) => {
-			persistSettingChange({ remoteSilentUpdate: enabled });
 		},
 		[persistSettingChange],
 	);
@@ -960,11 +922,8 @@ function GlobalSettings({
 							t={t}
 							globalSettings={globalSettings}
 							caffeinateAvailable={caffeinateAvailable}
-							canaryAvailable={canaryAvailable}
-							onUpdateChannelChange={handleUpdateChannelChange}
 							onRemoteTunnelChange={handleRemoteTunnelChange}
 							onRemotePortChange={handleRemotePortChange}
-							onRemoteSilentUpdateToggle={handleRemoteSilentUpdateToggle}
 							onStaticAccessCodeChange={handleStaticAccessCodeChange}
 							onPreventSleepToggle={handlePreventSleepToggle}
 							onConfirmBeforeQuitToggle={handleConfirmBeforeQuitToggle}

@@ -50,7 +50,6 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-auto",
 		taskSortOrder: "oldest-first",
-		updateChannel: "stable",
 	});
 	const [loading, setLoading] = useState(true);
 	const [loadErrors, setLoadErrors] = useState<string[]>([]);

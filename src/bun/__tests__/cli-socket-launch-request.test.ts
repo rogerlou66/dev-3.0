@@ -73,7 +73,7 @@ vi.mock("../socket-backpressure", () => ({
 vi.mock("../settings", () => ({
 	// Auto-approval off by default here: these cases assert the ask/answer
 	// contract, and a live 5-minute timer would outlive the test process.
-	loadSettings: vi.fn(() => ({ updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0 })),
+	loadSettings: vi.fn(() => ({ taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0 })),
 	saveSettings: vi.fn(),
 	recordFavoriteUsages: vi.fn(),
 }));
@@ -608,7 +608,7 @@ describe("task.createScratchAndRun", () => {
 describe("task.move — unanswered launch auto-approves", () => {
 	it("pushes the deadline and launches itself when nobody answers", async () => {
 		vi.mocked(loadSettings).mockReturnValue({
-			updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 5,
+			taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 5,
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		} as any);
 		const target = makeTask();
@@ -646,7 +646,7 @@ describe("task.move — unanswered launch auto-approves", () => {
 
 	it("carries no deadline when the setting is off", async () => {
 		vi.mocked(loadSettings).mockReturnValue({
-			updateChannel: "stable", taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0,
+			taskSortOrder: "oldest-first", agentLaunchAutoApproveMinutes: 0,
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		} as any);
 		setupBoard(makeTask());

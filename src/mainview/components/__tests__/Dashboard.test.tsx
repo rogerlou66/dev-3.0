@@ -16,7 +16,7 @@ vi.mock("../../rpc", () => ({
 			getSpaces: vi.fn(() => Promise.resolve({ version: 1, spaces: [], order: [] })),
 			reorderSpaces: vi.fn(),
 			getAgents: vi.fn(() => Promise.resolve([])),
-			getGlobalSettings: vi.fn(() => Promise.resolve({ defaultAgentId: "builtin-claude", defaultConfigId: "claude-default", taskSortOrder: "oldest-first", updateChannel: "stable" })),
+			getGlobalSettings: vi.fn(() => Promise.resolve({ defaultAgentId: "builtin-claude", defaultConfigId: "claude-default", taskSortOrder: "oldest-first" })),
 		},
 	},
 }));

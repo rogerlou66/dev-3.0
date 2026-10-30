@@ -45,8 +45,6 @@ vi.mock("../../rpc", () => ({
 }));
 vi.mock("../../toast", () => ({
 	toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() },
-	// No ToastHost here, so the header's update prompt has no slot to portal into.
-	usePinnedToastSlot: () => null,
 }));
 vi.mock("../../utils/moveTaskToStatus", () => ({ moveTaskToStatus: vi.fn(async () => true) }));
 vi.mock("../../utils/confirmTaskCompletion", () => ({ confirmTaskCompletion: vi.fn().mockResolvedValue(true) }));

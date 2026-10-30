@@ -460,9 +460,6 @@ export async function handleMenuAction(action: string, ctx: RouterCtx): Promise<
 		case "help-keyboard-shortcuts":
 			window.dispatchEvent(new CustomEvent("menu:show-keyboard-shortcuts"));
 			return;
-		case "update-popover-preview":
-			window.dispatchEvent(new CustomEvent("menu:show-update-popover-preview"));
-			return;
 		case "help-explain-screen":
 			window.dispatchEvent(new CustomEvent("menu:enter-help-mode"));
 			return;
@@ -485,7 +482,7 @@ const TASK_MOVE_STATUS: Record<string, TaskStatus> = {
  * menu bar (`AppMenuBar.tsx`) uses this as the source of truth for which menu
  * items are live: an item whose action is NOT in this set cannot run in the
  * browser (it is handled only by the bun-side `application-menu-clicked` handler
- * — e.g. new-window, check-for-updates, devtools, zoom, open-logs, remote-QR),
+ * — e.g. new-window, devtools, zoom, open-logs, remote-QR),
  * so the menu bar hides it. Keep this in lockstep with the `switch` above; a
  * unit test guards a representative slice against drift.
  */
@@ -499,7 +496,7 @@ export const BROWSER_HANDLED_ACTIONS: ReadonlySet<string> = new Set<string>([
 	"view-dashboard", "view-kanban", "view-changelog", "view-stats", "view-sessions", "open-settings",
 	"view-agent-traffic-log",
 	"view-toggle-file-explorer",
-	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab", "update-popover-preview",
+	"go-back", "go-forward", "gauge-demo", "viewport-lab", "native-pane-layout-lab",
 	"terminal-perf-overlay",
 	"debug-play-sound-completed", "debug-play-sound-cancelled", "debug-push-sound-completed",
 	"open-new-task", "open-add-project", "open-project-switch", "open-task-switch", "open-combined-switch", "open-command-palette", "find-coordinator",

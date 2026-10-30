@@ -56,6 +56,9 @@ export default {
 	},
 	release: {
 		baseUrl: RELEASE_BASE_URL,
+		// The app has no updater, so delta patches have no reader — and building them
+		// would download the previous release from the feed.
+		generatePatch: false,
 	},
 	build: {
 		// This is global across Electrobun platforms; decision 150 records why.

@@ -86,18 +86,6 @@ const stubUpdater = {
 			return process.env.DEV3_CHANNEL || "prod";
 		},
 	},
-	async checkForUpdate(): Promise<never> {
-		throw new Error("Updater.checkForUpdate not available in headless mode");
-	},
-	async downloadUpdate(): Promise<never> {
-		throw new Error("Updater.downloadUpdate not available in headless mode");
-	},
-	updateInfo(): null {
-		return null;
-	},
-	async applyUpdate(): Promise<never> {
-		throw new Error("Updater.applyUpdate not available in headless mode");
-	},
 };
 
 // ── Exports ──

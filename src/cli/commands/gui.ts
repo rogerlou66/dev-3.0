@@ -46,8 +46,8 @@ What it does:
           the install command for your distro (apt/dnf/pacman) and exits.
           No sudo is invoked from this CLI — the user runs the printed command.
 
-  After the first install the launcher self-updates via Electrobun's built-in
-  patcher; \`dev3 gui\` does NOT re-download on each invocation.
+  After the first install the bundle never updates itself, and \`dev3 gui\`
+  does NOT re-download on each invocation.
 
 Flags:
   --help, -h    Show this help.

@@ -1,11 +1,9 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
-import { createPortal } from "react-dom";
-import type { CodingAgent, Project, Space, Task, UpdateChangelog } from "../../shared/types";
+import type { CodingAgent, Project, Space, Task } from "../../shared/types";
 import { getTaskTitle, taskSeqLabel, ACTIVE_STATUSES, isBuiltinOpsProject, isSpaceSensitive, orderSpaces, spacesOfProject, orderProjectsForDisplay, projectDisplayName } from "../../shared/types";
 import { routeSpaceId, type Route } from "../state";
 import { useT } from "../i18n";
 import { HELP_ATTRACTOR_DISMISS_EVENT } from "../help";
-import { parseDisplayVersion } from "../../shared/update-channel";
 import { MASK_CLASS, useProjectPrivacy } from "../sensitive-projects";
 import { useSpaces } from "../useSpaces";
 import { groupProjectsForSwitcher } from "../utils/spaceGroups";
@@ -18,7 +16,7 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
 import { api, isElectrobun } from "../rpc";
 import { isMac, isRemote } from "../utils/platform";
 import { subscribeFullscreen, isFullscreenActive, isFullscreenSupported, toggleFullscreen } from "../fullscreen";
-import { toast, usePinnedToastSlot } from "../toast";
+import { toast } from "../toast";
 import TmuxSessionManager from "./TmuxSessionManager";
 import InlineRename from "./InlineRename";
 import NativeBackendMark from "./NativeBackendMark";
@@ -26,8 +24,6 @@ import SpaceIcon from "./SpaceIcon";
 import TaskTitleHoverCard from "./TaskTitleHoverCard";
 import TaskBreadcrumbBadge from "./TaskBreadcrumbBadge";
 import GitPullButton from "./GitPullButton";
-import UpdateReadyPopover, { UpdateWhatsNew } from "./UpdateReadyPopover";
-import CanaryBadge from "./CanaryBadge";
 import PreventSleepToggle from "./PreventSleepToggle";
 import RateLimitIndicator from "./RateLimitIndicator";
 import MemoryHeadroomIndicator from "./MemoryHeadroomIndicator";
@@ -59,7 +55,6 @@ import {
 	OverflowDotsIcon,
 	WrenchIcon,
 	SlidersIcon,
-	UpdateReadyIcon,
 	HelpModeIcon,
 } from "./HeaderIcons";
 import { APP_SHORTCUTS, shortcutKeysFor, shortcutKeysForMode } from "../keymap";
@@ -83,10 +78,6 @@ interface GlobalHeaderProps {
 	goForward: () => void;
 	canGoBack: boolean;
 	canGoForward: boolean;
-	updateVersion?: string | null;
-	updateReadySignal?: number;
-	updateChangelog?: UpdateChangelog | null;
-	updateDownloadStatus?: string | null;
 	remoteAccessAvailable?: boolean;
 	remoteAccessActive: boolean;
 	/** False until help mode has been opened once — see `HELP_ATTRACTOR_SCREENS`. */
@@ -134,7 +125,7 @@ interface BreadcrumbSegment {
 /** Cache TTL for project task counts (30 seconds) */
 const COUNTS_CACHE_TTL = 30_000;
 
-function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForward, canGoBack, canGoForward, updateVersion, updateReadySignal, updateChangelog, updateDownloadStatus, remoteAccessAvailable = false, remoteAccessActive, helpDiscovered = false, tourRunning = false, dashboardSlotRef, suppressHelpCallout }: GlobalHeaderProps) {
+function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForward, canGoBack, canGoForward, remoteAccessAvailable = false, remoteAccessActive, helpDiscovered = false, tourRunning = false, dashboardSlotRef, suppressHelpCallout }: GlobalHeaderProps) {
 	const t = useT();
 	useKeymapVersion();
 	const highlightHelp = !helpDiscovered && !tourRunning && !suppressHelpCallout && HELP_ATTRACTOR_SCREENS.has(route.screen);
@@ -161,11 +152,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	const [showActionSheet, setShowActionSheet] = useState(false);
 	const [showOverflowMenu, setShowOverflowMenu] = useState(false);
 	const overflowMenuRef = useRef<HTMLDivElement>(null);
-	const [showUpdateDropdown, setShowUpdateDropdown] = useState(false);
-	const [restarting, setRestarting] = useState(false);
-	const [restartContext, setRestartContext] = useState<{ headless: boolean; remoteActive: boolean; tasksInProgress: number } | null>(null);
-	const [showToast, setShowToast] = useState(false);
-	const pinnedToastSlot = usePinnedToastSlot();
 	const [showProjectDropdown, setShowProjectDropdown] = useState(false);
 	// Which space to zoom out to, when the current project sits in more than one.
 	const [showSpacePicker, setShowSpacePicker] = useState(false);
@@ -176,7 +162,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	// The highlight only appears once the keyboard is driving — an unprompted
 	// marker on row 0 competes with the accent row that says "you are here".
 	const [switcherKeyNav, setSwitcherKeyNav] = useState(false);
-	const dropdownRef = useRef<HTMLDivElement>(null);
 	const projectDropdownRef = useRef<HTMLDivElement>(null);
 	const activeSwitcherRowRef = useRef<HTMLButtonElement>(null);
 	const countsCacheTimeRef = useRef<number>(0);
@@ -198,45 +183,18 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		}
 	};
 
-	// Which build is on offer, read off the published version string. The toast below
-	// renders its own header rather than reusing UpdateReadyPopover, so it has to split
-	// the version the same way the popover does or the two disagree.
-	const offeredBuild = parseDisplayVersion(updateVersion ?? "");
-
-	// A manual check announces the downloaded update once. Applying it always
-	// requires an explicit click; this prompt never starts a restart timer.
-	useEffect(() => {
-		setShowToast(!!updateVersion);
-	}, [updateVersion, updateReadySignal]);
-
-	useEffect(() => {
-		if (!updateVersion) {
-			setRestartContext(null);
-			return;
-		}
-		let cancelled = false;
-		api.request.getUpdateRestartContext()
-			.then((context) => { if (!cancelled) setRestartContext(context); })
-			.catch(() => { if (!cancelled) setRestartContext(null); });
-		return () => { cancelled = true; };
-	}, [updateVersion, showUpdateDropdown]);
-
 	// Close whichever header dropdown is open on Escape.
 	useEscapeKey(
 		() => {
 			if (showProjectDropdown) setShowProjectDropdown(false);
-			if (showUpdateDropdown) setShowUpdateDropdown(false);
 			if (showOverflowMenu) setShowOverflowMenu(false);
 		},
-		{ enabled: showUpdateDropdown || showProjectDropdown || showOverflowMenu },
+		{ enabled: showProjectDropdown || showOverflowMenu },
 	);
 	// Close dropdowns on outside click
 	useEffect(() => {
-		if (!showUpdateDropdown && !showProjectDropdown && !showOverflowMenu) return;
+		if (!showProjectDropdown && !showOverflowMenu) return;
 		function handleClick(e: MouseEvent) {
-			if (showUpdateDropdown && dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-				setShowUpdateDropdown(false);
-			}
 			if (showProjectDropdown && projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
 				setShowProjectDropdown(false);
 			}
@@ -258,7 +216,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		return () => {
 			document.removeEventListener("mousedown", handleClick, true);
 		};
-	}, [showUpdateDropdown, showProjectDropdown, showOverflowMenu]);
+	}, [showProjectDropdown, showOverflowMenu]);
 
 	// Close the overflow menu when leaving compact mode or changing route
 	useEffect(() => {
@@ -318,34 +276,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		setSwitcherIndex(0);
 		setSwitcherKeyNav(false);
 	}, [showProjectDropdown]);
-
-	// Closing the prompt by any route — X, Postpone, "see all changes" — postpones:
-	// the timer is cancelled, and only the next announcement brings the prompt back.
-	function dismissToast() {
-		setShowToast(false);
-	}
-
-	async function handleRestart() {
-		setRestarting(true);
-		try {
-			// Belt-and-suspenders: the route is already persisted (debounced) on
-			// every navigation, but flush the exact current route synchronously
-			// here so an update triggered right after a navigation still restores
-			// to the correct surface.
-			await api.request.saveLastRoute({ route: JSON.stringify(route) });
-			const outcome = await api.request.applyUpdate();
-			// Installed, but this process is not being replaced (a foreground headless
-			// server has nothing to relaunch it). Stop pretending a restart is coming.
-			if (outcome && !outcome.restarting) {
-				setRestarting(false);
-				dismissToast();
-				toast.info(outcome.message ?? t("update.installedNoRestart"), { source: "update" });
-			}
-		} catch (err) {
-			setRestarting(false);
-			toast.error(t("update.applyFailed", { error: String(err) }), { source: "update" });
-		}
-	}
 
 	const handleProjectNameClick = useCallback(() => {
 		if (!("projectId" in route)) return;
@@ -643,7 +573,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	// Narrow viewport: the simple, dispatch-style right-cluster actions fold into
 	// a single kebab → BottomSheet. The Command Palette gets a touch entry here
 	// (it is otherwise keyboard-only, and the native menu is absent in remote).
-	// Stateful widgets (prevent-sleep, git pull, tmux, update indicator) stay inline.
+	// Stateful widgets (prevent-sleep, git pull, tmux) stay inline.
 	const headerSheetRows: { key: string; label: string; run: () => void; danger?: boolean }[] = isNarrow
 		? [
 				{ key: "palette", label: t("header.commandPalette"), run: () => window.dispatchEvent(new CustomEvent("menu:open-command-palette")) },
@@ -1066,50 +996,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 
 			{/* Actions — tmux sessions, changelog, project settings, global settings, external links */}
 			<div className="flex items-center gap-0.5 flex-shrink-0" data-help-id="header.utilities">
-				{/* Update download progress indicator */}
-				{updateDownloadStatus && updateDownloadStatus !== "error" && !updateVersion && (
-					<div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent/10 text-accent">
-						<svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
-							<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-							<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-						</svg>
-						<span className="text-micro font-semibold">
-							{updateDownloadStatus === "checking" ? t("update.checking") : t("update.downloading")}
-						</span>
-					</div>
-				)}
-				{/* Update available indicator */}
-				{updateVersion && (
-					<div className="relative" ref={dropdownRef}>
-						<Tooltip content={t("update.readyTooltip", { version: updateVersion })} detail={t("ttip.header.updateReady")}>
-							<button
-								onClick={() => setShowUpdateDropdown((v) => !v)}
-								className="header-anim flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors motion-safe:animate-pulse"
-								aria-label={t("update.readyTooltip", { version: updateVersion })}
-							>
-								<UpdateReadyIcon className="w-4 h-4" />
-								<span className="text-micro font-semibold">{t("update.readyLabel")}</span>
-							</button>
-					</Tooltip>
-						{showUpdateDropdown && (
-							<div className="absolute right-0 top-full mt-1.5 z-50">
-								<UpdateReadyPopover
-									version={updateVersion}
-									changelog={updateChangelog}
-									restarting={restarting}
-									tasksInProgress={restartContext?.tasksInProgress ?? 0}
-									keepsRemoteLink={restartContext?.headless ?? false}
-									onRestart={handleRestart}
-									onSeeAllChanges={() => {
-										setShowUpdateDropdown(false);
-										navigate({ screen: "changelog" });
-									}}
-								/>
-							</div>
-						)}
-					</div>
-				)}
-
 				{/* Overflow menu — low-frequency actions (Stats / GitHub / Report / Changelog)
 				    always live under a single kebab to keep the header lean. It opens the
 				    cluster (leftmost) because it is the one control present on every screen,
@@ -1502,62 +1388,6 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 					))}
 				</div>
 			</BottomSheet>
-		)}
-		{/* One-time response to a manual update check. */}
-		{showToast && updateVersion && pinnedToastSlot && createPortal(
-			<div className="animate-slide-in-right pointer-events-auto" data-testid="update-prompt-pinned">
-				<div className="bg-overlay border border-accent/30 rounded-xl shadow-2xl p-4 w-80 flex items-start gap-3">
-					<UpdateReadyIcon className="w-5 h-5 text-accent mt-0.5 flex-shrink-0" />
-					<div className="flex-1 min-w-0">
-						<div className="text-fg text-sm font-semibold">
-							{t("update.readyTitle", { version: offeredBuild.core })}
-							{offeredBuild.channel === "canary" && offeredBuild.sha && (
-								<>
-									{" "}
-									<CanaryBadge sha={offeredBuild.sha} fullVersion={updateVersion} />
-								</>
-							)}
-						</div>
-						<div className="text-fg-3 text-xs mt-1">
-							{t("update.sessionsNote")}
-						</div>
-						<UpdateWhatsNew
-							version={updateVersion}
-							changelog={updateChangelog}
-							className="mt-2.5"
-							onSeeAllChanges={() => {
-								dismissToast();
-								navigate({ screen: "changelog" });
-							}}
-						/>
-						<div className="flex items-center gap-2 mt-2.5">
-							<button
-								onClick={() => { dismissToast(); handleRestart(); }}
-								className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent-fill text-white hover:bg-accent-fill-hover transition-colors"
-							>
-								{t("update.restartBtn")}
-							</button>
-							<button
-								onClick={dismissToast}
-								className="px-3 py-1.5 text-xs font-medium rounded-lg text-fg-3 hover:text-fg hover:bg-elevated transition-colors"
-							>
-								{t("update.laterBtn")}
-							</button>
-						</div>
-					</div>
-					<button
-						onClick={dismissToast}
-						aria-label={t("update.laterBtn")}
-						data-testid="update-prompt-close"
-						className="text-fg-muted hover:text-fg transition-colors flex-shrink-0"
-					>
-						<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				</div>
-			</div>,
-			pinnedToastSlot,
 		)}
 		</>
 	);

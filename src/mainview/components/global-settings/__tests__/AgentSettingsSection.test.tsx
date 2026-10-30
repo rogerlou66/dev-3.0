@@ -42,7 +42,6 @@ const baseSettings: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
 	defaultConfigId: "claude-auto-opus48",
 	taskSortOrder: "oldest-first",
-	updateChannel: "stable",
 };
 
 /** Apply a partial patch to the Claude agent in DEFAULT_AGENTS for a test render. */

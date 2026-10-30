@@ -2,7 +2,7 @@ import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import GlobalHeader from "../GlobalHeader";
 import { I18nProvider } from "../../i18n";
-import type { Project, Task, UpdateChangelog } from "../../../shared/types";
+import type { Project, Task } from "../../../shared/types";
 import type { Route } from "../../state";
 import { setShortcutOverrides } from "../../keymap-store";
 import { APP_SHORTCUTS, shortcutKeysFor } from "../../keymap";
@@ -32,10 +32,6 @@ vi.mock("../../rpc", () => ({
 		request: {
 			getSystemMemory: vi.fn().mockResolvedValue(null),
 			getTasks: vi.fn(),
-			applyUpdate: vi.fn(),
-			// The update plaque asks what a restart would interrupt (and whether it keeps
-			// the remote link) as soon as an update is offered.
-			getUpdateRestartContext: vi.fn().mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 }),
 			saveLastRoute: vi.fn(),
 			renameTask: vi.fn(),
 			// `behindOrigin` > 0 keeps the pull button rendered — it hides when there is nothing to pull.
@@ -67,14 +63,9 @@ vi.mock("../../toast", () => ({
 		info: vi.fn(),
 		success: vi.fn(),
 	},
-	// Stands in for the real ToastHost slot, which no header test mounts. Body is
-	// the honest substitute: the update prompt portals somewhere queryable, exactly
-	// as it does in the app.
-	usePinnedToastSlot: () => document.body,
 }));
 
 import { api } from "../../rpc";
-import { toast } from "../../toast";
 
 const mockedApi = vi.mocked(api, true);
 
@@ -181,10 +172,6 @@ function renderHeader(
 	navigate?: (route: Route) => void,
 	tasks: Task[] = [],
 	extra?: {
-		updateVersion?: string | null;
-		updateReadySignal?: number;
-		updateChangelog?: UpdateChangelog | null;
-		updateDownloadStatus?: string | null;
 		remoteAccessAvailable?: boolean;
 		remoteAccessActive?: boolean;
 		suppressHelpCallout?: boolean;
@@ -236,10 +223,6 @@ function headerElement(
 				goForward={extra?.goForward ?? vi.fn()}
 				canGoBack={extra?.canGoBack ?? false}
 				canGoForward={extra?.canGoForward ?? false}
-				updateVersion={extra?.updateVersion}
-				updateReadySignal={extra?.updateReadySignal}
-				updateChangelog={extra?.updateChangelog}
-				updateDownloadStatus={extra?.updateDownloadStatus}
 				remoteAccessAvailable={extra?.remoteAccessAvailable ?? true}
 				remoteAccessActive={extra?.remoteAccessActive ?? false}
 				dashboardSlotRef={extra?.dashboardSlotRef}
@@ -646,121 +629,6 @@ describe("GlobalHeader — project switcher dropdown", () => {
 		});
 	});
 
-	it("shows downloading indicator when updateDownloadStatus is downloading", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1, project2],
-			vi.fn(),
-			[],
-			{ updateDownloadStatus: "downloading" },
-		);
-		expect(screen.getByText("Downloading...")).toBeInTheDocument();
-	});
-
-	it("shows checking indicator when updateDownloadStatus is checking", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1, project2],
-			vi.fn(),
-			[],
-			{ updateDownloadStatus: "checking" },
-		);
-		expect(screen.getByText("Checking...")).toBeInTheDocument();
-	});
-
-	it("does not show download indicator when updateVersion is set (ready state)", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1, project2],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3", updateDownloadStatus: "downloading" },
-		);
-		expect(screen.queryByText("Downloading...")).not.toBeInTheDocument();
-		// Should show the "Update" ready button instead
-		expect(screen.getByText("Update")).toBeInTheDocument();
-	});
-
-	it("does not show download indicator when status is error", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1, project2],
-			vi.fn(),
-			[],
-			{ updateDownloadStatus: "error" },
-		);
-		expect(screen.queryByText("Downloading...")).not.toBeInTheDocument();
-		expect(screen.queryByText("Checking...")).not.toBeInTheDocument();
-	});
-
-	it("renders the what's-new changelog section in the update dropdown", async () => {
-		const user = userEvent.setup();
-		const changelog: UpdateChangelog = {
-			features: ["Terminal scrollback search", "PR review threads in diff"],
-			featureCount: 5,
-			fixCount: 4,
-		};
-		renderHeader({ screen: "dashboard" }, [project1, project2], vi.fn(), [], {
-			updateVersion: "1.38.0",
-			updateChangelog: changelog,
-		});
-
-		// The manual-check result toast renders the same list; dismiss it so the queries
-		// below target the dropdown only.
-		await user.click(screen.getByText("Later"));
-		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
-
-		expect(screen.getByText("What's new in v1.38.0")).toBeInTheDocument();
-		expect(screen.getByText("Terminal scrollback search")).toBeInTheDocument();
-		expect(screen.getByText("PR review threads in diff")).toBeInTheDocument();
-		// 5 total features, 2 shown → "+3 more features · 4 fixes"
-		expect(screen.getByText("+3 more features · 4 fixes")).toBeInTheDocument();
-	});
-
-	it("renders the what's-new changelog section in the manual-check result toast", () => {
-		const changelog: UpdateChangelog = {
-			features: ["Terminal scrollback search", "PR review threads in diff"],
-			featureCount: 5,
-			fixCount: 4,
-		};
-		renderHeader({ screen: "dashboard" }, [project1, project2], vi.fn(), [], {
-			updateVersion: "1.38.0",
-			updateChangelog: changelog,
-		});
-
-		// The result toast shows when the manual download becomes ready; it must surface the
-		// same preview as the dropdown — regression: the toast previously omitted it.
-		expect(screen.getByText("What's new in v1.38.0")).toBeInTheDocument();
-		expect(screen.getByText("Terminal scrollback search")).toBeInTheDocument();
-		expect(screen.getByText("+3 more features · 4 fixes")).toBeInTheDocument();
-	});
-
-	it("navigates to the changelog screen from 'See all changes'", async () => {
-		const user = userEvent.setup();
-		const navigate = vi.fn();
-		renderHeader({ screen: "dashboard" }, [project1, project2], navigate, [], {
-			updateVersion: "1.38.0",
-			updateChangelog: { features: ["A feature"], featureCount: 1, fixCount: 0 },
-		});
-
-		// Dismiss the result toast first so "See all changes" is unambiguous.
-		await user.click(screen.getByText("Later"));
-		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
-		await user.click(screen.getByText(/See all changes/));
-		expect(navigate).toHaveBeenCalledWith({ screen: "changelog" });
-	});
-
-	it("omits the what's-new section when no changelog is provided", async () => {
-		const user = userEvent.setup();
-		renderHeader({ screen: "dashboard" }, [project1, project2], vi.fn(), [], {
-			updateVersion: "1.38.0",
-		});
-		await user.click(screen.getByRole("button", { name: /Version 1\.38\.0 is ready/i }));
-		expect(screen.queryByText("What's new in v1.38.0")).not.toBeInTheDocument();
-		// The dropdown still opened, so both manual restart entry points are present.
-		expect(screen.getAllByText("Restart to Update")).toHaveLength(2);
-	});
-
 	it("toggles dropdown open/close on repeated chevron clicks", async () => {
 		const user = userEvent.setup();
 		renderHeader({ screen: "project", projectId: "p1" });
@@ -887,151 +755,6 @@ describe("GlobalHeader — breadcrumb inline rename", () => {
 		await user.click(screen.getByTitle("Edit title"));
 		await user.keyboard("{Enter}");
 		expect(mockedApi.request.renameTask).not.toHaveBeenCalled();
-	});
-});
-
-describe("GlobalHeader — manual update prompt", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		vi.useFakeTimers();
-		mockedApi.request.getTasks.mockResolvedValue([]);
-		mockedApi.request.applyUpdate.mockResolvedValue(undefined as any);
-		mockedApi.request.saveLastRoute.mockResolvedValue(undefined as any);
-		// Auto-restart now requires a KNOWN non-headless context, so each test states
-		// it — `clearAllMocks` clears calls but not an implementation a sibling set.
-		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: false, remoteActive: false, tasksInProgress: 0 });
-	});
-
-	afterEach(() => {
-		vi.useRealTimers();
-	});
-
-	it("requires an explicit restart and offers a dismiss action", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-		expect(screen.getByText("Restart to Update")).toBeInTheDocument();
-		expect(screen.getByText("Later")).toBeInTheDocument();
-		expect(screen.queryByText(/\(\d+s\)/)).not.toBeInTheDocument();
-	});
-
-	it("dismisses the one-time prompt on Later click", () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-		expect(screen.getByText(/Restart to Update/)).toBeInTheDocument();
-
-		act(() => { fireEvent.click(screen.getByText("Later")); });
-
-		expect(screen.queryByText("Restart to Update")).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: /Version 1\.2\.3 is ready/i })).toBeInTheDocument();
-	});
-
-	it("shows the prompt again after another explicit check of the same version", () => {
-		const view = render(
-			headerElement({ screen: "dashboard" }, [project1], vi.fn(), [], {
-				updateVersion: "1.2.3",
-				updateReadySignal: 1,
-			}),
-		);
-		act(() => { fireEvent.click(screen.getByText("Later")); });
-		expect(screen.queryByText("Restart to Update")).not.toBeInTheDocument();
-
-		view.rerender(
-			headerElement({ screen: "dashboard" }, [project1], vi.fn(), [], {
-				updateVersion: "1.2.3",
-				updateReadySignal: 2,
-			}),
-		);
-
-		expect(screen.getByText("Restart to Update")).toBeInTheDocument();
-	});
-
-	it("does not restart without an explicit click", async () => {
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-
-		act(() => { vi.advanceTimersByTime(300_000); });
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
-	});
-
-	// The auto-restart gate must FAIL CLOSED. It reads the restart context over RPC;
-	// while that is unknown — pending, or failed — the box may be a headless
-	// `dev3 remote` server, where an unattended restart from a phone tab is exactly
-	// what the quiet-window policy refuses. Not knowing means not restarting.
-	it("does NOT auto-restart on a headless box", async () => {
-		mockedApi.request.getUpdateRestartContext.mockResolvedValue({ headless: true, remoteActive: false, tasksInProgress: 0 });
-		renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { updateVersion: "1.2.3" });
-
-		act(() => { vi.advanceTimersByTime(300_000); });
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
-	});
-
-	it("does NOT auto-restart when the restart context could not be read", async () => {
-		mockedApi.request.getUpdateRestartContext.mockRejectedValue(new Error("no answer"));
-		renderHeader({ screen: "dashboard" }, [project1], vi.fn(), [], { updateVersion: "1.2.3" });
-
-		act(() => { vi.advanceTimersByTime(300_000); });
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(mockedApi.request.applyUpdate).not.toHaveBeenCalled();
-	});
-
-	it("shows an error toast and re-enables restart when applyUpdate fails (issue #813)", async () => {
-		mockedApi.request.applyUpdate.mockRejectedValue(new Error("Update not ready to apply"));
-		renderHeader(
-			{ screen: "dashboard" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-
-		act(() => { fireEvent.click(screen.getByText("Restart to Update")); });
-		// Flush the async handleRestart (saveLastRoute → applyUpdate rejection)
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(toast.error).toHaveBeenCalledWith(
-			expect.stringContaining("Update not ready to apply"),
-			// The toast names where it came from, so it is not a bare sentence.
-			{ source: "update" },
-		);
-		// The UI must not stay stuck on "Restarting..."
-		expect(screen.queryByText("Restarting...")).not.toBeInTheDocument();
-	});
-
-	it("saves current route via RPC before applying update", async () => {
-		renderHeader(
-			{ screen: "project", projectId: "p1" },
-			[project1],
-			vi.fn(),
-			[],
-			{ updateVersion: "1.2.3" },
-		);
-
-		act(() => { fireEvent.click(screen.getByText("Restart to Update")); });
-		await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-
-		expect(mockedApi.request.saveLastRoute).toHaveBeenCalledWith({
-			route: JSON.stringify({ screen: "project", projectId: "p1" }),
-		});
 	});
 });
 

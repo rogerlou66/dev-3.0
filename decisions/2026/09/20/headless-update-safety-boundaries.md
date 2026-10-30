@@ -1,5 +1,7 @@
 # Headless update safety boundaries
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: headless self-update is deleted altogether, so there is no unattended restart to bound.
+
 ## Context
 
 A headless update can restart through a detached helper or by exiting for systemd or a container supervisor. Those strategies do not have the same process-lifetime guarantee, and native terminal sessions do not expose a post-restart output timestamp.

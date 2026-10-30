@@ -70,8 +70,8 @@ in-app opt-out switch. Upstream merges must preserve the removal.
 | No telemetry runtime | GA4, PostHog, remote feature flags, telemetry profiles, and geolocation collection are removed; do not restore their modules, imports, events, or dependencies |
 | Diagnostics stay local | Errors use `src/mainview/diagnostics.ts` and the local logger; crash reporting does not create an external exception channel |
 | No identity bootstrap | Desktop and remote HTML shells inject no analytics identity. The retired `analyticsDistinctId` setting remains readable only for N-2 on-disk compatibility |
-| Desktop updates remain manual | `src/bun/updater.ts` runs desktop checks and downloads on explicit user actions; desktop startup schedules no automatic check or download. The separate headless `dev3 remote` self-update watcher retains its existing behavior |
-| Removal is tested | `src/bun/__tests__/no-external-telemetry.test.ts` checks runtime imports/endpoints, dependencies, release credentials, and website tags; `src/bun/__tests__/manual-updates-only.test.ts` guards desktop updater startup |
+| No updater at all | The app never contacts a release feed: there is no in-app updater, no "Check for Updates" menu item, no update channel setting, no `dev3 update` command, and `dev3 remote` does not update itself. A build runs until it is rebuilt from source and reinstalled; only the bundle's own `version.json` is read (`src/bun/app-version.ts`) |
+| Removal is tested | `src/bun/__tests__/no-external-telemetry.test.ts` checks runtime imports/endpoints, dependencies, release credentials, and website tags; `src/bun/__tests__/manual-updates-only.test.ts` guards that no updater, update RPC or update command returns |
 
 Do not add a telemetry channel or analytics event as part of an upstream feature. Keep its local
 behavior and remove its tracking integration, with regression coverage for any new outbound path.
@@ -125,17 +125,17 @@ The `~/.dev3.0/` directory is shared between **every installed version** of the 
 
 These rules apply to any code touching `~/.dev3.0/`, any refactor of `src/bun/data.ts` / `src/bun/git.ts` / `src/bun/paths.ts` / `src/cli/context.ts`, and any "cleanup" of the data directory.
 
-## Update channels — brew deps are NOT guaranteed (MANDATORY)
+## Install paths — brew deps are NOT guaranteed (MANDATORY)
 
-Two independent update channels deliver different things:
+Two independent install paths deliver different things:
 
 1. **Homebrew** (`brew install/upgrade --cask dev3`) — installs the app **and** its brew dependencies (`git`, the pinned `h0x91b/dev3/tmux@3.6` keg, `cloudflared`).
-2. **In-app updater** (Electrobun `Updater`; also DMG/tarball installs) — swaps **only the `.app` bundle**. It cannot run brew, so any dependency added to the cask/formula after the user's original install **will be missing** on these machines.
+2. **Bundle-only installs** (DMG/tarball, or a source build copied into `/Applications`) — replace **only the `.app` bundle**. Nothing runs brew, so any dependency added to the cask/formula after the user's original install **will be missing** on these machines. (This fork has no in-app updater; older installs that used it are in the same position.)
 
 Hard rules for any feature that leans on an external binary:
 
 - **Never assume a brew dependency exists.** A new `depends_on` in `release.yml` reaches only brew users. Every code path must degrade gracefully when the vendored/pinned binary is absent (fall back to PATH, feature-gate, or log a warning with the install command — never crash or break existing flows).
-- **Explicitly test the "in-app updated, dependency missing" configuration** — it is the *majority* upgrade path, not an edge case. The tmux@3.6 pin shipped green on dev machines (keg present) but broke updater users: PATH resolution found our own `~/.dev3.0/bin/tmux` shim (that dir is first in PATH — it hosts the dev3 CLI) and symlinked it onto itself → ELOOP, every tmux spawn dead (v1.29.1 incident; post-mortem in `decisions/2026/07/05/pin-tmux-3.6-vendored-keg.md`).
+- **Explicitly test the "bundle replaced, dependency missing" configuration** — it is the *majority* upgrade path, not an edge case. The tmux@3.6 pin shipped green on dev machines (keg present) but broke bundle-only upgrades: PATH resolution found our own `~/.dev3.0/bin/tmux` shim (that dir is first in PATH — it hosts the dev3 CLI) and symlinked it onto itself → ELOOP, every tmux spawn dead (v1.29.1 incident; post-mortem in `decisions/2026/07/05/pin-tmux-3.6-vendored-keg.md`).
 - **Any shim placed into `~/.dev3.0/bin` must be excluded from that binary's own PATH resolution** — dereference it, never commit it as the resolved binary, and sanitize a broken shim at startup (reference pattern: `dereferenceTmuxShim`/`sanitizeTmuxShim` in `src/bun/pty-server.ts`).
 
 ## Git

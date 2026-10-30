@@ -12,12 +12,7 @@ import { applyFreezeDiagnosticsSetting, configureFreezeDiagnostics, recordFreeze
 import { resolve } from "node:path";
 import { startRendererWatchdog } from "./renderer-watchdog";
 import { applyArtifactFreezeRecovery, markArtifactFreezeRecovered, recordArtifactFreezeEvidence } from "./artifact-freeze-recovery";
-import {
-	checkForUpdateWithChannel,
-	getLocalVersion,
-	downloadUpdateForChannel,
-	isUpdateAlreadyReady,
-} from "./updater";
+import { getLocalVersion } from "./app-version";
 import { loadSettings, loadSettingsSync } from "./settings";
 import { applySavedTmuxPanePreferences, writeTmuxConfigs } from "./tmux/config";
 import { setCurrentUiTheme } from "./theme-state";
@@ -179,7 +174,7 @@ log.info("Log files", { dir: getLogPath() });
 	// copy owns the CLI every agent on the machine runs, and a worktree build
 	// landing on it silently swaps everyone onto an unmerged branch. See
 	// managed-cli-guard.ts.
-	if (managedCliWriteAllowed(PATHS.VIEWS_FOLDER, DEV3_HOME)) installBinary(cliBinaryName());
+	if (managedCliWriteAllowed(PATHS.VIEWS_FOLDER)) installBinary(cliBinaryName());
 
 	// Install dev3 skill into all supported AI agent directories (~/.claude, ~/.codex, etc.).
 	// Overwritten on every start to match the running app version (same pattern as CLI binary).
@@ -807,7 +802,7 @@ function runGlobalQuitCleanup(): void {
 	log.info("App is quitting, running global cleanup");
 	stopFreezeDiagnostics();
 	stopAgentMessageLogWatches();
-	// Snapshot window geometry so an update restart reopens on the same screen.
+	// Snapshot window geometry so the next launch reopens on the same screen.
 	try { flushWindowState(); } catch (err) { log.warn("flushWindowState failed", { error: String(err) }); }
 	try { stopPortScanPoller(); } catch (err) { log.warn("stopPortScanPoller failed", { error: String(err) }); }
 	try { stopFocusTracker(); } catch (err) { log.warn("stopFocusTracker failed", { error: String(err) }); }
@@ -903,16 +898,11 @@ Electrobun.events.on("reopen", () => {
 	}
 });
 
-// Helper to push update progress to the renderer
-const sendUpdateProgress = (status: string, progress?: number) => {
-	pushEverywhere("updateDownloadProgress", { status, progress });
-};
-
 // --- Menu Event Handlers ---
 
 Electrobun.events.on("application-menu-clicked", async (e) => {
-	// Most menu actions target the currently focused window; a few (update
-	// progress, broadcast notifications) reach all windows via broadcast.
+	// Most menu actions target the currently focused window; a few (broadcast
+	// notifications) reach all windows via broadcast.
 	const focused = getFocusedWindow();
 
 	if (e.data.action === MENU_ACTIONS.newWindow) {
@@ -925,9 +915,7 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 		log.info("Hard refresh — navigating to home page");
 		focused?.webview.loadURL(url);
 	} else if (e.data.action === MENU_ACTIONS.about) {
-		// The channel BAKED INTO THE BUNDLE, not the one selected in Settings: About answers
-		// "which build am I running", and those two disagree for as long as a switch is
-		// pending. `getLocalVersion` reads it from the bundle's version.json.
+		// The channel baked into the bundle — `getLocalVersion` reads its version.json.
 		const local = await getLocalVersion().catch(() => null);
 		sendToFocusedWindow("showAbout", { version: APP_VERSION, buildChannel: local?.channel });
 	} else if (e.data.action === MENU_ACTIONS.openSettings) {
@@ -940,50 +928,6 @@ Electrobun.events.on("application-menu-clicked", async (e) => {
 		sendToFocusedWindow("navigateToGaugeDemo");
 	} else if (e.data.action === MENU_ACTIONS.viewportLab) {
 		sendToFocusedWindow("navigateToViewportLab");
-	} else if (e.data.action === MENU_ACTIONS.checkForUpdates) {
-		// A manual check downloads the selected update in the background.
-		// A ready update surfaces as the existing header "Update ready" plaque
-		// (`updateAvailable`); "up to date" / errors surface as in-app toasts
-		// (`updateCheckOutcome`). No native message boxes — works in remote mode too.
-		try {
-			const settings = await loadSettings();
-			sendUpdateProgress("checking");
-			const result = await checkForUpdateWithChannel(settings.updateChannel);
-
-			if (result.devBuild) {
-				sendUpdateProgress("idle");
-				sendToFocusedWindow("updateCheckOutcome", { status: "dev" });
-			} else if (result.error) {
-				sendUpdateProgress("idle");
-				sendToFocusedWindow("updateCheckOutcome", { status: "error", detail: result.error });
-			} else if (result.updateAvailable) {
-				// Already downloaded — answer instantly with the ready prompt instead
-				// of downloading the same tar again (issue #1072).
-				if (isUpdateAlreadyReady(result.version)) {
-					sendUpdateProgress("idle");
-					pushEverywhere("updateAvailable", {
-						version: result.version,
-						changelog: result.changelog,
-					});
-					return;
-				}
-				sendUpdateProgress("downloading", 0);
-				const dlResult = await downloadUpdateForChannel(settings.updateChannel, sendUpdateProgress);
-				if (dlResult.ok) {
-					pushEverywhere("updateAvailable", { version: result.version, changelog: result.changelog });
-				} else {
-					sendUpdateProgress("error");
-					sendToFocusedWindow("updateCheckOutcome", { status: "error", detail: dlResult.error || "Download failed" });
-				}
-			} else {
-				sendUpdateProgress("idle");
-				sendToFocusedWindow("updateCheckOutcome", { status: "none", version: (await getLocalVersion()).version });
-			}
-		} catch (err) {
-			sendUpdateProgress("idle");
-			log.error("Menu check-for-updates failed", { error: String(err) });
-			sendToFocusedWindow("updateCheckOutcome", { status: "error", detail: String(err) });
-		}
 	} else if (e.data.action === "terminal-soft-reset") {
 		sendToFocusedWindow("terminalSoftReset");
 	} else if (e.data.action === "terminal-hard-reset") {

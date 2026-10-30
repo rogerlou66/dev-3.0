@@ -12,7 +12,7 @@ vi.mock("../../rpc", () => ({
 		setTaskBlocked: vi.fn(),
 		moveTask: vi.fn(),
 		getAgents: vi.fn().mockResolvedValue([]),
-		getGlobalSettings: vi.fn().mockResolvedValue({ defaultAgentId: "builtin-claude", defaultConfigId: "claude-default", taskSortOrder: "oldest-first", updateChannel: "stable" }),
+		getGlobalSettings: vi.fn().mockResolvedValue({ defaultAgentId: "builtin-claude", defaultConfigId: "claude-default", taskSortOrder: "oldest-first" }),
 	} },
 }));
 

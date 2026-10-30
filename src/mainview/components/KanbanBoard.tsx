@@ -107,7 +107,6 @@ function KanbanBoard({
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-auto",
 		taskSortOrder: "oldest-first",
-		updateChannel: "stable",
 	});
 	const [launchModal, setLaunchModal] = useState<{ task: Task; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
 	const [dragFromStatus, setDragFromStatus] = useState<TaskStatus | null>(null);

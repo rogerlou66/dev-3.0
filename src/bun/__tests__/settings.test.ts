@@ -19,7 +19,6 @@ function makeSettings(overrides: Partial<GlobalSettings> = {}): GlobalSettings {
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-default",
 		taskSortOrder: "oldest-first",
-		updateChannel: "stable",
 		...overrides,
 	};
 }
@@ -126,7 +125,7 @@ describe("saveSettings", () => {
 	});
 
 	it("does not corrupt the existing settings file if a write crashes mid-save", async () => {
-		const previousSettings = makeSettings({ updateChannel: "canary" });
+		const previousSettings = makeSettings({ taskSortOrder: "newest-first" });
 		writeFileSync(settingsPath, JSON.stringify(previousSettings, null, 2), "utf-8");
 
 		vi.spyOn(Bun, "write").mockImplementation(async (target) => {
@@ -391,11 +390,6 @@ describe("saveSettings", () => {
 			defaultAgentId: "builtin-codex",
 			defaultConfigId: "codex-default",
 			taskSortOrder: "newest-first",
-			// Back to a NON-default value, so this field can once again tell "preserved" from
-			// "reset to the default" — it briefly had to be "stable" while a global flag
-			// collapsed every channel. The collapse is now per-platform, and this suite runs
-			// on platforms the canary feed publishes for.
-			updateChannel: "canary",
 			openArtifactsInPopup: true,
 			artifactTemplate: "custom",
 			artifactTemplatePath: "/Users/me/my-template",
@@ -434,7 +428,6 @@ describe("saveSettings", () => {
 			reviewModePrompt: "Review the diff and report only blockers.",
 			taskOpenMode: "fullscreen",
 			defaultDiffViewMode: "unified",
-			remoteSilentUpdate: false,
 			preventSleepWhileRunning: true,
 			skipQuitDialog: true,
 			importShellEnv: false,

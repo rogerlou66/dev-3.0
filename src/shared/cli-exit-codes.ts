@@ -13,7 +13,7 @@ export const CLI_EXIT_CODE_DELIVERY_UNCONFIRMED = 11;
 export const CLI_EXIT_CODE_PRUNE_INCOMPLETE = 12;
 export const CLI_EXIT_CODE_ARTIFACT_ASSET_MISSING = 13;
 export const CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND = 14;
-export const CLI_EXIT_CODE_UPDATE_REFUSED = 15;
+// 15 was `dev3 update`'s refusal; the command is gone — never reuse the number.
 export const CLI_EXIT_CODE_INSTANCE_NOT_FOUND = 16;
 export const CLI_EXIT_CODE_MESSAGE_SUBJECT_REQUIRED = 17;
 export const CLI_EXIT_CODE_TASK_REF_UNRESOLVED = 18;
@@ -119,12 +119,6 @@ export const CLI_EXIT_CODE_DEFINITIONS = [
 		code: CLI_EXIT_CODE_ARTIFACT_SECRET_FOUND,
 		description:
 			"`dev3 inline-html` found a credential-shaped string (GitHub token, `sk-` key, AWS key id, private-key block) inside the folded page. Nothing was written and the file must not be published until the secret is removed.",
-	},
-	{
-		constant: "CLI_EXIT_CODE_UPDATE_REFUSED",
-		code: CLI_EXIT_CODE_UPDATE_REFUSED,
-		description:
-			"`dev3 update` refused to touch this install and nothing was changed: it is running from source, it is one of the copies dev3 keeps inside `~/.dev3.0` rather than an install — the PATH copy at `<dev3Home>/bin/dev3` that the app rewrites on every launch, or the `remote/rollback/dev3` copy a self-update took aside and a rolled-back server runs from (updating either would write a release tree into dev3's own data directory and leave the real install stale), it is a macOS app bundle the CLI cannot swap, it is Windows (no CLI tarball), or it is a Homebrew cask whose recorded version has drifted from the running one. Distinct from exit 1, which means an update was attempted and failed.",
 	},
 	{
 		constant: "CLI_EXIT_CODE_INSTANCE_NOT_FOUND",

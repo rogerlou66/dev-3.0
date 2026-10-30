@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import type { GlobalSettings, RemoteTunnelSettings } from "../../../shared/types";
-import type { UpdateChannel } from "../../../shared/update-channel";
 import type { TFunction } from "../../i18n";
 import SettingsEntry from "./SettingsEntry";
 import SettingsSection from "./SettingsSection";
@@ -13,11 +12,8 @@ export default function SystemSettingsSection({
 	t,
 	globalSettings,
 	caffeinateAvailable,
-	canaryAvailable,
-	onUpdateChannelChange,
 	onRemoteTunnelChange,
 	onRemotePortChange,
-	onRemoteSilentUpdateToggle,
 	onStaticAccessCodeChange,
 	onPreventSleepToggle,
 	onConfirmBeforeQuitToggle,
@@ -25,12 +21,8 @@ export default function SystemSettingsSection({
 	t: TFunction;
 	globalSettings: GlobalSettings;
 	caffeinateAvailable: boolean;
-	/** The canary feed carries a build for this host. False on platforms it does not publish. */
-	canaryAvailable: boolean;
-	onUpdateChannelChange: (channel: UpdateChannel) => void;
 	onRemoteTunnelChange: (tunnel: RemoteTunnelSettings | undefined) => void;
 	onRemotePortChange: (port: number | undefined) => void;
-	onRemoteSilentUpdateToggle: (enabled: boolean) => void;
 	/** Empty string clears the code. */
 	onStaticAccessCodeChange: (code: string) => void;
 	onPreventSleepToggle: (enabled: boolean) => void;
@@ -44,33 +36,6 @@ export default function SystemSettingsSection({
 
 	return (
 		<SettingsSection title={t("settings.categorySystem")} helpTopicId="settings.system">
-			<SettingsEntry anchor="update-channel">
-				<div>
-					<label className="block text-fg text-sm font-semibold mb-2">
-						{t("settings.updateChannel")}
-					</label>
-					<p className="text-fg-3 text-sm mb-3">
-						{t("settings.updateChannelDesc")}
-					</p>
-					<select
-						value={globalSettings.updateChannel}
-						onChange={(event) => onUpdateChannelChange(event.target.value as UpdateChannel)}
-						disabled={!canaryAvailable}
-						className={`w-full px-4 py-3 bg-raised border border-edge rounded-xl text-fg text-sm outline-none appearance-none${
-							canaryAvailable ? "" : " cursor-not-allowed opacity-50"
-						}`}
-					>
-						<option value="stable">{t("settings.updateChannelStable")}</option>
-						<option value="canary">{t("settings.updateChannelCanary")}</option>
-					</select>
-					{!canaryAvailable ? (
-						// Says WHY rather than leaving a dimmed control that reads as broken. The
-						// channel publishes per platform, and this machine is not one of them yet.
-						<p className="text-fg-muted text-xs mt-2">{t("settings.updateChannelUnavailableHere")}</p>
-					) : null}
-				</div>
-			</SettingsEntry>
-
 			{/* Not a setting, so no registry entry: a status that only exists while
 			    remote access is down, sitting above the controls that fix it. */}
 			<RemoteAccessDownNotice status={remoteAccessStatus} onRetry={retryRemoteAccess} />
@@ -122,24 +87,6 @@ export default function SystemSettingsSection({
 						{t("settings.remotePortDesc")}
 					</p>
 					<RemotePortField t={t} port={globalSettings.remotePort} onChange={onRemotePortChange} />
-				</div>
-			</SettingsEntry>
-
-			<SettingsEntry anchor="remote-silent-update">
-				<div>
-					<p className="block text-fg text-sm font-semibold mb-2">
-						{t("settings.remoteSilentUpdate")}
-					</p>
-					<p className="text-fg-3 text-sm mb-3">
-						{t("settings.remoteSilentUpdateDesc")}
-					</p>
-					<SettingsToggle
-						checked={globalSettings.remoteSilentUpdate !== false}
-						ariaLabel={t("settings.remoteSilentUpdate")}
-						onLabel={t("settings.on")}
-						offLabel={t("settings.off")}
-						onToggle={() => onRemoteSilentUpdateToggle(globalSettings.remoteSilentUpdate === false)}
-					/>
 				</div>
 			</SettingsEntry>
 

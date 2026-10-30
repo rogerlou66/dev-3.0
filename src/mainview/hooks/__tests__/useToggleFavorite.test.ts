@@ -14,7 +14,7 @@ import { api } from "../../rpc";
 
 const mockedApi = vi.mocked(api, true);
 
-const SETTINGS = { updateChannel: "stable", favorites: [] } as unknown as GlobalSettings;
+const SETTINGS = { favorites: [] } as unknown as GlobalSettings;
 
 describe("useToggleFavorite", () => {
 	beforeEach(() => {

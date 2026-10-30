@@ -65,10 +65,10 @@ describe("desktop entry push wiring", () => {
 	});
 
 	it("still routes the events that were lost, by name", () => {
-		// The four literal-named pushes from the four blocks that were window-only.
+		// The literal-named pushes from the blocks that were window-only.
 		// The pollers hand their own `(name, payload)` through, so the absence guards
 		// above are what cover those.
-		for (const event of ["ptyDied", "projectPtyDied", "updateAvailable", "updateDownloadProgress"]) {
+		for (const event of ["ptyDied", "projectPtyDied"]) {
 			expect(ENTRY, `${event} must be published through pushEverywhere`).toContain(`pushEverywhere("${event}"`);
 		}
 	});

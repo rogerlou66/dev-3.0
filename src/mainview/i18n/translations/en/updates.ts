@@ -1,60 +1,8 @@
 const updates = {
-	// Update
-	"update.checkingTitle": "Checking for Updates",
-	"update.upToDate": "You're up to date!",
-	"update.availableTitle": "Update Available",
-	"update.availableMessage": "Version {version} is available. Would you like to download it?",
-	"update.downloadBtn": "Download",
-	"update.laterBtn": "Later",
-	"update.errorTitle": "Update Check Failed",
-	"update.readyLabel": "Update",
-	"update.readyTooltip": "Version {version} is ready to install",
-	"update.readyTitle": "v{version} ready to install",
-	"update.sessionsNote": "All terminal sessions will be preserved — tmux keeps running in the background.",
-	"update.restartBtn": "Restart to Update",
-	"update.restarting": "Restarting...",
-	"update.checking": "Checking...",
-	"update.downloading": "Downloading...",
-	"update.upToDateVersion": "You're up to date — v{version}",
-	"update.checkFailedDetail": "Update check failed: {error}",
-	"update.devBuildNotice": "This is a dev build — updates are disabled. Rebuild from source to update.",
-	"update.applyFailed": "Couldn't apply the update: {error}",
-	"update.installedNoRestart": "The update is installed, but this server has to be restarted by hand.",
-	"update.whatsNewVersion": "What's new in v{version}",
-	// "SINCE", not "in": on canary the same changelog window is everything that landed on
-	// main AFTER that release, so naming it as the release's contents is simply false.
-	"update.whatsNewSinceVersion": "What's new since v{version}",
+	// Canary build badge (About dialog)
 	// The channel name is a proper noun in all locales; the tooltip is what carries the meaning.
 	"update.canaryBadge": "Canary",
 	"update.canaryBadgeTooltip": "Canary build — cut from main, not a tested release. {version}",
-	"update.seeAllChanges": "See all changes",
-	"update.moreFeatures_one": "+{count} more feature",
-	"update.moreFeatures_other": "+{count} more features",
-	"update.fixCount_one": "{count} fix",
-	"update.fixCount_other": "{count} fixes",
-
-	// Update-popover simulator (dev-only, Settings → Developer Tools)
-	"updateSim.title": "Next-release update popover",
-	"updateSim.subtitle":
-		"Preview of the \"what's new\" popover the next release will show, from your local change-logs (uncommitted included).",
-	"updateSim.refresh": "Refresh",
-	"updateSim.loading": "Computing window…",
-	"updateSim.unavailable": "Not available — this build has no change-logs directory or isn't a git checkout.",
-	"updateSim.previewNote": "Preview only — Restart is disabled here.",
-	"updateSim.diagnostics": "Diagnostics",
-	"updateSim.prevTag": "Since tag",
-	"updateSim.noTag": "no tag",
-	"updateSim.fallbackBadge": "fallback window",
-	"updateSim.totalEntries_one": "{count} total entry",
-	"updateSim.totalEntries_other": "{count} total entries",
-	"updateSim.includesUncommitted": "Window counts committed + uncommitted + untracked change-logs since the tag.",
-	"updateSim.popoverShowsNote": "only feature & fix show in the popover",
-	"updateSim.mergedPRs_one": "{count} PR merged since the tag",
-	"updateSim.mergedPRs_other": "{count} PRs merged since the tag",
-	"updateSim.windowFiles": "Entries in window ({count})",
-	"updateSim.emptyWindow": "No entries in the window.",
-	"updateSim.rawPayload": "Raw payload",
-	"updateSim.close": "Close",
 
 	// Rosetta warning (Intel build on Apple Silicon)
 	"rosetta.title": "Intel build on Apple Silicon",
@@ -103,9 +51,6 @@ const updates = {
 	"changelog.clearSearch": "Clear search",
 	"changelog.noResults": "Nothing matches your search or filters.",
 	"changelog.resetFilters": "Reset filters",
-	"update.remoteLinkSurvives": "The public link and this session are kept — the page reconnects on its own.",
-	"update.tasksInProgressWarning_one": "{count} task is in progress. Restarting now can interrupt its agent.",
-	"update.tasksInProgressWarning_other": "{count} tasks are in progress. Restarting now can interrupt their agents.",
 	"changelog.showMore": "Show more",
 } as const;
 

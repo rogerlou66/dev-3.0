@@ -13,7 +13,7 @@ import { getAgentDirLiveModels } from "../agent-dir-live-models";
 import { agentKey } from "../../shared/agent-adapters/registry";
 import type { AgentLiveModels } from "../../shared/agent-live-models";
 import * as github from "../github";
-import * as updater from "../updater";
+import { getLocalVersion } from "../app-version";
 import * as rosetta from "../rosetta";
 import * as repoConfig from "../repo-config";
 import * as pty from "../pty-server";
@@ -464,93 +464,6 @@ async function getAgentLiveModels(params: {
 	return getAgentDirLiveModels(kind, params.accountId, { refresh: params.refresh });
 }
 
-async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: string; error?: string }> {
-	log.info("-> checkForUpdate");
-	const settings = await loadSettings();
-	const result = await updater.checkForUpdateWithChannel(settings.updateChannel);
-	log.info("<- checkForUpdate", { ...result });
-	return result;
-}
-
-/** True in the `dev3 remote` server, where the bundle-swap updater does not exist. */
-function isHeadless(): boolean {
-	return process.env.DEV3_HEADLESS === "1";
-}
-
-async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
-	log.info("-> downloadUpdate");
-	const settings = await loadSettings();
-	// Headless has no bundle to download: the update is a brew upgrade or a CLI
-	// tarball, and "download" means pre-fetching it while the server keeps serving.
-	if (isHeadless()) {
-		const { buildPlan, stageUpdate } = await import("../self-update");
-		const { plan } = await buildPlan(settings.updateChannel);
-		if (plan.kind === "refused") return { ok: false, error: plan.reason };
-		if (plan.kind === "up-to-date") return { ok: true };
-		getPushMessage()?.("updateDownloadProgress", { status: "downloading", progress: 0 });
-		const staged = await stageUpdate(plan);
-		getPushMessage()?.("updateDownloadProgress", { status: staged.ok ? "complete" : "error", progress: 100 });
-		return staged.ok ? { ok: true } : { ok: false, error: staged.error };
-	}
-	const result = await updater.downloadUpdateForChannel(
-		settings.updateChannel,
-		(status, progress) => {
-			getPushMessage()?.("updateDownloadProgress", { status, progress });
-		},
-	);
-	log.info("<- downloadUpdate", result);
-	return result;
-}
-
-async function applyUpdate(): Promise<{ restarting: boolean; message?: string }> {
-	log.info("-> applyUpdate");
-	if (isHeadless()) {
-		const settings = await loadSettings();
-		const { runSelfUpdate } = await import("../self-update");
-		const outcome = await runSelfUpdate({ channel: settings.updateChannel, restart: true });
-		// Throwing is how the renderer's Restart button reports a failure (it toasts
-		// the message), and a refusal IS a failure from the button's point of view.
-		if (!outcome.ok) throw new Error(outcome.message);
-		// A SUCCESS THAT IS NOT A RESTART STILL HAS TO BE REPORTED. An interactive
-		// `dev3 remote --no-detach` has no supervisor, so the update is installed and the
-		// process stays alive — resolving silently left the button spinning "Restarting…"
-		// with the sentence explaining the manual restart going nowhere.
-		return { restarting: outcome.restarting, message: outcome.message };
-	}
-	await updater.applyUpdate();
-	return { restarting: true };
-}
-
-/**
- * What the update popover needs to warn before restarting: whether this is a
- * headless box at all, whether the app is being reached remotely, and how many
- * tasks are mid-flight right now.
- *
- * The task count is a WARNING, not a gate because this is an explicit manual
- * action. Helper restarts preserve detached tmux agents, but a process supervisor
- * may terminate them, so the warning states that risk while leaving the choice live.
- *
- * `remoteActive` IS a gate, but only over the unattended countdown: nobody in a
- * browser can see a timer running on the desktop, so it must not fire under them.
- * The manual restart stays available in every state.
- */
-async function getUpdateRestartContext(): Promise<{ headless: boolean; remoteActive: boolean; tasksInProgress: number }> {
-	const headless = isHeadless();
-	const { isRemoteAccessActive } = await import("../remote-access-server");
-	const remoteActive = isRemoteAccessActive();
-	let tasksInProgress = 0;
-	try {
-		const projects = [...await data.loadProjects(), ...await data.loadVirtualProjects()];
-		for (const project of projects) {
-			const tasks = await data.loadTasks(project);
-			tasksInProgress += tasks.filter((task) => task.status === "in-progress").length;
-		}
-	} catch (err) {
-		log.warn("getUpdateRestartContext: could not count in-progress tasks", { error: String(err) });
-	}
-	return { headless, remoteActive, tasksInProgress };
-}
-
 async function saveLastRoute({ route }: { route: string }): Promise<void> {
 	log.info("-> saveLastRoute");
 	// Fresh-start (dev) mode must not persist the route — it would clobber the
@@ -567,13 +480,11 @@ async function getLastRoute(): Promise<{ route: string | null }> {
 	return { route };
 }
 
-async function getAppVersion(): Promise<{ version: string; channel: string; buildChannel: string }> {
+async function getAppVersion(): Promise<{ version: string; buildChannel: string }> {
 	log.info("-> getAppVersion");
-	const local = await updater.getLocalVersion();
-	const settings = await loadSettings();
+	const local = await getLocalVersion();
 	const result = {
 		version: local.version,
-		channel: settings.updateChannel,
 		buildChannel: local.channel,
 	};
 	log.info("<- getAppVersion", result);
@@ -794,10 +705,6 @@ export const settingsConfigHandlers = {
 	saveAgents,
 	getAgentAvailableModels,
 	getAgentLiveModels,
-	checkForUpdate,
-	downloadUpdate,
-	applyUpdate,
-	getUpdateRestartContext,
 	saveLastRoute,
 	getLastRoute,
 	getAppVersion,

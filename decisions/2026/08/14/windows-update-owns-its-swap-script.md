@@ -1,5 +1,7 @@
 # dev3 owns the Windows update swap script, and the layout goes side-by-side next
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: `src/bun/windows-update/` is deleted with the desktop updater.
+
 ## Context
 
 2026-08-14 was the first time in this project's history that anyone observed the Windows

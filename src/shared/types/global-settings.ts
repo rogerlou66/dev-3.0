@@ -1,5 +1,4 @@
 import type { TerminalBackendIdentity } from "../terminal-backend-identity";
-import type { UpdateChannel } from "../update-channel";
 import type { ShellFlavor } from "../posix-shell";
 import type { FavoriteAgentConfig } from "./coding-agents";
 
@@ -85,7 +84,6 @@ export interface GlobalSettings {
 	 * most-recently-used order. See sortTasks.ts.
 	 */
 	taskSortOrder: "oldest-first" | "newest-first";
-	updateChannel: UpdateChannel;
 	appearancePreset?: "default" | "cmux";
 	theme?: "dark" | "light" | "system";
 	resolvedTheme?: "dark" | "light";
@@ -201,15 +199,6 @@ export interface GlobalSettings {
 	artifactTemplate?: "off" | "custom";
 	/** The user's own starter folder for `"custom"`. Absent = `~/.dev3.0/artifact-template-custom`, seeded from the dev3 template. */
 	artifactTemplatePath?: string;
-	/**
-	 * Let a headless `dev3 remote` box install updates on its own once browser and
-	 * terminal activity are quiet. Default ON — the whole point is that nobody
-	 * ever goes back to a terminal to type `brew upgrade`. Helper restarts preserve
-	 * running agents; supervisor-owned restarts wait until no agent is at risk.
-	 * Turn it off to hold a box on one build while investigating. Has no effect on
-	 * the desktop app, which has its own updater.
-	 */
-	remoteSilentUpdate?: boolean;
 	preventSleepWhileRunning?: boolean; // keep a sleep inhibitor running while the app is open
 	skipQuitDialog?: boolean; // suppress the "tmux keeps running" quit confirmation
 	/**

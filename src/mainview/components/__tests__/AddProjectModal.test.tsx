@@ -16,7 +16,6 @@ vi.mock("../../rpc", () => ({
 					defaultAgentId: "builtin-claude",
 					defaultConfigId: "claude-default",
 					taskSortOrder: "oldest-first",
-					updateChannel: "stable",
 				}),
 			),
 			saveGlobalSettings: vi.fn(),
@@ -325,7 +324,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 
@@ -361,7 +359,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 
@@ -388,7 +385,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 		let resolveClone!: (v: any) => void;
@@ -425,7 +421,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 		let resolveClone!: (v: any) => void;
@@ -477,7 +472,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 		mockedApi.request.cloneAndAddProject.mockResolvedValue({
@@ -530,7 +524,6 @@ describe("AddProjectModal", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			cloneBaseDirectory: "/base",
 		});
 		mockedApi.request.cloneAndAddProject.mockResolvedValue({

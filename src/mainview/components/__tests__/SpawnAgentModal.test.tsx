@@ -35,7 +35,6 @@ const globalSettings: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
 	defaultConfigId: "claude-default",
 	taskSortOrder: "oldest-first",
-	updateChannel: "stable",
 };
 
 vi.mock("../../rpc", () => ({
@@ -68,7 +67,6 @@ vi.mock("../../rpc", () => ({
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 			}),
 			spawnAgentInTask: vi.fn().mockResolvedValue({ handoff: null }),
 			previewTaskHandoff: vi.fn().mockResolvedValue(null),
@@ -372,7 +370,6 @@ describe("SpawnAgentModal", () => {
 			defaultAgentId: "deleted-agent",
 			defaultConfigId: "deleted-config",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		renderModal();
 

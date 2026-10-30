@@ -957,15 +957,6 @@ const ALL_TIPS: Tip[] = [
 		score: 3,
 		contexts: ["board", "terminal"],
 	},
-	{
-		id: "remote-self-update",
-		titleKey: "tip.remoteSelfUpdate.title",
-		bodyKey: "tip.remoteSelfUpdate.body",
-		icon: "\u{F06B0}", // nf-md-cloud_sync
-		score: 3,
-		contexts: ["board", "settings"],
-		settingsSection: "system",
-	},
 	// Score 3: the log is real hidden value (30 days of agent-to-agent history that
 	// used to exist only as a 30-second toast), reachable by a shortcut nothing on
 	// screen advertises — but only a board running several agents ever needs it.

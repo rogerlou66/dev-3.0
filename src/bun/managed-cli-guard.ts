@@ -25,7 +25,6 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { detectInstallMethod } from "../shared/self-update";
 import { createLogger } from "./logger";
 
 const log = createLogger("managed-cli-guard");
@@ -41,8 +40,6 @@ export interface ManagedCliWriteInput {
 	buildChannel: string | null;
 	/** `process.execPath` — the binary actually running, not what it would install. */
 	execPath: string;
-	dev3Home: string;
-	platform: NodeJS.Platform;
 	env: Record<string, string | undefined>;
 }
 
@@ -82,7 +79,7 @@ export function mayWriteManagedCli(input: ManagedCliWriteInput): ManagedCliWrite
 		};
 	}
 	if (input.buildChannel) return { write: true, why: `installed build on the ${input.buildChannel} channel` };
-	if (detectInstallMethod(input.execPath, input.platform, input.dev3Home) === "source") {
+	if (/[\\/]bun(\.exe)?$/i.test(input.execPath)) {
 		return { write: false, why: "this is running from source (`bun run …`), which has no CLI to install" };
 	}
 	return { write: true, why: "installed build" };
@@ -126,12 +123,10 @@ export function resolveBuildChannel(fromPath: string): string | null {
  * walking up from it. Logs the verdict either way, so a skipped install is
  * visible in the log rather than looking like the write silently failed.
  */
-export function managedCliWriteAllowed(bundlePath: string, dev3Home: string): boolean {
+export function managedCliWriteAllowed(bundlePath: string): boolean {
 	const verdict = mayWriteManagedCli({
 		buildChannel: resolveBuildChannel(bundlePath),
 		execPath: process.execPath,
-		dev3Home,
-		platform: process.platform,
 		env: process.env,
 	});
 	if (verdict.write) log.info("Installing the managed dev3 CLI", { bundlePath, why: verdict.why });

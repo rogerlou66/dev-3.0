@@ -1,5 +1,7 @@
 # Headless self-update: hand the tunnel over, and let the supervisor relaunch
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the headless self-update, its tunnel handoff and the supervisor are deleted; `dev3 remote` no longer updates itself.
+
 Superseded on 2026-09-20 by `decisions/2026/09/20/headless-updates-survive-running-agents.md`: running tasks no longer block unattended updates because their detached tmux sessions survive the restart.
 
 ## Context

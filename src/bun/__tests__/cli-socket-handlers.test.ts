@@ -183,7 +183,7 @@ vi.mock("../socket-backpressure", () => ({
 }));
 
 vi.mock("../settings", () => ({
-	loadSettings: vi.fn(() => ({ updateChannel: "stable", taskSortOrder: "oldest-first" })),
+	loadSettings: vi.fn(() => ({ taskSortOrder: "oldest-first" })),
 	saveSettings: vi.fn(),
 	recordFavoriteUsages: vi.fn(),
 }));
@@ -424,7 +424,7 @@ describe("message.send / message.schedule — the subject gate", () => {
 		const resp = await send({ text: "ping" });
 		expect(resp.ok).toBe(false);
 		expect(resp.error).toContain("needs --subject");
-		expect(resp.error).toContain("dev3 update");
+		expect(resp.error).toContain("restart the dev3 app");
 		expect(sendMessageImmediately).not.toHaveBeenCalled();
 	});
 

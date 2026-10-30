@@ -116,8 +116,7 @@ export function compileUrlPattern(pattern: string | undefined): RegExp {
  *
  * On POSIX the line is `exec`-prefixed when it contains no shell control
  * operators AND no quotes, so `kill()` signals the tunnel itself instead of a
- * wrapper `sh` that would orphan it — and the pid recorded for the
- * self-update handoff is the real tunnel, not the wrapper. Leading VAR=value
+ * wrapper `sh` that would orphan it. Leading VAR=value
  * assignments stay in front of `exec`, where POSIX sh applies them to the
  * exec'd command. Quoted lines are left alone: word-splitting a quoted value
  * with a regex would splice `exec` inside the quotes, and a lone simple

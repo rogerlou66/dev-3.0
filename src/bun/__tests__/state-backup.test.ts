@@ -67,7 +67,7 @@ function catalog(providers: number, models: number): unknown {
 }
 
 function settings(extra: Record<string, unknown>): unknown {
-	return { defaultAgentId: "builtin-claude", defaultConfigId: "x", taskSortOrder: "oldest-first", updateChannel: "canary", ...extra };
+	return { defaultAgentId: "builtin-claude", defaultConfigId: "x", taskSortOrder: "newest-first", ...extra };
 }
 
 /** The whole registry, with a realistic payload and a stem, for the table-driven cases. */

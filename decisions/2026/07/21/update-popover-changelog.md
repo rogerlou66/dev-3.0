@@ -1,5 +1,7 @@
 # 148 — "What's new" changelog in the update-ready popover
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the app no longer shows an update popover; only the release pipeline still builds the changelog payload.
+
 ## Context
 
 The header "Update" plaque popover (`GlobalHeader.tsx`) previously showed only the

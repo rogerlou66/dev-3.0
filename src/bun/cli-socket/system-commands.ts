@@ -167,33 +167,4 @@ export const systemHandlers: Record<string, Handler> = {
 			signInLink: await getSignInLink(),
 		};
 	},
-
-	// `dev3 update` on a box with a running headless server DELEGATES here rather
-	// than updating the files itself, and that is the whole point: only this process
-	// can hand its port and its live cloudflared to the successor. A separate CLI
-	// process doing the swap would leave this server running an install that is no
-	// longer on disk, and the next restart would change the public URL.
-	"remote.selfUpdate": async (params) => {
-		const { runSelfUpdate } = await import("../self-update");
-		const { loadSettings } = await import("../settings");
-		const channel = (await loadSettings()).updateChannel;
-		const dryRun = Boolean((params as { dryRun?: boolean } | undefined)?.dryRun);
-		if (dryRun) {
-			const { buildPlan } = await import("../self-update");
-			const { install, plan, runningVersion, summary } = await buildPlan(channel);
-			return {
-				ok: plan.kind !== "refused",
-				restarting: false,
-				message: summary,
-				install,
-				kind: plan.kind,
-				runningVersion,
-				// The OFFERED build, so `dev3 update --check` can print it without planning
-				// a second time in a process whose install method is a different one.
-				version: plan.kind === "brew" || plan.kind === "tarball" ? plan.version : null,
-				channel,
-			};
-		}
-		return await runSelfUpdate({ channel, restart: true });
-	},
 };
