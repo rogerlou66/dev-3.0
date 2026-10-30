@@ -7,7 +7,7 @@
 	"scripts": {
 		"dev": "bun scripts/dev.ts",
 		"build": "bun scripts/generate-build-info.ts && bun scripts/generate-changelog.ts && vite build && bun run build:cli && electrobun build",
-		"build:prod": "bun scripts/generate-build-info.ts && bun scripts/generate-changelog.ts && vite build && bun run build:cli && electrobun build --channel prod",
+		"build:prod": "bun scripts/generate-build-info.ts && bun scripts/generate-changelog.ts && vite build && bun run build:cli && electrobun build --env=stable",
 		"build:cli": "bun scripts/build-cli.ts",
 		"build:native": "bun scripts/build-native.ts",
 		"start": "bun scripts/dev.ts --start",
