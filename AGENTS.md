@@ -70,7 +70,7 @@ in-app opt-out switch. Upstream merges must preserve the removal.
 | No telemetry runtime | GA4, PostHog, remote feature flags, telemetry profiles, and geolocation collection are removed; do not restore their modules, imports, events, or dependencies |
 | Diagnostics stay local | Errors use `src/mainview/diagnostics.ts` and the local logger; crash reporting does not create an external exception channel |
 | No identity bootstrap | Desktop and remote HTML shells inject no analytics identity. The retired `analyticsDistinctId` setting remains readable only for N-2 on-disk compatibility |
-| No updater at all | The app never contacts a release feed: there is no in-app updater, no "Check for Updates" menu item, no update channel setting, no `dev3 update` command, and `dev3 remote` does not update itself. A build runs until it is rebuilt from source and reinstalled; only the bundle's own `version.json` is read (`src/bun/app-version.ts`) |
+| No updater at all | The app never contacts a release feed: there is no in-app updater, no "Check for Updates" menu item, no update channel setting, no `dev3 update` command, and `dev3 remote` does not update itself. A build runs until it is rebuilt from source and reinstalled; only the bundle's own version.json is read (`src/bun/app-version.ts`) |
 | Removal is tested | `src/bun/__tests__/no-external-telemetry.test.ts` checks runtime imports/endpoints, dependencies, release credentials, and website tags; `src/bun/__tests__/manual-updates-only.test.ts` guards that no updater, update RPC or update command returns |
 
 Do not add a telemetry channel or analytics event as part of an upstream feature. Keep its local
