@@ -156,7 +156,7 @@ Both mistakes below have already happened more than once. Check them before ever
 | `origin/main` | A stale upstream snapshot (v1.48.1). **Never** rebase onto it — git starts replaying the whole fork history. If that happens, `git rebase --abort` |
 | `upstream` = `h0x91b/dev-3.0` | The original project, for upstream merges only. Never push or open a PR there |
 
-**`gh` resolves to the upstream by default.** This checkout has no `gh` default repo, and the `upstream` remote makes `gh` pick `h0x91b/dev-3.0`, so a bare `gh pr create`, or `dev3 pr create`, which calls `gh`, publicly opens the PR on someone else's repository. Always pass the fork explicitly:
+**`gh` resolves to the upstream by default.** Without a `gh` default repo, the `upstream` remote makes `gh` pick `h0x91b/dev-3.0`, so a bare `gh pr create`, or `dev3 pr create`, which calls `gh`, publicly opens the PR on someone else's repository. The main clone has `gh repo set-default rogerlou66/dev-3.0` applied (stored in the shared `.git/config`, so every worktree inherits it); a fresh clone needs it run once. Still pass the fork explicitly, so a clone without that setting fails safe:
 
 ```bash
 GH_REPO=rogerlou66/dev-3.0 dev3 pr create --base rl-main --title "..." --description @body.md
