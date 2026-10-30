@@ -1,0 +1,1 @@
+Upgraded Mermaid to 11.17.2 and pinned DOMPurify 3.4.17, ip-address 10.7.4 and Vite 8.2.4 to clear the XSS and SSRF advisories in the shipped renderer and runtime graph, and pinned every third-party GitHub Action to a commit SHA, replacing the mutable `aquasecurity/trivy-action@master` reference with v0.36.0.
