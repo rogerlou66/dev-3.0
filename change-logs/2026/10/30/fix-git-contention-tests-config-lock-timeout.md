@@ -1,0 +1,1 @@
+The git worktree contention tests now pin core.configLockTimeout to 0 through GIT_CONFIG_* env, because git 2.56+ waits up to a second on every held config.lock and pushed the attempt-cap test past its 5s timeout on CI; a regression test checks that the pin reaches git (port of upstream h0x91b/dev-3.0#2095).
