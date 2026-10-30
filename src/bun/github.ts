@@ -520,7 +520,7 @@ export async function resolveMergeMethod(
 }
 
 // A merged PR never un-merges, so a terminal answer is cached for the process
-// lifetime; everything else expires so the 15s branch-status poll re-asks
+// lifetime; everything else expires so the branch-status poll (15 s by default) re-asks
 // without hammering the API.
 const PR_SNAPSHOT_TTL_MS = 60_000;
 const PR_MERGED_TIMEOUT_MS = 10_000;

@@ -1,5 +1,7 @@
 # Configurable background polling (Settings → Polling)
 
+See also `decisions/2026/10/30/renderer-pollers-in-polling-settings.md`: the renderer's branch-status poll and board PR lookup joined these four loops.
+
 ## Context
 Four background loops reach the network on fixed cadences: the merge-detection poller (`git fetch` + merged check), the PR-status poller (`gh`), the task git bar's fetch, and the Pull button's "behind origin" fetch. Users on metered links, rate-limited `gh` accounts or many repos had no way to slow them down or turn them off.
 

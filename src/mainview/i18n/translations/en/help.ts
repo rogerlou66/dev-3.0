@@ -152,7 +152,7 @@ const help = {
 		"Where task worktrees live on disk, which external editors and apps power open-in, and your GitHub accounts.",
 	"help.settings.polling.title": "Polling",
 	"help.settings.polling.body":
-		"Background cadence for merge detection, pull request status, and the git-bar and Pull-button fetches. The on-screen project is checked more often than the rest; switch a check off to stop its network calls entirely.",
+		"Background cadence for merge detection, pull request status, the board's PR lookup, the open task's branch status, and the git-bar and Pull-button fetches. The on-screen project is checked more often than the rest; switch a check off to stop its automatic network calls.",
 	"help.settings.devtools.title": "Developer tools",
 	"help.settings.devtools.body": "Terminal keymap presets and the dev3 CLI installation status.",
 	"help.settings.rateLimits.title": "Rate-limit tracking",

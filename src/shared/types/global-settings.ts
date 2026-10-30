@@ -338,7 +338,13 @@ export interface GlobalSettings {
 }
 
 /** A poller the user can switch off as a whole. */
-export type PollingGroup = "mergeDetection" | "prStatus" | "branchStatusFetch" | "pullButtonFetch";
+export type PollingGroup =
+	| "mergeDetection"
+	| "prStatus"
+	| "projectPrList"
+	| "branchStatusPoll"
+	| "branchStatusFetch"
+	| "pullButtonFetch";
 
 /** One tunable interval, stored in whole minutes. */
 export type PollingIntervalKey =
@@ -348,13 +354,18 @@ export type PollingIntervalKey =
 	| "prBackground"
 	| "prPendingActive"
 	| "prPendingBackground"
+	| "projectPrList"
 	| "branchStatusFetch"
 	| "pullButtonFetch";
+
+/** One tunable interval, stored in whole seconds — its default is below a minute. */
+export type PollingSecondsKey = "branchStatusPoll";
 
 export interface PollingSettings {
 	/** Groups the user switched off; only `true` is ever stored. */
 	off?: Partial<Record<PollingGroup, true>>;
 	minutes?: Partial<Record<PollingIntervalKey, number>>;
+	seconds?: Partial<Record<PollingSecondsKey, number>>;
 }
 
 /** Every shortcut has one main combo and one optional second way to press it. */

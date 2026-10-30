@@ -49,6 +49,43 @@ describe("PollingSettingsSection", () => {
 		expect(onChange).toHaveBeenLastCalledWith({ off: { prStatus: true, branchStatusFetch: true } });
 	});
 
+	it("offers the board PR lookup in minutes and the task branch status in seconds", () => {
+		renderSection();
+		expect(field("settings.pollingProjectPrList", "settings.pollingEvery").placeholder).toBe("1");
+		const branchStatus = field("settings.pollingBranchStatus", "settings.pollingEvery");
+		expect(branchStatus.placeholder).toBe("15");
+		expect(branchStatus.min).toBe("5");
+		expect(branchStatus.max).toBe("3600");
+		expect(screen.getAllByText("settings.pollingSecondsUnit")).toHaveLength(1);
+	});
+
+	it("stores a seconds interval in `seconds`, clamped, next to existing minute overrides", () => {
+		const { onChange } = renderSection({ minutes: { projectPrList: 3 } });
+
+		fireEvent.change(field("settings.pollingBranchStatus", "settings.pollingEvery"), { target: { value: "2" } });
+		expect(onChange).toHaveBeenLastCalledWith({ minutes: { projectPrList: 3 }, seconds: { branchStatusPoll: 5 } });
+
+		fireEvent.change(field("settings.pollingProjectPrList", "settings.pollingEvery"), { target: { value: "" } });
+		expect(onChange).toHaveBeenLastCalledWith(undefined);
+	});
+
+	it("switches the two renderer pollers off independently", async () => {
+		const user = userEvent.setup();
+		const { onChange } = renderSection();
+
+		await user.click(screen.getByRole("switch", { name: "settings.pollingBranchStatus" }));
+		expect(onChange).toHaveBeenLastCalledWith({ off: { branchStatusPoll: true } });
+
+		await user.click(screen.getByRole("switch", { name: "settings.pollingProjectPrList" }));
+		expect(onChange).toHaveBeenLastCalledWith({ off: { projectPrList: true } });
+	});
+
+	it("disables the seconds field while the task branch status is off", () => {
+		renderSection({ off: { branchStatusPoll: true } });
+		expect(field("settings.pollingBranchStatus", "settings.pollingEvery").disabled).toBe(true);
+		expect(field("settings.pollingProjectPrList", "settings.pollingEvery").disabled).toBe(false);
+	});
+
 	it("resets every override at once", async () => {
 		const user = userEvent.setup();
 		const { onChange } = renderSection({ minutes: { mergeActive: 5 } });

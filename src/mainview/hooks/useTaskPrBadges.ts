@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PRInfo, Task, TaskPRBadgeInfo } from "../../shared/types";
 import { api } from "../rpc";
 import { startVisibilityAwarePoll } from "../utils/poll";
+import { usePollingSettings } from "./usePollingSettings";
 import { hydrateTaskPRMap, samePRMap, type PRIdentity } from "../utils/taskPrBadge";
 
 interface UseTaskPrBadgesOptions {
 	tasks: Task[];
 	/**
 	 * Projects to discover PRs for by matching branch names (`getProjectPRs`,
-	 * once per project per minute). Omit it and the map is built purely from what
+	 * once per project per Settings → Polling interval, a minute by default).
+	 * Omit it and the map is built purely from what
 	 * each task already carries — no network at all. A surface that spans every
 	 * project (the Active Tasks sidebar in global scope) must omit it: the same
 	 * poll that costs the board one lookup would cost it one per project.
@@ -45,9 +47,13 @@ export function useTaskPrBadges({ tasks, discoverProjectIds, knowsProject }: Use
 
 	useEffect(rehydrate, [rehydrate]);
 
+	const polling = usePollingSettings();
+	const discoveryEnabled = polling.enabled.projectPrList;
+	const discoveryIntervalMs = polling.intervalMs.projectPrList;
+
 	const projectIdsKey = discoverProjectIds?.join(",") ?? "";
 	useEffect(() => {
-		if (!projectIdsKey) return;
+		if (!projectIdsKey || !discoveryEnabled) return;
 		const projectIds = projectIdsKey.split(",");
 		const fetchPRs = () => {
 			// One lookup per project: a branch name is only unique inside its own
@@ -68,8 +74,8 @@ export function useTaskPrBadges({ tasks, discoverProjectIds, knowsProject }: Use
 				rehydrate();
 			}).catch(() => {});
 		};
-		return startVisibilityAwarePoll({ fn: fetchPRs, intervalMs: 60_000 });
-	}, [projectIdsKey, rehydrate]);
+		return startVisibilityAwarePoll({ fn: fetchPRs, intervalMs: discoveryIntervalMs });
+	}, [projectIdsKey, rehydrate, discoveryEnabled, discoveryIntervalMs]);
 
 	useEffect(() => {
 		function onPrStatus(e: Event) {

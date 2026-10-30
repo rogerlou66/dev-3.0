@@ -211,7 +211,7 @@ async function healDeadCompareBase(project: Project, task: Task, baseBranch: str
 	return projectBase;
 }
 
-// The git bar polls status every 15 s; its background fetch is paced separately
+// The git bar polls status every 15 s by default; its background fetch is paced separately
 // (Settings → Polling). An explicit refresh always fetches and restarts the clock.
 const branchStatusFetchLastAttempt = new Map<string, number>();
 
@@ -234,7 +234,7 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 	const task = await data.getTask(project, params.taskId);
 
 	// Virtual (Operations) tasks have a working dir but no git repo. The renderer
-	// polls this every 15s for any active task with a worktreePath, so return an
+	// polls this (every 15 s by default) for any active task with a worktreePath, so return an
 	// inert status instead of spawning a doomed `git` in a non-repo directory.
 	if (project.kind === "virtual" || !task.worktreePath) {
 		return { ahead: 0, behind: 0, baseUnreachable: false, canRebase: false, insertions: 0, deletions: 0, unpushed: 0, preservedOutsideBranch: false, mergedByContent: false, diffFiles: 0, diffInsertions: 0, diffDeletions: 0, diffFileStats: [], prNumber: null, prUrl: null, prState: null, mergeCompletionFingerprint: null, hasRemote: false, remoteIsGitHub: false, remoteAhead: 0 };
@@ -249,7 +249,7 @@ async function getBranchStatusImpl(params: { taskId: string; projectId: string; 
 	}
 
 	// Nothing to fetch without a remote — the doomed `git fetch origin <base>` was
-	// spawned on every 15s poll of a local-only project and always failed.
+	// spawned on every status poll of a local-only project and always failed.
 	const hasRemote = await git.hasOriginRemote(project.path);
 	const compareRefBranch = params.compareRef?.startsWith("origin/") ? params.compareRef.slice("origin/".length) : null;
 	const fetchOptions = { force: params.refresh === true, priority: true };
