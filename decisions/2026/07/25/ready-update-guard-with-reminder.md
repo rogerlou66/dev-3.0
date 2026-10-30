@@ -1,5 +1,7 @@
 # 168 — Guard re-downloads of a ready update, but keep re-prompting for it
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the desktop updater and its ready prompt are deleted.
+
 ## Context
 
 The 30-minute auto-check only asked "is a newer version available?". Once an update was downloaded and waiting for a restart, every following check saw the same version, downloaded it again, and re-announced it (issue #1072). Long sessions repeated that indefinitely.

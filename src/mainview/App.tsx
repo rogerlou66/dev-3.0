@@ -11,7 +11,7 @@ import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus, UpdateChangelog } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { useAgents } from "./hooks/useAgents";
@@ -65,7 +65,6 @@ import { syncGlobalSettingsCache } from "./global-settings-cache";
 import StuckPreparationPopover from "./components/StuckPreparationPopover";
 import FolderPickerHost from "./components/FolderPickerModal";
 import KeyboardShortcutsModal, { type ShortcutsTab } from "./components/KeyboardShortcutsModal";
-import UpdatePopoverSimulatorModal from "./components/UpdatePopoverSimulatorModal";
 import RemoteAccessDialog from "./components/RemoteAccessDialog";
 import RemoteAccessDownNotice from "./components/RemoteAccessDownNotice";
 import RemoteSignIn from "./components/RemoteSignIn";
@@ -340,22 +339,17 @@ function App() {
 		open: false,
 		tab: "app",
 	});
-	// Dev-only update-popover simulator (View → Debug → Update Popover Preview).
-	const [updatePreviewOpen, setUpdatePreviewOpen] = useState(false);
 	useEffect(() => {
 		function onShowTmux() { setShortcutsModal({ open: true, tab: "terminal" }); }
 		function onShowKeyboard() { setShortcutsModal({ open: true, tab: "app" }); }
 		function onEnterHelpMode() { setHelpMode(true); }
-		function onShowUpdatePreview() { setUpdatePreviewOpen(true); }
 		window.addEventListener("menu:show-tmux-cheat-sheet", onShowTmux);
 		window.addEventListener("menu:show-keyboard-shortcuts", onShowKeyboard);
 		window.addEventListener("menu:enter-help-mode", onEnterHelpMode);
-		window.addEventListener("menu:show-update-popover-preview", onShowUpdatePreview);
 		return () => {
 			window.removeEventListener("menu:show-tmux-cheat-sheet", onShowTmux);
 			window.removeEventListener("menu:show-keyboard-shortcuts", onShowKeyboard);
 			window.removeEventListener("menu:enter-help-mode", onEnterHelpMode);
-			window.removeEventListener("menu:show-update-popover-preview", onShowUpdatePreview);
 		};
 	}, []);
 
@@ -440,17 +434,6 @@ function App() {
 	/** The channel baked into the running bundle — what tells a canary install from the release. */
 	const [aboutBuildChannel, setAboutBuildChannel] = useState<string | null>(null);
 
-	// Silent update indicator
-	const [updateVersion, setUpdateVersion] = useState<string | null>(null);
-	// "What's new" summary for the ready update (features-first), shown in the header popover
-	const [updateChangelog, setUpdateChangelog] = useState<UpdateChangelog | null>(null);
-	// A repeated manual check can report the same ready version. Preserve that
-	// signal separately so the result prompt responds to every explicit check.
-	const [updateReadySignal, setUpdateReadySignal] = useState(0);
-	// Download progress: null = idle, "checking" | "downloading" | "error"
-	const [updateDownloadStatus, setUpdateDownloadStatus] = useState<string | null>(null);
-	const updateStatusShownAtRef = useRef<number>(0);
-	const updateClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	// Remote access QR code modal
 	const [remoteQR, setRemoteQR] = useState<RemoteAccessQRData | null>(null);
@@ -593,7 +576,6 @@ function App() {
 		defaultAgentId: "builtin-claude",
 		defaultConfigId: "claude-auto",
 		taskSortOrder: "oldest-first",
-		updateChannel: "stable",
 	});
 	// Which task's workspace pane may dock the artifact panel. Docking is the
 	// default; the popup is the explicit opt-in. Every surface with no pane of its
@@ -2609,19 +2591,6 @@ function App() {
 		}).catch((err) => console.error("respondToAgentLaunchRequest failed:", err));
 	}, []);
 
-	// Listen for silent update ready notification
-	useEffect(() => {
-		function onUpdateAvailable(e: Event) {
-			const { version, changelog } = (e as CustomEvent).detail as { version: string; changelog?: UpdateChangelog };
-			setUpdateVersion(version);
-			setUpdateChangelog(changelog ?? null);
-			setUpdateDownloadStatus(null); // clear download indicator once ready
-			setUpdateReadySignal((signal) => signal + 1);
-		}
-		window.addEventListener("rpc:updateAvailable", onUpdateAvailable);
-		return () => window.removeEventListener("rpc:updateAvailable", onUpdateAvailable);
-	}, []);
-
 	// Open the in-app About dialog when the native menu's "About" item is clicked.
 	useEffect(() => {
 		function onShowAbout(e: Event) {
@@ -2632,27 +2601,6 @@ function App() {
 		window.addEventListener("rpc:showAbout", onShowAbout);
 		return () => window.removeEventListener("rpc:showAbout", onShowAbout);
 	}, []);
-
-	// Surface the result of a manual "Check for Updates" menu action as a toast.
-	// (Available updates flow through rpc:updateAvailable → the header plaque.)
-	useEffect(() => {
-		function onUpdateCheckOutcome(e: Event) {
-			const { status, version, detail } = (e as CustomEvent).detail as {
-				status: "none" | "error" | "dev";
-				version?: string;
-				detail?: string;
-			};
-			if (status === "dev") {
-				toast.info(t("update.devBuildNotice"), { source: "update" });
-			} else if (status === "none") {
-				toast.info(t("update.upToDateVersion", { version: version ?? "" }), { source: "update" });
-			} else {
-				toast.error(t("update.checkFailedDetail", { error: detail ?? "" }), { source: "update" });
-			}
-		}
-		window.addEventListener("rpc:updateCheckOutcome", onUpdateCheckOutcome);
-		return () => window.removeEventListener("rpc:updateCheckOutcome", onUpdateCheckOutcome);
-	}, [t]);
 
 	useEffect(() => {
 		function onOpenTaskNavigation(e: Event) {
@@ -2782,36 +2730,6 @@ function App() {
 		return () => window.removeEventListener("rpc:automationRunsMissed", onAutomationRunsMissed);
 	}, []);
 
-	// Listen for update download progress (minimum 5s display time)
-	useEffect(() => {
-		const MIN_DISPLAY_MS = 5_000;
-		function onDownloadProgress(e: Event) {
-			const { status } = (e as CustomEvent).detail;
-			if (status === "complete" || status === "idle") {
-				// Clear after minimum display time
-				const elapsed = Date.now() - updateStatusShownAtRef.current;
-				const remaining = Math.max(0, MIN_DISPLAY_MS - elapsed);
-				if (updateClearTimerRef.current) clearTimeout(updateClearTimerRef.current);
-				updateClearTimerRef.current = setTimeout(() => {
-					setUpdateDownloadStatus(null);
-					updateClearTimerRef.current = null;
-				}, remaining);
-			} else {
-				// Show immediately, record timestamp
-				if (updateClearTimerRef.current) {
-					clearTimeout(updateClearTimerRef.current);
-					updateClearTimerRef.current = null;
-				}
-				updateStatusShownAtRef.current = Date.now();
-				setUpdateDownloadStatus(status); // "checking", "downloading", "error"
-			}
-		}
-		window.addEventListener("rpc:updateDownloadProgress", onDownloadProgress);
-		return () => {
-			window.removeEventListener("rpc:updateDownloadProgress", onDownloadProgress);
-			if (updateClearTimerRef.current) clearTimeout(updateClearTimerRef.current);
-		};
-	}, []);
 
 	// Listen for Cmd+, (Settings menu item)
 	useEffect(() => {
@@ -3164,10 +3082,6 @@ function App() {
 						goForward={() => dispatch({ type: "goForward" })}
 						canGoBack={state.historyIndex > 0}
 						canGoForward={state.historyIndex < state.routeHistory.length - 1}
-						updateVersion={updateVersion}
-						updateReadySignal={updateReadySignal}
-						updateChangelog={updateChangelog}
-						updateDownloadStatus={updateDownloadStatus}
 						remoteAccessAvailable={!isElectrobun}
 						remoteAccessActive={remoteAccessActive}
 						helpDiscovered={globalSettings.helpModeDiscovered}
@@ -3798,7 +3712,6 @@ function App() {
 				onTabChange={(tab) => setShortcutsModal((s) => ({ ...s, tab }))}
 				onClose={() => setShortcutsModal((s) => ({ ...s, open: false }))}
 			/>
-			{updatePreviewOpen && <UpdatePopoverSimulatorModal onClose={() => setUpdatePreviewOpen(false)} />}
 			<ConfirmHost />
 			{launchRequests[0] && (
 				<AgentLaunchRequestModal

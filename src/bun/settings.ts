@@ -4,16 +4,6 @@ import type { GlobalSettings, ShortcutOverride } from "../shared/types";
 import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
 import { recordFavoriteUsage, sanitizeFavorites } from "../shared/favorites";
 import { sanitizePollingSettings } from "../shared/polling-settings";
-import { coerceUpdateChannel, DEFAULT_UPDATE_CHANNEL } from "../shared/update-channel";
-import { canaryPublishesFor, hostOsName } from "../shared/canary-publish";
-
-/**
- * Does the canary feed carry a build for THIS machine? Asked here rather than passed in,
- * because only the host knows its own platform — the renderer would answer for the browser.
- */
-export function hostPublishesCanary(): boolean {
-	return canaryPublishesFor(hostOsName(process.platform), process.arch);
-}
 import { normalizeSimplifiedInterface, SIMPLIFY_VIEW_PRESET_IDS } from "../shared/simplified-interface";
 import { withFileLock } from "./file-lock";
 import { createLogger } from "./logger";
@@ -86,7 +76,6 @@ const DEFAULT_SETTINGS: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
 	defaultConfigId: "claude-auto-opus55-medium",
 	taskSortOrder: "oldest-first",
-	updateChannel: DEFAULT_UPDATE_CHANNEL,
 };
 
 const ALL_BUILTIN_CONFIG_IDS = new Set(DEFAULT_AGENTS.flatMap((a) => a.configurations.map((c) => c.id)));
@@ -133,7 +122,6 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		defaultAgentId: d.defaultAgentId ?? DEFAULT_SETTINGS.defaultAgentId,
 		defaultConfigId: resolveDefaultConfigId(d.defaultConfigId),
 		taskSortOrder: d.taskSortOrder === "newest-first" ? "newest-first" : "oldest-first",
-		updateChannel: coerceUpdateChannel(d.updateChannel, hostPublishesCanary()),
 		appearancePreset: d.appearancePreset === "cmux" ? "cmux" : "default",
 		theme: d.theme === "light" || d.theme === "system" || d.theme === "dark" ? d.theme : undefined,
 		resolvedTheme: d.resolvedTheme === "light" || d.resolvedTheme === "dark" ? d.resolvedTheme : undefined,
@@ -178,8 +166,6 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		// Default = the dev3 template, so only the two other modes are stored.
 		artifactTemplate: d.artifactTemplate === "off" || d.artifactTemplate === "custom" ? d.artifactTemplate : undefined,
 		artifactTemplatePath: typeof d.artifactTemplatePath === "string" && d.artifactTemplatePath.trim() ? d.artifactTemplatePath.trim() : undefined,
-		// Retired; an older co-installed build still reads its stored opt-out.
-		remoteSilentUpdate: d.remoteSilentUpdate === false ? false : undefined,
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
 		skipQuitDialog: d.skipQuitDialog === true ? true : undefined,
 		importShellEnv: d.importShellEnv === false ? false : undefined,

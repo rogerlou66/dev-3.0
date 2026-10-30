@@ -112,9 +112,8 @@ function topLevelKeys(content: string): string[] | null {
  * toggle back to its default legitimately removes a key.
  *
  * The shape actually worth refusing is the one that happened — the file vanished
- * and came back written from `DEFAULT_SETTINGS`, four keys where twenty had
- * been, which is how a canary build came to read `updateChannel: "stable"` and
- * swap the whole app mid-flight. That shape is a strict SUBSET of the good copy
+ * and came back written from `DEFAULT_SETTINGS`, a few keys where twenty had
+ * been, silently resetting the user's preferences. That shape is a strict SUBSET of the good copy
  * with most of it gone. Ordinary editing either introduces a key or drops a
  * handful, so requiring both conditions leaves normal use untouched.
  */

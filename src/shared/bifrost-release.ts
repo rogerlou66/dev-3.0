@@ -1,7 +1,7 @@
 /**
  * Where the pinned proxy-sidecar binary comes from, per platform.
  *
- * dev3 never downloads this at runtime (AGENTS.md § Update channels): release CI
+ * dev3 never downloads this at runtime (AGENTS.md § Install paths): release CI
  * fetches it, checks its SHA-256 against the pin, and bakes it into the app. The
  * mapping lives here, pure, so the download script and its tests agree.
  */

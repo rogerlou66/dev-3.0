@@ -276,17 +276,6 @@ describe("the canary release is never the default download", () => {
 		).toContain("--prerelease");
 		expect(edit, "the refresh path does not re-assert --latest=false. Same failure, same fix.").toContain("--latest=false");
 	});
-
-	// Not a style rule: the app must never learn to read releases. Ordering lives in
-	// `buildOrder` in the manifest, and a second source of truth would order builds by a
-	// version string or by publish date, which is exactly what the two channels cannot do.
-	it("leaves the updater reading the bucket and nothing else", () => {
-		const updater = read("../updater.ts");
-		expect(
-			/github\.com|api\.github/.test(updater),
-			"src/bun/updater.ts now references GitHub. The canary release page is a download surface for humans; making the app read it turns release publish dates into update ordering and breaks the channel rules. Fix: the feed is BASE_URL in the bucket.",
-		).toBe(false);
-	});
 });
 
 describe("the job that refreshes the release", () => {

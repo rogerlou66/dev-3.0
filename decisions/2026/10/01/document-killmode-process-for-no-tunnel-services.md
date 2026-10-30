@@ -1,6 +1,6 @@
 # Document KillMode=process as an opt-in drop-in for --no-tunnel services
 
-Superseded on 2026-10-30 by `decisions/2026/10/30/remove-headless-self-update.md`: the self-update handoff it mentions is gone; the KillMode drop-in guidance for `--no-tunnel` services still stands.
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the self-update handoff it mentions is gone; the KillMode drop-in guidance for `--no-tunnel` services still stands.
 
 ## Context
 `dev3 remote install-service` writes a unit with systemd's default `KillMode=control-group`. The tmux server that hosts every agent terminal is started by dev3 and lives in the unit's cgroup, so any stop or restart of the unit kills every running agent. Self-update avoids that by waiting for a quiet window, but a manual `systemctl --user restart` does not.

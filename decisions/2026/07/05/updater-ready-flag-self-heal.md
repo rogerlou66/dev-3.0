@@ -1,5 +1,7 @@
 # 106 — Self-healing applyUpdate: Electrobun checkForUpdate() wipes updateReady
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the desktop updater and `applyUpdate` are deleted.
+
 ## Context
 
 Issues #788/#813: the "Restart to Update" header button sometimes did nothing, and the app updated only after the plaque re-appeared minutes later. Restarting dev3 also "fixed" it.

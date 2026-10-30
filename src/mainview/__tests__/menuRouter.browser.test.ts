@@ -42,7 +42,7 @@ describe("BROWSER_HANDLED_ACTIONS", () => {
 	});
 
 	it("excludes bun-only / unhandled actions", () => {
-		for (const a of ["new-window", "check-for-updates", "toggle-devtools", "zoom-in", "open-logs-directory", "show-remote-qr", "task-rename"]) {
+		for (const a of ["new-window", "toggle-devtools", "zoom-in", "open-logs-directory", "show-remote-qr", "task-rename"]) {
 			expect(BROWSER_HANDLED_ACTIONS.has(a)).toBe(false);
 		}
 	});

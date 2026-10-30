@@ -115,7 +115,7 @@ Two numbers, no per-metric split: **~70% for normal code, ~85% for critical modu
   `src/shared/types.ts` helpers, `src/mainview/i18n/`, `src/cli/`, `src/bun/data.ts`,
   `src/bun/git.ts`, `src/bun/tmux/`, `src/mainview/utils/`.
 - **Not expected to be covered** (bootstrap/wrappers that only make sense in e2e):
-  `src/bun/index.ts`, `updater.ts`, `shell-env.ts`, `spawn.ts`, `src/mainview/rpc.ts`,
+  `src/bun/index.ts`, `shell-env.ts`, `spawn.ts`, `src/mainview/rpc.ts`,
   `main.tsx`.
 
 **No coverage provider is wired up** — no `coverage` block in any vitest config, nothing

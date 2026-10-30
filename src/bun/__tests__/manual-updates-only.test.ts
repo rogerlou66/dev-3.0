@@ -5,35 +5,38 @@ import { describe, expect, it } from "vitest";
 const read = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
 const exists = (relative: string) => existsSync(fileURLToPath(new URL(relative, import.meta.url)));
 
-const mainSource = read("../index.ts");
-const updaterSource = read("../updater.ts");
-const headlessSource = read("../headless-entry.ts");
-const cliMainSource = read("../../cli/main.ts");
-
-describe("manual updates only", () => {
-	it("does not schedule update checks from the main process", () => {
-		expect(mainSource).not.toMatch(/startAutoCheck|Auto-Update Check/);
+// This fork never contacts a release feed: a build runs until it is rebuilt from source.
+describe("the app has no updater", () => {
+	it("ships no updater or self-update modules", () => {
+		for (const path of [
+			"../updater.ts",
+			"../self-update.ts",
+			"../self-update-watch.ts",
+			"../windows-update/apply.ts",
+			"../../shared/self-update.ts",
+			"../../cli/commands/update.ts",
+		]) {
+			expect(exists(path), path).toBe(false);
+		}
 	});
 
-	it("does not expose an automatic update scheduler", () => {
-		expect(updaterSource).not.toMatch(/export function startAutoCheck|CHECK_INTERVAL_MS/);
-	});
-});
-
-// A headless box runs what was built from source; it must never reach the release feed.
-describe("headless dev3 remote has no updater", () => {
-	it("starts no update watch and imports no updater", () => {
-		expect(headlessSource).not.toMatch(/self-update|SelfUpdate|from "\.\/updater"/);
+	it("exposes no update RPC, push message or menu item", () => {
+		const schema = read("../../shared/types/rpc-schema.ts");
+		expect(schema).not.toMatch(/\b(checkForUpdate|downloadUpdate|applyUpdate|updateAvailable|updateDownloadProgress|updateCheckOutcome)\b/);
+		expect(read("../../shared/application-menu.ts")).not.toMatch(/checkForUpdates|Check for Updates/);
 	});
 
-	it("ships no self-update modules", () => {
-		expect(exists("../self-update.ts")).toBe(false);
-		expect(exists("../self-update-watch.ts")).toBe(false);
-		expect(exists("../../shared/self-update.ts")).toBe(false);
+	it("never calls Electrobun's network updater", () => {
+		for (const path of ["../index.ts", "../headless-entry.ts", "../app-version.ts", "../electrobun-platform.ts"]) {
+			expect(read(path), path).not.toMatch(/Updater\.(checkForUpdate|downloadUpdate|applyUpdate|updateInfo)\b/);
+		}
+	});
+
+	it("has no update channel or remote self-update setting", () => {
+		expect(read("../../shared/types/global-settings.ts")).not.toMatch(/\b(updateChannel|remoteSilentUpdate)\b/);
 	});
 
 	it("has no `dev3 update` command", () => {
-		expect(exists("../../cli/commands/update.ts")).toBe(false);
-		expect(cliMainSource).not.toMatch(/command === "update"/);
+		expect(read("../../cli/main.ts")).not.toMatch(/command === "update"/);
 	});
 });

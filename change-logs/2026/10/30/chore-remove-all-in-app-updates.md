@@ -1,0 +1,1 @@
+dev3 no longer checks for or installs updates anywhere: the desktop "Check for Updates…" menu item, the header update prompt, the update channel setting and the `dev3 update` command are gone, and `dev3 remote` no longer updates itself. A build now runs whatever was built from source; the "Update a remote box on its own" setting and its tip are removed too.

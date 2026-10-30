@@ -266,15 +266,12 @@ vi.mock("../agents", () => ({
 	saveAllAgents: vi.fn(),
 }));
 
-vi.mock("../updater", () => ({
-	checkForUpdateWithChannel: vi.fn(),
-	downloadUpdateForChannel: vi.fn(),
-	applyUpdate: vi.fn(),
+vi.mock("../app-version", () => ({
 	getLocalVersion: vi.fn(),
 }));
 
 vi.mock("../settings", () => ({
-	loadSettings: vi.fn(() => ({ updateChannel: "stable", taskSortOrder: "oldest-first" })),
+	loadSettings: vi.fn(() => ({ taskSortOrder: "oldest-first" })),
 	loadSettingsSync: vi.fn(() => ({ playSoundOnTaskComplete: false })),
 	saveSettings: vi.fn(),
 	recordFavoriteUsages: vi.fn(),
@@ -429,7 +426,7 @@ import * as agents from "../agents";
 import * as launchAvailability from "../agent-launch-availability";
 import * as accountRouter from "../account-router";
 import * as workspaceGuard from "../task-workspace-guard";
-import * as updater from "../updater";
+import * as appVersion from "../app-version";
 import { setupAgentHooks } from "../agent-hooks";
 import { loadSettings, loadSettingsSync, saveSettings } from "../settings";
 import * as repoConfig from "../repo-config";
@@ -654,7 +651,7 @@ describe("handleBellAutoStatus", () => {
 		vi.mocked(data.loadProjects).mockReset();
 		vi.mocked(data.loadTasks).mockReset();
 		vi.mocked(data.updateTask).mockReset();
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 	});
 
 	it("moves in-progress task to user-questions", async () => {
@@ -2174,7 +2171,7 @@ describe("handlers.getGlobalSettings", () => {
 	beforeEach(() => vi.clearAllMocks());
 
 	it("returns settings from loadSettings", async () => {
-		const settings = { updateChannel: "beta" } as unknown as GlobalSettings;
+		const settings = { taskSortOrder: "newest-first" } as unknown as GlobalSettings;
 		vi.mocked(loadSettings).mockResolvedValue(settings);
 
 		const result = await handlers.getGlobalSettings();
@@ -2198,10 +2195,9 @@ describe("handlers.saveGlobalSettings", () => {
 	});
 
 	it("saves and broadcasts normalized interface settings", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "beta" } as unknown as GlobalSettings);
-		await handlers.saveGlobalSettings({ updateChannel: "stable" } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "newest-first" } as unknown as GlobalSettings);
+		await handlers.saveGlobalSettings({} as GlobalSettings);
 		const expected = {
-			updateChannel: "stable",
 			simplifiedMode: false,
 			hiddenControls: [],
 			personalHiddenControls: [],
@@ -2216,7 +2212,7 @@ describe("handlers.saveGlobalSettings", () => {
 	// its own copy of the settings: without the push the favorite was saved and
 	// invisible everywhere but the screen it was starred on.
 	it("broadcasts the settings after a favorite is toggled", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
 		await handlers.toggleFavoriteAgent({ agentId: "builtin-claude", configId: "cfg-1" });
 		expect(push).toHaveBeenCalledWith(
 			"globalSettingsUpdated",
@@ -2231,14 +2227,13 @@ describe("handlers.saveGlobalSettings", () => {
 	// install got a fresh id (and lost its flag targeting) on every launch.
 	it("keeps the stored legacy id when the renderer's snapshot predates it", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({
-			updateChannel: "stable",
 			analyticsDistinctId: "legacy-analytics-id",
 		} as GlobalSettings);
 
-		await handlers.saveGlobalSettings({ updateChannel: "beta" } as unknown as GlobalSettings);
+		await handlers.saveGlobalSettings({ taskSortOrder: "newest-first" } as unknown as GlobalSettings);
 
 		expect(saveSettings).toHaveBeenCalledWith(
-			expect.objectContaining({ updateChannel: "beta", analyticsDistinctId: "legacy-analytics-id" }),
+			expect.objectContaining({ taskSortOrder: "newest-first", analyticsDistinctId: "legacy-analytics-id" }),
 		);
 	});
 
@@ -2246,7 +2241,7 @@ describe("handlers.saveGlobalSettings", () => {
 	// trusting the payload switched Auto off (or back on) on the next unrelated save.
 	it("keeps the stored Auto account default whatever the renderer's snapshot says", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({ autoAccountDefault: { claude: true } } as GlobalSettings);
-		await handlers.saveGlobalSettings({ updateChannel: "beta" } as unknown as GlobalSettings);
+		await handlers.saveGlobalSettings({ taskSortOrder: "newest-first" } as unknown as GlobalSettings);
 		expect(vi.mocked(saveSettings).mock.lastCall?.[0].autoAccountDefault).toEqual({ claude: true });
 
 		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
@@ -2273,7 +2268,7 @@ describe("handlers.saveGlobalSettings", () => {
 	it("leaves the freeze collector alone when the switch did not change", async () => {
 		const { applyFreezeDiagnosticsSetting } = await import("../freeze-diagnostics");
 		vi.mocked(loadSettings).mockResolvedValue({ freezeDiagnosticsEnabled: true } as GlobalSettings);
-		await handlers.saveGlobalSettings({ freezeDiagnosticsEnabled: true, updateChannel: "beta" } as unknown as GlobalSettings);
+		await handlers.saveGlobalSettings({ freezeDiagnosticsEnabled: true, taskSortOrder: "newest-first" } as unknown as GlobalSettings);
 		expect(applyFreezeDiagnosticsSetting).not.toHaveBeenCalled();
 	});
 
@@ -2281,7 +2276,7 @@ describe("handlers.saveGlobalSettings", () => {
 		_resetWatchedNotificationState();
 		setFocusMode(true);
 
-		await handlers.saveGlobalSettings({ updateChannel: "stable" } as GlobalSettings);
+		await handlers.saveGlobalSettings({} as GlobalSettings);
 
 		expect(isNotificationSuppressed()).toBe(true);
 		_resetWatchedNotificationState();
@@ -2294,11 +2289,11 @@ describe("handlers.saveGlobalSettings", () => {
 	it.skipIf(process.platform === "win32")(
 		"keeps the live theme when the shell changes and the snapshot carries no resolvedTheme",
 		async () => {
-			vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+			vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
 			await handlers.setTmuxTheme({ theme: "light" });
 			vi.mocked(pty.applyTmuxTheme).mockClear();
 
-			await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+			await handlers.saveGlobalSettings({ terminalShell: "sh" } as GlobalSettings);
 
 			// No `paneDimming`: a shell change must not override the server-wide
 			// dimming choice another dev3 instance may have made since.
@@ -2313,9 +2308,9 @@ describe("handlers.saveGlobalSettings", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("leaves tmux alone when the shell did not change", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({ terminalShell: "sh" } as GlobalSettings);
 
-		await handlers.saveGlobalSettings({ updateChannel: "stable", terminalShell: "sh" } as GlobalSettings);
+		await handlers.saveGlobalSettings({ terminalShell: "sh" } as GlobalSettings);
 
 		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
 	});
@@ -2323,25 +2318,25 @@ describe("handlers.saveGlobalSettings", () => {
 	// The toggle is an explicit override of the server-wide choice: it has to
 	// reach the live server at once, whichever instance the user clicked in.
 	it.skipIf(process.platform === "win32")("overrides the server-wide choice when pane dimming is switched off", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
 
-		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: false } as GlobalSettings);
+		await handlers.saveGlobalSettings({ dimInactivePanes: false } as GlobalSettings);
 
 		expect(pty.applyTmuxTheme).toHaveBeenCalledWith(expect.any(String), { appearancePreset: "default", paneDimming: false });
 	});
 
 	it.skipIf(process.platform === "win32")("overrides the server-wide choice when pane dimming is switched back on", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", dimInactivePanes: false } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({ dimInactivePanes: false } as GlobalSettings);
 
-		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: true } as GlobalSettings);
+		await handlers.saveGlobalSettings({ dimInactivePanes: true } as GlobalSettings);
 
 		expect(pty.applyTmuxTheme).toHaveBeenCalledWith(expect.any(String), { appearancePreset: "default", paneDimming: true });
 	});
 
 	it.skipIf(process.platform === "win32")("leaves tmux alone when pane dimming stays at its default", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as GlobalSettings);
+		vi.mocked(loadSettings).mockResolvedValue({} as GlobalSettings);
 
-		await handlers.saveGlobalSettings({ updateChannel: "stable", dimInactivePanes: true } as GlobalSettings);
+		await handlers.saveGlobalSettings({ dimInactivePanes: true } as GlobalSettings);
 
 		expect(pty.applyTmuxTheme).not.toHaveBeenCalled();
 	});
@@ -2397,7 +2392,6 @@ describe("handlers.setTmuxTheme", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		} as GlobalSettings);
 
 		await handlers.setTmuxTheme({ theme: "light", preference: "system" });
@@ -2846,7 +2840,7 @@ function tmuxArgvSince(from: number): string[] {
 describe("handlers.moveTask", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 	});
 
 	it("todo → in-progress: creates worktree + PTY", async () => {
@@ -3575,7 +3569,7 @@ describe("handlers.moveTaskToProject", () => {
 		const moved = makeTask({ id: "task-1", projectId: "to", status: "todo" });
 		vi.mocked(data.getProject).mockImplementation(async (id) => (id === "from" ? from : to));
 		vi.mocked(data.moveTaskToProject).mockResolvedValue(moved);
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 		const push = vi.fn();
 		setPushMessage(push);
 
@@ -3609,7 +3603,7 @@ describe("handlers.moveTaskToProject", () => {
 describe("virtual task lifecycle", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 		// has-session probe → 0 (exists) so launchTaskPty treats the session as
 		// pre-existing and skips the split-shell loop (keeps the test fast).
 		mockSpawn.mockReturnValue({ exited: Promise.resolve(0) });
@@ -4939,7 +4933,7 @@ describe("handlers.spawnVariants", () => {
 			// regression silently pass — force it to reject so any accidental git
 			// call in the virtual path fails loudly.
 			vi.mocked(git.createWorktree).mockReset();
-			vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+			vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 			// has-session probe → 0 (exists) so launchTaskPty skips the split-shell loop.
 			mockSpawn.mockReturnValue({ exited: Promise.resolve(0) });
 		});
@@ -7417,7 +7411,7 @@ describe("handlers.checkSystemRequirements", () => {
 		vi.mocked(existsSync).mockReturnValue(true);
 		vi.mocked(statSync).mockReturnValue({ isFile: () => true, mode: 0o755 } as any);
 		vi.mocked(accessSync).mockImplementation(() => undefined);
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({} as any);
 	});
 
 	it("returns installed status for each requirement", async () => {
@@ -7522,7 +7516,6 @@ describe("handlers.setCustomBinaryPath", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.mocked(loadSettings).mockResolvedValue({
-			updateChannel: "stable",
 			customBinaryPaths: { git: "/known/good/git" },
 		} as any);
 		vi.mocked(existsSync).mockReturnValue(true);
@@ -7574,7 +7567,7 @@ describe("resolveTmuxBinaryAtStartup", () => {
 		vi.mocked(existsSync).mockReturnValue(true);
 		vi.mocked(statSync).mockReturnValue({ isFile: () => true, mode: 0o755 } as any);
 		vi.mocked(accessSync).mockImplementation(() => undefined);
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({} as any);
 	});
 
 	it("resolves and commits the vendored keg at startup", async () => {
@@ -7621,7 +7614,6 @@ describe("resolveTmuxBinaryAtStartup", () => {
 		const homeDirectory = "/Users/tester";
 		const keg = "/opt/homebrew/opt/tmux@3.6/bin/tmux";
 		vi.mocked(loadSettings).mockResolvedValue({
-			updateChannel: "stable",
 			customBinaryPaths: { tmux: homeDirectory },
 		} as any);
 		mockSpawnSync.mockReturnValue({ exitCode: 1, stdout: null });
@@ -7649,88 +7641,22 @@ describe("resolveTmuxBinaryAtStartup", () => {
 });
 
 // ================================================================
-// handlers.checkForUpdate / downloadUpdate / applyUpdate / getAppVersion
+// handlers.getAppVersion
 // ================================================================
-
-describe("handlers.checkForUpdate", () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it("returns update check result", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "beta" } as any);
-		vi.mocked(updater.checkForUpdateWithChannel).mockResolvedValue({
-			updateAvailable: true,
-			version: "1.2.3",
-		});
-
-		const result = await handlers.checkForUpdate();
-		expect(result).toEqual({ updateAvailable: true, version: "1.2.3" });
-		expect(updater.checkForUpdateWithChannel).toHaveBeenCalledWith("beta");
-	});
-});
-
-describe("handlers.downloadUpdate", () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it("downloads update for configured channel", async () => {
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable" } as any);
-		vi.mocked(updater.downloadUpdateForChannel).mockResolvedValue({ ok: true });
-
-		const result = await handlers.downloadUpdate();
-		expect(result).toEqual({ ok: true });
-		expect(updater.downloadUpdateForChannel).toHaveBeenCalledWith("stable", expect.any(Function));
-	});
-});
-
-describe("handlers.applyUpdate", () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it("delegates to updater.applyUpdate", async () => {
-		await handlers.applyUpdate();
-		expect(updater.applyUpdate).toHaveBeenCalledOnce();
-	});
-});
-
-describe("update handlers in headless mode", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		process.env.DEV3_HEADLESS = "1";
-	});
-	afterEach(() => {
-		delete process.env.DEV3_HEADLESS;
-	});
-
-	// `dev3 remote` runs whatever was built; it must never ask the release feed.
-	it("refuses to check, download or apply without touching the updater", async () => {
-		vi.mocked(updater.getLocalVersion).mockResolvedValue({ version: "1.60.0", hash: "abc", channel: "prod" } as any);
-
-		const check = await handlers.checkForUpdate();
-		const download = await handlers.downloadUpdate();
-
-		expect(check).toEqual(expect.objectContaining({ updateAvailable: false, version: "1.60.0", error: expect.stringContaining("rebuild") }));
-		expect(download).toEqual({ ok: false, error: expect.stringContaining("rebuild") });
-		await expect(handlers.applyUpdate()).rejects.toThrow(/rebuild/);
-		expect(updater.checkForUpdateWithChannel).not.toHaveBeenCalled();
-		expect(updater.downloadUpdateForChannel).not.toHaveBeenCalled();
-		expect(updater.applyUpdate).not.toHaveBeenCalled();
-	});
-});
 
 describe("handlers.getAppVersion", () => {
 	beforeEach(() => vi.clearAllMocks());
 
 	it("returns version info", async () => {
-		vi.mocked(updater.getLocalVersion).mockResolvedValue({
+		vi.mocked(appVersion.getLocalVersion).mockResolvedValue({
 			version: "0.3.0",
 			hash: "abc123",
 			channel: "dev",
-			buildOrder: 1234,
 		});
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "beta" } as any);
 
 		const result = await handlers.getAppVersion();
 		expect(result).toEqual({
 			version: "0.3.0",
-			channel: "beta",
 			buildChannel: "dev",
 		});
 	});
@@ -9977,7 +9903,7 @@ describe("handlers.openQuickShell", () => {
 		vi.mocked(data.getProject).mockReset();
 		vi.mocked(data.getTask).mockReset();
 		vi.mocked(data.updateTask).mockReset();
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 		mockSpawn.mockReturnValue({ exited: Promise.resolve(0) });
 	});
 
@@ -12222,7 +12148,7 @@ describe("moveTaskToCustomColumn — resume logic", () => {
 		mockSpawn.mockReturnValue({ stderr: new Response(""), stdout: new Response(""), exited: Promise.resolve(0) });
 		vi.mocked(git.createWorktree).mockReset();
 		vi.mocked(git.createWorktree).mockResolvedValue({ worktreePath: "/tmp/new-wt", branchName: "dev3/resumed" } as any);
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 	});
 
 	it("moves active task to custom column without worktree changes", async () => {
@@ -13115,7 +13041,7 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		vi.mocked(data.updateTask).mockImplementation(async (_project: Project, taskId: string, patch: Partial<Task>) => (
 			makeTask({ ...patch, id: taskId })
 		));
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 	});
 
 	afterEach(() => {
@@ -13238,7 +13164,6 @@ describe("startMergeDetectionPoller / stopMergeDetectionPoller", () => {
 		const push = vi.fn();
 		if (settingsOverride) {
 			vi.mocked(loadSettings).mockResolvedValue({
-				updateChannel: "stable",
 				taskSortOrder: "oldest-first",
 				...settingsOverride,
 			} as GlobalSettings);
@@ -13940,7 +13865,7 @@ describe("prepareMergeCompletionPrompt (force re-check)", () => {
 		vi.clearAllMocks();
 		_resetMergePollerState();
 		project = makeProject();
-		vi.mocked(loadSettings).mockResolvedValue({ updateChannel: "stable", taskSortOrder: "oldest-first" } as any);
+		vi.mocked(loadSettings).mockResolvedValue({ taskSortOrder: "oldest-first" } as any);
 		vi.mocked(data.getProject).mockResolvedValue(project);
 		vi.mocked(data.updateTask).mockImplementation(async (_p: Project, _id: string, patch: Partial<Task>) => makeTask(patch));
 	});
@@ -14029,7 +13954,6 @@ describe("prepareMergeCompletionPrompt (force re-check)", () => {
 
 	it("returns a notice-only decision when the global suggestion is off", async () => {
 		vi.mocked(loadSettings).mockResolvedValue({
-			updateChannel: "stable",
 			taskSortOrder: "oldest-first",
 			suggestCompletingTasksAfterMerge: false,
 		} as GlobalSettings);
@@ -14331,7 +14255,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		vi.mocked(saveSettings).mockResolvedValue(undefined);
 	});
@@ -14364,7 +14287,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			agentBinaryPaths: { "builtin-codex": "/custom/codex" },
 		});
 		vi.mocked(existsSync).mockImplementation((path: any) => path === "/custom/codex");
@@ -14399,7 +14321,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			agentBinaryPaths: { "builtin-claude": "/usr/local/bin/claude" },
 		});
 		vi.mocked(existsSync).mockImplementation((path) => String(path) === "/usr/local/bin/claude");
@@ -14420,7 +14341,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			agentCustomBinaryPaths: { "builtin-claude": "/opt/wrappers/claude-wrapper" },
 		});
 		vi.mocked(existsSync).mockImplementation((path) => String(path) === "/opt/wrappers/claude-wrapper");
@@ -14440,7 +14360,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			agentCustomBinaryPaths: { "builtin-claude": "/opt/wrappers/claude-wrapper" },
 			agentBinaryPaths: { "builtin-claude": "/opt/wrappers/claude-wrapper" },
 		});
@@ -14467,7 +14386,6 @@ describe("checkAgentAvailability", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			agentBinaryPaths: { "builtin-claude": "/deleted/path/claude" },
 		});
 		vi.mocked(existsSync).mockReturnValue(false);
@@ -14489,7 +14407,6 @@ describe("setAgentBinaryPath", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		vi.mocked(saveSettings).mockResolvedValue(undefined);
 	});
@@ -16078,23 +15995,6 @@ describe("handlers.getLastRoute / saveLastRoute — fresh-start (dev) mode", () 
 		expect(data.saveLastRoute).not.toHaveBeenCalled();
 	});
 });
-
-describe("handlers.previewUpdatePopover", () => {
-	// Under vitest `import.meta.dir` is empty, so the repo-root walk finds no
-	// change-logs dir — the handler must degrade to a safe unavailable result
-	// rather than throw. The git-window computation itself is unit-tested via the
-	// shared resolvePrevTag / changedKeysFromPaths / selectReleaseWindow helpers.
-	it("degrades to a safe unavailable result when no repo root is resolvable", async () => {
-		const res = await handlers.previewUpdatePopover();
-		expect(res.available).toBe(false);
-		expect(res.changelog).toBeNull();
-		expect(res.diagnostics.includesUncommitted).toBe(true);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// handlers.saveAgents
-// ---------------------------------------------------------------------------
 
 describe("handlers.saveAgents", () => {
 	it("tells every open surface about the new presets, so no launch picker keeps the old ones", async () => {

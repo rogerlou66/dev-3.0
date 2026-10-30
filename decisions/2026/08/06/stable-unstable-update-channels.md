@@ -1,5 +1,7 @@
 # Stable and unstable update channels
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the app no longer selects or reads an update channel; the channels exist only in the release pipeline.
+
 Companion record: `decisions/2026/08/06/extract-reusable-release-build-workflows.md`. It owns the
 release-pipeline refactor the channel work needed, and everything that refactor taught: the
 publish-guard finding, the equivalence-anchor rule, the dead recovery branches, the coverage caps.

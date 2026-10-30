@@ -13,7 +13,7 @@ import { getAgentDirLiveModels } from "../agent-dir-live-models";
 import { agentKey } from "../../shared/agent-adapters/registry";
 import type { AgentLiveModels } from "../../shared/agent-live-models";
 import * as github from "../github";
-import * as updater from "../updater";
+import { getLocalVersion } from "../app-version";
 import * as rosetta from "../rosetta";
 import * as repoConfig from "../repo-config";
 import * as pty from "../pty-server";
@@ -464,74 +464,6 @@ async function getAgentLiveModels(params: {
 	return getAgentDirLiveModels(kind, params.accountId, { refresh: params.refresh });
 }
 
-/** True in the `dev3 remote` server, which has no updater: it runs whatever was built. */
-function isHeadless(): boolean {
-	return process.env.DEV3_HEADLESS === "1";
-}
-
-const HEADLESS_UPDATE_REFUSAL = "dev3 remote does not update itself — rebuild from source and restart it.";
-
-async function checkForUpdate(): Promise<{ updateAvailable: boolean; version: string; error?: string }> {
-	log.info("-> checkForUpdate");
-	if (isHeadless()) {
-		const local = await updater.getLocalVersion();
-		return { updateAvailable: false, version: local.version, error: HEADLESS_UPDATE_REFUSAL };
-	}
-	const settings = await loadSettings();
-	const result = await updater.checkForUpdateWithChannel(settings.updateChannel);
-	log.info("<- checkForUpdate", { ...result });
-	return result;
-}
-
-async function downloadUpdate(): Promise<{ ok: boolean; error?: string }> {
-	log.info("-> downloadUpdate");
-	if (isHeadless()) return { ok: false, error: HEADLESS_UPDATE_REFUSAL };
-	const settings = await loadSettings();
-	const result = await updater.downloadUpdateForChannel(
-		settings.updateChannel,
-		(status, progress) => {
-			getPushMessage()?.("updateDownloadProgress", { status, progress });
-		},
-	);
-	log.info("<- downloadUpdate", result);
-	return result;
-}
-
-async function applyUpdate(): Promise<void> {
-	log.info("-> applyUpdate");
-	if (isHeadless()) throw new Error(HEADLESS_UPDATE_REFUSAL);
-	await updater.applyUpdate();
-}
-
-/**
- * What the update popover needs to warn before restarting: whether the app is
- * being reached remotely, and how many
- * tasks are mid-flight right now.
- *
- * The task count is a WARNING, not a gate because this is an explicit manual
- * action. Helper restarts preserve detached tmux agents, but a process supervisor
- * may terminate them, so the warning states that risk while leaving the choice live.
- *
- * `remoteActive` IS a gate, but only over the unattended countdown: nobody in a
- * browser can see a timer running on the desktop, so it must not fire under them.
- * The manual restart stays available in every state.
- */
-async function getUpdateRestartContext(): Promise<{ remoteActive: boolean; tasksInProgress: number }> {
-	const { isRemoteAccessActive } = await import("../remote-access-server");
-	const remoteActive = isRemoteAccessActive();
-	let tasksInProgress = 0;
-	try {
-		const projects = [...await data.loadProjects(), ...await data.loadVirtualProjects()];
-		for (const project of projects) {
-			const tasks = await data.loadTasks(project);
-			tasksInProgress += tasks.filter((task) => task.status === "in-progress").length;
-		}
-	} catch (err) {
-		log.warn("getUpdateRestartContext: could not count in-progress tasks", { error: String(err) });
-	}
-	return { remoteActive, tasksInProgress };
-}
-
 async function saveLastRoute({ route }: { route: string }): Promise<void> {
 	log.info("-> saveLastRoute");
 	// Fresh-start (dev) mode must not persist the route — it would clobber the
@@ -548,13 +480,11 @@ async function getLastRoute(): Promise<{ route: string | null }> {
 	return { route };
 }
 
-async function getAppVersion(): Promise<{ version: string; channel: string; buildChannel: string }> {
+async function getAppVersion(): Promise<{ version: string; buildChannel: string }> {
 	log.info("-> getAppVersion");
-	const local = await updater.getLocalVersion();
-	const settings = await loadSettings();
+	const local = await getLocalVersion();
 	const result = {
 		version: local.version,
-		channel: settings.updateChannel,
 		buildChannel: local.channel,
 	};
 	log.info("<- getAppVersion", result);
@@ -775,10 +705,6 @@ export const settingsConfigHandlers = {
 	saveAgents,
 	getAgentAvailableModels,
 	getAgentLiveModels,
-	checkForUpdate,
-	downloadUpdate,
-	applyUpdate,
-	getUpdateRestartContext,
 	saveLastRoute,
 	getLastRoute,
 	getAppVersion,

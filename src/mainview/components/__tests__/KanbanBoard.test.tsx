@@ -14,7 +14,6 @@ vi.mock("../../rpc", () => ({
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 			}),
 			reorderColumns: vi.fn().mockResolvedValue(undefined),
 			createCustomColumn: vi.fn(),

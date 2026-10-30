@@ -12,8 +12,8 @@
 /**
  * Every platform the canary channel publishes, in the order the workflow declares them.
  *
- * The `os` token is the one `getPlatformPrefix()` in src/bun/updater.ts builds its feed URL
- * from, so Windows is `win`, never `windows`. The same token names electrobun's build folder
+ * The `os` token is the one the published feed manifests are named with, so Windows is
+ * `win`, never `windows`. The same token names electrobun's build folder
  * (`build/canary-win-x64`) and its artifact prefix, which is why one string serves all three.
  */
 export const CANARY_PLATFORMS = [
@@ -84,29 +84,4 @@ export function decidePlatformPublish(probe: FeedProbe, headSha: string): Publis
 		return { build: false, reason: `already published at ${headSha.slice(0, 9)}` };
 	}
 	return { build: true, reason: `published ${published.sha.slice(0, 9)}, main is at ${headSha.slice(0, 9)}` };
-}
-
-/**
- * Whether the canary feed carries a build for this host — DERIVED FROM {@link CANARY_PLATFORMS},
- * the same list that drives publishing, so the two cannot drift.
- *
- * WHY NOT PROBE THE BUCKET AT RUNTIME: an anonymous GET cannot tell "no build for this
- * platform" from "no permission" on `h0x91b-releases` — a missing key answers 403, which is
- * how the publisher's own bootstrap deadlocked. A client asking that question would have to
- * guess, and guessing wrong either hides a working channel or offers a broken one.
- *
- * WHY NOT A SECOND LIST: adding `win-x64` to publishing must be the ONLY edit needed to make
- * the channel selectable on Windows. A hand-maintained copy here would be a second place to
- * remember, and it is precisely the place nobody would think to look.
- */
-export function canaryPublishesFor(os: string, arch: string): boolean {
-	return CANARY_PLATFORMS.some((p) => p.os === os && p.arch === arch);
-}
-
-/** Node's `process.platform` in the spelling {@link CANARY_PLATFORMS} uses. Unknown stays unknown. */
-export function hostOsName(platform: string): string {
-	if (platform === "darwin") return "macos";
-	if (platform === "win32") return "win";
-	if (platform === "linux") return "linux";
-	return platform;
 }

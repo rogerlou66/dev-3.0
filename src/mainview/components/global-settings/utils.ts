@@ -22,7 +22,6 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
 	defaultConfigId: "claude-auto",
 	taskSortOrder: "oldest-first",
-	updateChannel: "stable",
 };
 
 export function resolveTheme(

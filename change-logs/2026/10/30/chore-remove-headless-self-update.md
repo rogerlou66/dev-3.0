@@ -1,1 +1,0 @@
-`dev3 remote` no longer checks the release feed every 30 minutes or installs updates on its own, and the `dev3 update` command is gone; a headless box now runs whatever was built from source. The "Update a remote box on its own" setting and its tip are removed.

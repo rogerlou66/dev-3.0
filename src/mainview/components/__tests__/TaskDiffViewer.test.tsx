@@ -473,7 +473,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		localStorage.clear();
 		// Most cases here assert against every fixture file, so they opt into
@@ -907,7 +906,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			defaultDiffViewMode: "unified",
 		});
 
@@ -936,7 +934,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			defaultDiffViewMode: "auto",
 		});
 
@@ -965,7 +962,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			defaultDiffViewMode: "auto",
 		});
 
@@ -2019,7 +2015,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			defaultDiffViewMode: "split",
 		});
 
@@ -2096,7 +2091,6 @@ describe("TaskDiffViewer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 			defaultDiffViewMode: "unified",
 		});
 
@@ -3076,7 +3070,6 @@ describe("TaskDiffViewer narrow viewport", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		localStorage.clear();
 		// Narrow cases assert the full fixture totals, so tests stay included.
@@ -3295,7 +3288,6 @@ describe("TaskDiffViewer — recent commits mode", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 		localStorage.clear();
 		document.documentElement.dataset.theme = "dark";
@@ -3485,7 +3477,6 @@ describe("TaskDiffViewer — GitHub PR review layer", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		} as never);
 		vi.mocked(api.request.getTaskPrComments).mockResolvedValue(makePrPayload() as never);
 		vi.mocked(api.request.sendAgentMessageNow).mockResolvedValue({ status: "delivered", spilledPath: null });

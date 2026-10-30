@@ -40,7 +40,6 @@ const FLAT_COUNT_KEYS: Record<string, string> = {
 	"artifactViewer.versionOf": "count is the total in 'Version N of M', never a subject",
 	"nativePaneLab.pager": "count is the total in 'Pane N of M'",
 	"infoPanel.prShowResolved": "count sits alone in parentheses",
-	"updateSim.windowFiles": "count sits alone in parentheses",
 	"task.hibernateConfirmMulti":
 		"only rendered when the task has 2+ panes, so every locale's wording is already its plural form",
 };

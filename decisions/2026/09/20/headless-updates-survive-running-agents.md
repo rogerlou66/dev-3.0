@@ -1,6 +1,6 @@
 # Headless updates survive running agents
 
-Superseded on 2026-10-30 by `decisions/2026/10/30/remove-headless-self-update.md`: headless self-update is deleted altogether.
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: headless self-update is deleted altogether.
 
 Superseded on 2026-09-20 by [`headless-update-safety-boundaries`](headless-update-safety-boundaries.md): running agents survive helper restarts, but supervisor-owned restarts must wait.
 

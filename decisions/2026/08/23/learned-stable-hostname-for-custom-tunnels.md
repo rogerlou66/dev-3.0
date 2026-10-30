@@ -1,6 +1,6 @@
 # Learned hostname stability for custom tunnels
 
-Superseded on 2026-10-30 by `decisions/2026/10/30/remove-headless-self-update.md`: hostname stability only fed the self-update handoff; `tunnel-host-memory.ts` is deleted and `tunnel-hosts.json` is no longer written.
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: hostname stability only fed the self-update handoff; `tunnel-host-memory.ts` is deleted and `tunnel-hosts.json` is no longer written.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # Headless update safety boundaries
 
-Superseded on 2026-10-30 by `decisions/2026/10/30/remove-headless-self-update.md`: headless self-update is deleted altogether, so there is no unattended restart to bound.
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: headless self-update is deleted altogether, so there is no unattended restart to bound.
 
 ## Context
 

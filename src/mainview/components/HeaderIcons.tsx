@@ -330,19 +330,6 @@ export function AgentTrafficIcon({ className }: HeaderIconProps) {
 	);
 }
 
-// 22 — Update ready: the arrow launches up into the cloud.
-export function UpdateReadyIcon({ className }: HeaderIconProps) {
-	return (
-		<svg {...svgBase(className)}>
-			<path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24" className="hdr hdr-cloud-bob" />
-			<g className="hdr hdr-up-arrow">
-				<path d="M12 21v-8" />
-				<path d="m8 17 4-4 4 4" />
-			</g>
-		</svg>
-	);
-}
-
 // 22 — Help mode: the question mark redraws itself, then the dot drops in.
 export function HelpModeIcon({ className }: HeaderIconProps) {
 	return (

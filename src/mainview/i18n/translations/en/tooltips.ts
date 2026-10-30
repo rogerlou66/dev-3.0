@@ -8,7 +8,6 @@ export const tooltips = {
 	"ttip.header.navForward": "Return to the screen you just went back from. The history stack keeps your recent screens in order.",
 	"ttip.header.switchProject": "Jump straight to another project's board without going through the dashboard.",
 	"ttip.header.switchVariant": "This task runs several variants — jump to another attempt without leaving the screen (also \u21e7\u2318[ / \u21e7\u2318]).",
-	"ttip.header.updateReady": "A new version is downloaded and ready. Click to restart the app and apply it.",
 	"ttip.header.quickShell":
 		"A throwaway terminal for quick one-off commands. It runs as a scratch task in the Operations board, so nothing touches your project worktrees.",
 	"ttip.header.projectTerminal": "A terminal in this project's root folder — the main working tree, not a task worktree.",

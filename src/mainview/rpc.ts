@@ -108,7 +108,6 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	agentLaunchRequested: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentLaunchRequested", { detail: payload })),
 	agentRequestResolved: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentRequestResolved", { detail: payload })),
 	agentLaunchAutoApproveHeld: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentLaunchAutoApproveHeld", { detail: payload })),
-	updateAvailable: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateAvailable", { detail: payload })),
 	portsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:portsUpdated", { detail: payload })),
 	devServerUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:devServerUpdated", { detail: payload })),
 	exposedPortsChanged: (payload) => window.dispatchEvent(new CustomEvent("rpc:exposedPortsChanged", { detail: payload })),
@@ -116,7 +115,6 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	resourceUsageUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:resourceUsageUpdated", { detail: payload })),
 	systemMemoryUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:systemMemoryUpdated", { detail: payload })),
 	agentRateLimitsUpdated: (payload) => window.dispatchEvent(new CustomEvent("rpc:agentRateLimitsUpdated", { detail: payload })),
-	updateDownloadProgress: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateDownloadProgress", { detail: payload })),
 	cloneProgress: (payload) => window.dispatchEvent(new CustomEvent("rpc:cloneProgress", { detail: payload })),
 	columnAgentFailed: (payload) => window.dispatchEvent(new CustomEvent("rpc:columnAgentFailed", { detail: payload })),
 	taskPreparationFailed: (payload) => window.dispatchEvent(new CustomEvent("rpc:taskPreparationFailed", { detail: payload })),
@@ -150,7 +148,6 @@ const pushMessageHandlers: Record<string, (payload: any) => void> = {
 	menuAction: (payload) => window.dispatchEvent(new CustomEvent("rpc:menuAction", { detail: payload })),
 	showQuitDialog: () => window.dispatchEvent(new CustomEvent("rpc:showQuitDialog")),
 	showAbout: (payload) => window.dispatchEvent(new CustomEvent("rpc:showAbout", { detail: payload })),
-	updateCheckOutcome: (payload) => window.dispatchEvent(new CustomEvent("rpc:updateCheckOutcome", { detail: payload })),
 };
 
 /**

@@ -1,5 +1,7 @@
 # Rename the second update channel to canary, and delete the vendor patch it depended on
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: the `updateChannel` setting is deleted; the canary name survives only in the release pipeline.
+
 ## Context
 
 The second update channel shipped as `unstable` in #1284/#1288 and **never worked once**.

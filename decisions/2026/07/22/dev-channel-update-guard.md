@@ -1,5 +1,7 @@
 # 151 — Guard the update flow on dev/source builds
 
+Superseded on 2026-10-30 by `decisions/2026/10/30/remove-all-in-app-updates.md`: there is no update flow left to guard.
+
 ## Context
 
 Running the app from source (`bun run dev`) builds it on the `dev` channel. Triggering the manual "Check for Updates" menu action crashed with

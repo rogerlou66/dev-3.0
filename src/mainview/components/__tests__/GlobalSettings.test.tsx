@@ -34,7 +34,6 @@ vi.mock("../../rpc", () => ({
 			checkAgentAvailability: vi.fn().mockResolvedValue([]),
 			setTmuxTheme: vi.fn().mockResolvedValue(undefined),
 			checkCaffeinateAvailable: vi.fn().mockResolvedValue({ available: true }),
-			checkCanaryChannelAvailable: vi.fn().mockResolvedValue({ available: true }),
 			getFreezeDiagnosticsStatus: vi
 				.fn()
 				.mockResolvedValue({ supported: true, running: false, directory: "/logs/freeze" }),
@@ -95,7 +94,6 @@ const mockGlobalSettings: GlobalSettingsType = {
 	defaultAgentId: "agent-1",
 	defaultConfigId: "cfg-1",
 	taskSortOrder: "oldest-first",
-	updateChannel: "stable",
 };
 
 function renderGlobalSettings(section?: SettingsSectionId, anchor?: SettingsEntryAnchor) {
@@ -538,49 +536,6 @@ describe("GlobalSettings", () => {
 				expect.objectContaining({ defaultDiffViewMode: "split" }),
 			);
 		});
-	});
-
-	describe("update channel", () => {
-		it("shows stable selected by default", async () => {
-			setupMocks();
-			renderGlobalSettings("system");
-			await waitForLoad();
-
-			const select = screen.getByDisplayValue("Stable");
-			expect(select).toBeInTheDocument();
-		});
-
-		// The control is ENABLED again: run 31257371545 published canary-macos-arm64,
-		// canary-macos-x64, canary-linux-x64 and canary-linux-arm64 (all HTTP 200, buildOrder
-		// 1618, sha 7a9d230fb). It shipped `disabled` while that was not true, because a
-		// channel with no manifest answers 403 and reads to the user as a bare error.
-		it("is enabled where the canary feed publishes a build", async () => {
-			setupMocks();
-			renderGlobalSettings("system");
-			await waitForLoad();
-
-			expect(
-				screen.getByDisplayValue("Stable"),
-				"the update-channel select must be enabled when the host answers that canary publishes for it. It was disabled while nothing was published; re-disabling it globally would silently remove the feature on every platform to protect one.",
-			).not.toBeDisabled();
-		});
-
-		// The per-platform half. Windows has no canary build leg, so `canary-win-x64` answers
-		// 403 — enabling the control there would hand a Windows user the exact bare
-		// `HTTP 403 fetching update.json` that v1.42.1 shipped.
-		it("is disabled, with a reason, where the channel publishes nothing", async () => {
-			setupMocks();
-			mockedApi.request.checkCanaryChannelAvailable.mockResolvedValue({ available: false });
-			renderGlobalSettings("system");
-			await waitForLoad();
-
-			expect(
-				await screen.findByText(/not published for this platform yet/i),
-				"a disabled channel picker must SAY why. A dimmed control with no explanation reads as broken rather than as 'not yet published here'.",
-			).toBeInTheDocument();
-			expect(screen.getByDisplayValue("Stable")).toBeDisabled();
-		});
-
 	});
 
 	describe("default agent selection", () => {

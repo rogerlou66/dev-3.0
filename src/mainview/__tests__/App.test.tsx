@@ -57,7 +57,6 @@ vi.mock("../rpc", () => ({
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 			}),
 			// Entering help mode records the one-way discovery flag.
 			saveGlobalSettings: vi.fn().mockResolvedValue(undefined),
@@ -1065,7 +1064,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 				experimentalAgentTraffic: true,
 			});
 			vi.mocked(api.request.getProjects).mockResolvedValue(twoProjects);
@@ -1544,7 +1542,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 				openArtifactsInPopup: true,
 			});
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
@@ -1573,7 +1570,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 			});
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
 				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
@@ -1617,7 +1613,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 				openArtifactsInPopup: true,
 			});
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
@@ -1649,7 +1644,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 			});
 			vi.mocked(api.request.getLastRoute).mockResolvedValue({
 				route: JSON.stringify({ screen: "project", projectId: "p1", activeTaskId: "t-artifact" }),
@@ -1682,7 +1676,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first" as const,
-				updateChannel: "stable" as const,
 			};
 
 			async function renderOnTask() {
@@ -2569,7 +2562,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 				playSoundOnTaskComplete: false,
 			});
 
@@ -2814,7 +2806,6 @@ describe("App keyboard shortcuts", () => {
 				defaultAgentId: "builtin-claude",
 				defaultConfigId: "claude-default",
 				taskSortOrder: "oldest-first",
-				updateChannel: "stable",
 				favorites: [{ agentId: "builtin-claude", configId: "best-value", uses: 1, lastUsedAt: 1 }],
 			});
 			await openLaunchDialogFromScratch();

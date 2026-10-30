@@ -62,7 +62,6 @@ describe("BugHuntersLightbox", () => {
 			defaultAgentId: "builtin-claude",
 			defaultConfigId: "claude-default",
 			taskSortOrder: "oldest-first",
-			updateChannel: "stable",
 		});
 	});
 

@@ -23,24 +23,3 @@ export interface UpdateChangelog {
 	featureCount: number; // Total new features in the release window
 	fixCount: number; // Total new fixes in the release window
 }
-
-/**
- * Result of the dev-only update-popover simulator (`previewUpdatePopover` RPC).
- * Runs the release-time release-window logic against the local `change-logs/`
- * dir + git tags so a developer can preview the next release's "what's new"
- * popover before shipping. Unavailable on production bundles (no change-logs
- * dir / not a git checkout).
- */
-export interface UpdatePopoverPreview {
-	available: boolean; // false when there is no change-logs dir or the app is not running from a git checkout
-	reason?: string; // machine-readable why-unavailable code, when available === false
-	changelog: UpdateChangelog | null; // exactly what the real popover would render
-	diagnostics: {
-		prevTag: string | null; // release tag the window is measured from (null → fallback / no tags)
-		usedFallback: boolean; // git window empty → fell back to the newest-day batch
-		windowFiles: string[]; // "<type>-<slug>" of each entry in the window
-		totalEntries: number; // total parsed changelog entries (whole history)
-		includesUncommitted: boolean; // window counts working-tree + untracked files, not just committed
-		mergedPRs: number; // squash-merged PRs (commits with a "(#N)" subject) since prevTag
-	};
-}

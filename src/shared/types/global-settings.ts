@@ -1,5 +1,4 @@
 import type { TerminalBackendIdentity } from "../terminal-backend-identity";
-import type { UpdateChannel } from "../update-channel";
 import type { ShellFlavor } from "../posix-shell";
 import type { FavoriteAgentConfig } from "./coding-agents";
 
@@ -85,7 +84,6 @@ export interface GlobalSettings {
 	 * most-recently-used order. See sortTasks.ts.
 	 */
 	taskSortOrder: "oldest-first" | "newest-first";
-	updateChannel: UpdateChannel;
 	appearancePreset?: "default" | "cmux";
 	theme?: "dark" | "light" | "system";
 	resolvedTheme?: "dark" | "light";
@@ -201,11 +199,6 @@ export interface GlobalSettings {
 	artifactTemplate?: "off" | "custom";
 	/** The user's own starter folder for `"custom"`. Absent = `~/.dev3.0/artifact-template-custom`, seeded from the dev3 template. */
 	artifactTemplatePath?: string;
-	/**
-	 * Retained only so older app versions sharing settings.json keep their stored
-	 * value. Current versions have no headless self-update and never read it.
-	 */
-	remoteSilentUpdate?: boolean;
 	preventSleepWhileRunning?: boolean; // keep a sleep inhibitor running while the app is open
 	skipQuitDialog?: boolean; // suppress the "tmux keeps running" quit confirmation
 	/**

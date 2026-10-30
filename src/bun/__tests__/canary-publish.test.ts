@@ -96,18 +96,10 @@ describe("deciding whether a platform needs an canary build", () => {
 	// English sentence says, and it would build a perfectly well-formed
 	// `canary-windows-x64-update.json` that no client ever fetches — green run, populated
 	// bucket, zero Windows users updated, nothing anywhere saying why.
-	it("spells Windows the way the updater spells it, not the way the runner does", () => {
-		const updater = readFileSync(
-			fileURLToPath(new URL("../updater.ts", import.meta.url)),
-			"utf8",
-		);
-		expect(
-			updater,
-			"getPlatformPrefix no longer maps win32 to 'win'. The published manifest key and the key the app asks for are built from two different files, and this is the only thing tying them together. Fix: whichever side changed, change the other in the same commit.",
-		).toMatch(/"win32"\s*\?\s*"win"/);
+	it("spells Windows the way the feed manifests are named, not the way the runner does", () => {
 		expect(
 			CANARY_PLATFORMS.map((p) => p.os),
-			"a platform is declared as 'windows'. The in-app updater fetches `{channel}-win-{arch}-update.json`, so publishing under 'windows' writes a manifest nobody reads.",
+			"a platform is declared as 'windows'. Feed manifests are named `{channel}-win-{arch}-update.json`, so publishing under 'windows' writes a manifest nobody reads.",
 		).not.toContain("windows");
 	});
 
