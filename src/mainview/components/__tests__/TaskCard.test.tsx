@@ -217,6 +217,15 @@ describe("TaskCard", () => {
 			expect(within(screen.getByTestId("task-card-rail")).queryByText("REVIEW")).not.toBeInTheDocument();
 		});
 
+		it("floats hover actions over the title instead of reserving row width for them", () => {
+			renderCard(makeTask({ status: "todo", title: "Two-line title" }), { compact: true });
+
+			const actions = screen.getByTestId("task-card-hover-actions");
+			expect(actions).toHaveClass("absolute", "pointer-events-none", "opacity-0", "group-hover:pointer-events-auto", "group-focus-within:opacity-100");
+			expect(actions.parentElement).toBe(screen.getByTestId("task-card-title").parentElement);
+			expect(within(actions).getByRole("button", { name: "Run" })).toBeInTheDocument();
+		});
+
 		it("shows full title plus the latest update without requesting a terminal preview", async () => {
 			vi.useFakeTimers();
 			mockedApi.request.getTerminalPreview.mockResolvedValue("tiny terminal snapshot");
