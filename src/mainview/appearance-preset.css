@@ -24,3 +24,114 @@
 [data-appearance-preset="cmux"] .font-sans {
 	font-family: 'SF Mono', 'JetBrainsMono Nerd Font Mono', 'PingFang SC', monospace;
 }
+
+/* Clarity: flat high-contrast dark. Solid surfaces instead of glass, one clear
+   hue per column, and idle cards that stay readable. */
+[data-appearance-preset="clarity"] {
+	--surface-base: 13 17 22;
+	--surface-raised: 21 26 33;
+	--surface-raised-hover: 28 34 43;
+	--surface-elevated: 28 34 43;
+	--surface-elevated-hover: 37 45 56;
+	--surface-overlay: 34 41 51;
+	--text-primary: 240 243 248;
+	--text-secondary: 205 212 222;
+	--text-tertiary: 163 173 186;
+	--text-muted: 139 149 163;
+	--border-default: 52 62 75;
+	--border-active: 80 94 112;
+	--accent: 122 162 247;
+	--accent-emphasis: 169 193 250;
+	--success: 74 222 128;
+	--success-strong: 134 239 172;
+	--warning: 245 184 61;
+	--warning-strong: 248 204 110;
+	--danger: 248 113 113;
+	--danger-strong: 252 165 165;
+	--bg-grad-from: #0d1117;
+	--bg-grad-mid: #0d1117;
+	--bg-grad-to: #0d1117;
+	--glass-column-rgb: 21 26 33;
+	--glass-column-alpha: 0.96;
+	--glass-card-rgb: 255 255 255;
+	--glass-card-alpha: 0.05;
+	--glass-card-hover-alpha: 0.09;
+	--glass-header-rgb: 17 22 29;
+	--glass-header-alpha: 0.97;
+	--glass-border-column-alpha: 0.08;
+	--glass-border-card-alpha: 0.13;
+	--glass-border-card-hover-alpha: 0.22;
+	--glow-start-alpha: 0.09;
+	--glow-mid-alpha: 0.025;
+	--glow-line-alpha: 0.95;
+}
+
+[data-appearance-preset="clarity"] .task-card-idle {
+	filter: none;
+	opacity: 0.88;
+}
+
+[data-appearance-preset="clarity"] .column-glow::before {
+	box-shadow: inset 0 3px 0 0 rgb(var(--col-rgb) / var(--glow-line-alpha));
+}
+
+/* Clarity on the workspace board: column identity edge, tinted lanes, count pills. */
+[data-appearance-preset="clarity"] .ws-col-head {
+	box-shadow: inset 0 3px 0 rgb(var(--col-rgb));
+	background-color: rgb(var(--col-rgb) / 0.07);
+}
+[data-appearance-preset="clarity"] .ws-col-label {
+	color: rgb(var(--col-rgb));
+}
+[data-appearance-preset="clarity"] .ws-col-count {
+	color: rgb(var(--col-rgb));
+	background-color: rgb(var(--col-rgb) / 0.16);
+	border-radius: 9999px;
+	padding: 1px 7px;
+	font-weight: 600;
+}
+[data-appearance-preset="clarity"] .ws-col-cell {
+	background-color: rgb(var(--col-rgb) / 0.045);
+}
+[data-appearance-preset="clarity"] .ws-done-head {
+	box-shadow: inset 0 3px 0 rgb(var(--success));
+	color: rgb(var(--success-strong));
+}
+[data-appearance-preset="clarity"] .ws-done-count:not(:disabled) {
+	background-color: rgb(var(--success) / 0.12);
+	border-radius: 9999px;
+}
+[data-appearance-preset="clarity"] .ws-inbox-cancel {
+	background-color: transparent;
+	color: rgb(var(--text-tertiary));
+	box-shadow: inset 0 0 0 1px rgb(var(--border-default));
+}
+[data-appearance-preset="clarity"] .ws-inbox-cancel:hover {
+	color: rgb(var(--danger));
+	box-shadow: inset 0 0 0 1px rgb(var(--danger) / 0.5);
+}
+
+/* Priority: P0/P1 loud, routine P3/P4 neutral so urgency stands out. */
+html[data-appearance-preset="clarity"] [data-priority="P0"] {
+	background-color: #f87171;
+	border-color: transparent;
+	color: #1f0606;
+}
+html[data-appearance-preset="clarity"] [data-priority="P1"] {
+	background-color: #fb923c;
+	border-color: transparent;
+	color: #2b1402;
+}
+html[data-appearance-preset="clarity"] [data-priority="P3"],
+html[data-appearance-preset="clarity"] [data-priority="P4"] {
+	background-color: rgb(var(--surface-elevated-hover));
+	border-color: transparent;
+	color: rgb(var(--text-secondary));
+}
+
+[data-appearance-preset="clarity"] .task-badge-offline {
+	border-style: solid;
+	border-color: rgb(251 146 60 / 0.45);
+	background-color: rgb(251 146 60 / 0.12);
+	color: #fdba74;
+}

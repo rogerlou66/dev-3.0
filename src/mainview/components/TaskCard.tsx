@@ -825,7 +825,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					: isHibernated
 						? { label: t("task.hibernatedBadge"), className: "border-edge-active text-fg-muted" }
 						: isDisconnected
-							? { label: t("task.disconnectedBadge"), className: "border-edge-active text-fg-muted" }
+							? { label: t("task.disconnectedBadge"), className: "task-badge-offline border-edge-active text-fg-muted" }
 							: null;
 
 		return (
@@ -847,7 +847,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				className={`group relative flex h-16 min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
 					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : "border-edge"
 				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
-					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""
+					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "task-card-idle grayscale opacity-60" : ""
 				}`}
 				style={needsInput ? {
 					background: `linear-gradient(90deg, ${statusColors["user-questions"]}18, ${statusColors["user-questions"]}08)`,
@@ -1020,7 +1020,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				isActive || isCompleted || isCancelled
 					? "cursor-pointer hover:-translate-y-0.5 hover:shadow-card-hover"
 					: "cursor-grab active:cursor-grabbing hover:-translate-y-0.5 hover:shadow-card-hover"
-			} ${isCompleting || isShuttingDown ? "grayscale opacity-40 pointer-events-none" : isPreparing ? "opacity-60" : isDisabled ? "opacity-50 pointer-events-none" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""}`}
+			} ${isCompleting || isShuttingDown ? "grayscale opacity-40 pointer-events-none" : isPreparing ? "opacity-60" : isDisabled ? "opacity-50 pointer-events-none" : isHibernated || isDisconnected ? "task-card-idle grayscale opacity-60" : ""}`}
 			style={needsInput ? {
 				background: `linear-gradient(${statusColors["user-questions"]}20, ${statusColors["user-questions"]}0d)`,
 				borderColor: `${statusColors["user-questions"]}70`,
@@ -1203,7 +1203,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 					<Tooltip content={t("task.disconnectedBadge")} detail={t("task.disconnectedHint")}>
 						<span
 							data-testid="task-card-disconnected-badge"
-							className="flex-shrink-0 rounded border border-dashed border-edge-active px-1.5 py-0.5 text-dense font-semibold uppercase tracking-[0.06em] text-fg-muted"
+							className="task-badge-offline flex-shrink-0 rounded border border-dashed border-edge-active px-1.5 py-0.5 text-dense font-semibold uppercase tracking-[0.06em] text-fg-muted"
 						>
 							{t("task.disconnectedBadge")}
 						</span>

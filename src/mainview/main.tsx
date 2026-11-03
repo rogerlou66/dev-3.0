@@ -1,3 +1,4 @@
+import { presetForcesDark } from "../shared/appearance-preset";
 import { bootstrapAppearancePreset, getAppearancePreset } from "./appearance-preset";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -74,7 +75,7 @@ function applySavedTheme(persist = false) {
 		...injectedThemeState,
 	});
 	injectedThemeState = {};
-	const effectiveTheme = getAppearancePreset() === "cmux" ? "dark" : resolved;
+	const effectiveTheme = presetForcesDark(getAppearancePreset()) ? "dark" : resolved;
 	document.documentElement.dataset.theme = effectiveTheme;
 	localStorage.setItem("dev3-theme", preference);
 	if (persist) api.request.setTmuxTheme({ theme: effectiveTheme, preference }).catch(() => {});

@@ -1,3 +1,4 @@
+import { presetForcesDark } from "../shared/appearance-preset";
 import { stopAgentMessageLogWatches } from "./agent-message-log-watch";
 import Electrobun, {
 	ApplicationMenu,
@@ -551,7 +552,7 @@ setFocusMode(loadSettingsSync().focusMode === true);
 const initialAppearance = loadSettingsSync();
 applySavedTmuxPanePreferences(initialAppearance);
 writeTmuxConfigs();
-const initialUiTheme = initialAppearance.appearancePreset === "cmux" ? "dark" : initialAppearance.resolvedTheme ?? "dark";
+const initialUiTheme = presetForcesDark(initialAppearance.appearancePreset) ? "dark" : initialAppearance.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
 await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: initialAppearance.appearancePreset });
 

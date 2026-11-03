@@ -1,3 +1,4 @@
+import { presetForcesDark } from "../shared/appearance-preset";
 import { stopAgentMessageLogWatches } from "./agent-message-log-watch";
 /**
  * Headless entry point for `dev3 remote`.
@@ -230,7 +231,7 @@ const startupSettings = await loadSettings();
 setFocusMode(startupSettings.focusMode === true);
 applySavedTmuxPanePreferences(startupSettings);
 writeTmuxConfigs();
-const initialUiTheme = startupSettings.appearancePreset === "cmux" ? "dark" : startupSettings.resolvedTheme ?? "dark";
+const initialUiTheme = presetForcesDark(startupSettings.appearancePreset) ? "dark" : startupSettings.resolvedTheme ?? "dark";
 setCurrentUiTheme(initialUiTheme);
 await (await import("./pty-server")).applyTmuxTheme(initialUiTheme, { appearancePreset: startupSettings.appearancePreset });
 

@@ -1,17 +1,16 @@
+import { parseAppearancePreset, presetForcesDark, type AppearancePreset } from "../shared/appearance-preset";
 import { useSyncExternalStore } from "react";
 import { api } from "./rpc";
+import { APPEARANCE_PRESET_CHANGE_EVENT } from "./appearance-preset-store";
 import type { GlobalSettings } from "../shared/types";
 import { getInitialThemeState, type ThemePreference } from "./theme-bootstrap";
 import { setTerminalFontOverride } from "./terminal-font";
 
-export type AppearancePreset = "default" | "cmux";
+export type { AppearancePreset };
+export { parseAppearancePreset };
 const STORAGE_KEY = "dev3-appearance-preset";
-const CHANGE_EVENT = "appearance-preset-changed";
+const CHANGE_EVENT = APPEARANCE_PRESET_CHANGE_EVENT;
 let current: AppearancePreset = "default";
-
-export function parseAppearancePreset(value: unknown): AppearancePreset {
-	return value === "cmux" ? "cmux" : "default";
-}
 
 export function getAppearancePreset(): AppearancePreset { return current; }
 
@@ -25,7 +24,7 @@ export function useAppearancePreset(): AppearancePreset {
 }
 
 export function resolveAppearanceTheme(preference: ThemePreference, prefersDark: boolean, preset = current) {
-	return preset === "cmux" ? "dark" : preference === "system" ? (prefersDark ? "dark" : "light") : preference;
+	return presetForcesDark(preset) ? "dark" : preference === "system" ? (prefersDark ? "dark" : "light") : preference;
 }
 
 function savedTheme(): ThemePreference {
@@ -52,7 +51,7 @@ export async function setAppearancePreset(preset: AppearancePreset): Promise<voi
 }
 
 export async function applyThemePreference(preference: ThemePreference): Promise<void> {
-	if (current === "cmux") return;
+	if (presetForcesDark(current)) return;
 	const theme = resolveAppearanceTheme(preference, window.matchMedia("(prefers-color-scheme: dark)").matches);
 	await api.request.setTmuxTheme({ theme, preference, appearancePreset: current });
 	localStorage.setItem("dev3-theme", preference);

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Dispatch, type DragEvent } from "react";
 import type { CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
-import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, isBuiltinOpsProject, orderProjectsForDisplay, taskSortRank } from "../../shared/types";
+import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, hexToRgb, isBuiltinOpsProject, orderProjectsForDisplay, taskSortRank } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { getTaskOpenMode } from "../state";
 import { useT, statusKey } from "../i18n";
@@ -431,7 +431,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 												<button type="button" disabled={busy} onClick={() => void moveTask(project, task, "completed")} className="rounded-md bg-[#3CF3B0] px-2 py-1 text-dense font-bold hover:brightness-110" style={{ color: "#04281c" }}>{t("status.completed")}</button>
 											</>
 										)}
-										<button type="button" disabled={busy} onClick={() => void moveTask(project, task, "cancelled")} className="rounded-md bg-danger/10 px-2 py-1 text-dense font-medium text-danger hover:bg-danger/15">{t("task.cancel")}</button>
+										<button type="button" disabled={busy} onClick={() => void moveTask(project, task, "cancelled")} className="ws-inbox-cancel rounded-md bg-danger/10 px-2 py-1 text-dense font-medium text-danger hover:bg-danger/15">{t("task.cancel")}</button>
 									</div>
 								</article>
 							);
@@ -498,9 +498,9 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					{desktopColumns.map((column) => {
 					const color = column === "custom" ? statusColors.todo : statusColors[column];
 					const count = orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0);
-					return <div key={column} className="flex min-w-0 items-center gap-1.5 border-l border-edge px-2"><span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="truncate text-dense font-bold uppercase tracking-[0.08em] text-fg-2">{columnLabel(column)}</span>{column === "blocked" && <HelpSpot topicId="board.column.blocked" />}{count > 0 && <span className="ml-auto font-mono text-nano text-fg-muted">{count}</span>}</div>;
+					return <div key={column} className="ws-col-head flex min-w-0 items-center gap-1.5 border-l border-edge px-2" style={{ "--col-rgb": hexToRgb(color) } as CSSProperties}><span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: color }} /><span className="ws-col-label truncate text-dense font-bold uppercase tracking-[0.08em] text-fg-2">{columnLabel(column)}</span>{column === "blocked" && <HelpSpot topicId="board.column.blocked" />}{count > 0 && <span className="ws-col-count ml-auto font-mono text-nano text-fg-muted">{count}</span>}</div>;
 					})}
-					<div className="flex items-center gap-1.5 border-l border-edge px-2 text-dense font-bold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceBoard.done")}</div>
+					<div className="ws-done-head flex items-center gap-1.5 border-l border-edge px-2 text-dense font-bold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceBoard.done")}</div>
 				</div>
 				{orderedProjects.map((project) => {
 				const projectTasks = tasksByProject.get(project.id) ?? [];
@@ -549,7 +549,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 								<button onClick={() => navigate({ screen: "project", projectId: project.id })} className="max-w-64 truncate text-left text-xs font-semibold text-fg-3 hover:text-accent">{project.name}</button>
 								<span className="text-dense text-fg-muted">{t.plural("workspaceBoard.noActiveSummary", completedTasks.length)}</span>
 								<button type="button" onClick={() => onOpenCreateTask(project.id)} className="ml-auto rounded px-2 py-1 text-dense font-medium text-fg-3 hover:bg-accent/10 hover:text-accent">{t("kanban.newTask")}</button>
-								{completedTasks.length > 0 && <button type="button" onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="rounded px-2 py-1 font-mono text-dense font-semibold text-success hover:bg-success/10">✓ {completedTasks.length}</button>}
+								{completedTasks.length > 0 && <button type="button" onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="ws-done-count rounded px-2 py-1 font-mono text-dense font-semibold text-success hover:bg-success/10">✓ {completedTasks.length}</button>}
 							</div>
 						) : (
 						<div className="grid" style={desktopGridStyle}>
@@ -586,7 +586,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 								<div
 									key={column}
 									data-testid={`workspace-cell-${project.id}-${column}`}
-									className={`min-w-0 border-l border-edge p-1 ${acceptsDrop ? "bg-accent/5" : ""}`}
+									className={`min-w-0 border-l border-edge p-1 ${acceptsDrop ? "bg-accent/5" : "ws-col-cell"}`}
+									style={{ "--col-rgb": hexToRgb(column === "custom" ? statusColors.todo : statusColors[column]) } as CSSProperties}
 									aria-label={acceptsDrop ? t("workspaceBoard.dropHere", { status: columnLabel(column), project: project.name }) : undefined}
 									onDragOver={acceptsDrop ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } : undefined}
 									onDrop={acceptsDrop ? (event) => {
@@ -608,7 +609,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 							);
 						})}
 							<div className="flex items-center justify-center border-l border-edge px-1">
-								<button type="button" disabled={completedTasks.length === 0} onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="rounded px-2 py-1 font-mono text-dense font-semibold text-success transition-colors hover:bg-success/10 disabled:text-fg-muted disabled:hover:bg-transparent">✓ {completedTasks.length}</button>
+								<button type="button" disabled={completedTasks.length === 0} onClick={() => setExpandedCompletedProjects((previous) => { const next = new Set(previous); if (completedExpanded) next.delete(project.id); else next.add(project.id); return next; })} aria-expanded={completedExpanded} className="ws-done-count rounded px-2 py-1 font-mono text-dense font-semibold text-success transition-colors hover:bg-success/10 disabled:text-fg-muted disabled:hover:bg-transparent">✓ {completedTasks.length}</button>
 							</div>
 						</div>
 						)}

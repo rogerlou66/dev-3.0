@@ -83,7 +83,7 @@ export function activeTmuxConfigPath(): string {
 }
 
 /** Switch the active themed config and return its path. */
-export function setActiveTmuxTheme(theme: "dark" | "light", appearancePreset: "default" | "cmux" = "default"): string {
+export function setActiveTmuxTheme(theme: "dark" | "light", appearancePreset: "default" | "cmux" | "clarity" = "default"): string {
 	activeTheme = appearancePreset === "cmux" ? "cmux" : theme;
 	return activeTmuxConfigPath();
 }
@@ -366,7 +366,7 @@ function paneTitlesConfig(defaultOn: boolean): string {
 	].join("\n");
 }
 
-export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true, paneTitles = false, appearancePreset: "default" | "cmux" = "default"): string {
+export function buildThemeConfig(flavor: "mocha" | "latte", dimInactivePanes = true, paneTitles = false, appearancePreset: "default" | "cmux" | "clarity" = "default"): string {
 	const pluginDir = CATPPUCCIN_PLUGIN_DIR;
 	return [
 		`# dev3 tmux config — Catppuccin ${flavor}`,

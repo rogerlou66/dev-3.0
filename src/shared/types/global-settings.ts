@@ -84,7 +84,7 @@ export interface GlobalSettings {
 	 * most-recently-used order. See sortTasks.ts.
 	 */
 	taskSortOrder: "oldest-first" | "newest-first";
-	appearancePreset?: "default" | "cmux";
+	appearancePreset?: "default" | "cmux" | "clarity";
 	theme?: "dark" | "light" | "system";
 	resolvedTheme?: "dark" | "light";
 	/**
