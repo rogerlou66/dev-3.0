@@ -844,7 +844,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				onMouseEnter={handleCardMouseEnter}
 				onMouseLeave={handleCardMouseLeave}
 				onClick={handleClick}
-				className={`group relative flex h-[3.25rem] min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
+				className={`group relative flex h-16 min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
 					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : "border-edge"
 				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
 					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-60" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "grayscale opacity-60" : ""
@@ -877,51 +877,62 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 				</button>
 
 				<div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1 pr-1.5">
-					<div className="flex min-w-0 items-center gap-1.5">
+					<div className="flex min-w-0 items-start gap-1.5">
 						{compactStateBadge && (
 							<span className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 py-px text-nano font-semibold uppercase tracking-[0.05em] ${compactStateBadge.className}`}>
 								{compactStateBadge.label}
 							</span>
 						)}
 						{task.scratch && <span className="flex-shrink-0 font-mono text-nano text-fg-3" title={t("task.scratchSession")}>&gt;_</span>}
-						<span
-							data-testid="task-card-title"
-							onClick={handleTitleClick}
-							className="min-w-0 flex-1 truncate whitespace-nowrap text-xs font-semibold leading-snug text-fg streamer-private"
-						>
-							{displayTitle}
-						</span>
-						{isTodo && !isDraft && (
-							<button
-								type="button"
-								onClick={(event) => { event.stopPropagation(); onLaunchVariants(task, "in-progress"); }}
-								aria-label={t("task.run")}
-								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success opacity-0 transition-[opacity,background-color,transform] hover:bg-success/15 group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
+						<div className="relative min-w-0 flex-1">
+							<span
+								data-testid="task-card-title"
+								onClick={handleTitleClick}
+								className="line-clamp-2 break-words text-xs font-semibold leading-snug text-fg streamer-private"
 							>
-								<svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4.5v15l12-7.5z" /></svg>
-							</button>
-						)}
-						{canQuickComplete && (
-							<button
-								type="button"
-								onClick={handleQuickComplete}
-								disabled={quickCompleting}
-								aria-label={t("pipeline.completeTooltip")}
-								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success opacity-0 transition-[opacity,background-color,transform] hover:bg-success/15 group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
-							>
-								{quickCompleting ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" /> : <span aria-hidden="true">✓</span>}
-							</button>
-						)}
-						{showDismissButton && (
-							<button
-								type="button"
-								onClick={handleDismiss}
-								aria-label={isCancelled ? t("task.delete") : t("task.cancel")}
-								className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-fg-muted opacity-0 transition-[opacity,color,background-color,transform] hover:bg-danger/15 hover:text-danger group-hover:opacity-100 focus:opacity-100 motion-safe:active:scale-[0.96]"
-							>
-								×
-							</button>
-						)}
+								{displayTitle}
+							</span>
+							{/* Floats over the title's end instead of reserving width it only uses on hover;
+							    click-through while hidden so a stray click cannot hit an invisible action. */}
+							{((isTodo && !isDraft) || canQuickComplete || showDismissButton) && (
+								<div
+									data-testid="task-card-hover-actions"
+									className="pointer-events-none absolute -top-0.5 right-0 flex items-center rounded bg-elevated opacity-0 shadow-popover transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+								>
+									{isTodo && !isDraft && (
+										<button
+											type="button"
+											onClick={(event) => { event.stopPropagation(); onLaunchVariants(task, "in-progress"); }}
+											aria-label={t("task.run")}
+											className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success transition-[background-color,transform] hover:bg-success/15 motion-safe:active:scale-[0.96]"
+										>
+											<svg className="h-3 w-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4.5v15l12-7.5z" /></svg>
+										</button>
+									)}
+									{canQuickComplete && (
+										<button
+											type="button"
+											onClick={handleQuickComplete}
+											disabled={quickCompleting}
+											aria-label={t("pipeline.completeTooltip")}
+											className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-success transition-[background-color,transform] hover:bg-success/15 motion-safe:active:scale-[0.96]"
+										>
+											{quickCompleting ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" /> : <span aria-hidden="true">✓</span>}
+										</button>
+									)}
+									{showDismissButton && (
+										<button
+											type="button"
+											onClick={handleDismiss}
+											aria-label={isCancelled ? t("task.delete") : t("task.cancel")}
+											className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-fg-muted transition-[color,background-color,transform] hover:bg-danger/15 hover:text-danger motion-safe:active:scale-[0.96]"
+										>
+											×
+										</button>
+									)}
+								</div>
+							)}
+						</div>
 						<PriorityBadge priority={task.priority} onChange={handleSetPriority} className="flex-shrink-0" />
 					</div>
 					<div className="flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-nano text-fg-muted">
