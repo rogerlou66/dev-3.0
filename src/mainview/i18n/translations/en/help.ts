@@ -58,7 +58,7 @@ const help = {
 	// ── Dashboard ──
 	"help.dashboard.projects.title": "Projects",
 	"help.dashboard.workspaceBoard.title": "Workspace board",
-	"help.dashboard.workspaceBoard.body": "The fixed Inbox rail keeps questions and Your Review work visible while the compact swimlanes scroll below it. Drag a desktop project handle to prioritize the whole row, click a Done count to open completed tasks, and click an active task to work without leaving the board.",
+	"help.dashboard.workspaceBoard.body": "Use the Inbox toggle beside Projects in the board column header to hide or show the rail; your choice is saved on this device. The fixed Inbox rail keeps questions and Your Review work visible while the compact swimlanes scroll below it. Drag a desktop project handle to prioritize the whole row, click a Done count to open completed tasks, and click an active task to work without leaving the board.",
 	"help.dashboard.workspaceTaskOverlay.title": "Task workspace over the board",
 	"help.dashboard.workspaceTaskOverlay.body": "The full task inspector and coding terminal float above the workspace board. Click the dimmed board around it or Close to return to the exact board position, or open the task full page when you want to leave the cross-project view.",
 	"help.dashboard.projects.body":
