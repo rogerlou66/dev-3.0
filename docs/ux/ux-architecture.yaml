@@ -256,7 +256,7 @@ ux_architecture:
       purpose: "Cross-project daily work: Inbox + compact project swimlanes."
       allowed: ["human_inbox", "object_card", "same_project_drag_move", "project_reorder", "task_open", "project_open", "search", "project_scoped_create", "completed_disclosure"]
       forbidden: ["cross_project_drag", "project_column_config", "custom_column_drop"]
-      contract: "Fixed horizontal Inbox (left rail) above the scrolling grid; AI Review distinct; Done counts disclose cards; empty rows keep New Task. Search, lifecycle, drag, reorder, Custom, refresh, narrow carousel stay."
+      contract: "Inbox above scrolling grid; header toggle beside Projects saves device-local visibility (default shown); AI Review distinct; Done counts disclose cards; empty rows keep New Task. Search, lifecycle, drag, reorder, Custom, refresh, narrow carousel stay."
       status: "observed"
       evidence: ["WorkspaceBoard.tsx", "Dashboard.tsx", "task-lifecycle.ts#getWorkspaceBoardTasks"]
       blocked_reviews: "Blocked column after Your Review on both boards; drag/status menus hold settled reviews (no reason, no runtime change). Excluded from Inbox/Needs You, survives hooks; unblock, drag out or todo/terminal clears it. Search is:blocked; wait time separate."

@@ -41,6 +41,7 @@ interface WorkspaceBoardProps {
 }
 
 const BASE_COLUMNS: WorkspaceColumnId[] = ["todo", "in-progress", "review-by-user", "blocked", "review-by-colleague", "completed"];
+const INBOX_VISIBLE_STORAGE_KEY = "dev3-workspace-inbox-visible";
 const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 type ProjectDropSide = "before" | "after";
@@ -56,6 +57,10 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, bellR
 		defaultConfigId: "claude-auto",
 		taskSortOrder: "oldest-first",
 	});
+	const [inboxVisible, setInboxVisible] = useState(() => {
+		try { return localStorage.getItem(INBOX_VISIBLE_STORAGE_KEY) !== "false"; }
+		catch { return true; }
+	});
 	const [loading, setLoading] = useState(true);
 	const [loadErrors, setLoadErrors] = useState<string[]>([]);
 	const [dragged, setDragged] = useState<{ projectId: string; taskId: string; status: TaskStatus } | null>(null);
@@ -64,6 +69,13 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, bellR
 	const [movingTaskIds, setMovingTaskIds] = useState<Set<string>>(new Set());
 	const [expandedCompletedProjects, setExpandedCompletedProjects] = useState<Set<string>>(new Set());
 	const [launchModal, setLaunchModal] = useState<{ task: Task; project: Project; targetStatus: TaskStatus; mode?: "spawn" | "addAttempts" } | null>(null);
+
+	function toggleInbox() {
+		const visible = !inboxVisible;
+		setInboxVisible(visible);
+		try { localStorage.setItem(INBOX_VISIBLE_STORAGE_KEY, String(visible)); }
+		catch { /* Keep the toggle usable when browser storage is unavailable. */ }
+	}
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -404,7 +416,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, bellR
 
 	function renderInbox() {
 		return (
-			<section className="flex h-32 flex-shrink-0 overflow-hidden border-b border-edge bg-gradient-to-b from-raised/80 to-base/40" aria-label={t("workspaceBoard.inbox")}>
+			<section id="workspace-inbox" className="flex h-32 flex-shrink-0 overflow-hidden border-b border-edge bg-gradient-to-b from-raised/80 to-base/40" aria-label={t("workspaceBoard.inbox")}>
 				<div className="flex w-10 flex-shrink-0 flex-col items-center justify-center gap-2 border-r border-edge bg-base/25" title={t("workspaceBoard.inboxDescription")}>
 					<span className={`h-1.5 w-1.5 rounded-full bg-[#FFA353] ${inboxItems.length > 0 ? "motion-safe:animate-pulse" : "opacity-40"}`} />
 					<div className="flex h-12 w-full items-center justify-center overflow-visible">
@@ -508,11 +520,20 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, bellR
 		{isNarrow ? (
 			<MobileBoardCarousel columns={carouselColumns} initialColumnId={carouselColumns.find((column) => column.id === "in-progress" && column.count > 0)?.id ?? "review-by-user"} />
 		) : <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-3">
-			{renderInbox()}
+			{inboxVisible && renderInbox()}
 			<div data-testid="workspace-kanban-scroll" className="min-h-0 flex-1 overflow-auto">
 			<div style={{ minWidth: desktopGridMinWidth }}>
 				<div className="sticky top-0 z-20 grid h-9 border-b border-edge bg-base/95 backdrop-blur" style={desktopGridStyle}>
-					<div className="sticky left-0 z-10 flex items-center bg-base/95 px-3 text-dense font-bold uppercase tracking-[0.12em] text-fg-3">{t("workspaceBoard.projects")}</div>
+					<div className="sticky left-0 z-10 flex items-center justify-between gap-1 bg-base/95 px-3 text-dense font-bold uppercase tracking-[0.12em] text-fg-3">
+						<span>{t("workspaceBoard.projects")}</span>
+						<button type="button" onClick={toggleInbox} aria-expanded={inboxVisible} aria-controls="workspace-inbox"
+							aria-label={t(inboxVisible ? "workspaceBoard.hideInbox" : "workspaceBoard.showInbox")}
+							title={t(inboxVisible ? "workspaceBoard.hideInbox" : "workspaceBoard.showInbox")}
+							className="flex min-h-7 items-center gap-1 rounded px-1.5 text-dense font-medium normal-case tracking-normal text-fg-3 transition-colors hover:bg-raised-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-accent motion-safe:active:scale-[0.96]">
+							<svg aria-hidden="true" className="h-3 w-3 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={inboxVisible ? "m4 10 4-4 4 4" : "m4 6 4 4 4-4"} /></svg>
+							{t("workspaceBoard.inbox")}
+						</button>
+					</div>
 					{desktopColumns.map((column) => {
 					const color = column === "custom" ? statusColors.todo : statusColors[column];
 					const count = orderedProjects.reduce((sum, project) => sum + tasksForCell(project, column).length, 0);

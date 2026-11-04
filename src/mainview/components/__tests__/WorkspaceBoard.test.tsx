@@ -61,6 +61,44 @@ describe("WorkspaceBoard", () => {
 		expect(api.request.getProjectPRs).not.toHaveBeenCalled();
 	});
 
+	it("hides and restores Inbox without removing the board tasks, and remembers visibility", async () => {
+		const user = userEvent.setup();
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [task("review", "p1", "review-by-user")] }]);
+		const board = () => <I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>;
+		const first = render(board());
+		const hide = await screen.findByRole("button", { name: "Hide Inbox" });
+		expect(hide).toHaveAttribute("aria-expanded", "true");
+		await user.click(hide);
+		await waitFor(() => expect(screen.queryByRole("region", { name: "Inbox" })).not.toBeInTheDocument());
+		expect(screen.getByTestId("workspace-cell-p1-review-by-user")).toHaveTextContent("review");
+		first.unmount();
+		const second = render(board());
+		const show = await screen.findByRole("button", { name: "Show Inbox" });
+		expect(show).toHaveAttribute("aria-expanded", "false");
+		await user.click(show);
+		await waitFor(() => expect(screen.getByRole("region", { name: "Inbox" })).toHaveTextContent("review"));
+		second.unmount();
+		render(board());
+		expect(await screen.findByRole("region", { name: "Inbox" })).toBeInTheDocument();
+	});
+
+	it("keeps Inbox usable when storage cannot be read or written", async () => {
+		const user = userEvent.setup();
+		const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("Storage unavailable"); });
+		const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Storage unavailable"); });
+		try {
+			vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [] }]);
+			render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+			await user.click(await screen.findByRole("button", { name: "Hide Inbox" }));
+			await waitFor(() => expect(screen.queryByRole("region", { name: "Inbox" })).not.toBeInTheDocument());
+			await user.click(screen.getByRole("button", { name: "Show Inbox" }));
+			await waitFor(() => expect(screen.getByRole("region", { name: "Inbox" })).toBeInTheDocument());
+		} finally {
+			read.mockRestore();
+			write.mockRestore();
+		}
+	});
+
 	it("keeps a To Do worktree untouched when its launch reset is declined", async () => {
 		const previous = { ...task("previous-run", "p1", "todo"), worktreePath: "/tmp/previous", branchName: "dev3/previous" };
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [previous] }]);
@@ -96,7 +134,10 @@ describe("WorkspaceBoard", () => {
 		for (const entry of tasks.filter((entry) => entry.id !== expectedId)) expect(screen.queryByTestId(`workspace-task-${entry.id}`)).not.toBeInTheDocument();
 	});
 
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		localStorage.removeItem("dev3-workspace-inbox-visible");
+	});
 
 	it.each([
 		["is:keepalive", { keepAlive: { enabled: true } }],

@@ -10,7 +10,7 @@ history, PRs and `decisions/`. Newest first.
 
 **Settled fork decisions → bible §5/§12 and yaml:** Aug 19–27, 2026: questions projection, Completed disclosure/search, Board shortcut, Android shell, workspace overlay, project-priority swimlanes. Evidence: `WorkspaceBoard.tsx`, `WorkspaceTaskOverlay.tsx`, `android/`.
 
-**2026-08-28 — Workspace Inbox:** Fixed horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
+**2026-08-28 — Workspace Inbox:** Hideable horizontal Inbox duplicates actionable questions/reviews above the grid; counter-clockwise left rail, distinct AI Review, Done disclosure, empty-row New Task. Evidence: `WorkspaceBoard.tsx`, `TaskCard.tsx`; bible §5.
 **Record-backed entries are pointers:** state the rule, its canonical location and the `decisions/` record. Keep full reasoning only where no record exists; never delete the only explanation.
 
 2026-10-23 — Polling is its own Settings category (yaml `settings_screen.grouping`): background git/gh cadence and off switches; manual refresh always runs. Rejected folding into System (updates, proxy, dev tools). Why: decisions/2026/10/23/configurable-polling-intervals.md.

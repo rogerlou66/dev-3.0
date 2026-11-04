@@ -32,6 +32,8 @@ const dashboard = {
 	"dashboard.projectCount_other": "{count} проектов",
 	"workspaceBoard.projects": "Проекты",
 	"workspaceBoard.inbox": "Входящие",
+	"workspaceBoard.hideInbox": "Hide Inbox",
+	"workspaceBoard.showInbox": "Show Inbox",
 	"workspaceBoard.inboxDescription": "Вопросы и проверки, ожидающие вас",
 	"workspaceBoard.inboxEmpty": "Нет задач, ожидающих ответа или проверки.",
 	"workspaceBoard.question": "Есть вопросы",
