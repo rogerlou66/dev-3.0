@@ -50,7 +50,7 @@ import Tooltip from "./Tooltip";
 import TaskShutdownOverlay from "./TaskShutdownOverlay";
 import TaskPrBadges from "./TaskPrBadges";
 import ReviewedPrLink from "./ReviewedPrLink";
-import PipelineRing from "./PipelineRing";
+import PipelineRing, { CompleteCheckIcon } from "./PipelineRing";
 
 const SUMMARY_PREVIEW_WIDTH = 360;
 const SUMMARY_PREVIEW_HEIGHT = 190;
@@ -114,6 +114,8 @@ interface TaskCardProps {
 	onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 	/** Jira-like board density: keep identity, title, lifecycle, and the To Do run action. */
 	compact?: boolean;
+	/** Global Kanban card: a fixed three-row layout. Per-project boards keep plain `compact`. */
+	threeRow?: boolean;
 	/**
 	 * Name the card's project on the card. Identity, not an action: plain text, no
 	 * focus, no menu row, and it spends none of the card's action slots. Set only
@@ -126,7 +128,7 @@ interface TaskCardProps {
 	onFilterByEpic?: (epic: Epic) => void;
 }
 
-function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false, showProjectMark = false, lineage, onFilterByEpic }: TaskCardProps) {
+function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants, onAddAttempts, onDragStart: onDragStartProp, resourceUsage, bellCount = 0, bellReasons, ports, devServer, isActiveInSplit = false, isMoving: isMovingProp = false, onSetMoving, siblingMap, prInfo, onOpenUnresolvedComments, onEditDraft, onOpenWorkspaceTask, compact = false, threeRow = false, showProjectMark = false, lineage, onFilterByEpic }: TaskCardProps) {
 	const { byId: epicsById } = useEpics();
 	const epic = task.epicId ? epicsById.get(task.epicId) : undefined;
 	const t = useT();
@@ -484,6 +486,24 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		}
 	}
 
+	const taskLabelIds = task.labelIds ?? [];
+
+	async function toggleLabel(labelId: string) {
+		const newIds = taskLabelIds.includes(labelId)
+			? taskLabelIds.filter((id) => id !== labelId)
+			: [...taskLabelIds, labelId];
+		try {
+			const updated = await api.request.setTaskLabels({
+				taskId: task.id,
+				projectId: project.id,
+				labelIds: newIds,
+			});
+			dispatch({ type: "updateTask", task: updated });
+		} catch {
+			// ignore
+		}
+	}
+
 	function handleContextMenu(e: React.MouseEvent) {
 		if (isShuttingDown) return;
 		preview.close();
@@ -532,8 +552,11 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		setDetailOpen(true);
 	}
 
+	// Live three-row cards get the terminal preview; everything else compact keeps the text summary.
+	const usesSummaryPreview = compact && !(threeRow && ACTIVE_STATUSES.includes(task.status));
+
 	function handleCardMouseEnter() {
-		if (compact) {
+		if (usesSummaryPreview) {
 			if (menuOpen || isShuttingDown || !compactSummaryEnabled() || !cardRef.current) return;
 			if (summaryPreviewTimerRef.current) clearTimeout(summaryPreviewTimerRef.current);
 			summaryPreviewTimerRef.current = setTimeout(() => {
@@ -548,7 +571,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	}
 
 	function handleCardMouseLeave() {
-		if (compact) {
+		if (usesSummaryPreview) {
 			closeSummaryPreview();
 			return;
 		}
@@ -752,7 +775,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		<span
 			data-testid="task-card-dev-control"
 			data-dev-state={devServer.running ? (devStarting ? "starting" : "running") : "conflict"}
-			className={`flex h-6 flex-shrink-0 items-center overflow-hidden rounded-lg border ${devTone}`}
+			className={`flex ${threeRow ? "h-[18px] rounded" : "h-6 rounded-lg"} flex-shrink-0 items-center overflow-hidden border ${devTone}`}
 		>
 			<Tooltip content={devLabel} detail={devDetail}>
 				<button
@@ -829,21 +852,347 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 		</Tooltip>
 	);
 
+	const compactStateBadge = blocked ? { label: t("task.blocked"), className: "border-edge-active text-fg-2" } : isCoordinator
+		? { label: t("task.coordinatorBadge"), className: "border-success/60 text-success-strong" }
+		: task.taskType === "board-cleanup"
+			? { label: t("task.boardCleanupBadge"), className: "border-danger/60 text-danger-strong" }
+		: task.taskType === "pr-review"
+			? { label: t("task.prReviewBadge"), className: "border-transparent text-fg-3" }
+			: isDraft
+				? { label: t("task.draftBadge"), className: "border-edge-active text-fg-3" }
+				: isHibernated
+					? { label: t("task.hibernatedBadge"), className: "border-edge-active text-fg-muted" }
+					: isDisconnected
+						? { label: t("task.disconnectedBadge"), className: "task-badge-offline border-edge-active text-fg-muted" }
+						: null;
+
+	if (compact && threeRow && !narrow) {
+		const assignedLabels = taskLabelIds
+			.map((id) => (project.labels ?? []).find((label) => label.id === id))
+			.filter((label) => label !== undefined);
+		const trayButton = "flex h-[18px] w-5 flex-shrink-0 items-center justify-center rounded transition-[color,background-color,transform] duration-150 ease-out motion-safe:active:scale-[0.96]";
+		const neutralTrayButton = `${trayButton} text-fg-2 hover:bg-fg/10 hover:text-fg`;
+		const trayReveal = "pointer-events-none absolute right-[5px] z-10 flex items-center gap-px rounded bg-elevated opacity-0 shadow-popover transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100";
+		const showRun = isTodo && !isDraft && !isPreparing;
+		const showComplete = canQuickComplete && !isTodo && !isCancelled;
+		const showOpenIn = isActive && !!task.worktreePath && !isDisabled;
+		const showWatch = isActive && !isDisabled;
+		const showAddVariant = isActive && !spawnVariantHidden && !isDisabled;
+
+		return (
+			<div
+				ref={cardRef}
+				data-task-id={task.id}
+				data-hint-id={task.id}
+				data-help-id="board.task-card"
+				data-testid="workspace-three-row-task-card"
+				data-needs-input={needsInput || undefined}
+				draggable={!isDisabled && !detailOpen && !isHibernated}
+				onDragStart={handleDragStart}
+				onDragEnd={handleDragEnd}
+				{...contextMenu.handlers}
+				onContextMenu={handleContextMenu}
+				onMouseEnter={handleCardMouseEnter}
+				onMouseLeave={handleCardMouseLeave}
+				onClick={handleClick}
+				className={`group relative flex h-[58px] min-w-0 items-stretch overflow-hidden rounded-lg border bg-raised/70 text-left transition-[transform,box-shadow,background-color,border-color,opacity,filter] duration-150 ease-out hover:-translate-y-px hover:bg-raised-hover hover:shadow-card-hover ${
+					isDraft ? "border-dashed border-edge-active" : isCoordinator ? "border-dashed border-success/60" : task.taskType === "board-cleanup" ? "border-dashed task-card-board-cleanup" : isActiveInSplit ? "border-accent ring-1 ring-accent/70" : "border-transparent ring-1 ring-edge/70"
+				} ${isActive || isCompleted || isCancelled ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} ${
+					isCompleting || isShuttingDown ? "pointer-events-none grayscale opacity-40" : isPreparing ? "opacity-70" : isDisabled ? "pointer-events-none opacity-50" : isHibernated || isDisconnected ? "task-card-idle grayscale opacity-60" : ""
+				}`}
+				style={needsInput ? {
+					background: `${statusColors["user-questions"]}1f`,
+					borderColor: `${statusColors["user-questions"]}80`,
+				} : undefined}
+			>
+				<div aria-hidden="true" className="w-0.5 flex-shrink-0" style={{ background: railColor }} />
+				<div className="flex w-6 flex-shrink-0 flex-col items-center pt-1">
+					<button
+						ref={statusMenu.triggerRef}
+						type="button"
+						onClick={statusMenu.toggle}
+						disabled={isDisabled || isHibernated}
+						aria-label={`${blocked ? t("task.blocked") : activeCol?.name ?? task.status}. ${t("task.moveTo")}`}
+						data-testid="task-card-rail"
+						className="relative flex h-4 w-6 flex-shrink-0 items-center justify-center text-fg-3 transition-[filter,transform] hover:brightness-125 motion-safe:active:scale-[0.96] disabled:opacity-50"
+					>
+						{bellCount > 0 && (
+							<span className="absolute -top-1 left-0 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-nano font-bold leading-none text-white shadow-[0_2px_6px_rgb(239_68_68_/_0.45)]">
+								{bellCount > 9 ? "9+" : bellCount}
+							</span>
+						)}
+						{blocked ? <span aria-hidden="true" style={{ color: railColor }}>Ⅱ</span> : activeCol ? (
+							<span className="h-3 w-3 rounded-full" style={{ background: railColor, boxShadow: `0 0 6px ${railColor}60` }} />
+						) : (
+							<PipelineRing status={task.status} size="compact" tooltip={false} />
+						)}
+					</button>
+					{agent && (
+						<span data-testid="task-card-agent" className="flex h-4 flex-shrink-0 items-center justify-center">
+							{hasLauncherIcon ? <AgentLauncherBadge agent={agent} size={14} /> : (
+								<span role="img" aria-label={agent.name} title={agent.name} className="flex h-3.5 w-3.5 items-center justify-center rounded-[3px] bg-fg/10 text-nano font-bold leading-none text-fg-2">
+									{agent.name.slice(0, 1).toUpperCase()}
+								</span>
+							)}
+						</span>
+					)}
+				</div>
+
+				<div className="flex min-w-0 flex-1 flex-col gap-px pb-1 pr-[7px] pt-1">
+					<div className="flex h-8 min-w-0 items-start gap-1.5">
+						<span
+							data-testid="task-card-title"
+							onClick={handleTitleClick}
+							className="line-clamp-2 min-w-0 flex-1 break-words text-xs font-semibold leading-4 text-fg streamer-private"
+						>
+							{displayTitle}
+						</span>
+						<PriorityBadge priority={task.priority} onChange={handleSetPriority} className="flex-shrink-0" quietLowLevels />
+					</div>
+					<div data-testid="task-card-identity" className="flex h-3.5 min-w-0 items-center gap-[5px] overflow-hidden font-mono text-dense text-fg-muted">
+						<span className="flex-shrink-0 text-accent/70">
+							#{task.seq}
+							{variantFraction && <span className="ml-0.5 text-accent/60">{variantFraction}</span>}
+						</span>
+						{showProjectMark && (
+							<span data-testid="task-card-project-mark" className="max-w-[35%] shrink-0 truncate font-sans font-semibold text-fg-3" title={projectDisplayName(project, t("ops.boardName"))}>
+								{projectDisplayName(project, t("ops.boardName"))}
+							</span>
+						)}
+						{needsInput ? (
+							<span
+								data-testid="task-card-needs-input"
+								className="flex-shrink-0 rounded border px-1 font-sans font-semibold leading-3"
+								style={{ color: statusColors["user-questions"], borderColor: `${statusColors["user-questions"]}80`, background: `${statusColors["user-questions"]}18` }}
+							>
+								{t("task.needsInput")}
+							</span>
+						) : compactStateBadge && (
+							<span data-testid="task-card-state-badge" className={`max-w-24 flex-shrink-0 truncate rounded border border-dashed px-1 font-sans font-semibold leading-3 ${compactStateBadge.className}`}>
+								{compactStateBadge.label}
+							</span>
+						)}
+						{epic && (
+							<span className="min-w-0 flex-shrink">
+								<EpicChip epic={epic} testId="task-card-epic" onClick={onFilterByEpic ? (e) => { e.stopPropagation(); onFilterByEpic(epic); } : undefined} />
+							</span>
+						)}
+						{lineage && <span className="flex-shrink-0 [&>div]:mt-0"><LineageCluster lineage={lineage} /></span>}
+						{task.watched && <WatchingIcon className="h-2.5 w-2.5 flex-shrink-0 text-accent" />}
+						{task.scratch && <span className="flex-shrink-0 text-fg-3" title={t("task.scratchSession")}>&gt;_</span>}
+						<NativeBackendMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-native-backend" />
+						<ForeignCodeMark task={task} className="h-3 w-3 flex-shrink-0" testId="task-card-foreign-code" />
+						{isTodo && task.preparationError ? (
+							<span role="alert" title={t("task.launchFailed", { error: task.preparationError })} className="min-w-0 flex-1 truncate text-danger">
+								{t("task.launchFailed", { error: task.preparationError })}
+							</span>
+						) : (
+							<span data-testid="task-card-config" className="min-w-0 flex-1 truncate" title={configLabel || undefined}>
+								{isPreparing ? preparingStageLabel : agentConfig?.name ?? agent?.name ?? ""}
+							</span>
+						)}
+						{variantDots}
+						{assignedLabels.length > 0 && (
+							<button
+								ref={pickerAnchorRef}
+								type="button"
+								data-testid="task-card-label-dots"
+								aria-label={assignedLabels.map((label) => label.name).join(", ")}
+								title={assignedLabels.map((label) => label.name).join(", ")}
+								onClick={(e) => { e.stopPropagation(); setPickerOpen(true); }}
+								className="flex h-3.5 flex-shrink-0 items-center gap-0.5 rounded px-0.5 hover:bg-fg/10"
+							>
+								{assignedLabels.map((label) => (
+									<span key={label.id} aria-hidden="true" className="h-1.5 w-1.5 rounded-full" style={{ background: label.color }} />
+								))}
+							</button>
+						)}
+						{pickerOpen && pickerAnchorRef.current && (
+							<LabelPicker project={project} dispatch={dispatch} taskId={task.id} onClose={() => setPickerOpen(false)} anchorEl={pickerAnchorRef.current} selectedIds={taskLabelIds} onToggle={toggleLabel} />
+						)}
+						{(gitSignals.length > 0 || runSignals.length > 0 || timeSignals.length > 0) && (
+							<div data-testid="task-card-signals" className="flex min-w-0 flex-shrink-0 flex-nowrap items-center gap-1 overflow-hidden">
+								{prBadges}
+								{reviewedPr && <ReviewedPrLink pr={reviewedPr} testId={`task-card-reviewed-pr-${task.id}`} />}
+								{Children.toArray(runSignals)}
+								{Children.toArray(timeSignals)}
+							</div>
+						)}
+					</div>
+				</div>
+
+				{(showRun || showComplete || canQuickCancel || showDismissButton || isPreparing) && (
+					<div data-testid="task-card-hover-actions" className={`${trayReveal} top-[18px]`}>
+						{showRun && (
+							<Tooltip content={t("task.run")} detail={t("ttip.task.run")}>
+								<button type="button" onClick={(e) => { e.stopPropagation(); onLaunchVariants(task, "in-progress"); }} aria-label={t("task.run")} disabled={isDisabled} className={`${trayButton} text-success hover:bg-success/15`}>
+									<PlayIcon className="h-3 w-3" />
+								</button>
+							</Tooltip>
+						)}
+						{showComplete && (
+							<Tooltip content={t("pipeline.completeTooltip")}>
+								<button type="button" onClick={handleQuickComplete} disabled={quickCompleting} aria-label={t("pipeline.completeTooltip")} className={`${trayButton} text-success hover:bg-success/15`}>
+									{quickCompleting ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-success/30 border-t-success" /> : <CompleteCheckIcon className="h-3 w-3" />}
+								</button>
+							</Tooltip>
+						)}
+						{(canQuickCancel || showDismissButton || isPreparing) && (
+							<Tooltip content={isCancelled ? t("task.delete") : t("task.cancel")}>
+								<button
+									type="button"
+									onClick={isPreparing ? handleCancelPreparation : canQuickCancel ? handleQuickCancel : handleDismiss}
+									disabled={quickCancelling || cancellingPreparation}
+									aria-label={isCancelled ? t("task.delete") : t("task.cancel")}
+									className={`${trayButton} text-fg-2 hover:bg-danger/15 hover:text-danger`}
+								>
+									<svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M6 6l12 12" /></svg>
+								</button>
+							</Tooltip>
+						)}
+					</div>
+				)}
+				{!isShuttingDown && (
+					<div data-testid="task-card-secondary-actions" className={`${trayReveal} bottom-0.5`}>
+						{devServerControl}
+						{showOpenIn && (
+							<Tooltip content={t("openIn.menuTitle")} detail={t("ttip.openIn.menu")}>
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										const rect = e.currentTarget.getBoundingClientRect();
+										setCtxMenuPos({ top: rect.bottom + 4, left: rect.left });
+										setCtxMenuOpen(true);
+									}}
+									aria-label={t("openIn.menuTitle")}
+									className={`${trayButton} text-accent hover:bg-accent/15`}
+								>
+									<OpenInIcon className="h-3 w-3" />
+								</button>
+							</Tooltip>
+						)}
+						{showWatch && (
+							<Tooltip content={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")} detail={t("ttip.task.watch")}>
+								<button
+									type="button"
+									onClick={async (e) => {
+										e.stopPropagation();
+										try {
+											const updated = await api.request.toggleTaskWatch({ taskId: task.id, projectId: project.id, watched: !task.watched });
+											dispatch({ type: "updateTask", task: updated });
+										} catch {
+											// Toggle failed silently — secondary action
+										}
+									}}
+									aria-label={task.watched ? t("task.unwatchTooltip") : t("task.watchTooltip")}
+									className={task.watched ? `${trayButton} text-accent hover:bg-accent/15` : neutralTrayButton}
+								>
+									{task.watched ? <WatchingIcon className="h-3 w-3" /> : <WatchIcon className="h-3 w-3" />}
+								</button>
+							</Tooltip>
+						)}
+						{showAddVariant && (
+							<Tooltip content={t("task.addVariant")} detail={t("ttip.task.addVariant")}>
+								<button type="button" onClick={(e) => { e.stopPropagation(); preview.close(); onAddAttempts(task); }} aria-label={t("task.addVariant")} className={neutralTrayButton}>
+									<svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+								</button>
+							</Tooltip>
+						)}
+						<Tooltip content={t("task.moreActions")}>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									preview.close();
+									closeSummaryPreview();
+									const rect = e.currentTarget.getBoundingClientRect();
+									contextMenu.open({ x: rect.left, y: rect.bottom + 4 });
+								}}
+								aria-label={t("task.moreActions")}
+								className={neutralTrayButton}
+							>
+								<svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01" /></svg>
+							</button>
+						</Tooltip>
+					</div>
+				)}
+
+				{isPreparing && (
+					<div
+						role="progressbar"
+						aria-label={t("task.preparing")}
+						aria-valuemin={0}
+						aria-valuemax={100}
+						aria-valuenow={preparingProgress}
+						aria-valuetext={preparingStageLabel}
+						className="absolute inset-x-0.5 bottom-0 h-0.5 bg-fg/10"
+					>
+						<div className="h-full bg-accent transition-[width] duration-300 ease-out" style={{ width: `${preparingProgress}%` }} />
+					</div>
+				)}
+				{isMovingProp && <div className="absolute inset-0 z-20 grid place-items-center bg-base/50"><span className="h-4 w-4 animate-spin rounded-full border-2 border-fg-muted/30 border-t-accent" /></div>}
+				{isShuttingDown && <TaskShutdownOverlay />}
+
+				{detailOpen && createPortal(
+					<TaskDetailModal task={task} project={project} dispatch={dispatch} onClose={() => setDetailOpen(false)} onOpenTask={openTaskFromDialog} onLaunchVariants={onLaunchVariants} navigate={navigate} />,
+					document.body,
+				)}
+				<StatusMenuPortal menu={statusMenu} narrow={narrow} title={t("task.moveTo")} sheetTestId="task-status-sheet">
+					<TaskBlockAction task={task} dispatch={dispatch} onClose={() => setMenuOpen(false)} />
+					<PipelineDropdown currentStatus={task.status} onMove={handleMove} onMoveToCustomColumn={handleMoveToCustomColumn} onDelete={isCancelled ? handleDelete : undefined} customColumns={project.customColumns} currentCustomColumnId={task.customColumnId} project={project} hideHeader />
+					{hasLiveAgent && (
+						<>
+							<div className="mx-3 my-1 border-t border-edge-active" />
+							<PipelineMenuAction icon={<SendLaterIcon className="h-4 w-4" />} label={t("task.sendMessageLater")} onClick={(event) => { event.stopPropagation(); setMenuOpen(false); setScheduleMsgOpen(true); }} />
+						</>
+					)}
+				</StatusMenuPortal>
+				<TaskContextMenu
+					task={task}
+					project={project}
+					dispatch={dispatch}
+					pos={contextMenu.pos}
+					onClose={contextMenu.close}
+					onOpenTask={openTaskFromDialog}
+					onOpenDetails={() => setDetailOpen(true)}
+					onShowFamily={lineage ? (lineage.onFilterByParent ?? lineage.onFilterByChildren ?? undefined) : undefined}
+					testId={`card-task-menu-${task.id}`}
+				/>
+				{ctxMenuOpen && task.worktreePath && <OpenInMenu position={ctxMenuPos} path={task.worktreePath} taskId={task.id} onClose={() => setCtxMenuOpen(false)} />}
+				{scheduleMsgOpen && createPortal(<ScheduleMessageModal task={task} project={project} dispatch={dispatch} onClose={() => setScheduleMsgOpen(false)} />, document.body)}
+				{summaryPreviewPos && createPortal(
+					<div data-testid="workspace-task-summary-preview" className="pointer-events-none fixed z-50 w-[22.5rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-edge-active bg-overlay shadow-2xl shadow-black/50" style={{ left: summaryPreviewPos.left, top: summaryPreviewPos.top }}>
+						<div className="border-b border-edge px-3 py-2.5">
+							<div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.fullTitle")}</div>
+							<div className="mt-1 line-clamp-3 break-words text-sm font-semibold leading-snug text-fg streamer-private">{displayTitle}</div>
+						</div>
+						<div className="px-3 py-2.5">
+							<div className="text-nano font-semibold uppercase tracking-[0.08em] text-fg-muted">{t("workspaceCard.latestUpdate")}</div>
+							<p className={`mt-1 line-clamp-5 whitespace-pre-wrap break-words text-xs leading-relaxed ${latestUpdate ? "text-fg-2" : "italic text-fg-muted"}`}>{latestUpdate ?? t("workspaceCard.noLatestUpdate")}</p>
+						</div>
+					</div>,
+					document.body,
+				)}
+				{isActive && (
+					<TerminalPreviewPopover
+						{...preview.state}
+						taskId={task.id}
+						projectId={project.id}
+						overview={task.overview ?? null}
+						userOverview={task.userOverview ?? null}
+						description={task.description}
+						attentionReasons={bellReasons}
+						task={task}
+						agents={agents}
+					/>
+				)}
+			</div>
+		);
+	}
+
 	if (compact && !narrow) {
 		const hasLineage = lineage && (lineage.parentLabel !== null || lineage.childCount > 0);
-		const compactStateBadge = blocked ? { label: t("task.blocked"), className: "border-edge-active text-fg-2" } : isCoordinator
-			? { label: t("task.coordinatorBadge"), className: "border-success/60 text-success-strong" }
-			: task.taskType === "board-cleanup"
-				? { label: t("task.boardCleanupBadge"), className: "border-danger/60 text-danger-strong" }
-			: task.taskType === "pr-review"
-				? { label: t("task.prReviewBadge"), className: "border-transparent text-fg-3" }
-				: isDraft
-					? { label: t("task.draftBadge"), className: "border-edge-active text-fg-3" }
-					: isHibernated
-						? { label: t("task.hibernatedBadge"), className: "border-edge-active text-fg-muted" }
-						: isDisconnected
-							? { label: t("task.disconnectedBadge"), className: "task-badge-offline border-edge-active text-fg-muted" }
-							: null;
 
 		return (
 			<div
@@ -1364,7 +1713,6 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						{/* Label chips — always rendered so "+" stays discoverable on hover */}
 						{!compact && (() => {
 							const projectLabels = project.labels ?? [];
-							const taskLabelIds = task.labelIds ?? [];
 							const assignedLabels = taskLabelIds
 								.map((id) => projectLabels.find((l) => l.id === id))
 								.filter(Boolean) as typeof projectLabels;
@@ -1378,22 +1726,6 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 										taskId: task.id,
 										projectId: project.id,
 										labelIds: taskLabelIds.filter((id) => id !== labelId),
-									});
-									dispatch({ type: "updateTask", task: updated });
-								} catch {
-									// ignore
-								}
-							}
-
-							async function toggleLabel(labelId: string) {
-								const newIds = taskLabelIds.includes(labelId)
-									? taskLabelIds.filter((id) => id !== labelId)
-									: [...taskLabelIds, labelId];
-								try {
-									const updated = await api.request.setTaskLabels({
-										taskId: task.id,
-										projectId: project.id,
-										labelIds: newIds,
 									});
 									dispatch({ type: "updateTask", task: updated });
 								} catch {

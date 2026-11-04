@@ -372,6 +372,7 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 					? (candidate, candidateProject, trigger) => onOpenWorkspaceTask(candidateProject, candidate, tasksByProject.get(candidateProject.id) ?? [candidate], trigger)
 					: undefined}
 				compact
+				threeRow
 			/>
 		);
 	}

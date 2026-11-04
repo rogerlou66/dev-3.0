@@ -11,6 +11,8 @@ interface PriorityBadgeProps {
 	/** `xs` = task card, `sm` = modals, `touch` = narrow bars next to the status control. */
 	size?: "xs" | "sm" | "touch";
 	className?: string;
+	/** Plain muted text for the low levels (P3, P4), where the badge repeats on nearly every card. */
+	quietLowLevels?: boolean;
 }
 
 /**
@@ -19,12 +21,12 @@ interface PriorityBadgeProps {
  * static chip. Colors come from semantic tokens ({@link PRIORITY_STYLES}) — never
  * hardcoded — so both themes work. Always visible (no hover-only affordance).
  */
-function PriorityBadge({ priority, onChange, size = "xs", className = "" }: PriorityBadgeProps) {
+function PriorityBadge({ priority, onChange, size = "xs", className = "", quietLowLevels = false }: PriorityBadgeProps) {
 	const t = useT();
 	const [open, setOpen] = useState(false);
 	const btnRef = useRef<HTMLButtonElement>(null);
 	const level = priority ?? DEFAULT_PRIORITY;
-	const style = PRIORITY_STYLES[level];
+	const badgeCls = quietLowLevels && (level === "P3" || level === "P4") ? "text-fg-muted" : PRIORITY_STYLES[level].badge;
 	// `touch` mirrors the narrow status control so the two sit as one band on a
 	// phone instead of a tall pill next to a tiny chip. The +2px is the status
 	// control's own wrapper border, which sits outside its min-h-[2.75rem] button.
@@ -42,7 +44,7 @@ function PriorityBadge({ priority, onChange, size = "xs", className = "" }: Prio
 
 	if (!onChange) {
 		return (
-			<span data-priority={level} className={`${baseCls} ${sizeCls} ${style.badge} ${className}`}>
+			<span data-priority={level} className={`${baseCls} ${sizeCls} ${badgeCls} ${className}`}>
 				{level}
 			</span>
 		);
@@ -62,7 +64,7 @@ function PriorityBadge({ priority, onChange, size = "xs", className = "" }: Prio
 					e.stopPropagation();
 					setOpen((v) => !v);
 				}}
-				className={`${baseCls} transition-colors hover:brightness-110 focus-visible:ring-1 focus-visible:ring-accent/60 ${sizeCls} ${style.badge} ${className}`}
+				className={`${baseCls} transition-colors hover:brightness-110 focus-visible:ring-1 focus-visible:ring-accent/60 ${sizeCls} ${badgeCls} ${className}`}
 			>
 				{level}
 			</button>
