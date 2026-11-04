@@ -544,7 +544,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 	// PR signals — the same cluster the Active Tasks sidebar renders, extracted so
 	// the two surfaces cannot drift.
 	const prBadges = prInfo ? (
-		<TaskPrBadges prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} />
+		<TaskPrBadges prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} compact={threeRow} />
 	) : null;
 
 	function handleShowDescription(e: React.MouseEvent) {
@@ -987,7 +987,7 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 								{t("task.launchFailed", { error: task.preparationError })}
 							</span>
 						) : (
-							<span data-testid="task-card-config" className="min-w-0 flex-1 truncate" title={configLabel || undefined}>
+							<span data-testid="task-card-config" className="min-w-12 flex-1 truncate" title={configLabel || undefined}>
 								{isPreparing ? preparingStageLabel : agentConfig?.name ?? agent?.name ?? ""}
 							</span>
 						)}
@@ -1010,8 +1010,9 @@ function TaskCard({ task, project, dispatch, navigate, agents, onLaunchVariants,
 						{pickerOpen && pickerAnchorRef.current && (
 							<LabelPicker project={project} dispatch={dispatch} taskId={task.id} onClose={() => setPickerOpen(false)} anchorEl={pickerAnchorRef.current} selectedIds={taskLabelIds} onToggle={toggleLabel} />
 						)}
-						{(gitSignals.length > 0 || runSignals.length > 0 || timeSignals.length > 0) && (
-							<div data-testid="task-card-signals" className="flex min-w-0 flex-shrink-0 flex-nowrap items-center gap-1 overflow-hidden">
+						{(gitSignals.length > 0 || runSignals.length > 0 || timeSignals.length > 0 || (isActive && devPort !== null)) && (
+							<div data-testid="task-card-signals" className="flex h-3.5 min-w-0 flex-nowrap items-center gap-1 overflow-hidden [&>*]:!h-3.5">
+								{isActive && devServer?.running && devPort !== null && <span data-testid="task-card-dev-port" className="flex-shrink-0 text-success">:{devPort}</span>}
 								{prBadges}
 								{reviewedPr && <ReviewedPrLink pr={reviewedPr} testId={`task-card-reviewed-pr-${task.id}`} />}
 								{Children.toArray(runSignals)}

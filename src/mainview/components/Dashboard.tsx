@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch } from "react";
 import { createPortal } from "react-dom";
 import DashboardHeaderControls from "./DashboardHeaderControls";
 import { toast } from "../toast";
-import type { Project, Space, Task } from "../../shared/types";
+import type { DevServerSummary, PortInfo, Project, ResourceUsage, Space, Task } from "../../shared/types";
 import { isBuiltinOpsProject, isSpaceSensitive, orderProjectsForDisplay } from "../../shared/types";
 import { HOME_GROUP_ID } from "../utils/spaceGroups";
 import type { AppAction, Route } from "../state";
@@ -24,6 +24,10 @@ interface DashboardProps {
 	dispatch: Dispatch<AppAction>;
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
+	bellReasons?: Map<string, string[]>;
+	taskPorts?: Map<string, PortInfo[]>;
+	taskDevServers?: Map<string, DevServerSummary>;
+	taskResourceUsage?: Map<string, ResourceUsage>;
 	onOpenAddProject: (spaceIds?: string[]) => void;
 	onOpenCreateTask: (projectId: string) => void;
 	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
@@ -37,6 +41,10 @@ function Dashboard({
 	dispatch,
 	navigate,
 	bellCounts,
+	bellReasons,
+	taskPorts,
+	taskDevServers,
+	taskResourceUsage,
 	onOpenAddProject,
 	onOpenCreateTask,
 	onOpenWorkspaceTask,
@@ -160,6 +168,10 @@ function Dashboard({
 								dispatch={dispatch}
 								navigate={navigate}
 								bellCounts={bellCounts}
+								bellReasons={bellReasons}
+								taskPorts={taskPorts}
+								taskDevServers={taskDevServers}
+								taskResourceUsage={taskResourceUsage}
 								onOpenCreateTask={onOpenCreateTask}
 								onOpenAddProject={onOpenAddProject}
 								onOpenWorkspaceTask={onOpenWorkspaceTask}

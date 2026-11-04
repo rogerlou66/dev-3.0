@@ -242,6 +242,14 @@ describe("TaskCard", () => {
 			expect(within(actions).queryByRole("button", { name: /complete/i })).not.toBeInTheDocument();
 		});
 
+		it("shows the running dev server port in the signals row and its control in the hover tray", () => {
+			const devServer = { taskId: "t1", hasDevScript: true, running: true, ports: [5173], conflictPorts: [], declaredCount: 1, runningCount: 1, servers: [{ name: "dev", isDefault: true, running: true, ports: [5173] }] } as DevServerSummary;
+			renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/worktree" }), { ...threeRow, devServer });
+
+			expect(screen.getByTestId("task-card-signals")).toContainElement(screen.getByTestId("task-card-dev-port"));
+			expect(screen.getByTestId("task-card-secondary-actions")).toContainElement(screen.getByTestId("task-card-dev-control"));
+		});
+
 		it("offers only Delete on a cancelled card", () => {
 			renderCard(makeTask({ status: "cancelled" }), threeRow);
 

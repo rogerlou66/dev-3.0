@@ -3917,6 +3917,10 @@ function App() {
 						dispatch={dispatch}
 						navigate={navigate}
 						bellCounts={state.bellCounts}
+						bellReasons={state.bellReasons}
+						taskPorts={state.taskPorts}
+						taskDevServers={state.taskDevServers}
+						taskResourceUsage={state.taskResourceUsage}
 							onOpenAddProject={() => setShowAddProjectModal(true)}
 							onOpenCreateTask={(projectId) => openCreateTaskModal(projectId)}
 							onOpenWorkspaceTask={openWorkspaceTask}

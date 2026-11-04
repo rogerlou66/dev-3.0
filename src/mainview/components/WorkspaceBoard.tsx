@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Dispatch, type DragEvent } from "react";
-import type { CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
+import type { CodingAgent, DevServerSummary, GlobalSettings, PortInfo, Project, ResourceUsage, Task, TaskStatus } from "../../shared/types";
 import { ACTIVE_STATUSES, getAllowedTransitions, getTaskTitle, hexToRgb, isBuiltinOpsProject, orderProjectsForDisplay, taskSortRank } from "../../shared/types";
 import type { AppAction, Route } from "../state";
 import { getTaskOpenMode } from "../state";
@@ -8,6 +8,7 @@ import { api } from "../rpc";
 import { toast } from "../toast";
 import { useStatusColors } from "../hooks/useStatusColors";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
+import { useTaskPrBadges } from "../hooks/useTaskPrBadges";
 import { moveTaskToStatus, resetTaskToTodoWithConsent } from "../utils/moveTaskToStatus";
 import { sortTasksForColumn } from "./sortTasks";
 import { canBlockTask, effectiveTaskColumn, isTaskBlocked, type TaskBoardColumn } from "../../shared/task-blocking";
@@ -29,6 +30,10 @@ interface WorkspaceBoardProps {
 	dispatch: Dispatch<AppAction>;
 	navigate: (route: Route) => void;
 	bellCounts: Map<string, number>;
+	bellReasons?: Map<string, string[]>;
+	taskPorts?: Map<string, PortInfo[]>;
+	taskDevServers?: Map<string, DevServerSummary>;
+	taskResourceUsage?: Map<string, ResourceUsage>;
 	onOpenCreateTask: (projectId: string) => void;
 	onOpenAddProject?: () => void;
 	onOpenWorkspaceTask?: (project: Project, task: Task, tasks: Task[], trigger: HTMLElement | null) => void;
@@ -40,7 +45,7 @@ const WORKSPACE_CELL_TASK_LIMIT = 15;
 const COMPLETED_COLLAPSED_TASK_LIMIT = 2;
 type ProjectDropSide = "before" | "after";
 
-function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpenCreateTask, onOpenAddProject, onOpenWorkspaceTask, onReorderProjects }: WorkspaceBoardProps) {
+function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, bellReasons, taskPorts, taskDevServers, taskResourceUsage, onOpenCreateTask, onOpenAddProject, onOpenWorkspaceTask, onReorderProjects }: WorkspaceBoardProps) {
 	const t = useT();
 	const statusColors = useStatusColors();
 	const isNarrow = useNarrowViewport(CAROUSEL_MAX_WIDTH);
@@ -123,6 +128,8 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 		[projects],
 	);
 	const allTasks = useMemo(() => [...tasksByProject.values()].flat(), [tasksByProject]);
+	// No discoverProjectIds: a board spanning every project must not poll a PR list per project.
+	const taskPrMap = useTaskPrBadges({ tasks: allTasks });
 	const columns = useMemo(() => {
 		const next = [...BASE_COLUMNS];
 		if (allTasks.some((task) => effectiveTaskColumn(task) === "review-by-ai")) next.splice(2, 0, "review-by-ai");
@@ -361,6 +368,11 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 				onAddAttempts={(candidate) => setLaunchModal({ task: candidate, project, targetStatus: candidate.status, mode: "addAttempts" })}
 				onDragStart={(taskId) => setDragged({ projectId: project.id, taskId, status: task.status })}
 				bellCount={bellCounts.get(task.id) ?? 0}
+				bellReasons={bellReasons?.get(task.id)}
+				resourceUsage={taskResourceUsage?.get(task.id.slice(0, 8))}
+				ports={taskPorts?.get(task.id)}
+				devServer={taskDevServers?.get(task.id)}
+				prInfo={taskPrMap.get(task.id)}
 				isMoving={movingTaskIds.has(task.id)}
 				onSetMoving={(taskId, moving) => setMovingTaskIds((previous) => {
 					const next = new Set(previous);
