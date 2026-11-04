@@ -149,6 +149,7 @@ const kanban = {
 	"task.failedMoveToProject": "Couldn’t move the task to that project — try again. ({error})",
 	"task.failedDelete": "Couldn’t delete the task — try again. ({error})",
 	"task.run": "Run",
+	"task.moreActions": "More actions",
 	"task.addVariant": "+ Variant",
 	"task.preparing": "Preparing…",
 	"task.shuttingDown": "Shutting down…",

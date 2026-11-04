@@ -175,6 +175,7 @@ function renderCard(
 		onEditDraft?: (task: Task) => void;
 			onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement | null) => void;
 			compact?: boolean;
+			threeRow?: boolean;
 			devServer?: DevServerSummary;
 			ports?: PortInfo[];
 	},
@@ -199,6 +200,7 @@ function renderCard(
 				onEditDraft={opts?.onEditDraft}
 					onOpenWorkspaceTask={opts?.onOpenWorkspaceTask}
 					compact={opts?.compact}
+					threeRow={opts?.threeRow}
 					devServer={opts?.devServer}
 					ports={opts?.ports}
 			/>
@@ -207,6 +209,74 @@ function renderCard(
 }
 
 describe("TaskCard", () => {
+	describe("global Kanban three-row presentation", () => {
+		const threeRow = { compact: true, threeRow: true };
+
+		it("keeps one fixed height whatever the title length", () => {
+			renderCard(makeTask({ status: "review-by-user", title: "Short" }), threeRow);
+
+			expect(screen.getByTestId("workspace-three-row-task-card")).toHaveClass("h-[58px]");
+			expect(screen.getByTestId("task-card-title")).toHaveClass("line-clamp-2");
+		});
+
+		it("shows the coding agent under the status ring, not in the meta row", () => {
+			renderCard(makeTask({ status: "in-progress", agentId: agents[0].id }), threeRow);
+
+			const agentSlot = screen.getByTestId("task-card-agent");
+			expect(agentSlot.parentElement).toContainElement(screen.getByTestId("task-card-rail"));
+			expect(screen.getByTestId("task-card-identity")).not.toContainElement(agentSlot);
+		});
+
+		it("moves state badges out of the title row", () => {
+			renderCard(makeTask({ status: "todo", draft: true }), threeRow);
+
+			expect(screen.getByTestId("task-card-identity")).toContainElement(screen.getByTestId("task-card-state-badge"));
+		});
+
+		it("offers Run and Cancel on a todo card, without Complete", () => {
+			renderCard(makeTask({ status: "todo" }), threeRow);
+
+			const actions = screen.getByTestId("task-card-hover-actions");
+			expect(within(actions).getByRole("button", { name: "Run" })).toBeInTheDocument();
+			expect(within(actions).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+			expect(within(actions).queryByRole("button", { name: /complete/i })).not.toBeInTheDocument();
+		});
+
+		it("shows the running dev server port in the signals row and its control in the hover tray", () => {
+			const devServer = { taskId: "t1", hasDevScript: true, running: true, ports: [5173], conflictPorts: [], declaredCount: 1, runningCount: 1, servers: [{ name: "dev", isDefault: true, running: true, ports: [5173] }] } as DevServerSummary;
+			renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/worktree" }), { ...threeRow, devServer });
+
+			expect(screen.getByTestId("task-card-signals")).toContainElement(screen.getByTestId("task-card-dev-port"));
+			expect(screen.getByTestId("task-card-secondary-actions")).toContainElement(screen.getByTestId("task-card-dev-control"));
+		});
+
+		it("offers only Delete on a cancelled card", () => {
+			renderCard(makeTask({ status: "cancelled" }), threeRow);
+
+			const actions = screen.getByTestId("task-card-hover-actions");
+			expect(within(actions).getAllByRole("button")).toHaveLength(1);
+			expect(within(actions).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+		});
+
+		it("keeps the workspace actions on a live card and opens the task menu from More", async () => {
+			const user = userEvent.setup();
+			renderCard(makeTask({ status: "in-progress", worktreePath: "/tmp/worktree" }), threeRow);
+
+			const secondary = screen.getByTestId("task-card-secondary-actions");
+			expect(within(secondary).getByRole("button", { name: "+ Variant" })).toBeInTheDocument();
+			await user.click(within(secondary).getByRole("button", { name: "More actions" }));
+
+			expect(screen.getByTestId(/^card-task-menu-/)).toBeInTheDocument();
+		});
+
+		it("leaves the plain compact card untouched for per-project boards", () => {
+			renderCard(makeTask({ status: "todo" }), { compact: true });
+
+			expect(screen.getByTestId("workspace-compact-task-card")).toHaveClass("h-16");
+			expect(screen.queryByTestId("workspace-three-row-task-card")).not.toBeInTheDocument();
+		});
+	});
+
 	describe("workspace-board compact presentation", () => {
 		it("clamps the title to two lines in a fixed-height card the rail label does not stretch", () => {
 			renderCard(makeTask({ status: "review-by-user", title: "A very long task title that cannot fit inside one compact card" }), { compact: true });

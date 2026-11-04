@@ -2,11 +2,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import WorkspaceBoard from "../WorkspaceBoard";
 import { I18nProvider } from "../../i18n";
-import type { Project, Task } from "../../../shared/types";
+import type { DevServerSummary, PortInfo, Project, ResourceUsage, Task, TaskPRBadgeInfo } from "../../../shared/types";
 
 vi.mock("../../rpc", () => ({
 	api: { request: {
 		getWorkspaceBoardTasks: vi.fn(),
+		getProjectPRs: vi.fn().mockResolvedValue([]),
 		getUnsavedWork: vi.fn().mockResolvedValue({ hasUncommitted: false, hasUnpushed: false }),
 		resetTaskToTodo: vi.fn(),
 		setTaskBlocked: vi.fn(),
@@ -17,11 +18,12 @@ vi.mock("../../rpc", () => ({
 }));
 
 vi.mock("../TaskCard", () => ({
-	default: ({ task, project, onOpenWorkspaceTask, onDragStart }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void; onDragStart?: (id: string) => void }) => (
+	default: ({ task, project, onOpenWorkspaceTask, onDragStart, ports, devServer, resourceUsage, prInfo }: { task: Task; project: Project; onOpenWorkspaceTask?: (task: Task, project: Project, trigger: HTMLElement) => void; onDragStart?: (id: string) => void; ports?: PortInfo[]; devServer?: DevServerSummary; resourceUsage?: ResourceUsage; prInfo?: TaskPRBadgeInfo }) => (
 		<button
 			draggable
 			onDragStart={() => onDragStart?.(task.id)}
 			data-testid={`workspace-task-${task.id}`}
+			data-signals={JSON.stringify({ ports: ports?.length, dev: devServer?.ports, rss: resourceUsage?.rss, pr: prInfo?.number })}
 			data-needs-input={task.status === "user-questions" || undefined}
 			onClick={(event) => onOpenWorkspaceTask?.(task, project, event.currentTarget)}
 		>
@@ -46,6 +48,19 @@ function task(id: string, projectId: string, status: Task["status"]): Task {
 }
 
 describe("WorkspaceBoard", () => {
+	it("hands each card its live signals, without polling a PR list per project", async () => {
+		const live = { ...task("11111111-live", "p1", "in-progress"), prNumber: 42, prUrl: "https://example.test/pull/42" };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [live] }]);
+		const ports = new Map([[live.id, [{ port: 3000, pid: 1, processName: "node" } as PortInfo]]]);
+		const devServers = new Map([[live.id, { taskId: live.id, running: true, ports: [3000] } as DevServerSummary]]);
+		const usage = new Map([[live.id.slice(0, 8), { rss: 1024, cpu: 1 } as ResourceUsage]]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query="" dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} taskPorts={ports} taskDevServers={devServers} taskResourceUsage={usage} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+
+		const card = await screen.findByTestId(`workspace-task-${live.id}`);
+		await waitFor(() => expect(JSON.parse(card.getAttribute("data-signals")!)).toEqual({ ports: 1, dev: [3000], rss: 1024, pr: 42 }));
+		expect(api.request.getProjectPRs).not.toHaveBeenCalled();
+	});
+
 	it("keeps a To Do worktree untouched when its launch reset is declined", async () => {
 		const previous = { ...task("previous-run", "p1", "todo"), worktreePath: "/tmp/previous", branchName: "dev3/previous" };
 		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [previous] }]);

@@ -148,6 +148,7 @@ const kanban = {
 	"task.failedMoveToProject": "Error al mover tarea al proyecto: {error}",
 	"task.failedDelete": "Error al eliminar tarea: {error}",
 	"task.run": "Ejecutar",
+	"task.moreActions": "Más acciones",
 	"task.addVariant": "+ Variante",
 	"task.preparing": "Preparando…",
 	"task.shuttingDown": "Cerrando…",
