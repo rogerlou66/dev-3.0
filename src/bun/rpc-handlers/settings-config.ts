@@ -1,3 +1,4 @@
+import { presetForcesDark } from "../../shared/appearance-preset";
 import { normalizeSimplifiedInterface } from "../../shared/simplified-interface";
 import { noteInterfaceModeChange } from "../interface-onboarding";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from "node:fs";
@@ -268,7 +269,7 @@ function getShellAvailability(): ShellAvailability {
  */
 async function applyTmuxConfigChange(
 	theme: "dark" | "light",
-	options: { refreshShell: boolean; dimInactivePanes: boolean; dimChanged: boolean; paneTitles: boolean; titlesChanged: boolean; appearancePreset?: "default" | "cmux" },
+	options: { refreshShell: boolean; dimInactivePanes: boolean; dimChanged: boolean; paneTitles: boolean; titlesChanged: boolean; appearancePreset?: "default" | "cmux" | "clarity" },
 ): Promise<void> {
 	try {
 		if (options.refreshShell) process.env.SHELL = getUserShell();
@@ -317,7 +318,7 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 		// Written only by the account surfaces' Auto row, after the snapshot was taken.
 		autoAccountDefault: stored.autoAccountDefault,
 	};
-	if (next.appearancePreset === "cmux") next.resolvedTheme = "dark";
+	if (presetForcesDark(next.appearancePreset)) next.resolvedTheme = "dark";
 	await saveSettings(next);
 	await noteInterfaceModeChange(stored.simplifiedMode === true, next.simplifiedMode === true, stored.simplifiedModeSource === "fresh");
 	// Turning the artifact popup off after a freeze recovery turned it on is the
@@ -357,7 +358,7 @@ async function saveGlobalSettings(params: GlobalSettings): Promise<void> {
 	const dimChanged = (stored.dimInactivePanes !== false) !== (next.dimInactivePanes !== false);
 	const titlesChanged = (stored.paneTitles === true) !== (next.paneTitles === true);
 	if (process.platform !== "win32" && (shellChanged || dimChanged || titlesChanged)) {
-		await applyTmuxConfigChange(next.appearancePreset === "cmux" ? "dark" : next.resolvedTheme ?? getCurrentUiTheme(), {
+		await applyTmuxConfigChange(presetForcesDark(next.appearancePreset) ? "dark" : next.resolvedTheme ?? getCurrentUiTheme(), {
 			refreshShell: shellChanged,
 			dimInactivePanes: next.dimInactivePanes !== false,
 			appearancePreset: next.appearancePreset,
@@ -665,15 +666,15 @@ async function setAgentBinaryPath(params: { agentId: string; path: string }): Pr
 	log.info("<- setAgentBinaryPath saved");
 }
 
-async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" }): Promise<void> {
+async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" | "clarity" }): Promise<void> {
 	log.info("→ setTmuxTheme", params);
 	const settings = await loadSettings();
 	const appearancePreset = params.appearancePreset ?? settings.appearancePreset ?? "default";
-	const resolvedTheme = appearancePreset === "cmux" ? "dark" : params.theme;
+	const resolvedTheme = presetForcesDark(appearancePreset) ? "dark" : params.theme;
 	const next: GlobalSettings = {
 		...settings,
 		appearancePreset,
-		...(params.preference !== undefined && (appearancePreset !== "cmux" || settings.appearancePreset !== "cmux")
+		...(params.preference !== undefined && (!presetForcesDark(appearancePreset) || !presetForcesDark(settings.appearancePreset))
 			? { theme: params.preference } : {}),
 		resolvedTheme,
 	};

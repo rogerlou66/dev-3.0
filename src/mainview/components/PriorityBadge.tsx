@@ -42,7 +42,7 @@ function PriorityBadge({ priority, onChange, size = "xs", className = "" }: Prio
 
 	if (!onChange) {
 		return (
-			<span className={`${baseCls} ${sizeCls} ${style.badge} ${className}`}>
+			<span data-priority={level} className={`${baseCls} ${sizeCls} ${style.badge} ${className}`}>
 				{level}
 			</span>
 		);
@@ -53,6 +53,7 @@ function PriorityBadge({ priority, onChange, size = "xs", className = "" }: Prio
 			<button
 				ref={btnRef}
 				type="button"
+				data-priority={level}
 				aria-label={aria}
 				aria-haspopup="menu"
 				aria-expanded={open}

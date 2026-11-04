@@ -162,6 +162,20 @@ export const STATUS_COLORS: Record<TaskStatus, string> = {
 	cancelled: "#ff8282",
 };
 
+/** Column colours for the Clarity appearance preset (dark only). Hues are spread
+ *  so each column reads at a glance, and every value clears 4.5:1 as text on the
+ *  preset's raised surface (#151a21). */
+export const STATUS_COLORS_CLARITY: Record<TaskStatus, string> = {
+	todo: "#7aa2f7",
+	"in-progress": "#2dd4bf",
+	"user-questions": "#fb923c",
+	"review-by-ai": "#a3adba",
+	"review-by-user": "#f5b83d",
+	"review-by-colleague": "#b794f6",
+	completed: "#4ade80",
+	cancelled: "#f87171",
+};
+
 /** Light-theme column colours. Every one sits at the sRGB chroma ceiling for its
  *  lightness, and the hues are spaced (15° → 40° → 95° → 152° → 232° → 272° →
  *  318°) so that a column stays recognisable after the glow overlay keeps only a

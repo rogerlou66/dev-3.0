@@ -12,6 +12,7 @@
  *   - QR code generation for easy mobile access
  */
 
+import { presetForcesDark } from "../shared/appearance-preset";
 import { createReadStream, existsSync, statSync, readFileSync } from "node:fs";
 import { isAbsolute, join, extname, relative, resolve } from "node:path";
 import { networkInterfaces } from "node:os";
@@ -422,11 +423,11 @@ export async function serveStatic(pathname: string, staticRootOverride?: string)
 	});
 }
 
-function getInitialThemeBootstrap(): { preference: "dark" | "light" | "system"; resolved: "dark" | "light"; appearancePreset: "default" | "cmux" } {
+function getInitialThemeBootstrap(): { preference: "dark" | "light" | "system"; resolved: "dark" | "light"; appearancePreset: "default" | "cmux" | "clarity" } {
 	const settings = loadSettingsSync();
 	const appearancePreset = settings.appearancePreset ?? "default";
 	const preference = settings.theme ?? settings.resolvedTheme ?? getCurrentUiTheme();
-	const resolved = appearancePreset === "cmux" ? "dark" : settings.resolvedTheme ?? getCurrentUiTheme();
+	const resolved = presetForcesDark(appearancePreset) ? "dark" : settings.resolvedTheme ?? getCurrentUiTheme();
 	return { preference, resolved, appearancePreset };
 }
 

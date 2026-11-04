@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { setAppearancePreset, useAppearancePreset } from "../../appearance-preset";
+import { setAppearancePreset, useAppearancePreset, type AppearancePreset } from "../../appearance-preset";
 import { isTerminalFontAvailable } from "../../terminal-font";
 import { toast } from "../../toast";
 import { useIsSimplifyViewApplied } from "../../hooks/useIsControlHidden";
@@ -46,9 +46,9 @@ export default function AppearanceSettingsSection({
 	const simplifyEnabled = useIsSimplifyViewApplied();
 	const streamerMode = useStreamerMode();
 	const preset = useAppearancePreset();
-	const managed = preset === "cmux";
+	const managed = preset !== "default";
 	const [saving, setSaving] = useState(false);
-	async function changePreset(next: "default" | "cmux") {
+	async function changePreset(next: AppearancePreset) {
 		setSaving(true);
 		try {
 			await setAppearancePreset(next);
@@ -64,15 +64,18 @@ export default function AppearanceSettingsSection({
 				<div>
 					<p className="block text-fg text-sm font-semibold mb-2">{t("settings.appearancePreset")}</p>
 					<p className="text-fg-3 text-sm mb-3">{t("settings.appearancePresetDesc")}</p>
-					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+					<div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
 						<ThemeCard name={t("settings.appearancePresetDefault")} description={t("settings.appearancePresetDefaultDesc")}
-							active={!managed} disabled={saving} onClick={() => void changePreset("default")}
+							active={preset === "default"} disabled={saving} onClick={() => void changePreset("default")}
 							preview={{ bg: "#171924", raised: "#1e2133", text: "#eceef8", accent: "#5e9eff" }} />
 						<ThemeCard name="cmux" description={t("settings.appearancePresetCmuxDesc")}
-							active={managed} disabled={saving} onClick={() => void changePreset("cmux")}
+							active={preset === "cmux"} disabled={saving} onClick={() => void changePreset("cmux")}
 							preview={{ bg: "#24283b", raised: "#292e42", text: "#c0caf5", accent: "#7aa2f7" }} />
+						<ThemeCard name={t("settings.appearancePresetClarity")} description={t("settings.appearancePresetClarityDesc")}
+							active={preset === "clarity"} disabled={saving} onClick={() => void changePreset("clarity")}
+							preview={{ bg: "#0d1117", raised: "#1c222b", text: "#f0f3f8", accent: "#2dd4bf" }} />
 					</div>
-					{managed && !isTerminalFontAvailable("SF Mono") && (
+					{preset === "cmux" && !isTerminalFontAvailable("SF Mono") && (
 						<p className="text-warning-strong text-sm mt-3">{t("settings.appearancePresetFontMissing")}</p>
 					)}
 				</div>
@@ -100,7 +103,7 @@ export default function AppearanceSettingsSection({
 					<p className="block text-fg text-sm font-semibold mb-2">
 						{t("settings.theme")}
 					</p>
-					<p className="text-fg-3 text-sm mb-3">{t(managed ? "settings.appearancePresetThemeManaged" : "settings.themeDesc")}</p>
+					<p className="text-fg-3 text-sm mb-3">{t(preset === "clarity" ? "settings.appearancePresetThemeManagedClarity" : managed ? "settings.appearancePresetThemeManaged" : "settings.themeDesc")}</p>
 				<div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
 					<ThemeCard
 						name={t("settings.themeDark")}

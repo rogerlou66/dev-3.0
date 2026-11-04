@@ -103,6 +103,28 @@ describe("appearance preset lifecycle", () => {
 		expect(setTmuxTheme).not.toHaveBeenCalled();
 	});
 
+	it("clarity pins dark, keeps the saved font and survives theme menu commands", async () => {
+		localStorage.setItem("dev3-theme", "light");
+		fonts.applyTerminalFontSize(20);
+		appearance.bootstrapAppearancePreset();
+		await appearance.setAppearancePreset("clarity");
+		expect(document.documentElement.dataset.appearancePreset).toBe("clarity");
+		expect(document.documentElement.dataset.theme).toBe("dark");
+		expect(fonts.effectiveTerminalFontSize()).toBe(20);
+		expect(setTmuxTheme).toHaveBeenLastCalledWith({ theme: "dark", preference: "light", appearancePreset: "clarity" });
+		setTmuxTheme.mockClear();
+		await appearance.applyThemePreference("light");
+		expect(document.documentElement.dataset.theme).toBe("dark");
+		expect(setTmuxTheme).not.toHaveBeenCalled();
+		await appearance.setAppearancePreset("default");
+		expect(document.documentElement.dataset.theme).toBe("light");
+	});
+
+	it("parses unknown presets as default", () => {
+		expect(appearance.parseAppearancePreset("clarity")).toBe("clarity");
+		expect(appearance.parseAppearancePreset("neon")).toBe("default");
+	});
+
 	it("does not apply or persist a preset until its save succeeds", async () => {
 		localStorage.setItem("dev3-theme", "light");
 		appearance.bootstrapAppearancePreset();

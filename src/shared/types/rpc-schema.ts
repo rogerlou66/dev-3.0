@@ -1449,7 +1449,7 @@ export type AppRPCSchema = {
 				response: PRInfo[];
 			};
 			setTmuxTheme: {
-				params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" };
+				params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" | "clarity" };
 				response: void;
 			};
 			/**

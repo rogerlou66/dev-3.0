@@ -6,6 +6,8 @@ Two themes: **dark** (default) and **light**, toggled via `data-theme` attribute
 
 The optional **cmux appearance preset** fixes the effective theme to dark and applies SF Mono with the TokyoNight Storm palette through `data-appearance-preset="cmux"`. Saved theme and terminal font preferences remain intact; Default restores them. The preset keeps the existing type scale and semantic status colors, uses `#24283b` for the base and active terminal background, and retains a bundled font fallback and separate Nerd Font icons.
 
+The optional **Clarity appearance preset** (`data-appearance-preset="clarity"`) also fixes the effective theme to dark, keeps the default fonts and terminal theme, and swaps in a flat high-contrast palette: solid `#0d1117`/`#151a21` surfaces instead of glass, `STATUS_COLORS_CLARITY` for column identity, a 3px column header edge, and readable (not greyscaled) idle task cards.
+
 ---
 
 ## 1. Visual Theme & Atmosphere

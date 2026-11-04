@@ -73,7 +73,7 @@ const log = createLogger("pty");
  * explicit toggles that override the server-wide choice; without one the server
  * keeps whatever the last toggle — from this or another dev3 instance — set.
  */
-export async function applyTmuxTheme(theme: "dark" | "light", opts: { appearancePreset?: "default" | "cmux"; paneDimming?: boolean; paneTitles?: boolean } = {}): Promise<void> {
+export async function applyTmuxTheme(theme: "dark" | "light", opts: { appearancePreset?: "default" | "cmux" | "clarity"; paneDimming?: boolean; paneTitles?: boolean } = {}): Promise<void> {
 	const configPath = setActiveTmuxTheme(theme, opts.appearancePreset);
 	// Source the themed config on every known socket (typically just "dev3")
 	const sockets = new Set<string>();

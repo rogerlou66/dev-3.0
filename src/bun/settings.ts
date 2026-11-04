@@ -1,3 +1,4 @@
+import { parseAppearancePreset } from "../shared/appearance-preset";
 import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { GlobalSettings, ShortcutOverride } from "../shared/types";
@@ -122,7 +123,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		defaultAgentId: d.defaultAgentId ?? DEFAULT_SETTINGS.defaultAgentId,
 		defaultConfigId: resolveDefaultConfigId(d.defaultConfigId),
 		taskSortOrder: d.taskSortOrder === "newest-first" ? "newest-first" : "oldest-first",
-		appearancePreset: d.appearancePreset === "cmux" ? "cmux" : "default",
+		appearancePreset: parseAppearancePreset(d.appearancePreset),
 		theme: d.theme === "light" || d.theme === "system" || d.theme === "dark" ? d.theme : undefined,
 		resolvedTheme: d.resolvedTheme === "light" || d.resolvedTheme === "dark" ? d.resolvedTheme : undefined,
 		// Preserve the retired analytics id for older versions sharing settings.json.
