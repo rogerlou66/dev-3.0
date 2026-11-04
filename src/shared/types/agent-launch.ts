@@ -1,4 +1,6 @@
 import type { ResumeDialogPane } from "../agent-resume";
+import type { AgentSessionAction } from "../task-hibernate";
+import type { ExternalSenderRequester } from "../external-senders";
 import type { TaskStatus } from "./task-status";
 import { DEFAULT_PRIORITY, type TaskPriority } from "./task-priority";
 import type { Task } from "./task";
@@ -103,6 +105,8 @@ export interface AgentLaunchRequest {
 	spawn?: { choice: LaunchVariant; prompt?: string; handoff: boolean };
 	/** `dev3 agent resume`: restore these saved panes exactly — the dialog offers no agent choice. */
 	resume?: { panes: ResumeDialogPane[] };
+	/** `dev3 task hibernate` / `dev3 task wake --shell`: act on the task's session — the dialog offers no agent choice. */
+	sessionAction?: AgentSessionAction;
 	/**
 	 * Agent/config the requesting agent suggested with `--agent`/`--config`,
 	 * already validated. Only preselects the picker — the user still decides.
@@ -116,6 +120,12 @@ export interface AgentLaunchRequest {
 	scratch: boolean;
 	requesterSeq: number;
 	requesterTitle: string;
+	/**
+	 * Set when a registered external sender asked (`--as-sender`) rather than a
+	 * task: the dialog names it instead of `#requesterSeq`. Self-asserted on a
+	 * same-user socket, so it attributes the request and proves nothing.
+	 */
+	requesterSender?: ExternalSenderRequester;
 	subject: TaskDialogSubject;
 	/**
 	 * Priority the launch applies unless the user picks another in the dialog:

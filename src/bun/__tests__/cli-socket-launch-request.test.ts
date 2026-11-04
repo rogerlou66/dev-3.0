@@ -47,6 +47,15 @@ vi.mock("../rpc-handlers", () => {
 	};
 });
 
+vi.mock("../scheduled-message-author", () => ({
+	AGENT_IDENTITY_UNSUPPORTED_DETAIL: "agent identity cannot be verified on Windows yet",
+	captureScheduledMessageAuthor: vi.fn(async () => null),
+	resolveScheduledMessageAuthorPane: vi.fn(),
+	captureSenderAgent: vi.fn(async (_task: unknown, paneId: string | null) =>
+		paneId
+			? { ok: true, author: { paneId, sessionId: "conv-r", paneToken: "gen-1", agentProcess: "77@x" } }
+			: { ok: false, reason: "no-agent", detail: "dev3 was not run from a task terminal pane, so there is no sending agent" }),
+}));
 vi.mock("../agent-launch-handoff", () => ({
 	deliverLaunchHandoff: vi.fn(() => Promise.resolve(true)),
 }));
@@ -78,10 +87,21 @@ vi.mock("../settings", () => ({
 	recordFavoriteUsages: vi.fn(),
 }));
 
+vi.mock("../external-senders", () => ({
+	requireExternalSender: vi.fn((id: string) => {
+		if (id !== "openclaw:home:main") throw new Error(`Unknown external sender "${id}".`);
+		return { id, label: "OpenClaw main (home)" };
+	}),
+}));
+
 vi.mock("../cli-agent-spawn", () => ({
 	validateLaunchSuggestion: vi.fn(),
 }));
 
+vi.mock("../agents", async () => {
+	const { DEFAULT_AGENTS } = await import("../../shared/types");
+	return { getAllAgents: vi.fn().mockResolvedValue(DEFAULT_AGENTS) };
+});
 vi.mock("node:fs", () => ({
 	existsSync: vi.fn(() => false),
 	readdirSync: vi.fn(() => []),
@@ -99,6 +119,7 @@ vi.mock("node:fs", () => ({
 import * as data from "../data";
 import { moveTask, launchTaskWithAgentChoice, createScratchTask, deleteTask, getPushMessage } from "../rpc-handlers";
 import { deliverLaunchHandoff } from "../agent-launch-handoff";
+import { captureSenderAgent } from "../scheduled-message-author";
 import { resolveAgentRequest, _resetAgentRequestsForTests } from "../agent-requests";
 import { loadSettings } from "../settings";
 import { validateLaunchSuggestion } from "../cli-agent-spawn";
@@ -162,6 +183,8 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	_resetAgentRequestsForTests();
 	vi.mocked(deliverLaunchHandoff).mockResolvedValue(true);
+	// The launch answers once the child's preparation settles; by default it started.
+	vi.mocked(data.getTask).mockImplementation(async (_project, id) => makeTask({ id, status: "in-progress", runtimeState: { runtime: "running", updatedAt: 1 } }));
 });
 
 describe("task.move — agent-initiated launch approval", () => {
@@ -268,6 +291,96 @@ describe("task.move — agent-initiated launch approval", () => {
 			// No --handoff-file: the child still gets dev3's own default note.
 			launcherNote: null,
 		}));
+	});
+
+	// 2026-11-01 incident: the launch answered "started" at dispatch, while another
+	// dev3 instance was deleting the child's worktree. The reply must carry how the
+	// preparation actually ended.
+	it("reports a preparation that failed after approval instead of a start", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" as const }]);
+		const preparing = makeTask({ status: "in-progress", preparing: true, runtimeState: { runtime: "preparing", stage: "creating-worktree", runId: "r1", updatedAt: 1 } });
+		const failed = makeTask({ status: "todo", preparationError: "Preparation interrupted by app restart", runtimeState: { runtime: "idle", updatedAt: 2 } });
+		vi.mocked(data.getTask).mockResolvedValueOnce(preparing).mockResolvedValue(failed);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, { approved: true });
+
+		const resp = await respPromise;
+		expect((resp.data as { launched: Array<{ preparation: unknown }> }).launched[0]!.preparation).toEqual({
+			state: "failed",
+			error: "Preparation interrupted by app restart",
+		});
+		expect(data.getTask).toHaveBeenCalledTimes(2);
+	});
+
+	it("lists the pending launch in approvals.list with the dialog's context and who asked", async () => {
+		setupBoard(makeTask());
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([makeTask({ status: "in-progress" })]);
+
+		const respPromise = handleRequest(moveRequest({ taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", sourceTaskId: REQUESTER_ID }));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+
+		const listed = await handleRequest({ id: "req-2", method: "approvals.list", params: {} });
+		expect((listed.data as { requests: unknown[] }).requests).toEqual([expect.objectContaining({
+			kind: "launch", taskId: TARGET_ID, taskTitle: "Target task", seqLabel: "7", projectName: "Test Project",
+			requesterTaskId: REQUESTER_ID, requesterSeq: 3, requesterTitle: "Asking task", requesterSenderId: null,
+		})]);
+
+		resolveAgentRequest((pushFn.mock.calls[0]![1] as { requestId: string }).requestId, { approved: false });
+		await respPromise;
+		const after = await handleRequest({ id: "req-3", method: "approvals.list", params: {} });
+		expect(after.data).toEqual({ requests: [] });
+	});
+
+	it("hands the child a reply command that reaches the asking AGENT, not just its task", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" as const }]);
+
+		const respPromise = handleRequest(moveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			sourceTaskId: REQUESTER_ID,
+			sourcePaneId: "%2",
+			sourcePid: 4242,
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		resolveAgentRequest(payload.requestId as string, {
+			approved: true,
+			launch: { variants: [{ agentId: "builtin-claude", configId: "claude-auto", accountId: null }] },
+		});
+		expect((await respPromise).ok).toBe(true);
+
+		expect(captureSenderAgent).toHaveBeenCalledWith(expect.objectContaining({ id: REQUESTER_ID }), "%2", 4242);
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			source: expect.objectContaining({ seq: 3, agent: expect.objectContaining({ paneId: "%2", agentProcess: "77@x" }) }),
+		}));
+	});
+
+	it("never captures a sender for a plain move that launches nothing", async () => {
+		setupBoard(makeTask({ status: "in-progress" }));
+		vi.mocked(moveTask).mockResolvedValue(makeTask({ status: "review-by-user" }));
+		await handleRequest(moveRequest({
+			taskId: TARGET_ID, newStatus: "review-by-user", projectId: "proj-1", sourceTaskId: REQUESTER_ID, sourcePaneId: "%2", sourcePid: 4242,
+		}));
+		expect(captureSenderAgent).not.toHaveBeenCalled();
 	});
 
 	it("passes the launcher's --handoff-file text through to the child's note", async () => {
@@ -582,6 +695,10 @@ describe("task.createScratchAndRun", () => {
 		expect(resp.ok).toBe(true);
 		expect(resp.data).toMatchObject({ approved: true, seq: 9 });
 		expect(deleteTask).not.toHaveBeenCalled();
+		// No pane reported, so the child is told replies cannot reach the asker.
+		expect(deliverLaunchHandoff).toHaveBeenCalledWith(expect.objectContaining({
+			source: expect.objectContaining({ agentUnavailable: expect.stringContaining("not run from a task terminal pane") }),
+		}));
 	});
 
 	it("discards the placeholder task when the user declines", async () => {
@@ -773,8 +890,8 @@ describe("task.move — agent-initiated launch with variants", () => {
 describe("launch requests with a suggested agent/config (issue #1911)", () => {
 	const SUGGESTED = { agentId: "builtin-codex", configId: "codex-low" };
 
-	async function startMove(params: Record<string, unknown> = {}) {
-		const target = makeTask();
+	async function startMove(params: Record<string, unknown> = {}, taskOverrides: Partial<Task> = {}) {
+		const target = makeTask(taskOverrides);
 		setupBoard(target);
 		const pushFn = vi.fn();
 		vi.mocked(getPushMessage).mockReturnValue(pushFn);
@@ -819,6 +936,23 @@ describe("launch requests with a suggested agent/config (issue #1911)", () => {
 			vi.useRealTimers();
 		}
 		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({ choice: { variants: [SUGGESTED], priority: "P3" } }));
+	});
+
+	it("a coordinator with no flags preselects and auto-launches the coordinator preset", async () => {
+		vi.mocked(loadSettings).mockReturnValue({ agentLaunchAutoApproveMinutes: 1 } as never);
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const coordinator = { agentId: "builtin-claude", configId: "claude-auto-fable51-medium" };
+		let payload: Record<string, unknown>;
+		try {
+			const started = await startMove({}, { taskType: "coordinator" });
+			payload = started.payload;
+			vi.advanceTimersByTime(60_000);
+			await started.respPromise;
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(payload.suggested).toEqual(coordinator);
+		expect(launchTaskWithAgentChoice).toHaveBeenCalledWith(expect.objectContaining({ choice: { variants: [coordinator], priority: "P3" } }));
 	});
 
 	it("without flags: no suggestion, no validation, and auto-approval keeps the default variant", async () => {
@@ -899,5 +1033,93 @@ describe("launch requests with a suggested agent/config (issue #1911)", () => {
 		expect(payload.suggested).toEqual(SUGGESTED);
 		resolveAgentRequest(payload.requestId as string, { approved: false });
 		await respPromise;
+	});
+});
+
+describe("task.moveAsSender — a start an external sender asks for", () => {
+	function senderMoveRequest(params: Record<string, unknown>): CliRequest {
+		return { id: "req-1", method: "task.moveAsSender", params };
+	}
+
+	it("is refused on plain task.move, so no app ever runs a sender's start as an ordinary move", async () => {
+		setupBoard(makeTask());
+		const resp = await handleRequest(moveRequest({ taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", asSender: "openclaw:home:main" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("task.moveAsSender") });
+		expect(moveTask).not.toHaveBeenCalled();
+		expect(launchTaskWithAgentChoice).not.toHaveBeenCalled();
+	});
+
+	it("goes through the same dialog, naming the sender, and hands back an --as-sender reply command", async () => {
+		const target = makeTask();
+		setupBoard(target);
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		vi.mocked(launchTaskWithAgentChoice).mockResolvedValue([{ ...target, status: "in-progress" as const }]);
+
+		const respPromise = handleRequest(senderMoveRequest({
+			taskId: TARGET_ID,
+			newStatus: "in-progress",
+			projectId: "proj-1",
+			asSender: "openclaw:home:main",
+		}));
+		await vi.waitFor(() => expect(pushFn).toHaveBeenCalled());
+		const [event, payload] = pushFn.mock.calls[0] as [string, Record<string, unknown>];
+		expect(event).toBe("agentLaunchRequested");
+		expect(payload.requesterSender).toEqual({ senderId: "openclaw:home:main", label: "OpenClaw main (home)" });
+		expect(payload.requesterTitle).toBe("OpenClaw main (home)");
+		resolveAgentRequest(payload.requestId as string, { approved: true, launch: { variants: [{ agentId: null, configId: null }] } });
+
+		const resp = await respPromise;
+		const replyCommand = (resp.data as { launched: Array<{ replyCommand: string }> }).launched[0]!.replyCommand;
+		expect(replyCommand).toContain("dev3 message --as-sender openclaw:home:main --task seq:7 --project proj-1");
+		// A sender has no task to report back to, so no handoff note is typed.
+		expect(deliverLaunchHandoff).not.toHaveBeenCalled();
+		expect(moveTask).not.toHaveBeenCalled();
+	});
+
+	it("refuses a handoff note from a sender instead of dropping it", async () => {
+		setupBoard(makeTask());
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		const resp = await handleRequest(senderMoveRequest({
+			taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", asSender: "openclaw:home:main", handoffNote: "brief",
+		}));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--handoff-file does not apply with --as-sender") });
+		expect(pushFn).not.toHaveBeenCalled();
+	});
+
+	it("refuses moving a task that is already running, so no column agent starts without a dialog", async () => {
+		setupBoard(makeTask({ status: "in-progress" }));
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		const resp = await handleRequest(senderMoveRequest({ taskId: TARGET_ID, newStatus: "review-by-ai", projectId: "proj-1", asSender: "openclaw:home:main" }));
+		expect(resp).toMatchObject({ ok: false, error: "A sender can only start a task that is not running." });
+		expect(moveTask).not.toHaveBeenCalled();
+		expect(pushFn).not.toHaveBeenCalled();
+	});
+
+	it("treats a repeated start of a running task as a no-op", async () => {
+		setupBoard(makeTask({ status: "in-progress" }));
+		const resp = await handleRequest(senderMoveRequest({ taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", asSender: "openclaw:home:main" }));
+		expect(resp).toMatchObject({ ok: true, data: { id: TARGET_ID, status: "in-progress" } });
+		expect(moveTask).not.toHaveBeenCalled();
+	});
+
+	it("refuses an unknown sender before any dialog", async () => {
+		setupBoard(makeTask());
+		const pushFn = vi.fn();
+		vi.mocked(getPushMessage).mockReturnValue(pushFn);
+		const resp = await handleRequest(senderMoveRequest({ taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", asSender: "ghost" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringMatching(/^Unknown external sender/) });
+		expect(pushFn).not.toHaveBeenCalled();
+		expect(moveTask).not.toHaveBeenCalled();
+	});
+
+	it("refuses a request that comes from a task AND claims a sender", async () => {
+		setupBoard(makeTask());
+		const resp = await handleRequest(senderMoveRequest({
+			taskId: TARGET_ID, newStatus: "in-progress", projectId: "proj-1", asSender: "openclaw:home:main", sourceTaskId: REQUESTER_ID,
+		}));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--as-sender cannot be used from inside a task") });
 	});
 });

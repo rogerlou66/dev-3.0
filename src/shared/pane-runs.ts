@@ -277,7 +277,19 @@ export interface PaneRunPaneLine {
 	readonly alive: boolean | null;
 	/** The run this pane is executing, when dev3 started it. */
 	readonly runId: string | null;
+	/** Which of the task's agents dev3 launched in this pane, when it launched one. */
+	readonly agentRole?: "main" | "agent" | "review";
+	/** The `dev3 message --agent` address of the agent running here now. */
+	readonly agentHandle?: string;
+	/** Why an agent pane has no handle: nothing addressed to it by agent could be verified. */
+	readonly agentHandleUnavailable?: string;
 }
+
+const AGENT_ROLE_MARKS: Record<NonNullable<PaneRunPaneLine["agentRole"]>, string> = {
+	main: "main agent",
+	agent: "extra agent",
+	review: "AI Review agent",
+};
 
 export interface PaneRunListing {
 	readonly backend: "tmux" | "native";
@@ -301,12 +313,15 @@ export function renderPaneRunListing(listing: PaneRunListing): string {
 	}
 	for (const pane of listing.panes) {
 		const marks = [
+			pane.agentRole ? AGENT_ROLE_MARKS[pane.agentRole] : null,
 			pane.self ? "you" : null,
 			pane.active ? "active" : null,
 			pane.alive === false ? "dead" : null,
 			pane.runId ? `run ${pane.runId}` : null,
 		].filter(Boolean);
 		lines.push(`  ${pane.index}. ${pane.paneId} ${pane.label}${marks.length ? ` [${marks.join(", ")}]` : ""}`);
+		if (pane.agentHandle) lines.push(`     message it: --agent ${pane.agentHandle}`);
+		else if (pane.agentHandleUnavailable) lines.push(`     no --agent handle: ${pane.agentHandleUnavailable}`);
 	}
 	lines.push("", "runs:");
 	if (listing.runs.length === 0) {

@@ -47,26 +47,35 @@ export interface ScheduledMessage {
 	 */
 	spilledPath?: string;
 	/**
-	 * The agent that queued this for its OWN task (a self-reminder), so the fire
-	 * goes back to that agent instead of whichever sibling is focused. Absent for
-	 * cross-task and human-queued messages. Additive: older versions ignore it.
+	 * The one agent this goes to: the agent that queued a self-reminder, or the one
+	 * a sender addressed with `--agent`. The fire never reaches a sibling instead.
+	 * Absent for task-addressed messages. Additive: older versions ignore it.
 	 */
 	author?: ScheduledMessageAuthor;
 }
 
 /**
- * Who a self-reminder belongs to, captured when it was queued. The identity is
- * the agent PROCESS (pid + start time): pane ids are reused across tmux servers,
- * and an agent that exits leaves its pane behind as a plain shell.
+ * One agent process in a task: a self-reminder's author, an `--agent` address, or
+ * a message's sender. The identity is the PROCESS (pid + start time): pane ids are
+ * reused across tmux servers, and an agent that exits leaves its pane as a shell.
  */
 export interface ScheduledMessageAuthor {
-	/** Pane the scheduling agent ran in (tmux `%N` or native pane id). */
+	/** Pane the agent ran in (tmux `%N` or native pane id). */
 	paneId: string;
 	/** That pane's agent conversation id from `sessionState`, when known. */
 	sessionId: string | null;
-	/** The pane's generation: tmux server token, or the native registry session id. */
+	/**
+	 * The pane's generation: tmux server token, or the native registry session id.
+	 * Never reinterpreted: older versions compare it while the agent is alive.
+	 */
 	paneToken: string;
-	/** Start signature (`pid@lstart`) of the agent process itself. */
+	/**
+	 * Native main agent only: start signature of the pane's root process, which a
+	 * restart changes while `paneToken` (deterministic per pane) does not. Additive;
+	 * absent on tmux and on records written before it, which are never rebound.
+	 */
+	paneGeneration?: string;
+	/** Start signature of the agent process itself: `pid@linux:<boot id>:<start tick>` on Linux, `pid@<ps lstart>` elsewhere. */
 	agentProcess: string;
 }
 
@@ -105,6 +114,10 @@ export interface AgentMessageSource {
 	 * a cross-project reply command can carry `--project` (`agentReplyCommand`).
 	 */
 	projectId?: string;
+	/** The sending agent itself, so the reply command reaches it and no sibling. */
+	agent?: ScheduledMessageAuthor;
+	/** Why no sending agent could be proven; the envelope then offers no reply command. */
+	agentUnavailable?: string;
 }
 
 /** Per-task cap on pending scheduled messages; scheduling past this is rejected. */

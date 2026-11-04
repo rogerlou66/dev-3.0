@@ -1,3 +1,4 @@
+import type { TaskOrigin } from "./task-origin";
 import type { TerminalBackendIdentity } from "../terminal-backend-identity";
 import type { AccountPickReason } from "../account-routing";
 import type { ReviewComment } from "../review";
@@ -7,12 +8,14 @@ import type { TaskType } from "./task-type";
 import type { Project } from "./project";
 import type { ScheduledLaunch } from "./agent-launch";
 import type { ScheduledMessage } from "./scheduled-messages";
-import type { SharedArtifact, SharedImage } from "./shared-media";
+import type { KeepAliveState } from "./keep-alive";
+import type { PrWatch } from "../pr-watch";
+import type { LiveArtifact, SharedArtifact, SharedImage } from "./shared-media";
 import type { ScriptPlacement } from "./package-scripts";
 import type { MergeCompletionPromptState, PreparingStage, TaskSessionState } from "./task-lifecycle";
 import type { TaskHistoryEntry } from "./task-display";
 import type { TaskMovement, TaskNote } from "./task-notes";
-import type { TaskPRStatusCache, TaskPullRequestRecord } from "./pull-requests";
+import type { ReviewedPullRequest, TaskPRStatusCache, TaskPullRequestRecord } from "./pull-requests";
 
 // ---- Task relations ----
 
@@ -50,6 +53,11 @@ export interface TaskRuntimeState {
 	runtime: "idle" | "preparing" | "running" | "tearing-down";
 	stage?: string;
 	runId?: string;
+	/**
+	 * Pid of the dev3 instance running this `preparing`/`tearing-down` run. Several
+	 * instances share `~/.dev3.0`; boot recovery must leave a live peer's run alone.
+	 */
+	ownerPid?: number;
 	updatedAt: number;
 }
 
@@ -121,6 +129,12 @@ export interface Task {
 	 * top-level field because older app versions rewrite the PR fields above.
 	 */
 	pullRequests?: TaskPullRequestRecord[] | null;
+	/**
+	 * The pull request a review (foreign-code) task reviews, resolved from
+	 * `existingBranch` at creation or lazily for tasks created before this field.
+	 * Absent on every other task and on older records.
+	 */
+	reviewedPr?: ReviewedPullRequest | null;
 	groupId: string | null;
 	variantIndex: number | null;
 	/** Future-facing links to other tasks; the data layer fills [] for legacy records on load. */
@@ -316,22 +330,18 @@ export interface Task {
 	 * every pre-existing task, so older app versions see an ordinary task.
 	 */
 	foreignCode?: boolean;
-	/**
-	 * What kind of task this is, when the kind carries behaviour. A property of
-	 * the task, not a column and not a runtime phase. Only `"coordinator"` exists:
-	 * a task whose job is to run other tasks. It forbids nothing at the data
-	 * layer, and gates exactly three things — the card is marked, a live one sorts
-	 * above every priority band ({@link COORDINATOR_SORT_OFFSET}), and its
-	 * completion always belongs to the human ({@link taskCompletesManually}),
-	 * because a coordinator outlives any branch it merged.
-	 *
-	 * Set at creation from the task-type picker, and flipped either way afterwards
-	 * with `dev3 task update --type`. The CLI keeps the preamble in the
-	 * description in step with the field, so the badge never claims a role the
-	 * agent behind it was never told about. Absent on every pre-existing task, so
-	 * older app versions see an ordinary task.
-	 */
+	/** Role brief injected at creation; cleanup and coordinator tasks always complete manually. */
 	taskType?: TaskType | null;
+	/**
+	 * "Keep alive" — the user asked dev3 to auto-revive this task's agent when its
+	 * conversation dies (process exited, usage/rate limit, network/proxy error). A
+	 * property of the task in the {@link Task.draft}/{@link Task.hibernated} class:
+	 * never a column, a kind, or an action, and inert on its own — only the bun
+	 * watchdog scheduler reads it, only for a task whose agent should be running,
+	 * and never for a hibernated one. Absent/null on every pre-existing task.
+	 * See {@link KeepAliveState}.
+	 */
+	keepAlive?: KeepAliveState | null;
 	/**
 	 * The Claude Code session this task was imported from, for a task created by
 	 * the conversation import. Nothing about the task behaves differently
@@ -367,23 +377,42 @@ export interface Task {
 	 */
 	sharedImages?: SharedImage[];
 	/**
-	 * Clips the agent surfaced via `dev3 show-video`, oldest→newest. A field of
-	 * their own so older app versions, which read every `sharedImages` entry's
-	 * bytes, never see them; read both lists through {@link taskSharedMedia}.
+	 * Video clips the agent surfaced via `dev3 show-media`, oldest→newest. A field
+	 * of their own so older app versions, which read every `sharedImages` entry's
+	 * bytes, never see them; read every list through {@link taskSharedMedia}.
 	 */
 	sharedVideos?: SharedImage[];
+	/**
+	 * Audio tracks the agent surfaced via `dev3 show-media`, oldest→newest. Not in
+	 * `sharedVideos`: versions that know that field treat any non-`video/*` entry
+	 * as an image and would read a whole track over RPC.
+	 */
+	sharedAudio?: SharedImage[];
 	/**
 	 * HTML artifacts an agent surfaced via `dev3 show-artifact`, oldest→newest.
 	 * Each artifact is stored in its own additive `shared-artifacts/<id>/`
 	 * directory together with any `--assets` files and an optional ZIP bundle.
 	 */
 	sharedArtifacts?: SharedArtifact[];
+	/** The task's one Live Artifact (`dev3 live publish` / `adopt`); see {@link LiveArtifact}. */
+	liveArtifact?: LiveArtifact;
 	/**
 	 * Set when the task was created by a scheduled Automation fire (or its
 	 * "Run now" action). Drives the clock provenance glyph on the task card and
 	 * links the task back to its automation's run history.
 	 */
 	automationId?: string | null;
+	/**
+	 * Who created the task — see {@link TaskOrigin}. Set once at creation and
+	 * never by an update; absent means the user. Read through `taskOrigin()`.
+	 */
+	origin?: TaskOrigin;
+	/**
+	 * The global epic this task belongs to (see `Epic`), absent for none. Kept
+	 * out of `labelIds` on purpose: an older build's label editor saves only the
+	 * project's own labels and would silently drop a foreign id.
+	 */
+	epicId?: string;
 	/**
 	 * Deferred launch ("Start in…"). Set from the Launch modal when the user
 	 * schedules the spawn instead of firing it immediately. Only meaningful on
@@ -404,6 +433,11 @@ export interface Task {
 	 * See {@link ScheduledMessage}.
 	 */
 	scheduledMessages?: ScheduledMessage[] | null;
+	/**
+	 * `dev3 pr watch` subscriptions: the app messages the agent once when the
+	 * watched PR event happens, then removes the watch. At most one per kind.
+	 */
+	prWatches?: PrWatch[] | null;
 	/**
 	 * Cumulative wall-clock time (ms) the task has spent in each status,
 	 * finalized on every status transition (see `applyTaskUpdate` in data.ts).

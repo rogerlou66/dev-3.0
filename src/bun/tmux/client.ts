@@ -27,6 +27,7 @@ import {
 import { type BoundedRunResult, type SpawnBounds, runBounded } from "./bounded-spawn";
 import { DEFAULT_TMUX_SOCKET } from "./constants";
 import { activeTmuxConfigPath, tmuxClientCwd } from "./config";
+import { ensureLaunchdServer, predatesLaunchdServer } from "./launchd-server";
 import { TmuxError, TmuxSpawnError, TmuxTimeoutError } from "./errors";
 import type { TmuxFormat } from "./formats";
 import { PANE_ID_FORMAT, PANE_SIGHTING_FORMAT } from "./formats";
@@ -42,6 +43,8 @@ export interface TmuxClientOptions {
 	cwdExists?: (path: string) => boolean;
 	/** Default tmux socket for calls that don't pass one. */
 	socket?: string;
+	/** Pre-start hook for server-starting commands — defaults to the macOS launchd start. */
+	ensureServer?: typeof ensureLaunchdServer;
 }
 
 interface SocketOpt {
@@ -109,11 +112,13 @@ export class TmuxMissingCwdError extends Error {
 export class TmuxClient {
 	private readonly spawnFn: SpawnFn;
 	private readonly cwdExists: (path: string) => boolean;
+	private readonly ensureServer: typeof ensureLaunchdServer;
 	readonly defaultSocket: string;
 
 	constructor(opts: TmuxClientOptions = {}) {
 		this.spawnFn = opts.spawn ?? defaultSpawn;
 		this.cwdExists = opts.cwdExists ?? existsSync;
+		this.ensureServer = opts.ensureServer ?? ensureLaunchdServer;
 		this.defaultSocket = opts.socket ?? DEFAULT_TMUX_SOCKET;
 	}
 
@@ -146,6 +151,11 @@ export class TmuxClient {
 	/** Resolve a candidate path that may be the dev3 PATH shim (see ./binary). */
 	dereferenceShim(binaryPath: string): string | undefined {
 		return dereferenceTmuxShim(binaryPath);
+	}
+
+	/** A running server an older dev3 daemonized, outside launchd (macOS bundled tmux only). */
+	serverPredatesLaunchd(opts?: SocketOpt): boolean {
+		return predatesLaunchdServer({ binary: getTmuxBinary(), socket: opts?.socket ?? this.defaultSocket });
 	}
 
 	/** Version skew detected against the live server, when no compatible client was found. */
@@ -189,6 +199,21 @@ export class TmuxClient {
 			return;
 		}
 		await this.runChecked(socket, args);
+	}
+
+	/**
+	 * Give a server-starting command a launchd-owned server to connect to (macOS,
+	 * bundled tmux only). `env` is what the client would have handed a server it
+	 * started itself, so panes see the same global environment either way.
+	 */
+	private startServerIfMissing(socket: string | undefined, configFile: string, env: Record<string, string | undefined>): void {
+		this.ensureServer({
+			binary: getTmuxBinary(),
+			socket: socket ?? this.defaultSocket,
+			configFile,
+			cwd: tmuxClientCwd(),
+			env,
+		});
 	}
 
 	// ── Sessions ───────────────────────────────────────────────────────
@@ -245,7 +270,9 @@ export class TmuxClient {
 		// /etc/tmux.conf + ~/.tmux.conf and the user's personal settings leak
 		// into the dev3 server (decisions/2026/08/02/isolate-tmux-config.md).
 		this.assertPaneCwd(opts.cwd);
-		const args = ["-f", activeTmuxConfigPath(), "new-session", "-d"];
+		const configFile = activeTmuxConfigPath();
+		this.startServerIfMissing(opts.socket, configFile, process.env);
+		const args = ["-f", configFile, "new-session", "-d"];
 		for (const [key, value] of Object.entries(opts.env ?? {})) {
 			args.push("-e", `${key}=${value}`);
 		}
@@ -295,6 +322,7 @@ export class TmuxClient {
 		processEnv?: Record<string, string>;
 	} & SocketOpt): SpawnedProcess {
 		this.assertPaneCwd(opts.cwd);
+		this.startServerIfMissing(opts.socket, opts.configFile, { ...process.env, ...opts.processEnv });
 		const args = ["-f", opts.configFile, "new-session"];
 		if (opts.attachIfExists) args.push("-A");
 		args.push("-c", opts.cwd);
@@ -778,6 +806,16 @@ export class TmuxClient {
 	/** `set-option -u -t <target> <option>` — drop the target's own value so it inherits again. */
 	unsetOption(target: string, option: string, opts?: CommandOpts): Promise<void> {
 		return this.runCommand(opts?.socket, ["set-option", "-u", "-t", target, option], opts);
+	}
+
+	/** `set-option -w -t <windowId> <option> <value>` — a window-scoped (user) option. */
+	setWindowOption(windowId: string, option: string, value: string, opts?: CommandOpts): Promise<void> {
+		return this.runCommand(opts?.socket, ["set-option", "-w", "-t", windowId, option, value], opts);
+	}
+
+	/** `set-option -w -u -t <windowId> <option>` — drop the window's own value. */
+	unsetWindowOption(windowId: string, option: string, opts?: CommandOpts): Promise<void> {
+		return this.runCommand(opts?.socket, ["set-option", "-w", "-u", "-t", windowId, option], opts);
 	}
 
 	/** `set-option -g <option> <value>` — a server-global (session) option. */

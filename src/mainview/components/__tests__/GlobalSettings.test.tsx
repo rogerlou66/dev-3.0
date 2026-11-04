@@ -445,6 +445,26 @@ describe("GlobalSettings", () => {
 		});
 	});
 
+	describe("save base", () => {
+		it("saves on top of the host's settings even when the screen's load is lost", async () => {
+			setupMocks();
+			const stored: GlobalSettingsType = { ...mockGlobalSettings, theme: "light", tipsDisabled: true };
+			mockedApi.request.getGlobalSettings
+				.mockImplementationOnce(() => new Promise(() => {}))
+				.mockResolvedValueOnce(stored);
+			const user = userEvent.setup();
+			renderGlobalSettings("notifications");
+			await waitForLoad();
+
+			await user.click(screen.getByRole("switch", { name: "Watch tasks by default" }));
+
+			await waitFor(() => expect(mockedApi.request.saveGlobalSettings).toHaveBeenCalled());
+			const saved = mockedApi.request.saveGlobalSettings.mock.calls.map((c) => c[0]);
+			expect(saved.some((s) => s.defaultConfigId !== "cfg-1")).toBe(false);
+			expect(saved[saved.length - 1]).toEqual({ ...stored, watchByDefault: true });
+		});
+	});
+
 	describe("watch default", () => {
 		function getWatchDefaultSwitch() {
 			return screen.getByRole("switch", { name: "Watch tasks by default" });
@@ -979,6 +999,27 @@ describe("GlobalSettings", () => {
 			await user.click(toggle);
 			expect(mockedApi.request.saveGlobalSettings).toHaveBeenLastCalledWith(expect.objectContaining({ experimentalTerminalBidi: false }));
 		});
+		it("defaults the daily task-file cleanup to off and persists explicit choices", async () => {
+			setupMocks(mockAgents, { ...mockGlobalSettings });
+			const user = userEvent.setup();
+			renderGlobalSettings("system");
+			await waitForLoad();
+
+			const toggle = await screen.findByRole("switch", { name: "Clean up old task files" });
+			expect(toggle).toHaveAttribute("aria-checked", "false");
+
+			await user.click(toggle);
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenLastCalledWith(
+				expect.objectContaining({ autoCleanupTaskHistory: true }),
+			);
+			expect(toggle).toHaveAttribute("aria-checked", "true");
+
+			await user.click(toggle);
+			expect(mockedApi.request.saveGlobalSettings).toHaveBeenLastCalledWith(
+				expect.objectContaining({ autoCleanupTaskHistory: false }),
+			);
+		});
+
 		it("round-trips the confirm-before-quit toggle through skipQuitDialog", async () => {
 			setupMocks(mockAgents, { ...mockGlobalSettings, skipQuitDialog: true });
 			const user = userEvent.setup();

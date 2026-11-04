@@ -1,3 +1,4 @@
+import type { ResourceLevels } from "./system-resources";
 import type { TerminalBackendIdentity } from "../terminal-backend-identity";
 import type { ShellFlavor } from "../posix-shell";
 import type { FavoriteAgentConfig } from "./coding-agents";
@@ -101,6 +102,8 @@ export interface GlobalSettings {
 	 */
 	staticAccessCode?: string;
 	cloneBaseDirectory?: string;
+	/** Last position of the Add Project dialog's auto-configure switch. Absent = off. */
+	autoConfigureNewProjects?: boolean;
 	customBinaryPaths?: Record<string, string>; // requirementId → custom binary path
 	agentBinaryPaths?: Record<string, string>; // agentId → resolved binary path
 	/**
@@ -164,6 +167,11 @@ export interface GlobalSettings {
 	externalApps?: ExternalApp[]; // user-configured apps for "Open in..." menus
 	tipsDisabled?: boolean;
 	/**
+	 * Daily removal of finished tasks' diffs/logs older than 14 days.
+	 * Disabled unless explicitly enabled.
+	 */
+	autoCleanupTaskHistory?: boolean;
+	/**
 	 * Set the first time the user opens help mode. Until then the header's `?`
 	 * rests highlighted on the main screens — help mode is the product's only
 	 * teaching channel, so a user who never finds the button never learns
@@ -208,6 +216,12 @@ export interface GlobalSettings {
 	 * vars (PATH/LANG/...) for an isolated environment.
 	 */
 	importShellEnv?: boolean;
+	/**
+	 * Env vars every agent session gets when its project does not set the key
+	 * itself (`.dev3/config.json`, `.dev3/config.local.json`, Project Settings).
+	 * Values expand `{projectPath}` and `{projectName}`. Absent ⇒ no change.
+	 */
+	agentEnvDefaults?: Record<string, string>;
 	/**
 	 * Which POSIX shell dev3 runs in its terminals and generated wrapper
 	 * scripts. Undefined ⇒ auto-detect (the user's login shell, else the first
@@ -273,6 +287,8 @@ export interface GlobalSettings {
 	 * applied to the completion dialog: that one destroys a worktree.
 	 */
 	agentLaunchAutoApproveMinutes?: number;
+	/** Where the CPU and disk readouts turn yellow / red. Sparse: absent keys use the defaults. */
+	resourceLevels?: Partial<ResourceLevels>;
 	/** Retired PR backlink preference, retained for N-2 on-disk readability. */
 	prOriginTaskLink?: boolean;
 	/**
@@ -316,6 +332,12 @@ export interface GlobalSettings {
 	 * can override it; see resolvePresetPrompt.
 	 */
 	coordinatorPrompt?: string;
+	/**
+	 * Agent/preset a coordinator task launches on when nobody picked one.
+	 * Absent ⇒ DEFAULT_COORDINATOR_AGENT_ID / DEFAULT_COORDINATOR_CONFIG_ID.
+	 */
+	coordinatorAgentId?: string;
+	coordinatorConfigId?: string;
 	/**
 	 * Cross-provider "favorite" agent configs shown as quick-pick chips on the
 	 * launch picker (Launch/Retry, Spawn, Bug Hunters). Thin pointers, capped at
@@ -404,6 +426,8 @@ export interface ResolvedTerminalPath {
 export type FilePreviewResult =
 	| { kind: "text"; content: string; truncated: boolean; size: number }
 	| { kind: "image"; dataUrl: string; size: number }
+	/** Played from a `getFileMediaUrl` stream; the bytes never travel over RPC. */
+	| { kind: "media"; media: "audio" | "video"; mime: string; size: number }
 	| { kind: "binary"; size: number }
 	| { kind: "too-large"; size: number }
 	| { kind: "directory" }

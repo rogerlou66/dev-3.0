@@ -4,7 +4,7 @@ import { useT } from "../../i18n";
 import type { TaskBranchStatusController } from "./useTaskBranchStatus";
 import { AutoMergeIcon, CommitIcon, CreatePRIcon, MergeIcon, PushIcon, RebaseIcon, ShowDiffIcon } from "./GitIcons";
 import type { TaskInlineDiffRequest } from "../task-inline-diff";
-import { isLivePullRequest } from "../../utils/taskPrBadge";
+import { isLivePullRequest, reviewedPrLink } from "../../utils/taskPrBadge";
 
 interface TaskGitActionsSheetProps {
 	task: Task;
@@ -170,6 +170,17 @@ export default function TaskGitActionsSheet({
 			run: withDismiss(() => handleOpenPR()),
 		});
 	}
+	const reviewedPr = reviewedPrLink(task, prNumber != null ? { number: prNumber, url: branchStatus?.prUrl ?? "" } : null);
+	if (reviewedPr) {
+		rows.push({
+			key: "open-reviewed-pr",
+			icon: <CreatePRIcon className="h-5 w-5 shrink-0 text-fg-2" />,
+			label: t("task.reviewedPr.open", { number: String(reviewedPr.number) }),
+			disabled: false,
+			external: true,
+			run: withDismiss(() => window.open(reviewedPr.url, "_blank")),
+		});
+	}
 	if (!hasPR && ownBranch) {
 		const prDisabled = noRemote || noGitHubRemote || !branchStatus || ahead === 0;
 		const prReason = !branchStatus
@@ -227,7 +238,7 @@ export default function TaskGitActionsSheet({
 			<h3 className="mb-2 flex items-center gap-2 text-dense font-semibold uppercase tracking-wider text-fg-muted">
 				{t("infoPanel.gitSection")}
 				{statusLoading && (
-					<span className="h-3 w-3 animate-spin rounded-full border-2 border-current/30 border-t-current" aria-hidden="true" />
+					<span className="h-3 w-3 animate-spin rounded-full border-2 border-[color-mix(in_srgb,currentColor_30%,transparent)] border-t-current" aria-hidden="true" />
 				)}
 				{statusError && !branchStatus && (
 					<span className="flex items-center gap-1 text-micro font-normal normal-case tracking-normal text-danger" title={statusError}>

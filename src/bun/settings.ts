@@ -2,7 +2,8 @@ import { parseAppearancePreset } from "../shared/appearance-preset";
 import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { GlobalSettings, ShortcutOverride } from "../shared/types";
-import { DEFAULT_AGENTS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
+import { DEFAULT_AGENTS, DEFAULT_CLAUDE_CONFIG_ID, DEFAULT_RESOURCE_LEVELS, DEPRECATED_DEFAULT_CONFIG_REMAP } from "../shared/types";
+import { hasEnvLineBreak, sanitizeEnvMap } from "../shared/env-text";
 import { recordFavoriteUsage, sanitizeFavorites } from "../shared/favorites";
 import { sanitizePollingSettings } from "../shared/polling-settings";
 import { normalizeSimplifiedInterface, SIMPLIFY_VIEW_PRESET_IDS } from "../shared/simplified-interface";
@@ -75,8 +76,9 @@ function sanitizeRemoteTunnel(raw: unknown): GlobalSettings["remoteTunnel"] {
 
 const DEFAULT_SETTINGS: GlobalSettings = {
 	defaultAgentId: "builtin-claude",
-	defaultConfigId: "claude-auto-opus55-medium",
+	defaultConfigId: DEFAULT_CLAUDE_CONFIG_ID,
 	taskSortOrder: "oldest-first",
+	autoCleanupTaskHistory: false,
 };
 
 const ALL_BUILTIN_CONFIG_IDS = new Set(DEFAULT_AGENTS.flatMap((a) => a.configurations.map((c) => c.id)));
@@ -110,12 +112,24 @@ function normalizeAutoAccountDefault(raw: unknown): GlobalSettings["autoAccountD
 	return Object.keys(out).length ? out : undefined;
 }
 
-/**
- * Shape the raw file into `GlobalSettings`.
- *
- * One function for both loaders on purpose: they used to be hand-kept twins, and
- * the sync one once differed from the async shape.
- */
+/** Keep only positive finite numbers under known keys; nothing left ⇒ undefined (all defaults). */
+function sanitizeResourceLevels(raw: unknown): GlobalSettings["resourceLevels"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const out: Record<string, number> = {};
+	for (const key of Object.keys(DEFAULT_RESOURCE_LEVELS)) {
+		const value = (raw as Record<string, unknown>)[key];
+		if (typeof value === "number" && Number.isFinite(value) && value > 0) out[key] = value;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Malformed or multi-line entries are dropped: a launch script exports one line per key. */
+function normalizeAgentEnvDefaults(val: unknown): Record<string, string> | undefined {
+	const env = Object.fromEntries(Object.entries(sanitizeEnvMap(val)).filter(([, value]) => !hasEnvLineBreak(value)));
+	return Object.keys(env).length > 0 ? env : undefined;
+}
+
+/** Keep synchronous and asynchronous readers on the same normalized shape. */
 function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const d = data as any;
@@ -136,6 +150,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			? d.staticAccessCode.trim()
 			: undefined,
 		cloneBaseDirectory: d.cloneBaseDirectory ?? undefined,
+		autoConfigureNewProjects: d.autoConfigureNewProjects === true ? true : undefined,
 		customBinaryPaths: d.customBinaryPaths ?? undefined,
 		agentBinaryPaths: d.agentBinaryPaths ?? undefined,
 		agentCustomBinaryPaths: d.agentCustomBinaryPaths ?? undefined,
@@ -170,6 +185,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		preventSleepWhileRunning: d.preventSleepWhileRunning ?? undefined,
 		skipQuitDialog: d.skipQuitDialog === true ? true : undefined,
 		importShellEnv: d.importShellEnv === false ? false : undefined,
+		agentEnvDefaults: normalizeAgentEnvDefaults(d.agentEnvDefaults),
 		// Undefined is the meaningful default here ("auto-detect"), so only one of
 		// the three known flavors is ever stored.
 		terminalShell:
@@ -200,6 +216,7 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			d.agentLaunchAutoApproveMinutes >= 0
 				? d.agentLaunchAutoApproveMinutes
 				: undefined,
+		resourceLevels: sanitizeResourceLevels(d.resourceLevels),
 		// Retired preference: preserve the opt-out for older co-installed versions.
 		prOriginTaskLink: d.prOriginTaskLink === false ? false : undefined,
 		agentsLayoutRevision: typeof d.agentsLayoutRevision === "number" ? d.agentsLayoutRevision : undefined,
@@ -232,6 +249,8 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 		// false is the user opting out and must not collapse into "never chose".
 		experimentalAgentTraffic:
 			typeof d.experimentalAgentTraffic === "boolean" ? d.experimentalAgentTraffic : undefined,
+		// Cleanup is opt-in for both new and existing installations.
+		autoCleanupTaskHistory: d.autoCleanupTaskHistory === true,
 		// Default-off local diagnostics — only an explicit true is a stored opt-in.
 		freezeDiagnosticsEnabled: d.freezeDiagnosticsEnabled === true ? true : undefined,
 		// Only a recorded pick survives; anything else falls back to the default view.
@@ -252,6 +271,11 @@ function normalizeSettings(data: Record<string, unknown>): GlobalSettings {
 			: undefined,
 		// Polling cadence overrides; sparse, clamped, absent ⇒ every default.
 		polling: sanitizePollingSettings(d.polling),
+		// Unset ⇒ the built-in coordinator preset; see coordinatorLaunchDefault.
+		coordinatorAgentId: typeof d.coordinatorAgentId === "string" && d.coordinatorAgentId ? d.coordinatorAgentId : undefined,
+		coordinatorConfigId: typeof d.coordinatorConfigId === "string" && d.coordinatorConfigId
+			? resolveDefaultConfigId(d.coordinatorConfigId)
+			: undefined,
 	};
 }
 

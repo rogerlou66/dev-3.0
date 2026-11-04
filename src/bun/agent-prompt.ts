@@ -330,6 +330,7 @@ function holdAgentMessageForPane(
 	paneId: string,
 	prompt: string,
 	epilogue?: AgentPromptEpilogue,
+	verify?: () => Promise<string | null>,
 ): AgentPromptDelivery {
 	const context = { taskId: task.id.slice(0, 8), paneId };
 	const holdKey = agentMessageHoldKey("tmux", task.id, paneId);
@@ -347,6 +348,7 @@ function holdAgentMessageForPane(
 				return result;
 			},
 			bytes: utf8Length(prompt),
+			...(verify ? { verify } : {}),
 			...(epilogue
 				? {
 					epilogue: async (budgetBytes) => {
@@ -381,7 +383,7 @@ function holdAgentMessageForPane(
 		},
 		context,
 	);
-	return agentPromptHeld(delayMs);
+	return { ...agentPromptHeld(delayMs), paneId };
 }
 
 /** The verdict for a prompt that never found a pane to aim at. */
@@ -406,9 +408,10 @@ function tmuxRouting(task: Task): { tmuxSession: string; socket: string } {
  * Hand a task off to the AI agent running in its tmux session: pick the pane the
  * agent lives in (see {@link resolveAgentPromptTargetPane}), type `prompt` into
  * it, then submit it. This is the shared mechanism behind the Create-PR /
- * auto-merge buttons, the rebase-conflict handoff, and scheduled-message
- * delivery — the agent is a continuation of the user's conversation, so a
- * plain-language instruction is enough.
+ * auto-merge buttons, the rebase-conflict handoff, and the user's own "send to
+ * agent" clicks — the agent is a continuation of the user's conversation, so a
+ * plain-language instruction is enough. A held `dev3 message` does not follow
+ * focus: see `agent-message-target.ts`.
  *
  * Delivery goes through the guarded seam (decision 201), so the pane is pinned to
  * one tmux server generation and the verdict distinguishes "the pane is gone"
@@ -429,45 +432,24 @@ export async function sendPromptToAgentPane(
 }
 
 /**
- * Hold a `dev3 message` for the task's agent pane. Resolution happens NOW, so a task
- * with no agent pane is refused while its sender is still listening; the typing itself
- * happens when the pane goes quiet.
- */
-export async function holdMessageForAgentPane(
-	task: Task,
-	prompt: string,
-	agentPanes: PaneSessionEntry[] | undefined,
-	epilogue?: AgentPromptEpilogue,
-): Promise<AgentPromptDelivery> {
-	const { tmuxSession, socket } = tmuxRouting(task);
-	const targetPane = await resolveAgentPromptTargetPane(tmuxSession, socket, agentPanes);
-	if (!targetPane) {
-		return {
-			status: "not-delivered",
-			reason: "pane-absent",
-			detail: `no agent pane could be resolved in ${tmuxSession}`,
-		};
-	}
-	return holdAgentMessageForPane(task, targetPane, prompt, epilogue);
-}
-
-/**
- * Hold a `dev3 message` for one concrete pane id (the `{ kind: "pane" }` scheduled
- * target). Liveness is checked now rather than only at the pin: a message held for a
- * pane that is already gone would fail silently long after its sender walked away.
+ * Hold a `dev3 message` for one concrete pane id: the main agent's, an addressed
+ * agent's, or a `{ kind: "pane" }` scheduled target. Liveness is checked now rather
+ * than only at the pin: a message held for a pane that is already gone would fail
+ * silently long after its sender walked away. `verify` is asked again at release.
  */
 export async function holdMessageForPane(
 	task: Task,
 	paneId: string,
 	prompt: string,
 	epilogue?: AgentPromptEpilogue,
+	verify?: () => Promise<string | null>,
 ): Promise<AgentPromptDelivery> {
 	const { tmuxSession, socket } = tmuxRouting(task);
 	const live = await listLivePaneIds(tmuxSession, socket);
 	if (!live.includes(paneId)) {
 		return { status: "not-delivered", reason: "pane-absent", detail: `pane ${paneId} is not live in ${tmuxSession}` };
 	}
-	return holdAgentMessageForPane(task, paneId, prompt, epilogue);
+	return holdAgentMessageForPane(task, paneId, prompt, epilogue, verify);
 }
 
 /**

@@ -53,11 +53,16 @@ you ask:
 
 ```sh
 dev3 doctor --worktrees --prune-orphans          # orphans + unfinished teardowns
-dev3 doctor --worktrees --prune-older-than 30d   # old diffs/logs of finished tasks
+dev3 doctor --worktrees --prune-older-than 30d   # all of the above + old diffs/logs, once older than 30d
 ```
 
 A directory whose `dev3/task-*` branch is **not merged** into the base branch is reported and
-skipped — that is unpushed work. Add `--force-unmerged` only when you are sure you want it gone.
+skipped by `--prune-orphans` — that is unpushed work. `--prune-older-than` removes such a directory
+only once it is 60 days old, and keeps the branch ref so committed work stays recoverable. Add
+`--force-unmerged` only when you are sure you want it gone sooner — it deletes the branch too.
+
+dev3 runs `--prune-older-than 14d` by itself once a day (never in the first hour after launch,
+never with `--force-unmerged`). Turn it off in Settings → System → "Clean up old task files".
 This is the one dev3 command that deletes anything under `~/.dev3.0/`, and only because you typed
 the flag.
 
@@ -108,19 +113,24 @@ volumes per program
 but an agent sandbox or another security policy returns the same error, so the message alone does
 not prove which one is blocking.
 
-**Why the app's own toggle may not be enough:** on macOS, task shells do not run under the
-dev-3.0 app process. They run inside a **tmux server** that dev-3.0 starts and that then detaches
-and keeps running on its own — it survives quitting the app. The commands you type descend from
-that tmux process, not from the running app, and in the observed case the dev-3.0 entry in Full
-Disk Access was not enough for them. Apple's Developer Technical Support notes that a child process
-which daemonizes itself — as tmux does — can break the link macOS uses to apply an app's
-permission to its helpers
+**Why it happened:** on macOS, task shells run inside a **tmux server**, not under the app process,
+and macOS charges their file access to the server's *responsible process*. A server that tmux
+daemonized itself keeps pointing at the dev-3.0 instance that started it. Once that instance quits
+(an app restart or update) and macOS next re-checks access, the check fails —
+`tccd` logs `Failed to create Attribution Chain` — so every task terminal is denied even though the
+app's grants are still switched on. Re-toggling the app's entry does not help, and the failure can
+appear hours after the restart, whenever macOS drops its cached verdicts. Apple's Developer
+Technical Support describes the same weak link for helpers that daemonize
 ([Apple DTS: On File System Permissions](https://developer.apple.com/forums/thread/678819)).
 
-**Observed workaround** (one confirmed case, macOS 26.6): turning Full Disk Access for
-`dev-3.0.app` off and on did not help; adding the bundled tmux binary itself to Full Disk Access
-restored access. The root cause is not established yet, so treat this as a workaround to try, not
-as a requirement for every installation.
+**Fixed for the bundled tmux:** dev-3.0 now starts that server as a per-user launchd job, which
+macOS treats as its own responsible process and credits to the dev-3.0 app, so the app's existing
+grants keep working after restarts and updates. A server started by an older version keeps the old
+behaviour until it exits — dev-3.0 shows a warning toast at launch while one is running. It exits
+on its own once no task has a terminal open, at your next log-out, or at once if you run
+`tmux -L dev3 kill-server` and accept losing every running task terminal. Homebrew, PATH and custom tmux binaries still start the old way,
+because macOS would judge them as themselves rather than as dev-3.0 — for those, and for an old
+server you cannot restart yet, the Full Disk Access workaround below still applies.
 
 **Check first:** run `dev3 doctor` inside the failing task terminal. Its `repository access` line
 tells a deleted repository, a file-permission problem and an `Operation not permitted` denial
@@ -191,8 +201,9 @@ Apple lists it as a setting the user must change in System Settings
 ([Apple: Controlling app access to files in macOS](https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web)).
 Keeping new projects outside protected folders avoids the question entirely, but it is optional.
 
-Still open and tracked separately: why the app entry alone was not enough, whether the grant
-survives an app update that replaces the bundle, and whether Homebrew installs behave the same way.
+Still open: whether a launchd-started server keeps access after an update that changes the tmux
+binary itself (a byte-identical bundle swap was verified), and the native terminal backend, whose
+detached host has the same weak link and is not covered by the launchd start yet.
 
 ## Terminal colors and recommended agent themes
 

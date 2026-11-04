@@ -3,6 +3,7 @@ import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task
 import { buildTaskLifecycleEnv } from "../rpc-handlers/shared-pure";
 import type { Handler } from "./shared";
 import { requirePaneTask } from "./task-resolution";
+import { withAgentPanes } from "../agent-message-target";
 
 export const paneHandlers: Record<string, Handler> = {
 
@@ -36,7 +37,7 @@ export const paneHandlers: Record<string, Handler> = {
 
 	"pane.list": async (params) => {
 		const { task } = await requirePaneTask(params);
-		return await paneRunListing(task, params.selfPaneId === undefined ? null : String(params.selfPaneId));
+		return await withAgentPanes(task, await paneRunListing(task, params.selfPaneId === undefined ? null : String(params.selfPaneId)));
 	},
 
 	"pane.close": async (params) => {

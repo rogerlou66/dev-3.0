@@ -7,9 +7,14 @@ import { cliTransportFor, startCliListener } from "./cli-listener";
 import { agentHandlers } from "./cli-socket/agent-commands";
 import { automationHandlers } from "./cli-socket/automation-commands";
 import { boardMetadataHandlers } from "./cli-socket/board-metadata-commands";
+import { epicHandlers } from "./cli-socket/epic-commands";
+import { externalSenderHandlers } from "./cli-socket/external-sender-commands";
+import { liveHandlers } from "./cli-socket/live-commands";
 import { messageHandlers } from "./cli-socket/message-commands";
 import { paneHandlers } from "./cli-socket/pane-commands";
+import { prWatchHandlers } from "./cli-socket/pr-watch-commands";
 import { log, type Handler } from "./cli-socket/shared";
+import { statsHandlers } from "./cli-socket/stats-commands";
 import { systemHandlers } from "./cli-socket/system-commands";
 import { taskHandlers } from "./cli-socket/task-commands";
 import { uiHandlers } from "./cli-socket/ui-commands";
@@ -18,6 +23,7 @@ import * as data from "./data";
 import { createTask, launchTaskWithAgentChoice } from "./rpc-handlers";
 import { createIntegration } from "./integration";
 import { getAllAgents } from "./agents";
+import { secretCliHandlers } from "./cli-socket/secret-commands";
 
 const SOCKETS_DIR = `${DEV3_HOME}/sockets`;
 
@@ -55,14 +61,20 @@ function cleanupStaleSockets(): void {
 }
 
 const handlers: Record<string, Handler> = {
+	...secretCliHandlers,
 	...agentHandlers,
 	...paneHandlers,
 	...boardMetadataHandlers,
 	...automationHandlers,
 	...uiHandlers,
 	...messageHandlers,
+	...externalSenderHandlers,
+	...prWatchHandlers,
+	...statsHandlers,
 	...systemHandlers,
 	...taskHandlers,
+	...epicHandlers,
+	...liveHandlers,
 };
 
 const integration = createIntegration({
@@ -84,14 +96,14 @@ const integration = createIntegration({
 });
 for (const [method, handler] of Object.entries(integration)) handlers[`integration.${method}`] = handler;
 
-export async function handleRequest(req: CliRequest): Promise<CliResponse> {
+export async function handleRequest(req: CliRequest, signal?: AbortSignal): Promise<CliResponse> {
 	const handler = handlers[req.method];
 	if (!handler) {
 		return { id: req.id, ok: false, error: `Unknown method: ${req.method}` };
 	}
 
 	try {
-		const result = await handler(req.params);
+		const result = await handler(req.params, { signal });
 		return { id: req.id, ok: true, data: result };
 	} catch (err) {
 		return { id: req.id, ok: false, error: String(err instanceof Error ? err.message : err) };

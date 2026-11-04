@@ -1,4 +1,7 @@
+import type { PrStatusNotice, PrWatchUntil } from "./pr-watch";
+import { parseGitHubPullRequestUrl } from "./pr-status";
 import { ID_PREFIX_MIN_LENGTH, type AgentMessageSource } from "./types";
+import { encodeAgentHandle } from "./agent-handle";
 
 /**
  * What stands in for the subject in a printed reply command. Obviously a slot to
@@ -21,9 +24,21 @@ export const REPLY_SUBJECT_PLACEHOLDER = "what your reply is about";
 export const AGENT_MESSAGE_BURST_SEPARATOR = "\n\n";
 
 /**
+ * What `<reply-unavailable>` says when the record predates sender identities, or
+ * whoever stamped it did not say why none was proven.
+ */
+export const REPLY_UNAVAILABLE_UNRECORDED = "the sending agent's identity was not recorded";
+
+/**
  * Wrap a cross-task agent message in a pseudo-XML envelope so the receiving
  * agent immediately sees the text came from another task's agent (not from the
  * human) and knows the exact command to answer with.
+ *
+ * The reply command addresses the sending AGENT (`--agent`): a task-level reply
+ * may reach a sibling of the asker. `senderAlone` drops it when the caller proved
+ * the sender is its task's only agent and the main one, which a task-level reply
+ * reaches anyway. With no proven sender there is no reply command at all, only
+ * `<reply-unavailable>` saying why (#1809).
  *
  * `receiverProjectId` is the project of the task being written TO — it decides
  * whether the reply command needs `--project` (see {@link agentReplyCommand}).
@@ -37,6 +52,7 @@ export function wrapAgentMessage(
 	source: AgentMessageSource,
 	receiverProjectId: string,
 	subject?: string,
+	senderAlone = false,
 ): string {
 	// A record queued before `seqShared` existed only knows it was a variant, so it
 	// keeps the old pessimistic address rather than risking an ambiguous seq.
@@ -55,23 +71,69 @@ export function wrapAgentMessage(
 	// were required.
 	if (subject) lines.push(`<subject>${escapeXmlText(subject)}</subject>`);
 	lines.push(
-		`<reply-with>${agentReplyCommand({
-			target: {
-				id: source.taskId,
-				seq: source.seq,
-				seqShared,
-				variantIndex: source.variantIndex,
-				projectId: source.projectId,
-			},
-			fromProjectId: receiverProjectId,
-			quoted: "your reply",
-		})}</reply-with>`,
+		source.agent
+			? `<reply-with>${agentReplyCommand({
+				target: {
+					id: source.taskId,
+					seq: source.seq,
+					seqShared,
+					variantIndex: source.variantIndex,
+					projectId: source.projectId,
+				},
+				fromProjectId: receiverProjectId,
+				quoted: "your reply",
+				agentHandle: senderAlone ? undefined : encodeAgentHandle(source.agent),
+			})}</reply-with>`
+			: `<reply-unavailable>${escapeXmlText(source.agentUnavailable || REPLY_UNAVAILABLE_UNRECORDED)}</reply-unavailable>`,
 		"<message>",
 		text,
 		"</message>",
 		"</dev3-ai-message>",
 	);
 	return lines.join("\n");
+}
+
+/** An external sender's message as it reaches the envelope: who, and the id to reply to. */
+export interface ExternalSenderStamp {
+	id: string;
+	label: string;
+	messageId: string;
+}
+
+/**
+ * Wrap a message an external sender (`dev3 message --as-sender <id>`) wrote. Same
+ * tag family as {@link wrapAgentMessage}, so the receiver reads it as agent traffic
+ * and not as the user. The id is self-asserted — it attributes, it does not prove.
+ * The reply command lands in that sender's inbox, not in a task.
+ */
+export function wrapExternalSenderMessage(text: string, sender: ExternalSenderStamp, subject?: string): string {
+	const lines = [
+		"<dev3-ai-message>",
+		`<from-sender id="${escapeXmlText(sender.id)}">${escapeXmlText(sender.label)}</from-sender>`,
+		`<message-id>${sender.messageId}</message-id>`,
+	];
+	if (subject) lines.push(`<subject>${escapeXmlText(subject)}</subject>`);
+	lines.push(
+		`<reply-with>${externalSenderReplyCommand(sender.id, sender.messageId)}</reply-with>`,
+		"<message>",
+		neutralizeEnvelopeTags(text),
+		"</message>",
+		"</dev3-ai-message>",
+	);
+	return lines.join("\n");
+}
+
+/**
+ * A sender may relay third-party text; a `</message>` inside it would close the
+ * envelope and let the rest forge a `<from-task>` block. Escaping the `<` keeps it readable.
+ */
+function neutralizeEnvelopeTags(text: string): string {
+	return text.replace(/<(?=\s*\/\s*message\b|\s*\/?\s*dev3-ai-message\b)/gi, "&lt;");
+}
+
+/** The command a task's agent runs to answer an external sender. */
+export function externalSenderReplyCommand(senderId: string, messageId: string): string {
+	return `dev3 message --to-sender ${senderId} --in-reply-to ${messageId} --subject "${REPLY_SUBJECT_PLACEHOLDER}" "your reply"`;
 }
 
 /**
@@ -93,6 +155,80 @@ export function wrapArtifactMessage(
 		"</message>",
 		"</dev3-artifact-message>",
 	].join("\n");
+}
+
+export type PrMergedCompletion = "offered" | "not-offered" | "after-local-work" | "pinned";
+
+const PR_MERGED_SENTENCE: Record<PrMergedCompletion, (prNumber: number) => string> = {
+	offered: (n) => `PR #${n} merged. Wrap up now (final report, notes, report to whoever started you); dev3 offers the user task completion after your turn ends, so do not request it yourself.`,
+	"not-offered": (n) => `PR #${n} merged. dev3 does not offer completion for this task; continue per your task rules.`,
+	"after-local-work": (n) => `PR #${n} merged, but this worktree has uncommitted changes or commits the PR does not include; dev3 offers completion only once they are merged or dropped.`,
+	pinned: (n) => `PR #${n} merged. It is not this task's own PR, so dev3 offers no completion for it.`,
+};
+
+function prNoticeSentence(prNumber: number, notice: PrStatusNotice, completion: PrMergedCompletion): string {
+	switch (notice.kind) {
+		case "merged":
+			return PR_MERGED_SENTENCE[completion](prNumber);
+		case "replaced":
+			return `PR #${notice.oldNumber} is no longer this branch's open PR; watch ended. Run \`dev3 pr watch\` again if you still need it.`;
+		case "closed":
+			return `PR #${prNumber} closed without merge.`;
+		case "ci-passed":
+			return `PR #${prNumber}: CI finished on ${notice.sha.slice(0, 7)}: all ${notice.totalChecks} checks GitHub listed passed.`;
+		case "ci-failed":
+			// No check names: they are written by whoever owns the workflow file, and this text lands in the agent's prompt.
+			return `PR #${prNumber}: CI finished on ${notice.sha.slice(0, 7)}: ${notice.failedCount} of ${notice.totalChecks} checks GitHub listed failed; see \`gh pr checks ${prNumber}\`.`;
+	}
+}
+
+const PR_NOTICE_SUBJECT: Record<PrStatusNotice["kind"], string> = {
+	"ci-passed": "CI passed",
+	"ci-failed": "CI failed",
+	merged: "merged",
+	closed: "closed without merge",
+	replaced: "watch ended",
+};
+
+/** Only the exact `https://<host>/<owner>/<repo>/pull/<N>` shape of this PR goes into the message. */
+function isPlainPullRequestUrl(url: string, prNumber: number): boolean {
+	const repo = parseGitHubPullRequestUrl(url);
+	return repo !== null && url === `https://${repo.host}/${repo.owner}/${repo.repo}/pull/${prNumber}`;
+}
+
+/** The agent-traffic-log subject for a PR status message. */
+export function prStatusSubject(prNumber: number, notices: readonly PrStatusNotice[]): string {
+	const first = notices[0];
+	if (first?.kind === "replaced") return `PR #${first.oldNumber}: ${PR_NOTICE_SUBJECT.replaced}`;
+	return `PR #${prNumber}: ${first ? PR_NOTICE_SUBJECT[first.kind] : "status"}`;
+}
+
+/**
+ * The message dev3 itself types into an agent's pane when a `dev3 pr watch`
+ * subscription fires. Not a task talking, so no `<reply-with>`.
+ *
+ * Only dev3's own words, the PR number, its URL, a short SHA and check counts go
+ * in. Never the PR title, a review or a comment: fork authors write those, and this
+ * text lands in the agent's prompt. It must stay under
+ * `AGENT_MESSAGE_SPILL_THRESHOLD_BYTES`.
+ */
+export function wrapPrStatusMessage(input: {
+	prNumber: number;
+	url: string;
+	notices: readonly PrStatusNotice[];
+	/** Kinds of watch that remain on the task after this message. */
+	remaining: readonly PrWatchUntil[];
+	/** What the merge path does next: offer completion, only post a notice, or wait for local work to land. */
+	completion: PrMergedCompletion;
+}): string {
+	const sentences = [...new Set(input.notices.map((notice) => prNoticeSentence(input.prNumber, notice, input.completion)))];
+	const lines = ["<dev3-pr-status>", ...sentences];
+	if (isPlainPullRequestUrl(input.url, input.prNumber)) lines.push(input.url);
+	lines.push(
+		`${input.remaining.length > 0 ? `Watch until ${input.remaining.join(" and ")} stays active.` : "No watch is left."} Act per your task rules.`,
+		"</dev3-pr-status>",
+	);
+	return lines.join("\n");
 }
 
 /**
@@ -129,6 +265,8 @@ export function agentReplyCommand(opts: {
 	quoted: string;
 	/** Placeholder for the mandatory `--subject`; overridden only by tests. */
 	subject?: string;
+	/** Narrows the reply to one agent of the target task (`dev3 message --agent`). */
+	agentHandle?: string;
 }): string {
 	const { target, fromProjectId, quoted } = opts;
 	const crossProject = target.projectId != null && target.projectId !== fromProjectId;
@@ -140,7 +278,8 @@ export function agentReplyCommand(opts: {
 	// `--subject` is mandatory, so the printed command must carry it: a caller who
 	// copy-pastes the old shape is rejected with exit 17 instead of being heard.
 	const subject = opts.subject ?? REPLY_SUBJECT_PLACEHOLDER;
-	return `dev3 message --task ${address}${scope} --subject "${subject}" "${quoted}"`;
+	const agent = opts.agentHandle ? ` --agent ${opts.agentHandle}` : "";
+	return `dev3 message --task ${address}${scope}${agent} --subject "${subject}" "${quoted}"`;
 }
 
 /**
@@ -153,13 +292,14 @@ export function seqIsShared(task: { id: string; seq: number }, boardTasks: Array
 	return boardTasks.some((t) => t.seq === task.seq && t.id !== task.id);
 }
 
-const FROM_TASK_RE = /<from-task>([^<]+)<\/from-task>/;
+const SENDER_REF_RE = /<from-task>([^<]+)<\/from-task>|<from-sender id="([^"]+)">/;
 
 /** The sender address of each envelope, first-seen order, duplicates dropped; non-envelopes add nothing. */
 export function heldBatchSenders(texts: readonly string[]): string[] {
 	const senders: string[] = [];
 	for (const text of texts) {
-		const ref = FROM_TASK_RE.exec(text)?.[1];
+		const match = SENDER_REF_RE.exec(text);
+		const ref = match?.[1] ?? match?.[2];
 		if (ref && !senders.includes(ref)) senders.push(ref);
 	}
 	return senders;

@@ -27,9 +27,10 @@ import { writeDev3SelfShim } from "../cli-self-install";
 import { isFreshStartMode } from "../fresh-start";
 import { spawn } from "../spawn";
 import { getCurrentUiTheme, setCurrentUiTheme } from "../theme-state";
+import { runBoardCopy } from "../board-copy";
 import { extractConfigFromParams, getPushMessage, getSystemRequirements, log, resolveBinaryPath, setFocusMode } from "./shared";
 import { binaryCandidatesOnPath, tmuxSearchPaths } from "./shared-pure";
-import { agentBinaryPathOverride, isExecutableFile } from "../executable";
+import { agentBinaryPathOverride, brokenCustomPath, isExecutableFile } from "../executable";
 import { agentAlternativeInstallCommand, agentInstallCommand } from "../../shared/agent-install";
 import { harnessReadinessFrom } from "../harness-readiness";
 import { validateEnvMap } from "../../shared/env-text";
@@ -133,6 +134,8 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 		...(params.githubAuthHost !== undefined ? { githubAuthHost: params.githubAuthHost } : {}),
 		...(params.githubAuthLogin !== undefined ? { githubAuthLogin: params.githubAuthLogin } : {}),
 		...(params.sensitive !== undefined ? { sensitive: params.sensitive } : {}),
+		...(params.boardCopy !== undefined && project.kind !== "virtual" ? { boardCopy: params.boardCopy || undefined } : {}),
+		...(params.boardCopyMessages !== undefined ? { boardCopyMessages: params.boardCopyMessages || undefined } : {}),
 		...(params.autoAccountExclusions !== undefined
 			? { autoAccountExclusions: normalizeAccountExclusions(params.autoAccountExclusions) }
 			: {}),
@@ -159,6 +162,7 @@ async function updateProjectSettings(params: { projectId: string } & ProjectSett
 	// not a raw record a config file may override.
 	const updated = saved.kind === "virtual" ? saved : await repoConfig.resolveProjectConfig(saved);
 	getPushMessage()?.("projectUpdated", { project: updated });
+	if (params.boardCopy === true) void runBoardCopy(saved.id);
 	log.info("← updateProjectSettings done");
 	return updated;
 }
@@ -573,6 +577,12 @@ async function getRosettaWarning(): Promise<RosettaWarningInfo> {
 	return info;
 }
 
+async function getTmuxServerNotice(): Promise<{ predatesLaunchd: boolean }> {
+	const predatesLaunchd = tmux.serverPredatesLaunchd();
+	if (predatesLaunchd) log.warn("tmux server predates the launchd start; task terminals can still lose folder access");
+	return { predatesLaunchd };
+}
+
 async function checkGhAvailable(): Promise<{ available: boolean; notInstalled: boolean }> {
 	log.info("-> checkGhAvailable");
 	const status = await github.getGitHubCliStatus();
@@ -609,7 +619,10 @@ async function checkAgentAvailability(): Promise<AgentCheckResult[]> {
 		// The user's own path always applies; a path cached for a previous base
 		// command is stale, not an error — drop it.
 		const overridePath = agentBinaryPathOverride(agent.id, agent.baseCommand, settings.agentBinaryPaths, settings.agentCustomBinaryPaths);
-		const { resolvedPath, customPathError } = resolveBinaryPath(agent.baseCommand, overridePath);
+		// A broken custom path is an error, never a reason to report the system binary as this agent.
+		const { resolvedPath, customPathError } = brokenCustomPath(agent.id, settings.agentCustomBinaryPaths)
+			? { resolvedPath: undefined, customPathError: true }
+			: resolveBinaryPath(agent.baseCommand, overridePath);
 		log.info(`  agent ${agent.id} (${agent.baseCommand}): ${resolvedPath ? "found" : "NOT found"}`, { path: resolvedPath ?? "none" });
 		return {
 			agentId: agent.id,
@@ -621,6 +634,7 @@ async function checkAgentAvailability(): Promise<AgentCheckResult[]> {
 			alternativeInstallCommand: agentAlternativeInstallCommand(agent, process.platform),
 			installUrl: agent.installUrl,
 			customPathError,
+			customPath: settings.agentCustomBinaryPaths?.[agent.id],
 		};
 	});
 
@@ -655,6 +669,9 @@ async function setAgentBinaryPath(params: { agentId: string; path: string }): Pr
 	if (!existsSync(params.path)) {
 		throw new Error(`File not found: ${params.path}`);
 	}
+	if (!isExecutableFile(params.path)) {
+		throw new Error(`File is not executable: ${params.path}`);
+	}
 	const settings = await loadSettings();
 	// Written to both maps: the custom one is what every launch reads, the cache
 	// copy keeps an older app version on the same ~/.dev3.0 pointing at it too.
@@ -664,6 +681,18 @@ async function setAgentBinaryPath(params: { agentId: string; path: string }): Pr
 		agentBinaryPaths: { ...(settings.agentBinaryPaths ?? {}), [params.agentId]: params.path },
 	});
 	log.info("<- setAgentBinaryPath saved");
+}
+
+async function clearAgentBinaryPath(params: { agentId: string }): Promise<void> {
+	log.info("-> clearAgentBinaryPath", params);
+	const settings = await loadSettings();
+	const custom = { ...(settings.agentCustomBinaryPaths ?? {}) };
+	const cached = { ...(settings.agentBinaryPaths ?? {}) };
+	// The cache copy setAgentBinaryPath wrote goes too; a different (auto-found) path stays.
+	if (cached[params.agentId] === custom[params.agentId]) delete cached[params.agentId];
+	delete custom[params.agentId];
+	await saveSettings({ ...settings, agentCustomBinaryPaths: custom, agentBinaryPaths: cached });
+	log.info("<- clearAgentBinaryPath saved");
 }
 
 async function setTmuxTheme(params: { theme: "dark" | "light"; preference?: "dark" | "light" | "system"; appearancePreset?: "default" | "cmux" | "clarity" }): Promise<void> {
@@ -711,11 +740,13 @@ export const settingsConfigHandlers = {
 	getAppVersion,
 	checkSystemRequirements,
 	getRosettaWarning,
+	getTmuxServerNotice,
 	checkGhAvailable,
 	setCustomBinaryPath,
 	checkAgentAvailability,
 	checkHarnessReadiness,
 	setAgentBinaryPath,
+	clearAgentBinaryPath,
 	setTmuxTheme,
 };
 

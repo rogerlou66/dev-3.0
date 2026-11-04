@@ -2,20 +2,27 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { CliResponse, Task, TaskStatus, TaskType, TaskHistoryEntry, TaskNote } from "../../shared/types";
 import { STATUS_LABELS, ACTIVE_STATUSES, ALL_STATUSES, DEFAULT_PRIORITY, DRAFT_TASK_ACTIVATION_ERROR, TASK_REF_UNRESOLVED_PREFIX, TASK_TYPES, getTaskTitle, getTaskOverview, normalizePriority, normalizeTaskType, taskAgentSessionLooksLive, taskCompletesManually } from "../../shared/types";
-import { CLI_EXIT_CODE_APPROVAL_OUTCOME_UNKNOWN, CLI_EXIT_CODE_APPROVAL_STILL_PENDING, CLI_EXIT_CODE_CANCELLATION_DECLINED, CLI_EXIT_CODE_COMPLETION_DECLINED, CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_RESET_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT, CLI_EXIT_CODE_TASK_REF_UNRESOLVED } from "../../shared/cli-exit-codes";
+import { CLI_EXIT_CODE_APPROVAL_OUTCOME_UNKNOWN, CLI_EXIT_CODE_APPROVAL_STILL_PENDING, CLI_EXIT_CODE_CANCELLATION_DECLINED, CLI_EXIT_CODE_COMPLETION_DECLINED, CLI_EXIT_CODE_HIBERNATE_DECLINED, CLI_EXIT_CODE_HIBERNATE_NOTHING_TO_FREE, CLI_EXIT_CODE_LAUNCH_DECLINED, CLI_EXIT_CODE_LAUNCH_PREPARATION_FAILED, CLI_EXIT_CODE_RESET_DECLINED, CLI_EXIT_CODE_TASK_IS_DRAFT, CLI_EXIT_CODE_TASK_NOT_HIBERNATED, CLI_EXIT_CODE_TASK_REF_UNRESOLVED } from "../../shared/cli-exit-codes";
 import { CODEX_STOP_HOOK_FLAG, CODEX_STOP_HOOK_SUCCESS_JSON, TOLERATE_APP_OFFLINE_FLAG } from "../../shared/agent-hooks";
 import { allPullRequests } from "../../shared/task-pull-requests";
 import { sendRequest } from "../socket-client";
+import { senderAgentParams } from "../sender-agent";
 import { DESTRUCTIVE_APPROVAL_TARGET, isAgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../../shared/agent-approval";
 import { printDetail, exitError, exitUsage } from "../output";
 import type { ParsedArgs } from "../args";
 import { expandShortId, resolveProjectId, type CliContext } from "../context";
 import { rejectUnknownFlags } from "../flag-validation";
+import { exitOnSenderError, readSenderFlag } from "./sender";
 import { readStdin } from "../stdin";
 import { singleTextInput } from "../text-input";
-import { launchApprovalTimeoutMs } from "../launch-approval";
+import { launchAndPrepareTimeoutMs, launchApprovalTimeoutMs } from "../launch-approval";
+import type { LaunchPreparationOutcome } from "../../shared/launch-preparation";
 import { handleTasks } from "./tasks";
-import { buildTaskShowJson } from "../task-json";
+import { reportResumeOutcome } from "./agent";
+import type { CliHibernateOutcome, CliWakeOutcome } from "../../shared/task-hibernate";
+import { buildTaskShowJson, describeTaskEpic, describeTaskOrigin, type ShownTask } from "../task-json";
+import { exitEpicRequestFailed } from "./epic";
+import { withBooleanFlags } from "./spaces";
 
 // Statuses that destroy the worktree + terminal are never a direct CLI move.
 // Both become a blocking approval request the user answers in the app, so an
@@ -138,7 +145,7 @@ interface ShowTaskOptions {
 	notes?: boolean;
 }
 
-function printTask(task: Task, opts: ShowTaskOptions = {}): void {
+function printTask(task: ShownTask, opts: ShowTaskOptions = {}): void {
 	const titleMarker = task.titleEditedByUser ? " (user-edited — do NOT rename)" : "";
 	const fields: Array<[string, string]> = [
 		["ID:", task.id],
@@ -168,6 +175,10 @@ function printTask(task: Task, opts: ShowTaskOptions = {}): void {
 	}
 
 	fields.push(["Created:", formatDate(task.createdAt)]);
+	const createdBy = describeTaskOrigin(task);
+	if (createdBy) fields.push(["Created by:", createdBy]);
+	const epic = describeTaskEpic(task);
+	if (epic) fields.push(["Epic:", epic]);
 	fields.push(["Updated:", formatDate(task.updatedAt)]);
 	if (task.movedAt) fields.push(["Moved:", formatDate(task.movedAt)]);
 	if (task.notes && task.notes.length > 0) fields.push(["Notes:", String(task.notes.length)]);
@@ -178,7 +189,9 @@ function printTask(task: Task, opts: ShowTaskOptions = {}): void {
 				? "coordinator — manages other tasks, never auto-completes, sorts above every priority"
 				: task.taskType === "pr-review"
 					? "pr-review — reviews someone else's changes on this branch"
-					: task.taskType,
+					: task.taskType === "board-cleanup"
+						? "board-cleanup — passively audits open tasks; recommends cleanup for user approval"
+						: task.taskType,
 		]);
 	}
 	// A coordinator owns its completion whether or not the flag is set.
@@ -225,14 +238,26 @@ async function showTask(args: ParsedArgs, socketPath: string, context: CliContex
 
 	const opts = { history: args.flags.history === "true", notes: args.flags.notes === "true" };
 	if (args.flags.json !== undefined) {
-		process.stdout.write(`${JSON.stringify(buildTaskShowJson(resp.data as Task, opts), null, 2)}\n`);
+		process.stdout.write(`${JSON.stringify(buildTaskShowJson(resp.data as ShownTask, opts), null, 2)}\n`);
 		return;
 	}
-	printTask(resp.data as Task, opts);
+	printTask(resp.data as ShownTask, opts);
+}
+
+/** `--epic <ref>` / `--no-epic` as request params; both at once is a usage error. */
+function epicParams(args: ParsedArgs): Record<string, unknown> {
+	const noEpic = args.flags["no-epic"] === "true";
+	const epic = args.flags.epic;
+	if (epic === "true") exitUsage('--epic needs an epic name or id: --epic "Payments v2" (see dev3 epic list)');
+	if (noEpic && epic !== undefined) exitUsage("--epic and --no-epic cannot be combined.");
+	if (noEpic) return { noEpic: true };
+	return epic !== undefined ? { epic } : {};
 }
 
 async function createTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
-	rejectUnknownFlags(args, ["project", "title", "description", "type", "scratch", "run", "pr", "branch", "handoff-file", "agent", "config"]);
+	args = withBooleanFlags(args, ["no-epic"]);
+	rejectUnknownFlags(args, ["project", "title", "description", "type", "scratch", "run", "pr", "branch", "handoff-file", "agent", "config", "epic", "no-epic"]);
+	const epic = epicParams(args);
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (!projectId) {
 		exitUsage("--project <id> is required (or run from the project's worktree or checkout)");
@@ -253,7 +278,7 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 				"Create a normal task instead, or send instructions with `dev3 message --task seq:<N>` after it starts.",
 			);
 		}
-		return createScratchAndRun(projectId, socketPath, context, readHandoffFile(args), readLaunchSuggestion(args));
+		return createScratchAndRun(projectId, socketPath, context, readHandoffFile(args), readLaunchSuggestion(args), epic);
 	}
 	if (args.flags["handoff-file"] !== undefined) {
 		exitUsage("--handoff-file only applies to a launch: `task create --scratch --run` or `task move --status in-progress`.");
@@ -295,10 +320,14 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 	const description = args.flags.description === "-" ? stdinDescription : args.flags.description || positionalContent;
 
 	const params: Record<string, unknown> = { projectId, title };
+	// Inside a task's context that task is the parent, whoever typed the command.
+	if (context?.taskId) params.sourceTaskId = context.taskId;
 	if (description) params.description = description;
 	if (taskType) params.taskType = taskType;
 	if (prFlag) params.pr = prFlag;
 	if (branchFlag) params.branch = branchFlag;
+	// Without either flag the new task inherits the creating task's epic in the app.
+	Object.assign(params, epic);
 
 	const resp = await sendRequest(socketPath, "task.create", params);
 	if (!resp.ok) {
@@ -312,11 +341,12 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 				CLI_EXIT_CODE_TASK_REF_UNRESOLVED,
 			);
 		}
-		exitError(resp.error || "Failed to create task");
+		exitEpicRequestFailed(resp, "Failed to create task");
 	}
 
 	const task = resp.data as Task;
 	process.stdout.write(`Created task ${task.id.slice(0, 8)} (seq ${task.seq}): ${getTaskTitle(task)}\n`);
+	if (task.epicId) process.stderr.write(`Epic: ${task.epicId.slice(0, 8)}${epic.epic ? "" : " (inherited from the creating task)"}\n`);
 	// The type is only real once the role brief is in the description the agent
 	// will read, so name it rather than leaving the caller to check the card.
 	if (task.taskType) {
@@ -332,13 +362,14 @@ async function createTask(args: ParsedArgs, socketPath: string, context: CliCont
 }
 
 async function updateTask(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
-	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "type", "force", "print-role"]);
+	args = withBooleanFlags(args, ["no-epic"]);
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "title", "description", "priority", "manual-completion", "type", "force", "print-role", "epic", "no-epic"]);
 	const taskId = resolveTaskId(args, context);
 	if (!taskId) {
-		exitUsage("Usage: dev3 task update <id|--task id|--task-id id|--id id> [--title '...'] [--description '...'] [--priority P0..P4] [--manual-completion on|off] [--type coordinator|pr-review|standard]");
+		exitUsage("Usage: dev3 task update <id|--task id|--task-id id|--id id> [--title '...'] [--description '...'] [--priority P0..P4] [--manual-completion on|off] [--type coordinator|pr-review|board-cleanup|standard] [--epic <name|id> | --no-epic]");
 	}
 
-	const params: Record<string, unknown> = { taskId };
+	const params: Record<string, unknown> = { taskId, ...epicParams(args) };
 	const projectId = resolveProjectId(args.flags.project, context);
 	if (projectId) params.projectId = projectId;
 	// Tri-state semantics:
@@ -397,12 +428,14 @@ async function updateTask(args: ParsedArgs, socketPath: string, context: CliCont
 		&& params.priority === undefined
 		&& rawManualCompletion === undefined
 		&& rawType === undefined
+		&& params.epic === undefined
+		&& params.noEpic === undefined
 	) {
-		exitUsage("Provide --title, --description, --priority, --manual-completion, or --type to update");
+		exitUsage("Provide --title, --description, --priority, --manual-completion, --type, --epic or --no-epic to update");
 	}
 
 	const resp = await sendRequest(socketPath, "task.update", params);
-	if (!resp.ok) exitError(resp.error || "Failed to update task");
+	if (!resp.ok) exitEpicRequestFailed(resp, "Failed to update task");
 
 	const result = resp.data as Task | { task: Task; titlePreserved?: boolean; roleDelivery?: string; rolePrompt?: string; rolePromptSource?: string };
 	const task = "task" in result ? result.task : result;
@@ -785,6 +818,7 @@ async function createScratchAndRun(
 	context: CliContext | null,
 	handoffNote?: string,
 	suggestion?: { agentId: string; configId?: string },
+	epic: Record<string, unknown> = {},
 ): Promise<void> {
 	if (!context?.taskId) {
 		exitUsage("Run this from inside a task worktree — the new scratch task reports back to yours.");
@@ -795,9 +829,11 @@ async function createScratchAndRun(
 		resp = await sendRequest(socketPath, "task.createScratchAndRun", {
 			projectId,
 			sourceTaskId: context.taskId,
+			...senderAgentParams(context),
 			...(handoffNote ? { handoffNote } : {}),
 			...suggestion,
-		}, { timeoutMs: await launchApprovalTimeoutMs(socketPath) });
+			...epic,
+		}, { timeoutMs: await launchAndPrepareTimeoutMs(socketPath) });
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
 			exitError(
@@ -807,7 +843,7 @@ async function createScratchAndRun(
 		}
 		throw err;
 	}
-	if (!resp.ok) exitError(resp.error || "Failed to request a scratch task");
+	if (!resp.ok) exitEpicRequestFailed(resp, "Failed to request a scratch task");
 	if (!isLaunchApprovalOutcome(resp.data)) exitError("Unexpected response to the scratch launch request");
 	reportLaunchOutcome(resp.data, false);
 }
@@ -818,7 +854,7 @@ interface LaunchApprovalOutcome {
 	seq?: number;
 	title?: string;
 	/** One entry per task that started, in variant order; length 1 for a plain launch. */
-	launched?: Array<{ variantIndex: number | null; replyCommand: string }>;
+	launched?: Array<{ variantIndex: number | null; replyCommand: string; preparation?: LaunchPreparationOutcome }>;
 }
 
 function isLaunchApprovalOutcome(data: unknown): data is LaunchApprovalOutcome {
@@ -843,7 +879,7 @@ function movesForeignTaskIntoActiveColumn(
 }
 
 /** Print the result of an approved/declined launch, or exit with the decline code. */
-function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: boolean): void {
+function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: boolean, bySender = false): void {
 	if (!outcome.approved) {
 		exitError(
 			"User declined the launch request",
@@ -856,6 +892,7 @@ function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: bool
 		return;
 	}
 	const launched = outcome.launched ?? [];
+	exitOnFailedPreparation(outcome, launched);
 	const fallback = `dev3 message --task seq:${outcome.seq} --subject "what this is about" "your message"`;
 	if (launched.length > 1) {
 		// The user turned one launch into a variant group. Every sibling shares
@@ -868,14 +905,42 @@ function reportLaunchOutcome(outcome: LaunchApprovalOutcome, codexStopHook: bool
 			`User approved — seq:${outcome.seq} is starting as ${launched.length} variants: ${outcome.title ?? ""}\n` +
 			`They all share seq:${outcome.seq}, so address each one by its own id:\n` +
 			`${rows}\n` +
-			"They are independent agents on the same prompt. Each knows you started it and reports back to this task.\n",
+			"They are independent agents on the same prompt. Each knows you started it and reports back to this task.\n" +
+			stillPreparingNote(outcome, launched),
 		);
 		return;
 	}
 	process.stdout.write(
 		`User approved — task seq:${outcome.seq} is starting: ${outcome.title ?? ""}\n` +
 		`Talk to it with: ${launched[0]?.replyCommand ?? fallback}\n` +
-		"It knows you started it and will report back to this task.\n",
+		(bySender
+			? "It does not know who started it yet — your first --as-sender message tells it how to reply.\n"
+			: "It knows you started it and will report back to this task.\n") +
+		stillPreparingNote(outcome, launched),
+	);
+}
+
+function stillPreparingNote(outcome: LaunchApprovalOutcome, launched: NonNullable<LaunchApprovalOutcome["launched"]>): string {
+	if (!launched.some((entry) => entry.preparation?.state === "still-preparing")) return "";
+	return `It is still preparing (worktree/setup). If preparation fails it returns to To Do — check with \`dev3 task show --task seq:${outcome.seq}\`.\n`;
+}
+
+/**
+ * An approved launch whose preparation failed started nothing, so it must not
+ * print the "started" lines (2026-11-01 incident). Any failed variant fails the
+ * command: the requester has to look before it relies on the group.
+ */
+function exitOnFailedPreparation(outcome: LaunchApprovalOutcome, launched: NonNullable<LaunchApprovalOutcome["launched"]>): void {
+	const failed = launched.filter((entry) => entry.preparation?.state === "failed");
+	if (failed.length === 0) return;
+	const lines = failed.map((entry) => {
+		const error = entry.preparation?.state === "failed" ? entry.preparation.error : "";
+		return launched.length > 1 ? `variant #${entry.variantIndex ?? "?"}: ${error}` : error;
+	});
+	exitError(
+		`User approved, but task seq:${outcome.seq} failed to prepare — no agent is running for it`,
+		`${lines.join("\n")}\nThe task is back in To Do. Read the error before asking to start it again.`,
+		CLI_EXIT_CODE_LAUNCH_PREPARATION_FAILED,
 	);
 }
 
@@ -883,9 +948,11 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// `--tolerate-app-offline` only changes the app-offline exit code, which is
 	// decided before dispatch (main.ts) — accepted and ignored here.
 	rejectUnknownFlags(args, [
-		"id", "task", "task-id", "project", "status", "if-status", "if-status-not", "handoff-file", "agent", "config",
+		"id", "task", "task-id", "project", "status", "if-status", "if-status-not", "handoff-file", "agent", "config", "as-sender",
 		CODEX_STOP_HOOK_FLAG.slice(2), TOLERATE_APP_OFFLINE_FLAG.slice(2),
 	]);
+	// An external sender starting a task gets the launch dialog, like an agent does.
+	const asSender = readSenderFlag(args, "as-sender", context);
 	const taskId = resolveTaskId(args, context);
 	if (!taskId) {
 		exitUsage("Usage: dev3 task move <id|--task id|--task-id id|--id id> --status <status>");
@@ -901,6 +968,13 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	const suggestion = readLaunchSuggestion(args);
 	if (suggestion && !movesForeignTaskIntoActiveColumn(taskId, newStatus, context)) {
 		exitUsage("--agent/--config only apply when starting ANOTHER task: run from your worktree with --task <other> --status in-progress.");
+	}
+
+	if (asSender && !ACTIVE_STATUSES.includes(newStatus as TaskStatus)) {
+		exitUsage("--as-sender only applies to starting a task: --status in-progress (or another active status).");
+	}
+	if (asSender && "handoff-file" in args.flags) {
+		exitUsage("--handoff-file does not apply with --as-sender: a sender's launch gets no handoff note. Put your instructions in your first --as-sender message.");
 	}
 
 	const ifStatus = args.flags["if-status"];
@@ -938,6 +1012,10 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// to know which one: moving somebody else's task into a running column is a
 	// launch, and a launch needs the user's approval and agent pick.
 	if (context?.taskId) params.sourceTaskId = context.taskId;
+	// The launched task's first envelope replies to the agent asking, so it needs
+	// to know which one that is.
+	Object.assign(params, senderAgentParams(context));
+	if (asSender) params.asSender = asSender;
 	// Only used when this move turns out to be a launch; a same-task status move
 	// carries it and the server ignores it.
 	const handoffNote = readHandoffFile(args);
@@ -946,10 +1024,12 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 
 	// The approval dialog can sit open for minutes, so a move that might turn
 	// into one waits on the long timeout. A silent move still answers instantly.
-	const resp = movesForeignTaskIntoActiveColumn(taskId, newStatus, context)
-		? await sendRequest(socketPath, "task.move", params, { timeoutMs: await launchApprovalTimeoutMs(socketPath) })
-		: await sendRequest(socketPath, "task.move", params);
+	const method = asSender ? "task.moveAsSender" : "task.move";
+	const resp = asSender || movesForeignTaskIntoActiveColumn(taskId, newStatus, context)
+		? await sendRequest(socketPath, method, params, { timeoutMs: await launchAndPrepareTimeoutMs(socketPath) })
+		: await sendRequest(socketPath, method, params);
 	if (!resp.ok) {
+		exitOnSenderError(resp.error);
 		// A draft was deliberately parked by the human — give it its own exit code
 		// so an agent can tell "not ready yet" apart from a real failure.
 		if (resp.error?.includes(DRAFT_TASK_ACTIVATION_ERROR)) {
@@ -965,7 +1045,7 @@ async function moveTask(args: ParsedArgs, socketPath: string, context: CliContex
 	// The server answered with an approval outcome, not a moved task: this move
 	// was an agent-initiated launch and went through the dialog.
 	if (isLaunchApprovalOutcome(resp.data)) {
-		return reportLaunchOutcome(resp.data, codexStopHook);
+		return reportLaunchOutcome(resp.data, codexStopHook, Boolean(asSender));
 	}
 
 	const task = resp.data as Task;
@@ -1062,6 +1142,109 @@ async function taskTerminalBackend(args: ParsedArgs, socketPath: string, context
 	);
 }
 
+function formatFreed(bytes: number | null): string {
+	if (!bytes) return "";
+	const mb = bytes / (1024 * 1024);
+	return mb >= 1024 ? `, about ${(mb / 1024).toFixed(1)} GB freed` : `, about ${Math.round(mb)} MB freed`;
+}
+
+/** Both commands block on the launch dialog when an agent asks, so a timeout is not a failure to retry blindly. */
+async function sendSessionAction(socketPath: string, method: string, params: Record<string, unknown>, what: string): Promise<CliResponse> {
+	try {
+		return await sendRequest(socketPath, method, params, { timeoutMs: await launchApprovalTimeoutMs(socketPath) });
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("Socket timeout")) {
+			exitError(`Timed out waiting for the ${what}`, "The approval dialog may still be open; a later approval still goes ahead. Running the same command again waits on that same request.");
+		}
+		throw err;
+	}
+}
+
+/**
+ * A valueless flag swallows the next word, so `--json seq:12` leaves no
+ * positional and the id falls back to the worktree's own task — the wrong
+ * session gets hibernated or woken, silently.
+ */
+function rejectFlagValues(args: ParsedArgs, flags: readonly string[], usage: string): void {
+	for (const flag of flags) {
+		const value = args.flags[flag];
+		if (value !== undefined && value !== "true") {
+			exitUsage(`--${flag} takes no value (got "${value}"). The id goes first.\n${usage}`);
+		}
+	}
+}
+
+function sessionActionParams(args: ParsedArgs, context: CliContext | null, usage: string): Record<string, unknown> {
+	const taskId = resolveTaskId(args, context);
+	if (!taskId) exitUsage(usage);
+	const params: Record<string, unknown> = { taskId };
+	const projectId = resolveProjectId(args.flags.project, context);
+	if (projectId) params.projectId = projectId;
+	if (context?.taskId) params.sourceTaskId = context.taskId;
+	return params;
+}
+
+/**
+ * `dev3 task hibernate` — the session bar's Hibernate button. From inside a task
+ * (an agent asking) it goes through the launch dialog with its countdown; a
+ * person at a plain terminal hibernates directly.
+ */
+async function hibernateTaskCommand(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "json"]);
+	const usage = "Usage: dev3 task hibernate [<id>|--task <id>] [--json]";
+	rejectFlagValues(args, ["json"], usage);
+	const json = "json" in args.flags;
+	const params = sessionActionParams(args, context, usage);
+	const ownSession = targetsOwnSession(String(params.taskId), args, context);
+	if (params.sourceTaskId) {
+		process.stderr.write(ownSession
+			? "Requesting hibernation of THIS task — if it is running, the user approves it in the app, and that ends this session.\n"
+			: "Requesting hibernation — if the task is running, the user approves it in the app first...\n");
+	}
+	const resp = await sendSessionAction(socketPath, "task.hibernate", params, "hibernation");
+	if (!resp.ok) exitError(resp.error || "Failed to hibernate the task");
+	const result = resp.data as CliHibernateOutcome;
+	if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+	switch (result.outcome) {
+		case "hibernated":
+			if (!json) process.stdout.write(`Hibernated task #${result.seq}${formatFreed(result.freedRssBytes)} — agent, terminal and dev server stopped; worktree kept. Wake it with dev3 task wake.\n`);
+			return;
+		case "nothing-to-free":
+			return exitError(`Nothing to hibernate in task #${result.seq}: ${result.message}`, undefined, CLI_EXIT_CODE_HIBERNATE_NOTHING_TO_FREE);
+		case "declined":
+			return exitError(result.stale ? "The target task's run ended before approval" : "User declined the hibernation", "Nothing was stopped.", CLI_EXIT_CODE_HIBERNATE_DECLINED);
+	}
+}
+
+/** `dev3 task wake --resume|--shell` — the wake screen's two buttons. */
+async function wakeTaskCommand(args: ParsedArgs, socketPath: string, context: CliContext | null): Promise<void> {
+	rejectUnknownFlags(args, ["id", "task", "task-id", "project", "resume", "shell", "allow-agent-latest", "json"]);
+	const usage = "Usage: dev3 task wake [<id>|--task <id>] --resume [--allow-agent-latest] | --shell [--json]";
+	rejectFlagValues(args, ["resume", "shell", "allow-agent-latest", "json"], usage);
+	const resume = "resume" in args.flags;
+	const shell = "shell" in args.flags;
+	if (resume === shell) exitUsage(`Pass exactly one of --resume or --shell.\n${usage}`);
+	if (shell && "allow-agent-latest" in args.flags) exitUsage("--allow-agent-latest only applies to --resume.");
+	const json = "json" in args.flags;
+	const params = sessionActionParams(args, context, usage);
+	params.mode = resume ? "resume" : "shell";
+	if (resume) params.allowAgentLatest = "allow-agent-latest" in args.flags;
+	const resp = await sendSessionAction(socketPath, "task.wake", params, "wake");
+	if (!resp.ok) exitError(resp.error || "Failed to wake the task");
+	const result = resp.data as CliWakeOutcome;
+	if (result.outcome === "resume") return reportResumeOutcome(result.resume, json);
+	if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+	switch (result.outcome) {
+		case "woke-shell":
+			if (!json) process.stdout.write(`Woke task #${result.seq} with a plain shell (${result.backend}); the agent was not started and its saved conversation is kept.\n`);
+			return;
+		case "not-hibernated":
+			return exitError(`Task #${result.seq} is not hibernated — nothing to wake`, "A task whose terminal died without hibernating is brought back with dev3 agent resume.", CLI_EXIT_CODE_TASK_NOT_HIBERNATED);
+		case "declined":
+			return exitError(result.stale ? "The target task's run ended before approval" : "User declined the wake request", "Nothing was woken.", CLI_EXIT_CODE_LAUNCH_DECLINED);
+	}
+}
+
 export async function handleTask(
 	subcommand: string | undefined,
 	args: ParsedArgs,
@@ -1081,6 +1264,10 @@ export async function handleTask(
 			return openTask(args, socketPath, context);
 		case "terminal-backend":
 			return taskTerminalBackend(args, socketPath, context);
+		case "hibernate":
+			return hibernateTaskCommand(args, socketPath, context);
+		case "wake":
+			return wakeTaskCommand(args, socketPath, context);
 		case "list":
 			// Alias: the enumerate command lives under the plural `tasks list`.
 			// `task list` is a natural mistype, so forward it transparently.
@@ -1088,7 +1275,7 @@ export async function handleTask(
 		default:
 			exitUsage(
 				`Unknown subcommand: task ${subcommand || "(none)"}` +
-				"\nAvailable: task show, task create, task update, task move, task open, task terminal-backend",
+				"\nAvailable: task show, task create, task update, task move, task open, task terminal-backend, task hibernate, task wake",
 			);
 	}
 }

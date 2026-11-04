@@ -54,6 +54,8 @@ export interface TaskPRStatusCache {
 	checks: PRCheckInfo[];
 	prTitle: string | null;
 	isDraft: boolean | null;
+	/** Head branch of the cached PR; absent in caches written before this field existed. */
+	headRefName?: string | null;
 	cachedAt: string;
 }
 
@@ -65,6 +67,16 @@ export interface TaskPRStatusCache {
  */
 export interface RefreshTaskPrStatusResult {
 	outcome: "updated" | "unavailable" | "not-found" | "skipped";
+}
+
+/**
+ * The pull request a review task is ABOUT — someone else's, never the task's own
+ * (that is `prNumber`). Kept apart so the own-PR machinery (polling, merge
+ * detection, completion prompts) never acts on a PR the user only reads.
+ */
+export interface ReviewedPullRequest {
+	number: number;
+	url: string;
 }
 
 /** One entry of {@link Task.pullRequests}. */

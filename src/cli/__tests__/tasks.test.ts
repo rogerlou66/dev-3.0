@@ -93,6 +93,36 @@ afterEach(() => {
 });
 
 describe("tasks list", () => {
+
+	it("filters closed tasks before paging without dropping drafts or custom columns", async () => {
+		const base = TASKS[0]!;
+		mockSend.mockResolvedValue(okResp([
+			{ ...base, id: "done", status: "completed", seq: 99 },
+			{ ...base, id: "cancelled", status: "cancelled", seq: 98 },
+			{ ...base, id: "draft", status: "todo", draft: true, seq: 4 },
+			{ ...base, id: "parked", hibernated: true, status: "user-questions", seq: 3 },
+			{ ...base, id: "custom", customColumnId: "custom", status: "in-progress", seq: 2 },
+		]));
+		await handleTasks("list", { positional: [], flags: { open: "true", json: "true", limit: "2", offset: "1" } }, SOCKET, CTX);
+		const page = JSON.parse(stdoutOutput);
+		expect(page).toMatchObject({ schemaVersion: 1, total: 3, offset: 1, limit: 2 });
+		expect(page.tasks.map((task: { id: string }) => task.id)).toEqual(["parked", "draft"]);
+		expect(page.tasks[0].hibernated).toBe(true);
+		expect(page.tasks[1].draft).toBe(true);
+		expect(mockSend).toHaveBeenCalledTimes(1);
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "tasks.list", { projectId: CTX.projectId });
+	});
+
+	it("returns an empty structured page with the correct total", async () => {
+		mockSend.mockResolvedValue(okResp(TASKS));
+		await handleTasks("list", { positional: [], flags: { open: "true", json: "true", offset: "100" } }, SOCKET, CTX);
+		expect(JSON.parse(stdoutOutput)).toEqual({ schemaVersion: 1, tasks: [], total: TASKS.length, offset: 100, limit: 50 });
+	});
+
+	it("rejects contradictory open and terminal filters without a request", async () => {
+		await expect(handleTasks("list", { positional: [], flags: { open: "true", status: "completed" } }, SOCKET, CTX)).rejects.toThrow("EXIT_3");
+		expect(mockSend).not.toHaveBeenCalled();
+	});
 	it("lists tasks with explicit --project", async () => {
 		mockSend.mockResolvedValue(okResp(TASKS));
 
@@ -687,5 +717,69 @@ describe("tasks list priority", () => {
 			handleTasks("list", { positional: [], flags: { project: "proj-001", priority: "," } }, SOCKET, null),
 		).rejects.toThrow("EXIT_3");
 		expect(mockSend).not.toHaveBeenCalled();
+	});
+});
+
+describe("tasks list --children-of", () => {
+	const RESULT = {
+		parent: { id: "pppp", seq: 1801, projectId: "proj-001", projectName: "dev-3.0", title: "Coordinate" },
+		children: [
+			{ id: "cccccccc-2", seq: 9, variantIndex: null, projectId: "proj-002", projectName: "homebrew", status: "todo", title: "Bump cask" },
+			{ id: "cccccccc-1", seq: 1802, variantIndex: 2, projectId: "proj-001", projectName: "dev-3.0", status: "in-progress", title: "Fix CLI" },
+		],
+	};
+
+	it("asks for the children of the parent in the current project and lists every project", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: RESULT } as CliResponse);
+		await handleTasks("list", { positional: [], flags: { "children-of": "seq:1801" } }, SOCKET, CTX);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.children", { taskId: "seq:1801", projectId: "proj-001" });
+		expect(stdoutOutput).toContain("Children of #1801 · dev-3.0");
+		expect(stdoutOutput).toContain("homebrew");
+		expect(stdoutOutput).toContain("1802-2");
+		expect(stdoutOutput).toContain("Agent is Working");
+		expect(stdoutOutput.indexOf("dev-3.0  ")).toBeLessThan(stdoutOutput.indexOf("homebrew"));
+	});
+
+	it("resolves the parent in --project and prints JSON", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: RESULT } as CliResponse);
+		await handleTasks("list", { positional: [], flags: { "children-of": "seq:1801", project: "proj-009", json: "true" } }, SOCKET, CTX);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "task.children", { taskId: "seq:1801", projectId: "proj-009" });
+		const parsed = JSON.parse(stdoutOutput);
+		expect(parsed.children.map((c: { seq: number }) => c.seq)).toEqual([1802, 9]);
+	});
+
+	it("says so when the parent has no children", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: { ...RESULT, children: [] } } as CliResponse);
+		await handleTasks("list", { positional: [], flags: { "children-of": "seq:1801" } }, SOCKET, CTX);
+		expect(stdoutOutput).toContain("No children.");
+	});
+});
+
+describe("tasks list --epic", () => {
+	const RESULT = {
+		epic: { id: "epicpay1-0000", name: "Payments v2", color: "#3b82f6", archived: false, createdAt: 0 },
+		tasks: [
+			{ id: "tttttttt-2", seq: 9, variantIndex: null, projectId: "proj-002", projectName: "backend", status: "completed", title: "Payments API", epicId: "epicpay1-0000" },
+			{ id: "tttttttt-1", seq: 1802, variantIndex: null, projectId: "proj-001", projectName: "app", status: "in-progress", title: "Checkout page", epicId: "epicpay1-0000" },
+		],
+	};
+
+	it("lists the epic's tasks from every project and every status, ignoring the current project", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: RESULT } as CliResponse);
+		await handleTasks("list", { positional: [], flags: { epic: "Payments v2" } }, SOCKET, CTX);
+
+		expect(mockSend).toHaveBeenCalledWith(SOCKET, "epic.tasks", { epic: "Payments v2" });
+		expect(stdoutOutput).toContain("Epic Payments v2 (epicpay1)");
+		expect(stdoutOutput).toContain("backend");
+		expect(stdoutOutput).toContain("Completed");
+		expect(stdoutOutput.indexOf("app  ")).toBeLessThan(stdoutOutput.indexOf("backend"));
+	});
+
+	it("prints JSON", async () => {
+		mockSend.mockResolvedValue({ id: "1", ok: true, data: RESULT } as CliResponse);
+		await handleTasks("list", { positional: [], flags: { epic: "Payments v2", json: "true" } }, SOCKET, CTX);
+		expect(JSON.parse(stdoutOutput).tasks.map((t: { seq: number }) => t.seq)).toEqual([1802, 9]);
 	});
 });

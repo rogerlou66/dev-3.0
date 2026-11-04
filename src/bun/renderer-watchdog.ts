@@ -17,6 +17,7 @@
  *    can measure this, so each beat reports the gap it saw.
  */
 
+import { describeLateTick, probeHostSleep, type SleepProbe } from "./host-sleep-probe";
 import { createLogger } from "./logger";
 
 const log = createLogger("renderer-watchdog");
@@ -78,7 +79,8 @@ export const MIN_CLIENT_AGE_MS = 15_000;
 /**
  * A check that runs this many intervals late means the host was not running
  * either — machine asleep, process starved. Nobody's silence is judged on such a
- * tick, because every window looks frozen from the far side of a suspend.
+ * tick: every window looks frozen from the far side of a suspend, and after a
+ * starved stretch the beats queued during it have not been processed yet.
  */
 export const SUSPEND_TICK_FACTOR = 3;
 
@@ -111,6 +113,8 @@ export interface RendererWatchdogOptions {
 	onFreezeEvidence?: (evidence: FreezeEvidence) => void;
 	/** That same window came back — the freeze was a stall. */
 	onFreezeRecovered?: (afterMs: number) => void;
+	/** Tells a late tick from a sleep apart from one from a starved host; only names it in the log. */
+	sleepProbe?: SleepProbe;
 }
 
 const clients = new Map<string, ClientState>();
@@ -200,18 +204,27 @@ export function startRendererWatchdog(opts: RendererWatchdogOptions = {}): () =>
 	const setTimer = opts.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
 	const clearTimer = opts.clearInterval ?? ((handle: unknown) => clearInterval(handle as Parameters<typeof clearInterval>[0]));
 	const checkIntervalMs = opts.checkIntervalMs ?? CHECK_INTERVAL_MS;
+	const sleepProbe = opts.sleepProbe ?? probeHostSleep;
 	let lastTickAt: number | null = null;
 
 	const handle = setTimer(() => {
 		const tick = clock();
-		const sinceLastTick = lastTickAt == null ? 0 : tick - lastTickAt;
+		const gapStart = lastTickAt ?? tick;
+		const sinceLastTick = tick - gapStart;
 		lastTickAt = tick;
 		if (sinceLastTick > checkIntervalMs * SUSPEND_TICK_FACTOR) {
-			// The host slept (or was starved) through that gap, so every window looks
-			// frozen and none of them is. Rebase the baselines and judge nobody: a
-			// freeze that really outlived the suspend is reported on the next tick.
-			log.info("watchdog tick arrived late — treating it as a host suspend, not a freeze", { gapMs: sinceLastTick });
+			// Whether the machine slept or the host was starved, every window looks
+			// frozen and none can be judged yet. Rebase the baselines and judge nobody:
+			// a freeze that really outlived the gap is reported on a later tick.
 			for (const state of clients.values()) state.lastBeatAt = tick;
+			void sleepProbe(gapStart, tick)
+				.catch(() => "unknown" as const)
+				.then((cause) => {
+					log.info(`watchdog tick arrived late — ${describeLateTick(cause)}; no window judged on it`, {
+						gapMs: sinceLastTick,
+						cause,
+					});
+				});
 			return;
 		}
 		for (const [clientId, state] of clients) {

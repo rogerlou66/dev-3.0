@@ -44,6 +44,14 @@ describe("electrobun bundled resources", () => {
 		expect(readdirSync(fileURLToPath(new URL("../workers", import.meta.url)))).toContain("clonefile-worker.ts");
 	});
 
+	it("ships the clipboard image worker to the path the desktop host loads", () => {
+		const buildCli = readFileSync(fileURLToPath(new URL("../../../scripts/build-cli.ts", import.meta.url)), "utf-8");
+		expect(buildCli).toContain('"src/bun/workers/clipboard-image-worker.ts"');
+		const index = readFileSync(fileURLToPath(new URL("../index.ts", import.meta.url)), "utf-8");
+		expect(index, "cause: Linux clipboard reads fell back to the host thread in packaged builds. fix: configureClipboardImageWorker with the workers/ path").toContain('"workers", "clipboard-image-worker.js"');
+		expect(readdirSync(fileURLToPath(new URL("../workers", import.meta.url)))).toContain("clipboard-image-worker.ts");
+	});
+
 	// The copy map is an allow-list, so a public asset absent from it is served as
 	// the SPA index.html instead of itself. That shipped twice: the favicons, then
 	// sw.js + manifest.webmanifest, which silently killed Web Push in every
@@ -85,5 +93,28 @@ describe("electrobun packaged Bun runtime", () => {
 	it("does not make the production build depend on the removable detached-PTY prototype", () => {
 		const source = readFileSync(fileURLToPath(new URL("../../../electrobun.config.ts", import.meta.url)), "utf8");
 		expect(source).not.toContain("prototypes/detached-pty");
+	});
+});
+
+describe("electrobun 3D engines stay out of the bundles", () => {
+	// electrobun/bun re-exports three and @babylonjs/core as namespaces, which no
+	// bundler can tree-shake: 11 MB in the main bundle and the CLI each. Our patch
+	// drops them; an electrobun bump that loses the patch must fail here, not ship.
+	// See decisions/2026/10/22/strip-electrobun-3d-engines.md.
+	const electrobunApi = () =>
+		readFileSync(fileURLToPath(new URL("../../../node_modules/electrobun/dist/api/bun/index.ts", import.meta.url)), "utf8");
+
+	it("the installed electrobun/bun entry imports neither three nor @babylonjs/core", () => {
+		const source = electrobunApi();
+		expect(source).toContain("export {");
+		expect(source).not.toMatch(/from\s+["']three["']/);
+		expect(source).not.toMatch(/from\s+["']@babylonjs\/core["']/);
+	});
+
+	it("dev3 code never reaches for the stripped namespaces", () => {
+		for (const entry of ["../index.ts", "../window-manager.ts"]) {
+			const source = readFileSync(fileURLToPath(new URL(entry, import.meta.url)), "utf8");
+			expect(source).not.toMatch(/Electrobun\.(three|babylon)\b/);
+		}
 	});
 });

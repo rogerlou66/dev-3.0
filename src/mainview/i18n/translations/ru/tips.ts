@@ -192,7 +192,7 @@ const tips = {
 	"tip.mobilePanePager.title": "Свайпай между панелями",
 	"tip.mobilePanePager.body": "На телефоне задача показывает одну панель за раз — свайпните терминал вбок или используйте полосу ‹ ›, чтобы переключаться.",
 	"tip.statsTokenCost.title": "Смотри расход токенов",
-	"tip.statsTokenCost.body": "На странице статистики видно токены агента и их цену по API-тарифу — из локальных транскриптов Claude Code, без вызовов API.",
+	"tip.statsTokenCost.body": "В статистике видны токены агентов и оценка цены по API-тарифам с сохранением истории и обновлением цен.",
 	"tip.agentShowImage.title": "Агенты могут показывать картинки",
 	"tip.agentShowImage.body": "Запусти `dev3 show-image <path>` в задаче — скриншоты или рендеры откроются во встроенном вьюере с кликабельной историей.",
 	"tip.mobileComposer.title": "Поле ввода для телефона",
@@ -210,7 +210,7 @@ const tips = {
 	"tip.llmProvider.title": "Агенты через Amazon Bedrock",
 	"tip.llmProvider.body": "Настройка «LLM Provider» направляет Claude или Codex в Amazon Bedrock — dev3 подставит модель; учётные данные и регион остаются в вашей конфигурации.",
 	"tip.filterTokens.title": "Фильтруйте задачи токенами",
-	"tip.filterTokens.body": "В поле поиска наберите priority:P0 label:Bug agent:Codex status:review is:attention has:port — или соберите фильтр кликом по воронке.",
+	"tip.filterTokens.body": "В поле поиска наберите priority:P0 label:Bug agent:Codex status:review epic:Payments children:1801 is:attention pr:merged — или соберите фильтр кликом по воронке.",
 	"tip.cycleTaskVariants.title": "Цикл вариантов задачи",
 	"tip.cycleTaskVariants.body": "Нажмите Shift+Cmd+[ или ] (Ctrl в Linux), чтобы переключаться между живыми вариантами прямо из терминала.",
 	"tip.mobileTaskGit.title": "Git с телефона",
@@ -233,6 +233,8 @@ const tips = {
 	"tip.agentTrafficLog.body": "Нажмите ⇧⌘M — откроется последний час переписки агентов; нажмите «Воспроизвести», чтобы проиграть её, или расширьте период.",
 	"tip.continueInAnotherAgent.title": "Сменить агента по ходу",
 	"tip.continueInAnotherAgent.body": "В «+ Агент» отметь «Продолжить разговор этой задачи» — новый агент получит пересказ сессии и подхватит работу.",
+	"tip.renameTerminalWindow.title": "Свои имена для вкладок",
+	"tip.renameTerminalWindow.body": "Дважды кликните вкладку над терминалом (или F2 на ней), чтобы переименовать — имя держится, пока его не очистите.",
 };
 
 export default tips;

@@ -1,8 +1,10 @@
 import type { CodingAgent, Label, Task, TaskStatus, TaskType } from "../../shared/types";
-import { TASK_TYPES, isTaskDisconnected } from "../../shared/types";
+import { AGENT_TIME_STATUSES, TASK_TYPES, isTaskDisconnected } from "../../shared/types";
 import type { FacetKey, TaskQueryContext } from "./taskSearch";
 import { getTaskAgentMeta } from "./taskAgentMeta";
 import { isTaskBlocked } from "../../shared/task-blocking";
+import { isTrustedStoredPrState } from "../../shared/task-pull-requests";
+import { taskActivityTime } from "../components/sortTasks";
 
 /**
  * Facet-pool builders shared by the Kanban filter bar and the Active Tasks
@@ -47,6 +49,35 @@ export function isAttentionTask(task: Task): boolean {
 	return !isTaskBlocked(task) && ATTENTION_STATUSES.includes(task.status);
 }
 
+/**
+ * Quiet time after which an active task counts as stalled. Agent hooks re-stamp
+ * the activity clock on every turn, so 4h without a status change means one turn
+ * that never ended (hung or dead agent) — long workflow runs stay under it.
+ */
+export const STALLED_AFTER_HOURS = 4;
+const STALLED_AFTER_MS = STALLED_AFTER_HOURS * 60 * 60 * 1000;
+
+/** An agent-time status (`in-progress`, `review-by-ai`) idle for {@link STALLED_AFTER_HOURS} (`is:stalled`).
+ *  A task parked in a custom column was put there on purpose, so it never stalls. */
+export function isTaskStalled(task: Task, nowMs: number): boolean {
+	if (task.customColumnId || !AGENT_TIME_STATUSES.includes(task.status)) return false;
+	const since = taskActivityTime(task);
+	return since > 0 && nowMs - since >= STALLED_AFTER_MS;
+}
+
+/**
+ * GitHub state of the task's current PR, lowercased: the live state when the
+ * surface tracks one, else the persisted status cache or PR ledger for that number.
+ * A finished task's OPEN is stale (nothing polls it any more), so it reads as unknown.
+ */
+export function taskPrState(task: Task, prNumber: number | null, liveState: string | null | undefined): string | null {
+	if (prNumber == null) return null;
+	const cache = task.prStatusCache?.number === prNumber ? task.prStatusCache.mergeState?.state : null;
+	const ledger = task.pullRequests?.find((entry) => entry.number === prNumber)?.state;
+	const state = [liveState, cache, ledger].find((candidate) => isTrustedStoredPrState(task, candidate));
+	return state?.toLowerCase() ?? null;
+}
+
 export interface FacetResolver {
 	agents: CodingAgent[];
 	labelsFor: (task: Task) => Label[];
@@ -60,6 +91,12 @@ export interface FacetResolver {
 	 *  (a single project's board) return [] so the SPACES group is dropped. */
 	spaceNamesFor?: (task: Task) => string[];
 	prNumberFor?: (task: Task) => number | null;
+	/** Live GitHub state (OPEN/MERGED/CLOSED) of that PR, when the surface tracks one. */
+	prStateFor?: (task: Task) => string | null;
+	/** `children:` values that select the task (see `childrenTokenRefs`). */
+	childrenRefsFor?: (task: Task) => readonly string[];
+	/** The task's epic for `epic:`. */
+	epicFor?: (task: Task) => { id: string; name: string } | null;
 }
 
 /**
@@ -82,7 +119,9 @@ export function taskAgentName(task: Task, agents: CodingAgent[]): string | null 
 }
 
 /** Build the pure per-task facet context the matcher consumes. */
-export function taskQueryContext(task: Task, resolver: FacetResolver): TaskQueryContext {
+export function taskQueryContext(task: Task, resolver: FacetResolver, nowMs: number = Date.now()): TaskQueryContext {
+	const livePrNumber = resolver.prNumberFor?.(task) ?? null;
+	const prNumber = livePrNumber ?? task.prNumber ?? null;
 	return {
 		labelNames: resolver.labelsFor(task).map((l) => l.name),
 		agentName: taskAgentName(task, resolver.agents),
@@ -93,8 +132,14 @@ export function taskQueryContext(task: Task, resolver: FacetResolver): TaskQuery
 		isAttention: resolver.isAttentionFor(task),
 		isHidden: task.hidden === true,
 		isHibernated: isTaskNotRunning(task),
+		isKeptAlive: task.keepAlive?.enabled === true,
+		isStalled: isTaskStalled(task, nowMs),
+		hasPr: prNumber != null,
+		prState: taskPrState(task, prNumber, livePrNumber != null ? resolver.prStateFor?.(task) : null),
 		spaceNames: resolver.spaceNamesFor ? resolver.spaceNamesFor(task) : null,
-		prNumber: resolver.prNumberFor?.(task) ?? null,
+		prNumber: livePrNumber,
+		childrenRefs: resolver.childrenRefsFor?.(task) ?? [],
+		epic: resolver.epicFor?.(task) ?? null,
 	};
 }
 
@@ -103,7 +148,7 @@ export interface FilterFunnelCandidates {
 	priorityCandidates: FilterFunnelOption[];
 	/** Full ordered status vocabulary (built-in statuses + custom columns). */
 	statusCandidates: FilterFunnelOption[];
-	flagLabels: { attention: string; port: string; home: string; hidden: string; hibernated: string };
+	flagLabels: { attention: string; port: string; home: string; hidden: string; hibernated: string; keptAlive: string };
 	typeLabels: Record<TaskType | "standard", string>;
 }
 
@@ -132,6 +177,7 @@ export function buildFilterGroups(
 	let anyHome = false;
 	let anyHidden = false;
 	let anyHibernated = false;
+	let anyKeptAlive = false;
 
 	for (const task of tasks) {
 		for (const label of resolver.labelsFor(task)) {
@@ -165,6 +211,7 @@ export function buildFilterGroups(
 		if (resolver.hasPortFor(task)) anyPort = true;
 		if (task.hidden) anyHidden = true;
 		if (isTaskNotRunning(task)) anyHibernated = true;
+		if (task.keepAlive?.enabled) anyKeptAlive = true;
 	}
 
 	const priorityOptions = priorityCandidates.filter((c) => presentPriority.has(c.value.toLowerCase()));
@@ -188,6 +235,7 @@ export function buildFilterGroups(
 	// reachable while the very tasks it selects are out of the list.
 	if (anyHidden) flagOptions.push({ facet: "is", value: "hidden", label: flagLabels.hidden });
 	if (anyHibernated) flagOptions.push({ facet: "is", value: "hibernated", label: flagLabels.hibernated });
+	if (anyKeptAlive) flagOptions.push({ facet: "is", value: "keepalive", label: flagLabels.keptAlive });
 
 	const groups: FilterFunnelGroup[] = [
 		{ id: "priority", options: priorityOptions },

@@ -1,4 +1,5 @@
 import type { AgentFamily, CodingAgent, PaneSessionEntry, Project, Task } from "../../../shared/types";
+import { getPrimaryStopTarget } from "../../../shared/types";
 import * as data from "../../data";
 import * as pty from "../../pty-server";
 import * as agents from "../../agents";
@@ -8,13 +9,15 @@ import { getAgentAdapter } from "../../../shared/agent-adapters/registry";
 import { agentKey } from "../../../shared/agent-adapters/families";
 import * as repoConfig from "../../repo-config";
 import { resolveResumableSessionIds } from "../../agent-transcripts";
-import { DEFAULT_TMUX_SOCKET, taskSessionName } from "../../tmux";
+import { DEFAULT_TMUX_SOCKET, taskSessionName, tmux } from "../../tmux";
 import { dev3TaskTempPath } from "../../temp-paths";
 import { taskTerminalBackendIdentity } from "../../task-terminal-backend";
-import { nativeTaskPanesAlive } from "../../native-task-panes";
+import { nativeTaskPanesAlive, stopNativeTaskPanes } from "../../native-task-panes";
+import { assertTaskWorkspacePresent } from "../../task-workspace-guard";
 import type { ResumePaneMode, ResumePaneReport, ResumeUnavailableReason, TaskResumeResult } from "../../../shared/agent-resume";
+import { WAKE_SHELL_NOTICE } from "../../../shared/task-hibernate";
 import { getPushMessage, buildCmdScript, log, writeLaunchScript } from "../shared-pure";
-import { applyAgentHooksToCommand, ensureAgentTrust, launchTaskPty } from "./task-launch";
+import { applyAgentHooksToCommand, ensureAgentTrust, launchTaskPty, notifyStaleAccountDropped } from "./task-launch";
 import { findTaskAcrossProjects, markTerminalAttached, wakeIfHibernated } from "./task-state";
 
 /**
@@ -134,6 +137,29 @@ export async function taskTerminalAlive(task: Task): Promise<boolean> {
 		: pty.tmuxSessionExists(task.id, task.tmuxSocket ?? DEFAULT_TMUX_SOCKET);
 }
 
+const TEARDOWN_WAIT_MS = 5_000;
+const TEARDOWN_POLL_MS = 100;
+
+/**
+ * End a task's terminal and wait until the backend agrees it is gone. A relaunch
+ * racing a fire-and-forget `kill-session` attaches to the dying session
+ * (`new-session -A`) instead of starting the agent. Callers confirm with `refuseLive`.
+ */
+export async function tearDownTaskTerminal(task: Task): Promise<void> {
+	if (taskTerminalBackendIdentity(task) === "native") {
+		if (pty.hasSession(task.id)) await pty.destroySessionAwaited(task.id);
+		else await stopNativeTaskPanes(task.id);
+		return;
+	}
+	const socket = task.tmuxSocket ?? DEFAULT_TMUX_SOCKET;
+	// Exactly one kill: a second one still in flight could land on the fresh session.
+	if (pty.hasSession(task.id)) pty.destroySession(task.id, socket);
+	else await tmux.killSession(taskSessionName(task.id), { socket, bestEffort: true });
+	for (let waited = 0; waited < TEARDOWN_WAIT_MS && await pty.tmuxSessionExists(task.id, socket); waited += TEARDOWN_POLL_MS) {
+		await new Promise((resolve) => setTimeout(resolve, TEARDOWN_POLL_MS));
+	}
+}
+
 /**
  * The Resume Session path, shared by the terminal's button and `dev3 agent resume`.
  * One resume per task at a time: a second caller (a click while the CLI resumes,
@@ -228,7 +254,7 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 	const main = panes[0];
 	const mainResume = targets[0].sessionId;
 	const mainFreshSessionId = targets[0].mode === "fresh-session" ? crypto.randomUUID() : undefined;
-	await launchTaskPty(
+	const mainAccountId = await launchTaskPty(
 		resolvedProject,
 		task,
 		task.worktreePath,
@@ -238,6 +264,7 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 		true,
 		{ sessionId: mainResume ?? undefined, accountId: main.accountId, codexHome: codexHomes.get(0), freshSessionId: mainFreshSessionId },
 	);
+	if (mainAccountId !== undefined) reports[0].accountId = mainAccountId;
 	reports[0].status = "resumed";
 	if (mainFreshSessionId) reports[0].sessionId = mainFreshSessionId;
 	const backend = taskTerminalBackendIdentity(task);
@@ -273,13 +300,13 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 				try {
 					const paneResume = targets[i].sessionId;
 					const codexHome = codexHomes.get(i);
-					const accountId = codexHome ? codexAccountIdForHome(codexHome) ?? null : pane.accountId;
+					let accountId = codexHome ? codexAccountIdForHome(codexHome) ?? null : pane.accountId;
 					// Every conversation of this worktree belongs to another pane, so
 					// `--continue` would open one of theirs: start this pane over instead.
 					const freshSessionId = targets[i].mode === "fresh-session" ? crypto.randomUUID() : null;
 					const cmdOpts: agents.CommandOptions = freshSessionId
-						? { sessionId: freshSessionId, accountId }
-						: { resume: true, accountId };
+						? { sessionId: freshSessionId, accountId, accountFromStore: true }
+						: { resume: true, accountId, accountFromStore: true };
 					if (paneResume) cmdOpts.sessionId = paneResume;
 					let resumeCmd: string;
 					let resumeBaseCmd = pane.agentCmd;
@@ -294,6 +321,10 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 						extraEnv = resolved.extraEnv;
 						resumeBaseCmd = resolved.config?.baseCommandOverride || resolved.agent?.baseCommand || pane.agentCmd;
 						resumeAgentFamily = resolved.agentFamily ?? resumeAgentFamily;
+						if (resolved.staleAccountDropped) {
+							accountId = resolved.resolvedAccountId;
+							await notifyStaleAccountDropped(task);
+						}
 					} else {
 						resumeCmd = agents.buildResumeCommand(pane.agentCmd, paneResume ?? undefined, resumeAgentFamily) ?? pane.agentCmd;
 					}
@@ -305,7 +336,7 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 					};
 					await ensureAgentTrust(task.worktreePath, project.path, resumeBaseCmd, accountId, task.foreignCode, resumeAgentFamily, paneEnv);
 					resumeCmd = await applyAgentHooksToCommand(task.worktreePath, resumeBaseCmd, resumeCmd, {
-						stopTarget: project.autoReviewEnabled ? "review-by-ai" : "review-by-user",
+						stopTarget: getPrimaryStopTarget(project.autoReviewEnabled, task.taskType),
 						family: resumeAgentFamily,
 					});
 					const scriptPath = dev3TaskTempPath(params.taskId, `resume-pane-${i}.sh`);
@@ -332,7 +363,7 @@ async function performTaskResume(taskId: string, opts: ResumeTaskOptions): Promi
 						// in this worktree's own store, so the origin goes with the old one.
 						const resumed = sessionId ?? prior.sessionId;
 						const originCwd = resumed === prior.sessionId ? prior.sessionOriginCwd : undefined;
-						updatedPanes[index] = { ...prior, paneId, accountId, sessionId: resumed, sessionOriginCwd: originCwd };
+						updatedPanes[index] = { ...prior, paneId, accountId, sessionId: resumed, sessionOriginCwd: originCwd, parked: undefined };
 					}
 					await data.updateTask(project, params.taskId, { sessionState: { panes: updatedPanes } });
 				} catch (err) {
@@ -390,24 +421,60 @@ export async function restartTask(params: { taskId: string }): Promise<string> {
 
 	// Clear old session state — a new one will be generated by launchTaskPty.
 	// The abandoned conversation stays on disk; the floor keeps a scan off it.
+	const priorState = { sessionState: task.sessionState ?? null, codexScanFloorAt: task.codexScanFloorAt ?? null };
 	await data.updateTask(project, task.id, { sessionState: null, codexScanFloorAt: new Date().toISOString() });
 
 	const resolvedProject = project.kind === "virtual"
 		? project
 		: await repoConfig.resolveProjectConfig(project, task.worktreePath);
-	await launchTaskPty(
-		resolvedProject,
-		task,
-		task.worktreePath,
-		agentId,
-		configId,
-		false,
-		false,
-	);
+	try {
+		await launchTaskPty(
+			resolvedProject,
+			task,
+			task.worktreePath,
+			agentId,
+			configId,
+			false,
+			false,
+		);
+	} catch (err) {
+		// A refused launch must not cost the saved conversation.
+		await data.updateTask(project, task.id, priorState);
+		throw err;
+	}
 
 	await markTerminalAttached(project, task);
 
 	const url = `ws://localhost:${pty.getPtyPort()}?session=${params.taskId}`;
 	log.info("← restartTask", { url });
+	return url;
+}
+
+/**
+ * The wake screen's "plain shell": the task's terminal comes back with a shell
+ * and no agent. Unlike {@link restartTask} it neither re-runs the brief nor
+ * clears `sessionState`, so every saved pane can still be resumed later.
+ */
+export async function wakeTaskShell(params: { taskId: string }): Promise<string> {
+	log.info("→ wakeTaskShell", { taskId: params.taskId.slice(0, 8) });
+	const { task, project } = await findTaskAcrossProjects(params.taskId);
+	if (!task || !project || !task.worktreePath) {
+		throw new Error(`Cannot wake: task ${params.taskId} not found or has no worktree`);
+	}
+	if (!task.hibernated) throw new Error(`Cannot wake: task ${params.taskId} is not hibernated`);
+	// Before the flag clears: a launch that then throws would strand the task awake with no terminal.
+	assertTaskWorkspacePresent(project, task.worktreePath);
+	await wakeIfHibernated(project, task);
+	if (pty.hasSession(params.taskId)) {
+		await pty.destroySessionAwaited(params.taskId);
+	}
+	const resolvedProject = project.kind === "virtual"
+		? project
+		: await repoConfig.resolveProjectConfig(project, task.worktreePath);
+	await launchTaskPty(resolvedProject, task, task.worktreePath, null, null, false, false, { shellNotice: WAKE_SHELL_NOTICE });
+	await markTerminalAttached(project, task);
+	getPushMessage()?.("taskTerminalResumed", { taskId: params.taskId, projectId: project.id });
+	const url = `ws://localhost:${pty.getPtyPort()}?session=${params.taskId}`;
+	log.info("← wakeTaskShell", { url });
 	return url;
 }

@@ -5,6 +5,7 @@
  */
 import type { Project, Task, TaskStatus } from "../../shared/types";
 import { ACTIVE_STATUSES, DEV3_REPO_CONFIG_KEYS, taskSeqLabel } from "../../shared/types";
+import { ENV_UNSET } from "../../shared/agent-accounts";
 import {
 	assertPosixLaunchDialect,
 	getLaunchShellPath,
@@ -14,6 +15,7 @@ import {
 } from "../../shared/platform-launch";
 import { createLogger } from "../logger";
 import { DEV3_HOME } from "../paths";
+import { hookCliFilePath } from "../hook-cli-capability";
 import { broadcastToOtherInstances } from "../instance-broadcast";
 import { realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -99,10 +101,27 @@ export function generatedScriptName(base: string): string {
 	return `${base}${launchDialect().scriptExtension}`;
 }
 
+/**
+ * How a launch wrapper tells the app its agent process ended — `dev3 hook
+ * agent-exited`, with the exit code appended by `buildCmdScript`. The same CLI
+ * file the hooks run, whose support the launch checked. The session id is the one
+ * this spawn pre-assigned, so the report names exactly one agent.
+ */
+export function agentExitReportArgv(taskId: string, sessionId: string): string[] {
+	return [hookCliFilePath(), "hook", "agent-exited", "--task", taskId, "--session", sessionId];
+}
+
 export function buildCmdScript(
 	tmuxCmd: string,
 	env?: Record<string, string>,
-	options?: { paneTitle?: string; keepShell?: boolean; onExitCommand?: string; shellPath?: string },
+	options?: {
+		paneTitle?: string;
+		keepShell?: boolean;
+		onExitCommand?: string;
+		shellPath?: string;
+		/** argv run on every exit with the exit code appended — `agentExitReportArgv`. */
+		exitReport?: string[];
+	},
 ): string {
 	const d = launchDialect();
 	const exportLines = env && Object.keys(env).length > 0 ? d.envLines(env) : [];
@@ -120,6 +139,7 @@ export function buildCmdScript(
 		...exportLines,
 		...d.announceAndRun(`Starting: ${tmuxCmd}`, tmuxCmd),
 		d.captureExitCode("__EC"),
+		...(options?.exitReport ? [`${d.runCommand(options.exitReport)} ${d.exitCodeArg("__EC")}`] : []),
 	];
 	if (options?.keepShell) {
 		const okNotice = d.print(
@@ -558,6 +578,29 @@ export function buildTaskLifecycleEnv(
 		DEV3_WORKTREE_PATH: worktreePath,
 		DEV3_BRANCH_NAME: branchName ?? task.branchName ?? "",
 	};
+}
+
+/** The keys of {@link buildTaskLifecycleEnv} that name a task rather than its project. */
+export const TASK_SCOPED_ENV_KEYS = [
+	"DEV3_TASK_ID",
+	"DEV3_TASK_SEQ",
+	"DEV3_TASK_TITLE",
+	"DEV3_WORKTREE_PATH",
+	"DEV3_BRANCH_NAME",
+] as const;
+
+/**
+ * Env for a project's Repo terminal: its own project identity, and every
+ * task-scoped key actively removed. The shared tmux server's global env can
+ * still carry some task's identity, and a pane inherits whatever is not set
+ * or removed here — the prompt badge and `dev3` CLI routing both read it.
+ */
+export function buildProjectTerminalEnv(project: Project, repoEnv: Record<string, string>): Record<string, string> {
+	const env: Record<string, string> = { ...repoEnv };
+	for (const key of TASK_SCOPED_ENV_KEYS) env[key] = ENV_UNSET;
+	env.DEV3_PROJECT_PATH = project.path;
+	env.DEV3_PROJECT_NAME = project.name;
+	return env;
 }
 
 export function extractConfigFromParams(params: Record<string, any>): Record<string, any> {

@@ -227,7 +227,15 @@ describe("getPrimaryStopTarget", () => {
 
 	it("returns review-by-ai when automatic review is enabled", () => {
 		expect(getPrimaryStopTarget(true)).toBe("review-by-ai");
+		expect(getPrimaryStopTarget(true, null)).toBe("review-by-ai");
 	});
+
+	// #2127: a coordinator, an audit and a review of someone else's PR have no diff to review.
+	it.each(["coordinator", "pr-review", "board-cleanup"] as const)(
+		"skips automatic review for a %s task", (taskType) => {
+			expect(getPrimaryStopTarget(true, taskType)).toBe("review-by-user");
+		},
+	);
 });
 
 // ---- Constants: STATUS_LABELS ----
@@ -853,6 +861,12 @@ describe("task type", () => {
 	it("says a coordinator completes by hand even with the flag unset", () => {
 		expect(taskCompletesManually({ taskType: "coordinator" })).toBe(true);
 		expect(taskCompletesManually({ taskType: "coordinator", manualCompletion: false })).toBe(true);
+	});
+
+	it("keeps cleanup completion manual without lifting its priority", () => {
+		expect(normalizeTaskType(" Board-Cleanup ")).toBe("board-cleanup");
+		expect(taskCompletesManually({ taskType: "board-cleanup", manualCompletion: false })).toBe(true);
+		expect(compareTaskSortRank({ priority: "P3", taskType: "board-cleanup" }, { priority: "P0" })).toBeGreaterThan(0);
 	});
 
 	it("leaves an ordinary task's completion policy to its own flag", () => {

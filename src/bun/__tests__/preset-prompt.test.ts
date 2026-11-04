@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, resolvePresetPrompt, reviewTaskTitle, reviewTitleTopic } from "../../shared/types";
+import { BOARD_CLEANUP_PROMPT, presetPromptForTaskType, presetPromptSourceForTaskType, COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, resolvePresetPrompt, reviewTaskTitle, reviewTitleTopic } from "../../shared/types";
 import { CLI_EXIT_CODE_LAUNCH_DECLINED } from "../../shared/cli-exit-codes";
 import { COORDINATOR_PROMPT_LIMIT } from "../../shared/agent-command-line-budget";
 
@@ -210,6 +210,16 @@ describe("COORDINATOR_PROMPT", () => {
 		expect(COORDINATOR_PROMPT).toMatch(/`dev3 peek` is still the only way/);
 	});
 
+	// A child stuck on a question rarely pings the coordinator, and dev3 has no
+	// key-input command, so the rule must not promise one or a revision field.
+	it("sweeps unhandled waiting rows without inventing key input", () => {
+		expect(COORDINATOR_PROMPT).toMatch(/WAITING ROWS NEED YOU, notified or not, those waiting at your start too/);
+		expect(COORDINATOR_PROMPT).toMatch(/act only on a move or question\/result not yet handled/);
+		expect(COORDINATOR_PROMPT).toMatch(/Within approved scope, decide and unblock; else escalate/);
+		expect(COORDINATOR_PROMPT).toMatch(/No key input: answer free-text prompts by `dev3 message`, then peek/);
+		expect(COORDINATOR_PROMPT).toMatch(/never a blind Enter or user-only approval/);
+	});
+
 	// `dev3 events` (Seq 1738) is a POSITION, not a feed: a coordinator that reads
 	// it as "the last couple of hours" loses exactly the stretch it was away for.
 	// Each assertion below pins one half of that contract.
@@ -389,5 +399,31 @@ describe("reviewTitleTopic", () => {
 		expect(reviewTitleTopic(null)).toBe("");
 		expect(reviewTitleTopic("   \n ")).toBe("");
 		expect(reviewTitleTopic("feat:")).toBe("");
+	});
+});
+
+
+describe("board cleanup brief", () => {
+	it("does not inherit a coordinator or review override", () => {
+		const overrides = { coordinatorPrompt: "Delegate everything", reviewModePrompt: "Review code" };
+		expect(presetPromptForTaskType("board-cleanup", overrides, overrides)).toBe(BOARD_CLEANUP_PROMPT);
+		expect(presetPromptSourceForTaskType("board-cleanup", overrides, overrides)).toBe("built-in");
+	});
+
+	it("keeps inspection passive, project-scoped and evidence-driven", () => {
+		expect(BOARD_CLEANUP_PROMPT).toContain("Scope: this project; all projects ONLY on explicit request");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Operations alone grants no wider scope");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Audit is read-only: no waking, starting, resuming, spawning, messaging, interrupting or mutating other agents/tasks");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Page EVERY open task");
+		for (const action of ["COMPLETE:", "CANCEL:", "KEEP:", "INVESTIGATE:"]) expect(BOARD_CLEANUP_PROMPT).toContain(action);
+		expect(BOARD_CLEANUP_PROMPT).toContain("Age, silence, review status, local commits, tests and open PRs prove nothing");
+		expect(BOARD_CLEANUP_PROMPT).toContain("code PRs merged, no remaining scope/unique work");
+	});
+
+	it("requires exact chat approval before even opening destructive dialogs", () => {
+		expect(BOARD_CLEANUP_PROMPT).toContain("Get exact task/action approval in chat BEFORE destructive requests");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Re-read selected targets, re-check preservation/runtime");
+		expect(BOARD_CLEANUP_PROMPT).toContain("stop if changed");
+		expect(BOARD_CLEANUP_PROMPT).toContain("Publish report + own durable");
 	});
 });

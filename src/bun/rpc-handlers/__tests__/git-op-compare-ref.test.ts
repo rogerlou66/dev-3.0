@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 	getTask: vi.fn(),
 	openAuxPane: vi.fn(),
 	writeLaunchScript: vi.fn(async (_scriptPath: string, _body: string) => {}),
-	refExists: vi.fn(async () => true),
+	refExists: vi.fn(async (_path: string, _ref: string) => true),
 	detectDefaultCompareRef: vi.fn(async (_path: string, base: string) => base),
 	getBranchStatus: vi.fn(async () => ({ ahead: 1, behind: 0 })),
 	fetchCompareRef: vi.fn(async () => true),
@@ -40,6 +40,8 @@ vi.mock("../../git", () => ({
 	// here — the whole point is that every action funnels through it.
 	resolveCompareRef: async (path: string, base: string, explicit?: string) =>
 		explicit || mocks.detectDefaultCompareRef(path, base),
+	resolveConfiguredCompareRef: async (path: string, base: string, configured: string) =>
+		await mocks.refExists(path, configured) ? configured : mocks.detectDefaultCompareRef(path, base),
 	getCurrentBranch: vi.fn(async () => "dev3/feature"),
 	fetchOrigin: vi.fn(async () => true),
 	fetchCompareRef: mocks.fetchCompareRef,
@@ -77,6 +79,7 @@ vi.mock("../../lifecycle/activities", () => ({
 	persistTaskPrIdentity: vi.fn(),
 	prepareMergeCompletionPrompt: vi.fn(),
 	refreshTaskPrStatus: vi.fn(),
+	reportTaskPrStatus: vi.fn(),
 }));
 vi.mock("../../lifecycle/merge-fingerprint", () => ({ getMergeCompletionFingerprint: vi.fn() }));
 
@@ -159,6 +162,17 @@ describe("the user's explicit compare ref", () => {
 			compareRef: "review/base",
 		});
 		expect(paneScript()).toContain("git rebase review/base");
+	});
+});
+
+describe("a project compare ref the repo does not have", () => {
+	it("rebases onto the detected base instead of the missing configured ref", async () => {
+		mocks.getProject.mockResolvedValue({ ...PROJECT, defaultCompareRef: "origin/master" });
+		mocks.refExists.mockImplementation(async (_path: string, ref: string) => ref !== "origin/master");
+		await gitOperationHandlers.rebaseTask({ taskId: TASK.id, projectId: PROJECT.id, compareRef: "origin/master" });
+		const script = paneScript();
+		expect(script).toContain("git rebase master");
+		expect(script).not.toContain("origin/master");
 	});
 });
 

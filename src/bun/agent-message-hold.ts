@@ -42,6 +42,9 @@
  *    text releases it (a raw keystroke Enter does not: it may have hit copy mode, a
  *    picker, or another pane). Until then later messages wait behind it, the pane is
  *    probed each quiet window, and a gone pane drops it — both said out loud.
+ *  - A message bound to one agent process is checked again when the hold releases. If
+ *    that agent is no longer the one in the pane it is dropped and reported, never
+ *    typed into whatever runs there now (#1809).
  *  - Putting anything back never overwrites a hold that started meanwhile; the
  *    leftovers go in front of it, so arrival order survives.
  *  - In-memory and deliberately not persisted. If the app dies inside the window the
@@ -140,13 +143,19 @@ export interface HeldAgentMessage {
 	 * The newest registration wins, like `submit`.
 	 */
 	batch?: (texts: string[]) => Promise<HeldMessageBatch | null>;
+	/**
+	 * Asked when the hold releases, before anything is typed: null when this message may
+	 * still go to this pane, otherwise why not. A message bound to one agent that is no
+	 * longer the one in the pane is dropped and reported, never typed. Absent means "yes".
+	 */
+	verify?: () => Promise<string | null>;
 }
 
 /**
  * One typing step. A batch pointer is one step that stands for `originals`: those are
  * what goes back in the queue when the pointer was never typed.
  */
-type HeldDelivery = Pick<HeldAgentMessage, "deliver" | "bytes" | "text"> & {
+type HeldDelivery = Pick<HeldAgentMessage, "deliver" | "bytes" | "text" | "verify"> & {
 	originals?: HeldDelivery[];
 	path?: string;
 	discard?: HeldMessageBatch["discard"];
@@ -291,7 +300,7 @@ export function holdAgentMessage(key: string, message: HeldAgentMessage, context
 		stranded: null,
 		modeDeferred: false,
 	};
-	hold.deliveries.push({ deliver: message.deliver, bytes: message.bytes, text: message.text });
+	hold.deliveries.push({ deliver: message.deliver, bytes: message.bytes, text: message.text, verify: message.verify });
 	hold.epilogue = message.epilogue;
 	hold.submit = message.submit;
 	hold.alive = message.alive;
@@ -499,6 +508,8 @@ async function release(key: string, hold: Hold): Promise<void> {
 	holds.delete(key);
 	if (hold.timer) clearTimeout(hold.timer);
 
+	await dropUnverified(hold);
+	if (hold.deliveries.length === 0) return;
 	const { going, waiting } = await planRelease(hold);
 	let typed = 0;
 	const landedSteps: HeldDelivery[] = [];
@@ -571,6 +582,26 @@ async function release(key: string, hold: Hold): Promise<void> {
 		// newest registration left, so the next release still types against a fresh pin.
 		requeue(key, hold, waiting, { stranded: null, modeDeferred: false });
 	}
+}
+
+/** Take out every message whose `verify` refuses this pane now, and say so for each one. */
+async function dropUnverified(hold: Hold): Promise<void> {
+	const kept: HeldDelivery[] = [];
+	for (const delivery of hold.deliveries) {
+		let refusal: string | null = null;
+		try {
+			refusal = delivery.verify ? await delivery.verify() : null;
+		} catch (err) {
+			refusal = `the addressed agent could not be verified (${String(err)})`;
+		}
+		if (refusal === null) {
+			kept.push(delivery);
+			continue;
+		}
+		log.warn("held agent message dropped: its agent is not the one in this pane", { ...hold.context, why: refusal });
+		report(hold, { kind: "dropped", messages: 1, why: refusal });
+	}
+	hold.deliveries = kept;
 }
 
 /** Undo every batch among `steps`, which the pane refused before one byte of them was typed. */

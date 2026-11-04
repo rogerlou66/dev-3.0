@@ -602,8 +602,9 @@ describe("resolveAgentCommand — empty description (scratch task) opens interac
 			makeCtx({ taskDescription: "" }),
 		);
 
-		// No positional prompt — codex opens an empty interactive window …
-		expect(cmd).not.toMatch(/ -- /);
+		// No positional prompt — codex opens an empty interactive window … (the
+		// protocol text itself may quote ` -- `, so it is cut out first)
+		expect(cmd.replace(/-c 'developer_instructions=.*"'/s, "")).not.toMatch(/ -- /);
 		// … but the protocol is still delivered out-of-band (developer message),
 		// which is exactly what scratch tasks were missing with prompt-append.
 		expect(cmd).toContain("-c 'developer_instructions=");
@@ -909,6 +910,20 @@ describe("applyBinaryPathOverride", () => {
 		const agent = makeAgent({ baseCommand: "claude-codex" });
 		const result = applyBinaryPathOverride(agent, { "test-agent": claudePath });
 		expect(result.baseCommand).toBe("claude-codex");
+	});
+
+	it("fails the launch when the user's path is missing instead of using the system binary", () => {
+		const agent = makeAgent({ baseCommand: "claude", name: "Claude Code" });
+		const missing = join(dir, "gone");
+		expect(() => applyBinaryPathOverride(agent, { "test-agent": claudePath }, { "test-agent": missing })).toThrow(
+			`Custom executable for agent "Claude Code" not found or not executable: ${missing}`,
+		);
+	});
+
+	it("fails the launch when the user's path is not executable", () => {
+		const plain = join(dir, "plain");
+		writeFileSync(plain, "#!/bin/sh\n", { mode: 0o644 });
+		expect(() => applyBinaryPathOverride(makeAgent({ baseCommand: "claude" }), undefined, { "test-agent": plain })).toThrow(/not executable/);
 	});
 
 	it("ignores a cached path that no longer exists", () => {

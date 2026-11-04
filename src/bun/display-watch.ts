@@ -1,3 +1,4 @@
+import { probeHostSleep, type SleepProbe } from "./host-sleep-probe";
 import type { DisplayLike } from "./window-state";
 
 /**
@@ -19,6 +20,8 @@ export interface DisplayWatchOptions {
 	now?: () => number;
 	setInterval?: (fn: () => void, ms: number) => TimerHandle;
 	clearInterval?: (handle: TimerHandle) => void;
+	/** A late tick is a wake only if the machine really slept; a starved host is not one. */
+	sleepProbe?: SleepProbe;
 }
 
 /** Stable text form of the whole display layout — geometry and scale both matter. */
@@ -31,8 +34,8 @@ export function displaySignature(displays: DisplayLike[]): string {
 
 /**
  * Timers do not run while the machine is asleep, so a tick arriving much later
- * than scheduled is the wake signal. The multiplier keeps ordinary event-loop
- * stalls (GC, a busy machine) from being misread as a wake.
+ * than scheduled is a wake candidate. The multiplier keeps ordinary event-loop
+ * stalls (GC) out; the sleep probe then rules out a host starved while awake.
  */
 const WAKE_GAP_MULTIPLIER = 3;
 
@@ -46,13 +49,16 @@ export function startDisplayWatch(opts: DisplayWatchOptions): () => void {
 		opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
 	const clearTimer: (handle: TimerHandle) => void =
 		opts.clearInterval ?? ((handle) => clearInterval(handle as Parameters<typeof clearInterval>[0]));
+	const sleepProbe = opts.sleepProbe ?? probeHostSleep;
+	let stopped = false;
 
 	let signature = displaySignature(opts.getDisplays());
 	let lastTick = now();
 
 	const handle = setTimer(() => {
 		const tick = now();
-		const slept = tick - lastTick > intervalMs * WAKE_GAP_MULTIPLIER;
+		const gapStart = lastTick;
+		const late = tick - gapStart > intervalMs * WAKE_GAP_MULTIPLIER;
 		lastTick = tick;
 
 		const displays = opts.getDisplays();
@@ -64,8 +70,19 @@ export function startDisplayWatch(opts: DisplayWatchOptions): () => void {
 		// signature alone would miss it — report the wake anyway. Both together
 		// still report once: a changed layout is the more specific reason.
 		if (changed) opts.onChange({ reason: "displays", displays, signature: next });
-		else if (slept) opts.onChange({ reason: "wake", displays, signature: next });
+		else if (late) {
+			// "unknown" keeps reporting the wake: without a sleep signal that is the
+			// safer guess for a window that may have been left on a vanished screen.
+			void sleepProbe(gapStart, tick)
+				.catch(() => "unknown" as const)
+				.then((cause) => {
+					if (!stopped && cause !== "starved") opts.onChange({ reason: "wake", displays, signature: next });
+				});
+		}
 	}, intervalMs);
 
-	return () => clearTimer(handle);
+	return () => {
+		stopped = true;
+		clearTimer(handle);
+	};
 }

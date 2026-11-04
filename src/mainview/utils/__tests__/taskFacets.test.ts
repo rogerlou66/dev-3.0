@@ -1,6 +1,8 @@
 import type { CodingAgent, Label, Task } from "../../../shared/types";
 import {
 	isAttentionTask,
+	isTaskStalled,
+	STALLED_AFTER_HOURS,
 	taskQueryContext,
 	taskStatusValues,
 	buildFilterGroups,
@@ -8,6 +10,7 @@ import {
 	type FilterFunnelOption,
 } from "../taskFacets";
 import { matchesTaskQuery } from "../taskSearch";
+import en from "../../i18n/translations/en";
 
 const claude: CodingAgent = {
 	id: "builtin-claude",
@@ -143,7 +146,7 @@ describe("buildFilterGroups", () => {
 		{ facet: "priority", value: "P3", label: "P3 — Low" },
 		{ facet: "priority", value: "P4", label: "P4 — Lowest" },
 	];
-	const candidates = { priorityCandidates, statusCandidates, flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated" }, typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review" } };
+	const candidates = { priorityCandidates, statusCandidates, flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated", keptAlive: "Kept alive" }, typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review", "board-cleanup": "Board cleanup" } };
 
 	function resolverFor(): FacetResolver {
 		const labelsById: Record<string, Label[]> = {
@@ -201,6 +204,15 @@ describe("buildFilterGroups", () => {
 		expect(taskQueryContext(dead, resolverFor()).isHibernated).toBe(true);
 	});
 
+	it("offers is:keepalive only while a kept-alive task is in the pool", () => {
+		const flagsOf = (tasks: Task[]) => buildFilterGroups(tasks, resolverFor(), candidates)
+			.find((g) => g.id === "flags")?.options.map((o) => `${o.facet}:${o.value}`) ?? [];
+		expect(flagsOf([makeTask({ id: "plain", status: "in-progress" })])).not.toContain("is:keepalive");
+		const kept = makeTask({ id: "kept", status: "in-progress", keepAlive: { enabled: true } });
+		expect(flagsOf([kept])).toContain("is:keepalive");
+		expect(taskQueryContext(kept, resolverFor()).isKeptAlive).toBe(true);
+	});
+
 	it("drops the TYPES group when every task is standard", () => {
 		const groups = buildFilterGroups([makeTask({ id: "working" })], resolverFor(), candidates);
 		expect(groups.map((g) => g.id)).not.toContain("types");
@@ -245,8 +257,8 @@ describe("buildFilterGroups — SPACES group", () => {
 	const spaceCandidates = {
 		priorityCandidates: [{ facet: "priority" as const, value: "P2", label: "P2 — Normal" }],
 		statusCandidates: [{ facet: "status" as const, value: "in-progress", label: "Agent is Working" }],
-		flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated" },
-		typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review" },
+		flagLabels: { attention: "Needs attention", port: "Has running port", home: "Home", hidden: "Hidden from sidebar", hibernated: "Hibernated", keptAlive: "Kept alive" },
+		typeLabels: { standard: "Standard", coordinator: "Coordinator", "pr-review": "PR review", "board-cleanup": "Board cleanup" },
 	};
 
 	it("lists every space present in the pool, alphabetically, after STATUS", () => {
@@ -313,5 +325,94 @@ describe("buildFilterGroups — SPACES group", () => {
 			spaceNamesFor: () => ["Client X"],
 		});
 		expect(c.spaceNames).toEqual(["Client X"]);
+	});
+});
+
+describe("is:stalled", () => {
+	const HOUR = 60 * 60 * 1000;
+	const entered = "2026-01-01T00:00:00Z";
+	const enteredMs = Date.parse(entered);
+	const atLimit = enteredMs + STALLED_AFTER_HOURS * HOUR;
+
+	it("flags an agent-time status once its activity clock is quiet for the threshold", () => {
+		const task = makeTask({ status: "in-progress", statusEnteredAt: entered });
+		expect(isTaskStalled(task, atLimit - 1)).toBe(false);
+		expect(isTaskStalled(task, atLimit)).toBe(true);
+		expect(isTaskStalled(makeTask({ status: "review-by-ai", statusEnteredAt: entered }), atLimit)).toBe(true);
+	});
+
+	it("never flags a waiting, finished or custom-column task", () => {
+		for (const status of ["todo", "user-questions", "review-by-user", "completed"] as const) {
+			expect(isTaskStalled(makeTask({ status, statusEnteredAt: entered }), atLimit + HOUR)).toBe(false);
+		}
+		expect(isTaskStalled(makeTask({ statusEnteredAt: entered, customColumnId: "col" }), atLimit)).toBe(false);
+	});
+
+	it("falls back to movedAt/createdAt for tasks without a status stamp", () => {
+		expect(isTaskStalled(makeTask({ createdAt: entered }), atLimit)).toBe(true);
+	});
+
+	it("is computed into the query context against the given clock", () => {
+		const task = makeTask({ statusEnteredAt: entered });
+		const resolver = { agents: [], labelsFor: () => [], statusValuesFor: () => [], priorityFor: () => "P3", hasPortFor: () => false, isAttentionFor: () => false };
+		expect(matchesTaskQuery(task, "is:stalled", taskQueryContext(task, resolver, atLimit))).toBe(true);
+		expect(matchesTaskQuery(task, "is:stalled", taskQueryContext(task, resolver, enteredMs + HOUR))).toBe(false);
+	});
+
+	it("help text names the same threshold the code uses", () => {
+		expect(en["help.filters.dsl.body"]).toContain(`${STALLED_AFTER_HOURS} hours`);
+	});
+});
+
+describe("has:pr / pr: context", () => {
+	const base: FacetResolver = { agents: [], labelsFor: () => [], statusValuesFor: () => [], priorityFor: () => "P3", hasPortFor: () => false, isAttentionFor: () => false };
+	const cache = (number: number, state: string | null) => ({
+		number, url: `https://github.com/o/r/pull/${number}`, ciStatus: null, reviewState: null, unresolvedCount: null,
+		mergeState: { mergeable: null, status: null, state }, checks: [], prTitle: null, isDraft: null, cachedAt: "2026-01-01T00:00:00Z",
+	});
+
+	it("has no PR and no state without one", () => {
+		const c = taskQueryContext(makeTask(), base);
+		expect(c.hasPr).toBe(false);
+		expect(c.prState).toBeNull();
+	});
+
+	it("prefers the live PR state over the persisted one", () => {
+		const task = makeTask({ prNumber: 5, prStatusCache: cache(5, "OPEN") });
+		const c = taskQueryContext(task, { ...base, prNumberFor: () => 5, prStateFor: () => "MERGED" });
+		expect(c.hasPr).toBe(true);
+		expect(c.prState).toBe("merged");
+	});
+
+	it("falls back to the sticky PR's status cache, then its ledger entry", () => {
+		expect(taskQueryContext(makeTask({ prNumber: 5, prStatusCache: cache(5, "CLOSED") }), base).prState).toBe("closed");
+		const ledgerOnly = makeTask({ prNumber: 6, prStatusCache: cache(5, "OPEN"), pullRequests: [{ number: 6, url: "u", state: "MERGED", firstSeenAt: "" }] });
+		expect(taskQueryContext(ledgerOnly, base).prState).toBe("merged");
+	});
+
+	it("a finished task's frozen OPEN reads as unknown, so pr:open skips it", () => {
+		for (const status of ["completed", "cancelled"] as const) {
+			const task = makeTask({ status, prNumber: 5, prStatusCache: cache(5, "OPEN"), pullRequests: [{ number: 5, url: "u", state: "OPEN", firstSeenAt: "" }] });
+			expect(taskQueryContext(task, base).prState).toBeNull();
+			expect(taskQueryContext(task, { ...base, prNumberFor: () => 5, prStateFor: () => "OPEN" }).prState).toBeNull();
+			expect(taskQueryContext(task, base).hasPr).toBe(true);
+		}
+	});
+
+	it("a finished task keeps its final states and prefers the ledger's over a stale cache", () => {
+		expect(taskQueryContext(makeTask({ status: "completed", prNumber: 5, prStatusCache: cache(5, "MERGED") }), base).prState).toBe("merged");
+		const ledgerMerged = makeTask({ status: "completed", prNumber: 5, prStatusCache: cache(5, "OPEN"), pullRequests: [{ number: 5, url: "u", state: "MERGED", firstSeenAt: "" }] });
+		expect(taskQueryContext(ledgerMerged, base).prState).toBe("merged");
+	});
+
+	it("a live task's OPEN is still believed", () => {
+		expect(taskQueryContext(makeTask({ status: "review-by-user", prNumber: 5, prStatusCache: cache(5, "OPEN") }), base).prState).toBe("open");
+	});
+
+	it("a live PR with no known state never borrows another PR's state", () => {
+		const task = makeTask({ prNumber: 5, prStatusCache: cache(5, "MERGED") });
+		const c = taskQueryContext(task, { ...base, prNumberFor: () => 9 });
+		expect(c.hasPr).toBe(true);
+		expect(c.prState).toBeNull();
 	});
 });

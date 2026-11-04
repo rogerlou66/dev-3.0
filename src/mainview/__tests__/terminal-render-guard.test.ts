@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { installRenderGuard, DEFAULT_STALL_MS, type GuardableRenderer } from "../terminal-render-guard";
+import { installRenderGuard, DEFAULT_CHECK_INTERVAL_MS, DEFAULT_STALL_MS, type GuardableRenderer } from "../terminal-render-guard";
 
 /** A renderer whose paint the test controls, plus the vendor loop's own contract. */
 function makeHarness(opts: { visible?: boolean } = {}) {
@@ -61,6 +61,14 @@ function makeHarness(opts: { visible?: boolean } = {}) {
 	};
 }
 
+/** Checks at the real cadence, the way an unthrottled timer fires. */
+function runChecks(h: ReturnType<typeof makeHarness>, forMs: number) {
+	for (let at = 0; at < forMs; at += DEFAULT_CHECK_INTERVAL_MS) {
+		h.advance(DEFAULT_CHECK_INTERVAL_MS);
+		h.tick();
+	}
+}
+
 describe("installRenderGuard – surviving a bad frame", () => {
 	it("does not let a throwing frame escape, so the vendor loop lives", () => {
 		const h = makeHarness();
@@ -111,12 +119,10 @@ describe("installRenderGuard – noticing a loop that stopped", () => {
 	it("reports a visible pane that painted nothing for too long", () => {
 		const h = makeHarness();
 		h.frame();
-		h.advance(DEFAULT_STALL_MS + 1);
-
-		h.tick();
+		runChecks(h, DEFAULT_STALL_MS);
 
 		expect(h.stalls).toHaveLength(1);
-		expect(h.stalls[0]).toBeGreaterThan(DEFAULT_STALL_MS);
+		expect(h.stalls[0]).toBeGreaterThanOrEqual(DEFAULT_STALL_MS);
 	});
 
 	it("stays quiet while frames keep arriving", () => {
@@ -132,10 +138,7 @@ describe("installRenderGuard – noticing a loop that stopped", () => {
 	it("reports a stall once, not on every check", () => {
 		const h = makeHarness();
 		h.frame();
-		h.advance(DEFAULT_STALL_MS + 1);
-		h.tick();
-		h.advance(DEFAULT_STALL_MS + 1);
-		h.tick();
+		runChecks(h, DEFAULT_STALL_MS * 2);
 
 		expect(h.stalls).toHaveLength(1);
 	});
@@ -143,11 +146,9 @@ describe("installRenderGuard – noticing a loop that stopped", () => {
 	it("arms again after the pane recovers", () => {
 		const h = makeHarness();
 		h.frame();
-		h.advance(DEFAULT_STALL_MS + 1);
-		h.tick();
+		runChecks(h, DEFAULT_STALL_MS);
 		h.frame();
-		h.advance(DEFAULT_STALL_MS + 1);
-		h.tick();
+		runChecks(h, DEFAULT_STALL_MS);
 
 		expect(h.stalls).toHaveLength(2);
 	});
@@ -174,6 +175,42 @@ describe("installRenderGuard – noticing a loop that stopped", () => {
 		h.tick();
 
 		expect(h.stalls).toEqual([]);
+	});
+
+	it("does not judge a hidden stretch that no check ever saw", () => {
+		const h = makeHarness();
+		h.frame();
+		h.tick();
+		// Throttled while hidden: not one tick lands before the window is back.
+		h.setVisible(false);
+		h.advance(30_700);
+		h.setVisible(true);
+		h.tick();
+		h.advance(DEFAULT_CHECK_INTERVAL_MS);
+		h.tick();
+
+		expect(h.stalls).toEqual([]);
+	});
+
+	it("does not call a late check a stall, even while visible", () => {
+		const h = makeHarness();
+		h.frame();
+		h.tick();
+		h.advance(31_231);
+		h.tick();
+
+		expect(h.stalls).toEqual([]);
+	});
+
+	it("still reports a visible pane that stays dead after a late check", () => {
+		const h = makeHarness();
+		h.frame();
+		h.tick();
+		h.advance(31_231);
+		h.tick();
+		runChecks(h, DEFAULT_STALL_MS);
+
+		expect(h.stalls).toHaveLength(1);
 	});
 
 	it("stops watching and restores the vendor render on dispose", () => {

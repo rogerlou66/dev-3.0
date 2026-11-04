@@ -129,6 +129,7 @@ function runtimeState(runtime: LifecycleRuntime): TaskRuntimeState {
 			runtime: "preparing",
 			stage: runtime.stage,
 			runId: runtime.runId,
+			ownerPid: process.pid,
 			updatedAt: Date.now(),
 		};
 	}
@@ -137,6 +138,7 @@ function runtimeState(runtime: LifecycleRuntime): TaskRuntimeState {
 			runtime: "tearing-down",
 			stage: runtime.targetStatus,
 			runId: runtime.runId,
+			ownerPid: process.pid,
 			updatedAt: Date.now(),
 		};
 	}
@@ -172,6 +174,7 @@ function resetTaskUpdates(): Partial<Task> {
 		// Messages queued for the stopped agent belong to the run that ended; a
 		// deferred start (`scheduledLaunch`) is the card's own and stays.
 		scheduledMessages: null,
+		prWatches: null,
 		lifecycleStartedAt: undefined,
 	};
 }
@@ -308,7 +311,7 @@ function taskWithLaunchDescription(task: Task, forceBlank = false): Task {
  * Without one it opens the pane with a refusal line and a badge instead of the
  * agent — never throwing, because a failed preparation removes the worktree.
  */
-async function reopenCodexLaunch(project: Project, task: Task, worktreePath: string, launch: PreparationLaunch): Promise<{ sessionId?: string; codexHome?: string; agentRefusal?: string }> {
+async function reopenCodexLaunch(project: Project, task: Task, worktreePath: string, launch: PreparationLaunch): Promise<{ sessionId?: string; codexHome?: string; shellNotice?: string }> {
 	const recorded = task.sessionState?.panes?.[0];
 	// No agent on the launch means the project default, exactly as launchTaskPty resolves it.
 	const settings = loadSettingsSync();
@@ -325,7 +328,7 @@ async function reopenCodexLaunch(project: Project, task: Task, worktreePath: str
 		const reason = error instanceof Error ? error.message : String(error);
 		log.warn("Reopen did not start Codex", { taskId: task.id.slice(0, 8), reason });
 		pushCliAttention({ taskId: task.id, projectId: task.projectId, reason });
-		return { agentRefusal: reason };
+		return { shellNotice: reason };
 	}
 }
 
@@ -435,7 +438,7 @@ async function prepareTask(
 					launch.agentId,
 					launch.configId,
 					true,
-					effect.isReopen && !reopen.agentRefusal,
+					effect.isReopen && !reopen.shellNotice,
 					reopen,
 				);
 			});
@@ -496,7 +499,7 @@ async function prepareTask(
 					launch.agentId,
 					launch.configId,
 					true,
-					effect.isReopen && !reopen.agentRefusal,
+					effect.isReopen && !reopen.shellNotice,
 					{ branchName: worktree.branchName, ...reopen },
 				);
 			},
@@ -634,8 +637,9 @@ export async function runCleanupScript(
 		cwd: task.worktreePath,
 		envFlags: cleanupEnv,
 		command: buildScriptRunnerCommand(scriptPath, { shellPath: getUserShell() }),
+		// Session env only via `-e`: a client env would become the global env of
+		// a server this cleanup session happens to start.
 		terminal: { cols: 220, rows: 50, data: () => {} },
-		processEnv: cleanupEnv,
 	});
 	await awaitCleanupSession(proc, socket, sessionName, taskId);
 }
@@ -1314,6 +1318,7 @@ export async function executeLifecycleEffect(
 					runtime: "preparing",
 					stage: effect.stage,
 					runId: effect.runId,
+					ownerPid: process.pid,
 					updatedAt: Date.now(),
 				},
 			};

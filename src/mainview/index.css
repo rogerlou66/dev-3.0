@@ -174,6 +174,9 @@ html {
 	--surface-elevated: 21 27 43;
 	--surface-elevated-hover: 29 36 53;
 	--surface-overlay: 27 33 48;
+	/* Row hover inside a popup. elevated-hover sits only ΔL 0.013 above overlay
+	   (invisible); this is ΔL 0.06, between elevated-hover and a fg/10 tint. */
+	--surface-overlay-hover: 41 48 64;
 
 	/* ---- Text (oklch hue 262; APCA Lc ~99 / 78 / 61 / 41 on a card) ---- */
 	--text-primary: 239 244 252;
@@ -243,6 +246,7 @@ html {
 	--awake-hover: 239 108 1;
 	--diff-search-highlight-from: 255 227 138;
 	--diff-search-highlight-to: 255 166 196;
+	--diff-search-highlight-ink: 6 9 22;
 
 	/* ---- Categorical chart palette (pie/series slices) ---- */
 	--chart-1: 68 150 255;
@@ -323,6 +327,7 @@ html {
 	/* Overlay: hue corrected to 268° (same as other surfaces) at chroma ≈ 0.012;
 	   previously sat at ~286° due to near-zero-chroma numerical instability. */
 	--surface-overlay: 252 253 255;
+	--surface-overlay-hover: 239 243 251;
 
 	/* ---- Text (slate-based, never pure black; APCA Lc ~91 / 75 / 60 / 44) ---- */
 	--text-primary: 17 26 47;
@@ -392,6 +397,7 @@ html {
 	--awake-hover: 161 72 8;
 	--diff-search-highlight-from: 250 204 21;
 	--diff-search-highlight-to: 236 72 153;
+	--diff-search-highlight-ink: 17 26 47;
 
 	/* ---- Categorical chart palette (pie/series slices) ---- */
 	--chart-1: 59 130 246;
@@ -507,6 +513,11 @@ body, #root {
 .task-card-coordinator,
 .task-card-coordinator:hover {
 	border-color: rgb(var(--success) / 0.6);
+	border-width: 2px;
+}
+.task-card-board-cleanup,
+.task-card-board-cleanup:hover {
+	border-color: rgb(var(--danger) / 0.6);
 	border-width: 2px;
 }
 
@@ -949,6 +960,15 @@ button {
    reflow to 0×0 and snaps back instantly on close. */
 html[data-image-viewer="open"] [data-terminal="true"] {
 	visibility: hidden;
+}
+
+/* Native <audio> controls follow color-scheme, which the app never sets, so they
+   would paint a white pill on the dark theme. Scoped to the player, not the page. */
+.media-controls {
+	color-scheme: dark;
+}
+[data-theme="light"] .media-controls {
+	color-scheme: light;
 }
 
 /* The HTML artifact lightbox is the same modal card over the same scrim, so it
@@ -1616,6 +1636,15 @@ svg .hdr-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 .header-anim:is(:hover, :focus-visible) .hdr-sess2 { transform-box: fill-box; transform-origin: center; animation: hdr-sess-pulse 1.8s ease-in-out .3s infinite; }
 .header-anim:is(:hover, :focus-visible) .hdr-sess3 { transform-box: fill-box; transform-origin: center; animation: hdr-sess-pulse 1.8s ease-in-out .6s infinite; }
 
+/* -- Resource pills: memory teeth, the CPU core and the disk band blink in turn -- */
+@keyframes hdr-res-blink {
+	0%, 100% { opacity: 1; }
+	40% { opacity: .25; }
+}
+.header-anim:is(:hover, :focus-visible) .hdr-res1 { animation: hdr-res-blink 1.6s ease-in-out infinite; }
+.header-anim:is(:hover, :focus-visible) .hdr-res2 { animation: hdr-res-blink 1.6s ease-in-out .27s infinite; }
+.header-anim:is(:hover, :focus-visible) .hdr-res3 { animation: hdr-res-blink 1.6s ease-in-out .54s infinite; }
+
 /* -- GitHub: the octocat takes a polite bow -- */
 @keyframes hdr-gh {
 	0%, 15% { transform: rotate(0deg); }
@@ -2121,4 +2150,34 @@ svg .th-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 .extra-key-spinner {
 	width: calc(16 * var(--extra-key-unit));
 	height: calc(16 * var(--extra-key-unit));
+}
+
+::highlight(dev3-diff-find) {
+	background-color: rgb(var(--diff-search-highlight-from) / 0.28);
+	color: rgb(var(--text-primary));
+}
+::highlight(dev3-diff-find-active) {
+	background-color: rgb(var(--diff-search-highlight-from) / 0.9);
+	color: rgb(var(--diff-search-highlight-ink));
+}
+
+/* ---- Project reorder drag (useReorderDrag) ----------------------------------
+   The slot the dragged row will land in reads as an empty, accent-dashed hole;
+   the row itself travels as a lifted clone under the pointer. */
+[data-reorder-placeholder] {
+	border-style: dashed;
+	border-color: rgb(var(--accent) / 0.6);
+	background-color: rgb(var(--accent) / 0.08);
+}
+[data-reorder-placeholder] > * {
+	visibility: hidden;
+}
+.reorder-preview {
+	border-color: rgb(var(--border-active));
+	box-shadow: var(--shadow-popover);
+}
+html[data-reordering],
+html[data-reordering] * {
+	cursor: grabbing !important;
+	user-select: none !important;
 }

@@ -19,7 +19,7 @@ import { PANE_RUN_AUTO_CLOSE_SECONDS, PANE_RUN_FAILED_AUTO_CLOSE_SECONDS } from 
 import { CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED } from "./cli-exit-codes";
 
 /** PR creation and auto-merge instructions shared by every harness. */
-export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. \`x509: OSStatus -26276\` from \`gh\` (exit 28 here) indicates a sandbox TLS failure, not a logout; never advise \`gh auth login\` for it. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later.`;
+export const SKILL_PR_INSTRUCTION = `**Open the PR with \`dev3 pr create --title "..." --description "..."\`, never \`gh\` by hand** — it pushes the branch, targets the task's own base branch, and a logged-out \`gh\` exits 23 before pushing. \`x509: OSStatus -26276\` from \`gh\` (exit 28 here) indicates a sandbox TLS failure, not a logout; never advise \`gh auth login\` for it. Auto-merge needs the user's own word: \`--auto-merge\`, or \`dev3 pr auto-merge\` later. Waiting on a PR's CI or merge? \`dev3 pr watch [--until merged] [--pr <N>]\` (\`--pr\`: any open PR, e.g. one you handed off): dev3 messages you; never poll gh or set timers.`;
 
 const SKILL_HEADER = `# dev3 — Task Lifecycle Protocol
 
@@ -42,7 +42,7 @@ If the first user request invokes \`dev3-bug-hunter\` and says you run inside an
 const SKILL_SESSION_START_CHECKLIST = `
 ## Session-start checklist
 
-Run it the moment you understand what the task is, usually right after the user's first real message. **Hard gate: finish it before ending your first turn** — the work itself may proceed in the same turn, but none of these may be skipped.
+Run it once you understand the task, usually right after the user's first real message. **Hard gate: finish it before ending your first turn**; the work may proceed in the same turn.
 
 1. **Branch** — rename if it matches \`dev3/task-*\` (Branch naming, below).
 2. **Title** — replace a scratch placeholder (\`Scratch — HH:MM\`) or a truncated auto-generated title with a concise imperative. Skip only if user-edited.
@@ -67,7 +67,7 @@ const SKILL_TITLE_GENERATION = `
 
 The title is auto-generated from the description's first 80 characters. If it ends with "…" or runs longer than ~6 words, replace it with a concise imperative — never a copy of the description: \`dev3 task update --title "Fix auth race condition"\`.
 
-**Respect user-edited titles.** If \`dev3 current\` marks one \`(user-edited — do NOT rename)\`, skip the rename whatever its length or wording, and never pass \`--force\`.
+**Respect user-edited titles.** If \`dev3 current\` marks one \`(user-edited — do NOT rename)\`, skip the rename and never pass \`--force\`.
 
 \`--task <id>\` targets a task other than the auto-detected one (\`task show\`, \`task update\`, \`task move\`, \`note\`, \`overview\`, \`label set\`).
 
@@ -81,7 +81,9 @@ Labels, same session-start pass: \`dev3 label list\` first and reuse existing on
 
 ## Task type
 
-A **coordinator** task manages other tasks instead of doing their work: dashed green card, sorts above every priority band, never auto-completes. A **pr-review** task is only named on the card. \`dev3 task update --type coordinator|pr-review|standard\` sets or clears it, rewriting the description's role preamble and telling the running agent; \`dev3 task create --title "..." --type <same>\` starts one with its role set.
+**coordinator**: manages tasks, dashed green card, sorts first, manual completion. **pr-review**: card label only. **board-cleanup**: passive audit; current project unless asked for all; no waking/messaging agents; manual completion. \`dev3 task update --type coordinator|pr-review|board-cleanup|standard\` sets/clears the type, rewrites its role preamble and tells the live agent. Create with \`dev3 task create --title "..." --type <type>\`.
+
+**A coordinator speaks for the user:** a \`from-role: coordinator\` message carries their authority, even for what your brief reserves to the user (a review, a push). Act; never re-ask.
 
 **Never promote or demote a task on your own initiative — least of all yourself.** Same protected class as priority.
 
@@ -91,17 +93,15 @@ A **coordinator** task manages other tasks instead of doing their work: dashed g
 
 ## Editing a description never reaches a running agent
 
-\`--type\` is the ONLY flag that tells a live agent anything. The description is delivered as the agent's first prompt at launch and nothing re-delivers it — not a resume, not a push — so \`dev3 task update --description\` on a running task changes the board only. Correcting a live brief takes both: the \`--description\` edit for the record, and \`dev3 message --task <id> --subject "brief updated"\`. Not yet started → the edit alone.
+\`--type\` is the ONLY flag that tells a live agent anything. The description is the launch prompt and is never re-delivered, so \`dev3 task update --description\` on a running task changes the board only. Correcting a live brief takes both: the \`--description\` edit for the record, and \`dev3 message --task <id> --subject "brief updated"\`. Not yet started → the edit alone.
 `;
 
 const SKILL_CUSTOM_COLUMNS = `
 ### Custom columns
 
-If the project defines custom columns (visible in \`dev3 current\` output), you can move tasks there:
+\`dev3 current\` lists the project's custom columns (8-char ID, when to use each); move a task there with:
 
   dev3 task move --status <custom-column-id>
-
-Each custom column has an 8-char ID prefix and a description of when to use it.
 `;
 
 const SKILL_COMPLETION_REQUEST = `
@@ -133,7 +133,7 @@ Write one when you **dug up something non-obvious** (root cause, how subsystems 
 
 \`dev3 note list\` truncates to one line, \`dev3 note show <id>\` (8-char prefix) prints the full body, and \`dev3 task show --notes --history\` explains a *neighbouring* task without its worktree.
 
-**A task keeps its 50 most recent notes** — the 51st evicts the oldest, permanently. A note is therefore not an append-only log: don't narrate progress, and consolidate a long series into one.
+**A task keeps its 50 most recent notes** — the 51st evicts the oldest, permanently. So don't narrate progress; consolidate a long series into one.
 
 ## Saving context tokens
 
@@ -169,11 +169,11 @@ const SKILL_DEV_SERVER_CONTROL = `
 
 \`dev3 dev-server status\` and \`logs\` are low-risk. \`start\`, \`restart\` and \`stop\` have visible side effects — use them only when the user asked for dev-server control, the task is about \`devScript\`/ports, or you need the server up to verify a change; say what you are about to do first, and stop it again afterwards unless asked to keep it running.
 
-Need it actually serving (curl, browser QA)? \`start --wait\` / \`restart --wait\` blocks until it listens on an assigned \`DEV3_PORT*\` (\`--timeout <sec>\`, default 120), bound by its own tree or published for it, so a containerised \`devScript\` counts as ready. Do NOT probe ports yourself after a plain restart. \`stop\`/\`restart\` verify teardown first; \`status\` reports \`Dev Ports\`, \`Published Ports\`, and a WARNING when a foreign process squatted an assigned port.
+Need it serving (curl, QA)? \`start --wait\` / \`restart --wait\` blocks until it listens on an assigned \`DEV3_PORT*\` (\`--timeout <sec>\`, default 120), own or published (a containerised \`devScript\` counts). Do NOT probe ports yourself after a plain restart. \`stop\`/\`restart\` verify teardown first; \`status\` reports \`Dev Ports\`, \`Published Ports\`, and a WARNING when a foreign process holds an assigned port.
 
-A project can declare **several dev servers by name**: every subcommand takes one (\`dev3 dev-server start api\`, \`stop api\`, \`restart api\`, \`logs api\`) or \`--all\`. A bare one means the default (\`devScript\`) or the only declared server; several with no default exits ${CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED} naming them. \`status\` prints a block per server, \`--wait\` waits for that server's ports, and every server sees every named port as \`DEV3_PORT_<NAME>\`.
+A project can declare **several dev servers by name**: every subcommand takes one (\`dev3 dev-server start api\`, \`stop api\`, \`restart api\`, \`logs api\`) or \`--all\`. A bare one means the default (\`devScript\`) or the only declared server; several with no default exits ${CLI_EXIT_CODE_DEV_SERVER_NAME_REQUIRED} naming them. \`status\` prints a block per server, \`--wait\` waits for that server's ports, and every server sees every named port as \`DEV3_PORT_<NAME>\`. Args after \`--\` go to the script, kept for \`restart\`: \`start api -- --verbose\`.
 
-Each server's output also lands as text in \`<taskDir>/logs/dev-server*.log\`, fresh per start: \`dev3 dev-server logs [--lines N]\` tails it, and it greps.
+Each server's output lands in \`<taskDir>/logs/dev-server*.log\`, fresh per start: \`dev3 dev-server logs [--lines N]\` tails it.
 `;
 /** When a report becomes a dev3 HTML artifact. Shared verbatim by the protocol and the `dev3-artifact` skill. */
 export const ARTIFACT_FORMAT_RULES = `Any report a human reads defaults to the dev3 template, text-only summaries and daily briefs included. Other meanings win: Claude Artifacts, CI/build artifacts, package outputs.
@@ -193,6 +193,8 @@ export const ARTIFACT_AUTHORING_STEPS = `\`$DEV3_ARTIFACT_TEMPLATE_DIR\` is the 
 Publish directly: an ordinary report or revision needs no browser pass or screenshots; \`AUTHORING.md\` § Before you publish lists exceptions.
 
 The same \`--title\` or stable \`--artifact-id <slug>\` adds a VERSION. Never invent \`report-v2.html\`; \`--new\` is for a different report. A link outside dev3: \`/dev3-share-artifact\` (gist).
+
+\`dev3 live\`: one **Live Artifact** per task, edited in place (REFERENCE.md § Live pages).
 `;
 
 const SKILL_ARTIFACTS = `
@@ -211,8 +213,8 @@ Pull the user back deliberately — enough that they never miss something needin
 
 - \`dev3 attention "reason"\` — red badge on the card until the user opens the task (reasons accumulate, up to 5). Default for anything that needs them. \`--clear\` lowers it the moment the cause is resolved and they never came; a badge outliving its cause trains them to ignore badges.
 - \`dev3 notify "message" [--level info|success|error] [--duration <seconds>]\` — clickable in-app toast (ephemeral, 2s–30s). \`--desktop\` instead sends a native OS notification that shows even when the app is backgrounded; never combine the two flags.
-- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts; \`show-video\` plays MP4/WebM ≤300 MB there); files are copied into the worktree and **each \`--caption\` annotates the file it follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, show them rather than describing them or leaving a path to open.
-- \`dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]\` — **show an HTML artifact** (see the artifacts section above).
+- \`dev3 show-image <path> [--caption "..."] [<path> ...]\` — **show actual images** (screenshots, \`agent-browser\` captures, charts; \`show-media\` plays MP4/WebM video and MP3/M4A/WAV/OGG audio ≤300 MB there); files are copied into the worktree and **each \`--caption\` annotates the file it follows** (\`before.png --caption "current bug" after.png --caption "after my fix"\`). If relevant pixels exist, show them rather than describing them or leaving a path to open.
+- \`dev3 show-artifact <report-dir | file.html> [--assets <file...>] [--title "..."]\` — **show an HTML artifact**.
 - \`dev3 ui state\` — focused task/project, app foreground, user idle time (\`userActivity\`). Check BEFORE pinging.
 
 MUST ping, one per logical event and never per step: **blocked** → \`attention "the question"\`; **finished** something important → \`notify --level success\`; something **broke** → \`notify --level error\`; an **image worth seeing** or an interactive report → proactive \`show-image\` / \`show-artifact\`. SHOULD, only on long runs when the user likely stepped away: a major milestone, or a go/no-go before a risky action. Never ping per-step progress, routine tool calls, or anything already on screen.
@@ -231,7 +233,7 @@ For ANY question about project configuration — setup/dev/cleanup scripts, clon
 const SKILL_PANES = `
 ## Panes — for what the user wants to watch
 
-\`dev3 pane run\` puts one command in a pane beside yours, on every backend and OS, where the user sees it live. **Your own shell is the default.** Open a pane in two cases: the user asked to watch something run ("run the build on the right"), or the process must outlive your turn — a watcher, a log tail, a long-lived process someone keeps an eye on. Everything else stays inline — builds, test suites, checks — however long they take. A pane is a window into the user's terminal, not a way to free up your own tool call.
+\`dev3 pane run\` puts one command in a pane beside yours, on every backend and OS, where the user sees it live. **Your own shell is the default.** Open a pane in two cases: the user asked to watch something run ("run the build on the right"), or the process must outlive your turn — a watcher, a log tail, a long-lived process someone keeps an eye on. Everything else stays inline — builds, test suites, checks — however long they take.
 
 \`\`\`bash
 dev3 pane list                                 # which backend you are on — never assume, tmux is absent on Windows
@@ -244,7 +246,7 @@ The outcome line distinguishes **still running** from **finished, exit code N** 
 
 **Closing panes is your job, not the user's.** \`dev3 pane close <run-id>\` the moment you have read what you came for — per run, and again before ending a turn. Auto-close (exit 0 after ${PANE_RUN_AUTO_CLOSE_SECONDS}s, a failure after ${Math.round(PANE_RUN_FAILED_AUTO_CLOSE_SECONDS / 60)} min) is only a backstop. Closing destroys nothing — the output stays in the run's log.
 
-Reading the SCREEN of a pane you did not start ("look at the error on the right") is a different thing and **tmux-only today**: \`dev3 peek --pane <N>\` returns a tail on tmux, only the pane summary on native. On tmux you may also drive tmux directly for layout work the user asks for (rename / swap / move windows, resize) — load \`/dev3-tmux\`. On native those commands do not exist.
+Reading the SCREEN of a pane you did not start ("look at the error on the right") is **tmux-only today**: \`dev3 peek --pane <N>\` returns a tail on tmux, only the pane summary on native. On tmux you may also drive tmux directly for layout work the user asks for (rename / swap / move windows, resize) — load \`/dev3-tmux\`. On native those commands do not exist.
 `;
 
 const SKILL_SCRATCH_TASK = `
@@ -258,7 +260,7 @@ If a peer **agent** started you instead, your first message says so, names the t
 const SKILL_PEEK = `
 ## Checking on a peer task without interrupting it
 
-\`dev3 peek --task seq:<N> [--pane 2] [--lines 400] [--json]\` is a read-only glance at another task's terminal: a header, one line per pane (command, alive/dead, time since output) and the focused pane's tail. It never focuses, sends input, or takes ownership — the peeked agent cannot tell. With no \`--task\` it shows your own panes.
+\`dev3 peek --task seq:<N> [--pane 2] [--lines 400] [--json]\` is a read-only glance at another task's terminal: a header, one line per pane (command, alive/dead, time since output) and the focused pane's tail. It never focuses, sends input, or takes ownership. With no \`--task\` it shows your own panes.
 
 Reach for it INSTEAD of messaging a quiet worker "are you alive?" — a message costs that agent a turn, a peek none.
 
@@ -277,17 +279,17 @@ It **inherits your priority** unless it has its own; only the user may change th
 
 Use it only for work that belongs in its own session — never to escape your scope, never several at once: each interrupts the user.
 
-**Extra agent in an existing task** → \`dev3 agent spawn --task seq:<N> --prompt "brief"\`: new pane, same worktree and approval, prints the pane ID. \`dev3 agent list\` gives \`--agent\` / \`--config\` preset IDs; default account unless the user picks another. \`--handoff\` adds the conversation retelling. Messages reach the task, not the pane. Terminal gone → \`dev3 agent resume\` first.
+**Extra agent in an existing task** → \`dev3 agent spawn --task seq:<N> --prompt "brief"\`: new pane, same worktree and approval, prints the pane ID; default account unless the user picks another. \`--handoff\` adds the conversation retelling. Messages reach the task's main agent, not this pane. Terminal gone → \`dev3 agent resume\` first. Idle → \`dev3 task hibernate --task seq:<N>\` frees its memory (declined: exit 36); \`dev3 task wake\` brings it back.
 
 **Talking to another task's agent** — \`dev3 message --task seq:<N> --subject "<about 6 words>" "text"\` types straight into any live task's agent, not only one you started; from a worktree it arrives labeled as agent traffic carrying the command to answer you. \`--in 30m\` / \`--at 14:00\` queues it (aim it at yourself for a wake-up).
 
 - **\`--subject\` is mandatory** — the line the agent-traffic view (\`⇧⌘M\`) shows for that row; without one the command exits 17. About 6 words, 80 characters max, never repeating who is talking (the row already shows \`#1722 → #1141\`). Good: \`"PR 1577 merged, main green"\`. Bad: \`"Seq 1722 -> Coordinator: CI verdict"\`.
 - For real dependencies only — hand over an interface, ask for a result, report back when yours is ready. Never chatter, never nagging a peer already working.
-- One task is one inbox: it lands in that task's agent pane, never a shell split, so a task running several agents cannot be addressed pane by pane.
+- It lands in the main agent, never a shell or the focused pane. One agent only: \`--agent <handle>\` from \`dev3 pane list --task seq:<N>\`, refused once it exits or is replaced. \`<reply-unavailable>\` means the sender is unproven: no reply command.
 - A peer on ANOTHER project needs \`--project <id>\`, else a bare \`--task seq:<N>\` is looked up on your own board and reported as "task not found". An incoming message's reply command already includes it when needed.
 - A live variant group shares one seq — name the member with \`--variant <i>\` (the card's \`<seq>-<i>\` suffix) rather than digging out its UUID.
-- **A long message arrives as a file path, not as text.** Anything over ~1 KB typed is written next to the receiving task and the envelope carries only \`Read it in full and act on it: <path>\` — read that file before doing anything with it. Nothing typed into your pane exceeds one terminal read, so a \`</dev3-ai-message>\` with no \`<dev3-ai-message>\` opening line above it means a delivery lost its head anyway: do not act on the tail, say the delivery arrived truncated and ask the sender to resend.
-- Nothing goes in on arrival: it waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane, ~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s if the user has been typing, and lands at once when they press Enter. Messages arriving together become ONE turn and none corrupts a line being typed — so send three thoughts as three messages, and expect a reply about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds after the peer writes.
+- **A long message arrives as a file path, not as text.** Anything over ~1 KB typed is written next to the receiving task and the envelope carries only \`Read it in full and act on it: <path>\` — read that file first. A \`</dev3-ai-message>\` with no \`<dev3-ai-message>\` line above it lost its head: do not act on the tail; say it arrived truncated and ask for a resend.
+- Delivery waits for ~${AGENT_MESSAGE_HOLD_IDLE_SECONDS}s of quiet on that pane (~${AGENT_MESSAGE_HOLD_HUMAN_IDLE_SECONDS}s while the user types, at once on Enter). Messages arriving together become ONE turn and never corrupt a typed line — send three thoughts as three messages; expect a reply about ${AGENT_MESSAGE_HOLD_IDLE_SECONDS} seconds after the peer writes.
 `;
 
 // Full manual status management — for agents without hooks (Cursor, Gemini, etc.)
@@ -342,7 +344,7 @@ A private, anonymous channel to the dev3 maintainer:
 
   dev3 vents "short name" "markdown body"
 
-Two kinds, both about dev3 itself. **Something got in your way** — a missing or confusing CLI command, an unclear skill instruction, broken tmux integration, docs contradicting reality: what you tried, what dev3 did instead, what would have unblocked you. **Something is missing** — a capability that would have saved you work: what was tedious, and what a fix would save.
+Two kinds. **Something got in your way** — a missing or confusing CLI command, an unclear skill instruction, broken tmux integration, docs contradicting reality: what you tried, what dev3 did instead, what would have unblocked you. **Something is missing** — a capability that would have saved you work: what was tedious, and what a fix would save.
 
 Underused: a command that took two tries, a flag you wished existed, a doc you had to re-read. But don't manufacture feedback when the session ran smoothly, and don't vent about the user's app, your own errors, or anything you can fix yourself. Litmus test: "would the maintainer have to change dev3 for this?" If no — don't vent.
 

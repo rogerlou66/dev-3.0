@@ -45,4 +45,23 @@ describe("useViewportClamp", () => {
 		const { position } = clamp(refTo(100, 100), { top: 50, left: 50 });
 		expect(position).toEqual({ top: 50, left: 50 });
 	});
+
+	// Regression: the dev-server menu's args line arrived after the clamp ran, and
+	// the widened menu stuck out past the right edge until it was reopened.
+	it("re-clamps when content arriving after open changes its size", () => {
+		let width = 150;
+		const el = document.createElement("div");
+		el.getBoundingClientRect = () =>
+			({ width, height: 100, top: 0, left: 0, right: width, bottom: 100, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+		const ref = { current: el };
+		const position = { top: 40, left: 230 };
+		const { result, rerender } = renderHook(({ key }) => useViewportClamp(ref, position, key), {
+			initialProps: { key: "" },
+		});
+		expect(result.current.position.left).toBe(230);
+
+		width = 300;
+		rerender({ key: "--own-db 'a b'" });
+		expect(result.current.position.left).toBe(390 - 300 - 8);
+	});
 });

@@ -192,7 +192,7 @@ const tips = {
 	"tip.altClickMoveCursor.title": "Alt-click moves the cursor",
 	"tip.altClickMoveCursor.body": "At a shell prompt, hold Option/Alt and click anywhere on the line to jump the cursor there — no arrow-key holding.",
 	"tip.statsTokenCost.title": "See your token spend",
-	"tip.statsTokenCost.body": "Productivity Stats shows agent tokens used and their API-equivalent cost — read from local Claude Code transcripts, no API calls.",
+	"tip.statsTokenCost.body": "Productivity Stats shows recorded agent tokens and API-equivalent costs, with saved history and refreshed model prices.",
 	"tip.agentShowImage.title": "Agents can show you images",
 	"tip.agentShowImage.body": "Run `dev3 show-image <path>` in a task and screenshots or renders pop open in an in-app viewer with a clickable history.",
 	"tip.mobileComposer.title": "Phone-friendly prompt box",
@@ -210,7 +210,7 @@ const tips = {
 	"tip.llmProvider.title": "Run agents on Amazon Bedrock",
 	"tip.llmProvider.body": "The LLM Provider setting points Claude or Codex at Amazon Bedrock — dev3 pins the mapped model; credentials and region stay in your own config.",
 	"tip.filterTokens.title": "Filter tasks with tokens",
-	"tip.filterTokens.body": "In the search box type priority:P0 label:Bug agent:Codex status:review is:attention has:port — or click the funnel to build it.",
+	"tip.filterTokens.body": "In the search box type priority:P0 label:Bug agent:Codex status:review epic:Payments children:1801 is:attention pr:merged — or click the funnel to build it.",
 	"tip.cycleTaskVariants.title": "Cycle task variants",
 	"tip.cycleTaskVariants.body": "Press Shift+Cmd+[ or ] (Ctrl on Linux) to move between live variants without leaving the terminal.",
 	"tip.mobileTaskGit.title": "Git from your phone",
@@ -233,6 +233,8 @@ const tips = {
 	"tip.agentTrafficLog.body": "Press ⇧⌘M to see the last hour of agent-to-agent messages — press Play to replay it, or widen the time window.",
 	"tip.continueInAnotherAgent.title": "Switch agents mid-task",
 	"tip.continueInAnotherAgent.body": "In + Agent, tick “Continue this task’s conversation” — the new agent gets a retelling of the session so far and picks the work up.",
+	"tip.renameTerminalWindow.title": "Name your terminal tabs",
+	"tip.renameTerminalWindow.body": "Double-click a tab above the terminal (or press F2 on it) to rename it — the name sticks until you clear it.",
 } as const;
 
 export default tips;

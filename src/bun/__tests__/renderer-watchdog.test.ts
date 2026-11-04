@@ -48,6 +48,8 @@ describe("renderer watchdog", () => {
 	let stop: () => void;
 	let evidence: FreezeEvidence[];
 	let recoveries: number[];
+	let sleepCause: "slept" | "starved" | "unknown";
+	let probedGaps: Array<[number, number]>;
 
 	function advanceTo(ms: number) {
 		clock = ms;
@@ -74,6 +76,8 @@ describe("renderer watchdog", () => {
 		clock = 0;
 		evidence = [];
 		recoveries = [];
+		sleepCause = "unknown";
+		probedGaps = [];
 		stop?.();
 		stop = startRendererWatchdog({
 			now: () => clock,
@@ -86,6 +90,10 @@ describe("renderer watchdog", () => {
 			context: () => ({ activeTask: "abcd1234" }),
 			onFreezeEvidence: (e) => evidence.push(e),
 			onFreezeRecovered: (ms) => recoveries.push(ms),
+			sleepProbe: async (from, to) => {
+				probedGaps.push([from, to]);
+				return sleepCause;
+			},
 		});
 	});
 
@@ -262,6 +270,45 @@ describe("renderer watchdog", () => {
 			// And the baselines are rebased, so the very next check is not a freeze either.
 			runTo(clock + FREEZE_EVIDENCE_MS - CHECK_MS);
 			expect(evidence).toHaveLength(0);
+		});
+
+		/** The probe answers asynchronously; let its log line land. */
+		const flushProbe = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const lateTickLines = () =>
+			logged.info.mock.calls.filter(([msg]) => String(msg).startsWith("watchdog tick arrived late"));
+
+		it.each([
+			["slept", "the machine slept through it"],
+			["starved", "the host process was starved"],
+			["unknown", "cause unknown"],
+		] as const)("names a late tick's cause in the log — %s", async (cause, wording) => {
+			sleepCause = cause;
+			settledClient(ARTIFACT);
+			runTo(clock + CHECK_MS * 2);
+			const gapStart = clock;
+			advanceTo(clock + 13_100);
+			await flushProbe();
+
+			expect(probedGaps).toEqual([[gapStart, gapStart + 13_100]]);
+			expect(lateTickLines()).toHaveLength(1);
+			expect(lateTickLines()[0]![0]).toContain(wording);
+			expect(lateTickLines()[0]![1]).toMatchObject({ gapMs: 13_100, cause });
+		});
+
+		it.each(["slept", "starved"] as const)("rebases every window after a late tick, whatever the cause — %s", (cause) => {
+			sleepCause = cause;
+			settledClient(ARTIFACT);
+			runTo(clock + CHECK_MS * 2);
+			advanceTo(clock + FREEZE_EVIDENCE_MS * 10);
+
+			runTo(clock + FREEZE_EVIDENCE_MS - CHECK_MS);
+			expect(evidence).toHaveLength(0);
+		});
+
+		it("never asks the OS on an on-time tick", () => {
+			settledClient(ARTIFACT);
+			runTo(clock + CHECK_MS * 10);
+			expect(probedGaps).toEqual([]);
 		});
 
 		it("still catches a freeze that outlived the suspend", () => {

@@ -12,7 +12,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { DEV3_HOME } from "../paths";
 import { dev3TempPath } from "../temp-paths";
-import { SHELL_INIT_DIR, writeShellInit } from "../shell-init";
+import { SHELL_INIT_DIR, posixShellPromptEnv, writeShellInit } from "../shell-init";
 import { getUserShell } from "../shell-env";
 import { CATPPUCCIN_PLUGIN_DIR, NEW_WINDOW_STATUS_RANGE, PANE_ID_BADGE, STATUS_FORMAT, writeCatppuccinPlugin } from "./themes";
 import { TMUX_AGENT_PANE_OPTION } from "./constants";
@@ -172,6 +172,12 @@ bind -n C-DC if -F '#{alternate_on}' 'send-keys C-DC' 'send-keys M-d'
 # task sessions, so a global option would let tasks clobber each other's value.
 set-hook -g after-select-pane 'set -F ${TMUX_LAST_AGENT_PANE_OPTION} "#{?${TMUX_AGENT_PANE_OPTION},#{pane_id},#{${TMUX_LAST_AGENT_PANE_OPTION}}}"'
 
+# A launchd-started server runs with "tmux -D", which turns exit-empty off; turn it
+# back on once a session exists so the server still exits after the last one closes.
+# Turning it on before the first session would exit the waiting server at once.
+# See decisions/2026/10/26/tmux-server-as-launchd-job.md.
+set-hook -g session-created[99] 'set -s exit-empty on'
+
 # Pane border style
 set -g pane-border-lines double
 
@@ -208,13 +214,9 @@ set-environment -g ZDOTDIR ${SHELL_INIT_DIR}
  * as `sh`, where the file is valid anyway).
  */
 function shellEnvConfig(): string {
-	// dev3 runs inside its own tmux panes, so `$ENV` here is often the file we
-	// are about to point at — forwarding that would make the init file source
-	// itself forever.
-	const shrc = `${SHELL_INIT_DIR}/.shrc`;
-	const inherited = process.env.ENV?.trim();
-	const userEnv = inherited && inherited !== shrc ? tmuxConfigValue(inherited) : null;
-	const envLine = tmuxConfigValue(shrc);
+	const env = posixShellPromptEnv();
+	const userEnv = env.DEV3_USER_ENV ? tmuxConfigValue(env.DEV3_USER_ENV) : null;
+	const envLine = tmuxConfigValue(env.ENV);
 	return [
 		"# Shell prompt — POSIX sh reads $ENV for interactive shells",
 		...(userEnv ? [`set-environment -g DEV3_USER_ENV ${userEnv}`] : []),

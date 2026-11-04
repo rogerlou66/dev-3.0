@@ -1,12 +1,13 @@
 import "@testing-library/jest-dom/vitest";
-import { createElement } from "react";
 import { _resetPendingToastsForTests, _setToastArmDelayForTests } from "./toast";
 import { storageIsWritable } from "./utils/storage";
+import { resetRememberedFiltersForTests } from "./hooks/useRememberedFilter";
 
 // Toasts raised without a mounted host are queued for the next host (see toast.tsx),
-// so drop the queue between tests instead of leaking them into the next render.
+// so drop the queue between tests (and the in-memory board filters) instead of leaking them into the next render.
 afterEach(() => {
 	_resetPendingToastsForTests();
+	resetRememberedFiltersForTests();
 });
 
 // Tests click a toast the instant it mounts; the arming guard is covered in toast.test.tsx.
@@ -79,25 +80,6 @@ if (typeof window !== "undefined") {
 	});
 }
 
-vi.mock("@lobehub/icons/es/icons", () => {
-	const makeIcon = (name: string) => {
-		const Icon = (props: Record<string, unknown>) => createElement("svg", { "data-icon": name, ...props });
-		const Compound = Icon as typeof Icon & { Color: typeof Icon; Avatar: typeof Icon };
-		Compound.Color = (props: Record<string, unknown>) =>
-			createElement("svg", { "data-icon": `${name}-color`, ...props });
-		Compound.Avatar = (props: Record<string, unknown>) =>
-			createElement("svg", { "data-icon": `${name}-avatar`, ...props });
-		return Compound;
-	};
-
-	return {
-		Claude: makeIcon("claude"),
-		Codex: makeIcon("codex"),
-		Cursor: makeIcon("cursor"),
-		Gemini: makeIcon("gemini"),
-		OpenCode: makeIcon("opencode"),
-	};
-});
 
 // Suppress happy-dom AbortError noise during window teardown.
 // When happy-dom tears down the test window it aborts all pending fetch requests,

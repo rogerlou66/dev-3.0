@@ -18,6 +18,9 @@
  *    to go quiet, so a burst of `dev3 message` sends becomes one agent turn and no
  *    peer's text lands in the middle of the user's own line. Only the message paths
  *    ask for it; button hand-offs type and submit at once.
+ *  - A held message never follows focus. Task-addressed, it goes to the main
+ *    agent; bound to one agent (`author`), to that agent only — checked again at
+ *    release. Hand-offs keep the focus rule (`agent-message-target.ts`).
  *  - Four answers reach the caller, never fewer. `unconfirmed` is the native arm's
  *    everyday answer (its host cannot acknowledge input) and tmux's answer when a
  *    send stopped mid-program, so nothing may report it as either success or
@@ -25,9 +28,10 @@
  *    `src/shared/agent-prompt-delivery.ts`.
  */
 
-import type { ScheduledMessageTarget, Task } from "../shared/types";
+import type { ScheduledMessageAuthor, ScheduledMessageTarget, Task } from "../shared/types";
 import { type AgentPromptDelivery, agentPromptDeliveryFromPaneInput } from "../shared/agent-prompt-delivery";
-import { holdMessageForAgentPane, holdMessageForPane, sendPromptToAgentPane, sendPromptToPane } from "./agent-prompt";
+import { holdMessageForPane, sendPromptToAgentPane, sendPromptToPane } from "./agent-prompt";
+import { type HeldMessageTarget, addressedAgentRefusal, resolveMainAgentTarget } from "./agent-message-target";
 import { sendPromptToNativeAgentPane, sendPromptToNativePane } from "./agent-prompt-native";
 import { taskTerminalBackendIdentity } from "./task-terminal-backend";
 import { refreshClaudeHooksForTask } from "./agent-hooks-refresh";
@@ -63,7 +67,7 @@ export async function deliverAgentPrompt(
 	task: Task,
 	prompt: string,
 	target: ScheduledMessageTarget = { kind: "agent" },
-	opts: { hold?: boolean; epilogue?: AgentPromptEpilogue } = {},
+	opts: { hold?: boolean; epilogue?: AgentPromptEpilogue; author?: ScheduledMessageAuthor | null } = {},
 ): Promise<AgentPromptDelivery> {
 	// The prompt about to land will fire UserPromptSubmit, so the hooks have to be
 	// in place before it is typed, not after. A no-op unless something rewrote the
@@ -77,21 +81,25 @@ export async function deliverAgentPrompt(
 	// complete set rather than a list of the paths someone remembered.
 	noteDev3TypedPrompt(task.id, prompt);
 
-	if (taskTerminalBackendIdentity(task) === "native") {
+	const native = taskTerminalBackendIdentity(task) === "native";
+	if (opts.hold) {
+		const bound = await heldMessagePane(task, target, opts.author ?? null);
+		if (!bound.ok) return { status: "not-delivered", reason: "pane-absent", detail: bound.detail, paneId: "" };
+		const author = bound.author;
+		const verify = author ? () => addressedAgentRefusal(task, author, bound.paneId) : undefined;
+		if (!native) return holdMessageForPane(task, bound.paneId, prompt, opts.epilogue, verify);
 		// The native arm folds the trailer in NOW rather than at release time, so a
 		// held message carries a snapshot up to one hold window old. Its delivery is
 		// a closure that may be forwarded to whichever process owns the pane's
 		// writer lease, and a closure does not cross a process boundary — a stale
 		// trailer beats a trailer that silently vanishes on the forwarding path.
+		return sendPromptToNativePane(task, bound.paneId, await withEpilogue(prompt, opts.epilogue), { hold: true, verify });
+	}
+	if (native) {
 		const text = await withEpilogue(prompt, opts.epilogue);
 		return target.kind === "pane"
 			? sendPromptToNativePane(task, target.paneId, text, opts)
 			: sendPromptToNativeAgentPane(task, text, opts);
-	}
-	if (opts.hold) {
-		return target.kind === "pane"
-			? holdMessageForPane(task, target.paneId, prompt, opts.epilogue)
-			: holdMessageForAgentPane(task, prompt, task.sessionState?.panes, opts.epilogue);
 	}
 	// Nothing is held, so this send IS the whole turn: the trailer just rides on
 	// the end of the text instead of being typed as its own stage.
@@ -101,4 +109,10 @@ export async function deliverAgentPrompt(
 			? await sendPromptToPane(task, target.paneId, text)
 			: await sendPromptToAgentPane(task, text, task.sessionState?.panes);
 	return agentPromptDeliveryFromPaneInput(outcome);
+}
+
+/** The pane a held message waits for, and the agent it is bound to there, if any. */
+async function heldMessagePane(task: Task, target: ScheduledMessageTarget, author: ScheduledMessageAuthor | null): Promise<HeldMessageTarget> {
+	if (target.kind === "pane") return { ok: true, paneId: target.paneId, author };
+	return resolveMainAgentTarget(task);
 }

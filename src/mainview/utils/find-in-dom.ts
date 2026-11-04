@@ -6,8 +6,13 @@
  * elements would fight the Markdown renderer, which owns those nodes.
  */
 
-const HIGHLIGHT_NAME = "dev3-find";
-const ACTIVE_HIGHLIGHT_NAME = "dev3-find-active";
+/** CSS Highlight registry names a find paints under; two finds on screen must not share a pair. */
+export interface FindHighlightNames {
+	rest: string;
+	active: string;
+}
+
+const DEFAULT_HIGHLIGHT_NAMES: FindHighlightNames = { rest: "dev3-find", active: "dev3-find-active" };
 
 /** Hard stop so a one-character query in a huge file cannot lock up the frame. */
 export const MAX_FIND_MATCHES = 2000;
@@ -57,6 +62,82 @@ export function collectFindRanges(root: HTMLElement | null, query: string): Rang
 	return ranges;
 }
 
+/** Lowercases a string for matching; the one fold shared by every search so counts and highlights agree. */
+export function foldCase(text: string): string {
+	return text.toLocaleLowerCase();
+}
+
+const foldPerCodePoint = (text: string): string => Array.from(text, (char) => char.toLocaleLowerCase()).join("");
+
+/**
+ * Like collectFindRanges, but matches across text nodes: syntax highlighting
+ * splits a code line into many spans, so a query with a space or punctuation
+ * spans several nodes. Text under `skipSelector` (e.g. a diff's +/- gutter) is left out.
+ */
+export function collectJoinedFindRanges(
+	root: HTMLElement | null,
+	query: string,
+	skipSelector: string,
+	limit = MAX_FIND_MATCHES,
+): Range[] {
+	let needle = foldCase(query.trim());
+	if (!root || !needle) return [];
+
+	const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+		acceptNode(node) {
+			const parent = node.parentElement;
+			if (!node.nodeValue || !parent || SKIPPED_TAGS.test(parent.tagName) || parent.closest(skipSelector)) {
+				return NodeFilter.FILTER_REJECT;
+			}
+			return NodeFilter.FILTER_ACCEPT;
+		},
+	});
+	// Folding the joined text once keeps context-sensitive cases (final sigma) right across spans.
+	const nodes: Array<{ node: Node; start: number }> = [];
+	let text = "";
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		nodes.push({ node, start: text.length });
+		text += node.nodeValue ?? "";
+	}
+	let joined = foldCase(text);
+	// A length change ("İ" is two units) needs a map from folded units back to original offsets.
+	let origStart: number[] | null = null;
+	let origEnd: number[] | null = null;
+	if (joined.length !== text.length) {
+		origStart = [];
+		origEnd = [];
+		let offset = 0;
+		for (const char of text) {
+			for (let i = char.toLocaleLowerCase().length; i > 0; i -= 1) {
+				origStart.push(offset);
+				origEnd.push(offset + char.length);
+			}
+			offset += char.length;
+		}
+		// Unreachable with real casing rules; per-code-point folding makes the map exact if it ever happens.
+		if (origStart.length !== joined.length) {
+			joined = foldPerCodePoint(text);
+			needle = foldPerCodePoint(query.trim());
+		}
+	}
+
+	const ranges: Range[] = [];
+	let first = 0;
+	let last = 0;
+	for (let at = joined.indexOf(needle); at >= 0 && ranges.length < limit; at = joined.indexOf(needle, at + needle.length)) {
+		const from = origStart ? origStart[at] : at;
+		const to = origEnd ? origEnd[at + needle.length - 1] : at + needle.length;
+		while (first + 1 < nodes.length && nodes[first + 1].start <= from) first += 1;
+		last = Math.max(last, first);
+		while (last + 1 < nodes.length && nodes[last + 1].start < to) last += 1;
+		const range = root.ownerDocument.createRange();
+		range.setStart(nodes[first].node, from - nodes[first].start);
+		range.setEnd(nodes[last].node, to - nodes[last].start);
+		ranges.push(range);
+	}
+	return ranges;
+}
+
 function selectRange(range: Range | null): void {
 	const selection = globalThis.getSelection?.();
 	if (!selection) return;
@@ -64,17 +145,21 @@ function selectRange(range: Range | null): void {
 	if (range) selection.addRange(range);
 }
 
-export function clearFindHighlights(): void {
+export function clearFindHighlights(names: FindHighlightNames = DEFAULT_HIGHLIGHT_NAMES): void {
 	const registry = highlightRegistry();
 	if (!registry) {
 		selectRange(null);
 		return;
 	}
-	registry.delete(HIGHLIGHT_NAME);
-	registry.delete(ACTIVE_HIGHLIGHT_NAME);
+	registry.delete(names.rest);
+	registry.delete(names.active);
 }
 
-export function paintFindRanges(ranges: readonly Range[], activeIndex: number): void {
+export function paintFindRanges(
+	ranges: readonly Range[],
+	activeIndex: number,
+	names: FindHighlightNames = DEFAULT_HIGHLIGHT_NAMES,
+): void {
 	const registry = highlightRegistry();
 	// No Custom Highlight API (older WebKit): fall back to selecting the active
 	// match, so stepping is still visible even without the other matches tinted.
@@ -82,14 +167,14 @@ export function paintFindRanges(ranges: readonly Range[], activeIndex: number): 
 		selectRange(ranges[activeIndex] ?? null);
 		return;
 	}
-	clearFindHighlights();
+	clearFindHighlights(names);
 	if (ranges.length === 0) return;
 
 	const HighlightCtor = (globalThis as { Highlight: new (...ranges: Range[]) => unknown }).Highlight;
 	const rest = ranges.filter((_, index) => index !== activeIndex);
-	if (rest.length > 0) registry.set(HIGHLIGHT_NAME, new HighlightCtor(...rest));
+	if (rest.length > 0) registry.set(names.rest, new HighlightCtor(...rest));
 	const active = ranges[activeIndex];
-	if (active) registry.set(ACTIVE_HIGHLIGHT_NAME, new HighlightCtor(active));
+	if (active) registry.set(names.active, new HighlightCtor(active));
 }
 
 export function scrollRangeIntoView(range: Range | undefined): void {

@@ -83,6 +83,21 @@ describe("WorkspaceBoard", () => {
 
 	beforeEach(() => vi.clearAllMocks());
 
+	it.each([
+		["is:keepalive", { keepAlive: { enabled: true } }],
+		["is:stalled", { movedAt: "2026-01-01T00:00:00Z" }],
+		["has:pr", { prNumber: 42 }],
+		["pr:merged", { prNumber: 42, pullRequests: [{ number: 42, state: "MERGED" }] }],
+	])("filters compact workspace cards by %s", async (query, overrides) => {
+		const currentTime = new Date().toISOString();
+		const matching = { ...task("matching", "p1", "in-progress"), movedAt: currentTime, ...overrides } as Task;
+		const other = { ...task("other", "p1", "in-progress"), movedAt: currentTime };
+		vi.mocked(api.request.getWorkspaceBoardTasks).mockResolvedValue([{ projectId: "p1", tasks: [matching, other] }]);
+		render(<I18nProvider><WorkspaceBoard projects={[projects[0]]} query={query} dispatch={vi.fn()} navigate={vi.fn()} bellCounts={new Map()} onOpenCreateTask={vi.fn()} /></I18nProvider>);
+		expect(await screen.findByTestId("workspace-task-matching")).toBeInTheDocument();
+		expect(screen.queryByTestId("workspace-task-other")).not.toBeInTheDocument();
+	});
+
 	it("names the Blocked column visibly in the narrow carousel", async () => {
 		const originalMatchMedia = window.matchMedia;
 		const mock = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({ ...originalMatchMedia(query), matches: query === "(max-width: 767px)" }));

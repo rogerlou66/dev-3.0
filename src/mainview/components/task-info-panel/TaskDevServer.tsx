@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { toast } from "../../toast";
 import { createPortal } from "react-dom";
 import type { DevServerStatus, Project, Task } from "../../../shared/types";
-import { resolveDevServers } from "../../../shared/dev-servers";
+import { formatDevServerArgs, resolveDevServers } from "../../../shared/dev-servers";
 import { api } from "../../rpc";
 import { traceDevServerOp, type DevServerTrace } from "../../dev-server-trace";
 
@@ -53,49 +53,55 @@ const DEV_SERVER_POLL_MS = 4500;
 
 interface DevServerMenuProps {
 	position: { top: number; left: number };
+	scriptArgs: string[];
 	onRestart: () => void;
 	onStop: () => void;
 	onClose: () => void;
 }
 
-function DevServerMenu({ position, onRestart, onStop, onClose }: DevServerMenuProps) {
+function DevServerMenu({ position, scriptArgs, onRestart, onStop, onClose }: DevServerMenuProps) {
 	const t = useT();
 	const menuRef = useRef<HTMLDivElement>(null);
-	const { position: menuPos, visible } = useViewportClamp(menuRef, position);
+	const argsText = formatDevServerArgs(scriptArgs);
+	const { position: menuPos, visible } = useViewportClamp(menuRef, position, argsText);
 
 	useEscapeKey(onClose);
-	useEffect(() => {
-		function handleClick(event: MouseEvent) {
-			if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-				onClose();
-			}
-		}
-		document.addEventListener("mousedown", handleClick);
-		return () => {
-			document.removeEventListener("mousedown", handleClick);
-		};
-	}, [onClose]);
+	useArrowKeyFocus(menuRef, visible);
 
 	return (
+		<>
+		<DismissBackdrop onClose={onClose} />
 		<div
 			ref={menuRef}
-			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[11.25rem]"
+			onKeyDown={(event) => moveFocusWithArrows(event, menuRef.current)}
+			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[11.25rem] w-max select-none"
 			style={{ top: menuPos.top, left: menuPos.left, visibility: visible ? "visible" : "hidden" }}
 			onClick={(event) => event.stopPropagation()}
 		>
 			<div className="px-3 py-2 text-xs text-fg-3 uppercase tracking-wider font-semibold">
 				{t("header.devServerRunning")}
 			</div>
+			{scriptArgs.length > 0 && (
+				<div
+					className="px-3 -mt-1 pb-2 font-mono text-xs text-fg-3 truncate max-w-[16rem]"
+					title={t("header.devServerArgsTitle", { args: argsText })}
+					data-testid="dev-server-args"
+				>
+					{argsText}
+				</div>
+			)}
 			<button
+				type="button"
 				onClick={onRestart}
-				className="header-anim w-full text-left px-3 py-2 text-sm text-fg-2 hover:bg-elevated-hover hover:text-fg flex items-center gap-2.5 transition-colors"
+				className={`header-anim w-full text-left px-3 py-2 text-sm text-fg-2 hover:bg-fg/10 hover:text-fg flex items-center gap-2.5 transition-colors ${FOCUS_ROW}`}
 			>
 				<RescanIcon className="w-4 h-4 flex-shrink-0" />
 				{t("header.devServerRestart")}
 			</button>
 			<button
+				type="button"
 				onClick={onStop}
-				className="w-full text-left px-3 py-2 text-sm text-danger hover:bg-elevated-hover flex items-center gap-2.5 transition-colors"
+				className={`w-full text-left px-3 py-2 text-sm text-danger hover:bg-fg/10 flex items-center gap-2.5 transition-colors ${FOCUS_ROW}`}
 			>
 				<svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
 					<rect x="5" y="5" width="14" height="14" rx="2" />
@@ -103,6 +109,7 @@ function DevServerMenu({ position, onRestart, onStop, onClose }: DevServerMenuPr
 				{t("header.devServerStop")}
 			</button>
 		</div>
+		</>
 	);
 }
 
@@ -121,82 +128,178 @@ interface DevServerListProps {
 }
 
 /**
+ * Keyboard focus ring shared by every actionable row in the dev-server panels.
+ * Hover/focus fills use `fg/10`: `elevated-hover` is within a few RGB steps of `overlay` and vanished.
+ */
+const FOCUS_ROW = "outline-none focus-visible:bg-fg/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60";
+const FOCUS_CHIP = "outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
+
+/**
+ * Transparent click-catcher under a portalled panel, the same one the toolbar's
+ * Ports and Scripts menus use. A document `mousedown` listener cannot do this job:
+ * the terminal captures its own mousedown, so a click on it never reached one, and
+ * the toolbar button's click re-opened the panel that its mousedown had just closed.
+ */
+function DismissBackdrop({ onClose }: { onClose: () => void }) {
+	return <div className="fixed inset-0 z-40" data-testid="dev-server-backdrop" aria-hidden onClick={onClose} />;
+}
+
+function panelButtons(panel: HTMLElement | null): HTMLButtonElement[] {
+	return panel ? [...panel.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")] : [];
+}
+
+/** ArrowUp/ArrowDown/Home/End walk the panel's buttons; Tab keeps its natural order. */
+function moveFocusWithArrows(event: KeyboardEvent<HTMLElement>, panel: HTMLElement | null) {
+	if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+	const buttons = panelButtons(panel);
+	if (buttons.length === 0) return;
+	event.preventDefault();
+	const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+	const last = buttons.length - 1;
+	const next = event.key === "Home" ? 0
+		: event.key === "End" ? last
+			: event.key === "ArrowDown" ? (current + 1) % buttons.length
+				: (current <= 0 ? last : current - 1);
+	buttons[next]?.focus();
+}
+
+/**
+ * Focus the panel's first button on open, and again whenever a re-render drops
+ * focus to `<body>` — a row that starts its server is replaced by Restart/Stop,
+ * and the keyboard user must not be left outside the panel.
+ */
+function useArrowKeyFocus(panelRef: RefObject<HTMLElement | null>, visible: boolean, renderKey?: unknown) {
+	const mountedRef = useRef(false);
+	useEffect(() => {
+		// A `visibility: hidden` panel (before its viewport clamp) cannot take focus.
+		if (!visible) return;
+		const active = document.activeElement;
+		const firstRun = !mountedRef.current;
+		mountedRef.current = true;
+		if (panelRef.current?.contains(active)) return;
+		if (!firstRun && active && active !== document.body) return;
+		panelButtons(panelRef.current)[0]?.focus({ preventScroll: true });
+	}, [panelRef, visible, renderKey]);
+}
+
+interface DevServerListProps {
+	position: { top: number; left: number };
+	servers: Array<{ name: string; title: string; isDefault: boolean }>;
+	status: DevServerStatus | null;
+	busy: string | null;
+	onStart: (name: string) => void;
+	onStop: (name: string) => void;
+	onRestart: (name: string) => void;
+	onStartAll: () => void;
+	onStopAll: () => void;
+	onClose: () => void;
+}
+
+/**
  * One row per declared dev server: its state, the port it serves on, and its own
  * start/stop/restart. The toolbar keeps ONE button however many servers a
  * project declares — that is what this list is for.
+ *
+ * A stopped server's whole row is its Start button. A running row is NOT one
+ * button: the only one-click action there would be Stop, which kills the user's
+ * process, so it keeps separate Restart/Stop controls.
  */
 function DevServerList({ position, servers, status, busy, onStart, onStop, onRestart, onStartAll, onStopAll, onClose }: DevServerListProps) {
 	const t = useT();
 	const menuRef = useRef<HTMLDivElement>(null);
-	const { position: menuPos, visible } = useViewportClamp(menuRef, position);
+	const argsKey = status?.servers.map((entry) => (entry.running ? formatDevServerArgs(entry.scriptArgs) : "")).join("\n");
+	const { position: menuPos, visible } = useViewportClamp(menuRef, position, argsKey);
 
 	useEscapeKey(onClose);
-	useEffect(() => {
-		function handleClick(event: MouseEvent) {
-			if (menuRef.current && !menuRef.current.contains(event.target as Node)) onClose();
-		}
-		document.addEventListener("mousedown", handleClick);
-		return () => document.removeEventListener("mousedown", handleClick);
-	}, [onClose]);
+	useArrowKeyFocus(menuRef, visible, `${argsKey}|${status?.servers.map((entry) => entry.running).join(",")}|${busy}`);
 
 	const anyRunning = status?.servers.some((entry) => entry.running) === true;
 
 	return (
+		<>
+		<DismissBackdrop onClose={onClose} />
 		<div
 			ref={menuRef}
 			data-testid="dev-server-list"
-			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[17rem]"
+			role="group"
+			aria-labelledby="dev-server-list-title"
+			onKeyDown={(event) => moveFocusWithArrows(event, menuRef.current)}
+			className="fixed z-50 bg-overlay rounded-xl shadow-2xl shadow-black/40 border border-edge-active py-1.5 min-w-[17rem] select-none"
 			style={{ top: menuPos.top, left: menuPos.left, visibility: visible ? "visible" : "hidden" }}
 			onClick={(event) => event.stopPropagation()}
 		>
-			<div className="px-3 py-2 text-xs text-fg-3 uppercase tracking-wider font-semibold">
+			<div id="dev-server-list-title" className="px-3 py-2 text-xs text-fg-3 uppercase tracking-wider font-semibold">
 				{t("header.devServers")}
 			</div>
 			{servers.map((server) => {
 				const entry = status?.servers.find((candidate) => candidate.name === server.name);
 				const running = entry?.running === true;
 				const port = entry?.devPorts[0]?.port ?? entry?.publishedPorts[0]?.port ?? null;
+				const argsText = running && entry && entry.scriptArgs.length > 0 ? formatDevServerArgs(entry.scriptArgs) : null;
+				const isBusy = busy === server.name;
+				const dot = (
+					<span
+						className={`w-2 h-2 rounded-full flex-shrink-0 ${running ? "bg-success" : "bg-fg-muted/40"}`}
+						aria-hidden
+					/>
+				);
+				const name = <span className="flex-1 min-w-0 truncate text-sm text-fg-2 group-hover:text-fg" title={server.title}>{server.name}</span>;
+				if (!running) {
+					return (
+						<button
+							key={server.name}
+							type="button"
+							data-testid={`dev-server-row-${server.name}`}
+							onClick={() => onStart(server.name)}
+							disabled={isBusy}
+							className={`group w-full flex items-center gap-x-2 px-3 py-1.5 text-left cursor-pointer hover:bg-fg/10 transition-colors disabled:cursor-progress disabled:opacity-60 ${FOCUS_ROW}`}
+						>
+							{dot}
+							{name}
+							<span className="text-xs text-fg-3 group-hover:text-fg group-focus-visible:text-fg">
+								{isBusy ? t("header.devServerStarting") : t("header.devServerStart")}
+							</span>
+						</button>
+					);
+				}
 				return (
-					<div key={server.name} data-testid={`dev-server-row-${server.name}`} className="flex items-center gap-2 px-3 py-1.5">
-						<span
-							className={`w-2 h-2 rounded-full flex-shrink-0 ${running ? "bg-success" : "bg-fg-muted/40"}`}
-							aria-hidden
-						/>
-						<span className="flex-1 min-w-0 truncate text-sm text-fg-2" title={server.title}>{server.name}</span>
+					<div key={server.name} data-testid={`dev-server-row-${server.name}`} className="group flex flex-wrap items-center gap-x-2 px-3 py-1.5">
+						{dot}
+						{name}
 						{port !== null && (
 							<button
+								type="button"
 								onClick={() => window.open(`http://localhost:${port}`, "_blank")}
-								className="font-mono text-xs text-accent hover:text-accent-emphasis"
+								className={`font-mono text-xs text-accent hover:text-accent-emphasis rounded ${FOCUS_CHIP}`}
 								aria-label={t("header.devServerOpenPort", { port: String(port) })}
 							>
 								:{port}
 							</button>
 						)}
-						{running ? (
-							<>
-								<button
-									onClick={() => onRestart(server.name)}
-									disabled={busy === server.name}
-									className="text-xs text-fg-3 hover:text-fg px-1.5 py-0.5 rounded hover:bg-elevated-hover disabled:opacity-40"
-								>
-									{t("header.devServerRestart")}
-								</button>
-								<button
-									onClick={() => onStop(server.name)}
-									disabled={busy === server.name}
-									className="text-xs text-danger px-1.5 py-0.5 rounded hover:bg-elevated-hover disabled:opacity-40"
-								>
-									{t("header.devServerStop")}
-								</button>
-							</>
-						) : (
-							<button
-								onClick={() => onStart(server.name)}
-								disabled={busy === server.name}
-								className="text-xs text-fg-2 hover:text-fg px-1.5 py-0.5 rounded hover:bg-elevated-hover disabled:opacity-40"
+						<button
+							type="button"
+							onClick={() => onRestart(server.name)}
+							disabled={isBusy}
+							className={`text-xs text-fg-3 hover:text-fg px-1.5 py-0.5 rounded hover:bg-fg/10 disabled:opacity-40 ${FOCUS_CHIP}`}
+						>
+							{t("header.devServerRestart")}
+						</button>
+						<button
+							type="button"
+							onClick={() => onStop(server.name)}
+							disabled={isBusy}
+							className={`text-xs text-danger px-1.5 py-0.5 rounded hover:bg-fg/10 disabled:opacity-40 ${FOCUS_CHIP}`}
+						>
+							{t("header.devServerStop")}
+						</button>
+						{argsText !== null && (
+							<div
+								className="basis-full pl-4 font-mono text-xs text-fg-3 truncate"
+								title={t("header.devServerArgsTitle", { args: argsText })}
+								data-testid={`dev-server-args-${server.name}`}
 							>
-								{t("header.devServerStart")}
-							</button>
+								{argsText}
+							</div>
 						)}
 					</div>
 				);
@@ -206,20 +309,23 @@ function DevServerList({ position, servers, status, busy, onStart, onStop, onRes
 			)}
 			<div className="mt-1 border-t border-edge pt-1 flex items-center gap-2 px-3 py-1">
 				<button
+					type="button"
 					onClick={onStartAll}
-					className="text-xs text-fg-2 hover:text-fg px-1.5 py-0.5 rounded hover:bg-elevated-hover"
+					className={`text-xs text-fg-2 hover:text-fg px-1.5 py-0.5 rounded hover:bg-fg/10 ${FOCUS_CHIP}`}
 				>
 					{t("header.devServerStartAll")}
 				</button>
 				<button
+					type="button"
 					onClick={onStopAll}
 					disabled={!anyRunning}
-					className="text-xs text-danger px-1.5 py-0.5 rounded hover:bg-elevated-hover disabled:opacity-40"
+					className={`text-xs text-danger px-1.5 py-0.5 rounded hover:bg-fg/10 disabled:opacity-40 ${FOCUS_CHIP}`}
 				>
 					{t("header.devServerStopAll")}
 				</button>
 			</div>
 		</div>
+		</>
 	);
 }
 
@@ -383,6 +489,16 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 			setDevServerMenuPos({ top: rect.bottom + 4, left: rect.left });
 		}
 		setDevServerMenuOpen(true);
+		void loadMenuStatus();
+	}
+
+	/** Fills the menu's args line; display only, so a failed read just leaves it out. */
+	async function loadMenuStatus() {
+		try {
+			setDevStatus((await api.request.getDevServerStatus({ taskId: task.id, projectId: project.id })) ?? null);
+		} catch {
+			// no args line
+		}
 	}
 
 	async function startDevServerNow() {
@@ -444,6 +560,13 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 		}
 
 		if (!isTaskActive || devState === "starting") {
+			return;
+		}
+
+		// The trigger toggles: a second press closes whichever panel it opened.
+		if (devServerListOpen || devServerMenuOpen) {
+			setDevServerListOpen(false);
+			setDevServerMenuOpen(false);
 			return;
 		}
 
@@ -519,7 +642,7 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 	const isStarting = hasDevScript && isTaskActive && devState === "starting";
 
 	const stateClasses = !hasDevScript
-		? "text-warning-strong hover:text-warning-strong hover:bg-warning/15 cursor-pointer border border-dashed border-warning/40"
+		? "text-warning-strong hover:bg-warning/15 cursor-pointer border border-dashed border-warning/40"
 		: !isTaskActive
 			? "text-fg-muted/50 cursor-not-allowed border border-transparent"
 			: isStarting
@@ -563,7 +686,7 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 		devServerIcon = (
 			<span className="w-[1.125rem] h-[1.125rem] flex items-center justify-center" aria-hidden>
 				<span
-					className={`w-3.5 h-3.5 rounded-full border-2 border-current/30 border-t-current${reducedMotion ? "" : " animate-spin"}`}
+					className={`w-3.5 h-3.5 rounded-full border-2 border-[color-mix(in_srgb,currentColor_30%,transparent)] border-t-current${reducedMotion ? "" : " animate-spin"}`}
 				/>
 			</span>
 		);
@@ -588,6 +711,8 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 					className={`task-anim flex items-center gap-1 px-2 py-1 rounded-lg transition-colors flex-shrink-0 ${stateClasses}`}
 					aria-label={devServerTitle}
 					aria-busy={isStarting}
+					aria-haspopup={hasDevScript && isTaskActive && (multiServer || isRunning) ? "true" : undefined}
+					aria-expanded={devServerListOpen || devServerMenuOpen}
 					data-tour-anchor="task.dev-server"
 				>
 					{devServerIcon}
@@ -646,7 +771,10 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 					onRestart={(name) => actOnServer("restart", name)}
 					onStartAll={() => actOnServer("start", undefined, true)}
 					onStopAll={() => actOnServer("stop", undefined, true)}
-					onClose={() => setDevServerListOpen(false)}
+					onClose={() => {
+						setDevServerListOpen(false);
+						devServerBtnRef.current?.focus();
+					}}
 				/>,
 				document.body,
 			)}
@@ -654,9 +782,13 @@ export default function TaskDevServer({ task, project, isTaskActive, compact = f
 			{devServerMenuOpen && createPortal(
 				<DevServerMenu
 					position={devServerMenuPos}
+					scriptArgs={devStatus?.servers.find((entry) => entry.running)?.scriptArgs ?? []}
 					onRestart={handleDevServerRestart}
 					onStop={handleDevServerStop}
-					onClose={() => setDevServerMenuOpen(false)}
+					onClose={() => {
+						setDevServerMenuOpen(false);
+						devServerBtnRef.current?.focus();
+					}}
 				/>,
 				document.body,
 			)}

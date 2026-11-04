@@ -32,10 +32,14 @@ vi.mock("../data", () => ({
 		return { task: { ...makeTask(), ...updates }, result: undefined };
 	}),
 }));
+vi.mock("../agent-message-target", () => ({
+	resolveMainAgentTarget: vi.fn(async () => ({ ok: true, paneId: "%1", author: null })),
+	addressedAgentRefusal: vi.fn(async () => null),
+	agentPaneRoles: vi.fn(async () => new Map([["%1", "main"]])),
+}));
 vi.mock("../agent-prompt", () => ({
 	sendPromptToAgentPane: vi.fn(async () => true),
 	sendPromptToPane: vi.fn(async () => true),
-	holdMessageForAgentPane: vi.fn(async () => ({ status: "held" })),
 	holdMessageForPane: vi.fn(async () => ({ status: "held" })),
 }));
 vi.mock("../agent-prompt-native", () => ({

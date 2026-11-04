@@ -17,6 +17,7 @@ import { quoteIfUnsafe } from "../shared/agent-adapters/shell";
 import { writeOmpStatusExtension } from "../shared/omp-status-extension";
 import { writePiStatusExtension } from "../shared/pi-status-extension";
 import { resolveCopilotHome } from "./copilot-config";
+import { writeCursorUsageHooks } from "./cursor-usage-hooks";
 import { CODEX_HOOK_TRUST_BYPASS_FLAG, detectCodexHookTrustBypass, resetCodexHelpProbe } from "./codex-config";
 import { join } from "node:path";
 import { resolveHookCliPath } from "../shared/dev3-cli-path";
@@ -92,6 +93,16 @@ export async function setupAgentHooks(
 			worktreePath,
 			permissionMode: spec.permissionMode,
 		});
+		return null;
+	}
+
+	if (spec.kind === "cursor") {
+		try {
+			const result = await writeCursorUsageHooks(undefined, undefined, { create: true });
+			if (result.status === "skipped") log.warn("Cursor usage hooks not installed", { ...result });
+		} catch {
+			log.warn("Could not write Cursor usage hooks");
+		}
 		return null;
 	}
 

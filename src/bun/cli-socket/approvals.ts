@@ -1,6 +1,9 @@
 import type { AgentMessageSource, Project, ResetKeptBranch, Task, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus } from "../../shared/types";
 import { agentReplyCommand, seqIsShared } from "../../shared/agent-message-envelope";
-import { DEFAULT_PRIORITY, agentLaunchAutoApproveMs, buildTaskDialogSubject, getTaskTitle, taskNeedsReset, taskResetConsent } from "../../shared/types";
+import { type ExternalSenderRequester, isExternalSenderRequester } from "../../shared/external-senders";
+import { DEFAULT_PRIORITY, agentLaunchAutoApproveMs, buildTaskDialogSubject, getTaskTitle, isCoordinatorTask, taskNeedsReset, taskResetConsent } from "../../shared/types";
+import { coordinatorLaunchDefault } from "../../shared/coordinator-launch";
+import { getAllAgents } from "../agents";
 import { createAgentRequest, getAgentRequestState, joinAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
 import { DESTRUCTIVE_APPROVAL_TARGET, type AgentApprovalNotAttached, type AgentApprovalStatus, type DestructiveApprovalKind } from "../../shared/agent-approval";
 import type { AgentLaunchChoice, LaunchVariant } from "../../shared/types";
@@ -8,6 +11,8 @@ import { deliverLaunchHandoff } from "../agent-launch-handoff";
 import { getPushMessage, launchTaskWithAgentChoice, moveTask, resetTaskToTodo } from "../rpc-handlers";
 import { loadSettings } from "../settings";
 import { loadBoardTasks, resolveTaskAcrossProjects, resolveTaskFromParams } from "./task-resolution";
+import { awaitLaunchPreparation } from "./launch-preparation";
+import type { LaunchPreparationOutcome } from "../../shared/launch-preparation";
 
 export function approvalStatusOf(kind: DestructiveApprovalKind, task: Task): AgentApprovalStatus {
 	const known = getAgentRequestState(kind, task.id);
@@ -163,7 +168,7 @@ type LaunchApprovalOutcome =
 		approved: true;
 		seq: number;
 		title: string;
-		launched: Array<{ variantIndex: number | null; replyCommand: string }>;
+		launched: Array<{ variantIndex: number | null; replyCommand: string; preparation: LaunchPreparationOutcome }>;
 	};
 
 /**
@@ -173,8 +178,9 @@ type LaunchApprovalOutcome =
  * #1496. An explicit priority on the target always wins, and the user can still
  * override either in the launch dialog. Unreadable requester ⇒ the plain default.
  */
-async function resolveLaunchPriority(task: Task, requester: AgentMessageSource): Promise<TaskPriority> {
+async function resolveLaunchPriority(task: Task, requester: AgentMessageSource | ExternalSenderRequester): Promise<TaskPriority> {
 	if (task.priority) return task.priority;
+	if (isExternalSenderRequester(requester)) return DEFAULT_PRIORITY;
 	try {
 		const found = await resolveTaskAcrossProjects(requester.taskId);
 		return found?.task.priority ?? DEFAULT_PRIORITY;
@@ -196,13 +202,21 @@ export async function requestAgentLaunchApproval(opts: {
 	project: Project;
 	task: Task;
 	targetStatus: TaskStatus;
-	requester: AgentMessageSource;
+	/** A task's agent, or a registered external sender (`--as-sender`). */
+	requester: AgentMessageSource | ExternalSenderRequester;
 	/** The launcher's standing text, already read from its `--handoff-file`. */
 	launcherNote?: string | null;
 	/** Validated `--agent`/`--config` suggestion; only preselects the dialog. */
 	suggested?: LaunchVariant | null;
 }): Promise<LaunchApprovalOutcome> {
 	const { project, task, targetStatus, requester } = opts;
+	// A coordinator's own preset preselects the dialog and is what an unwatched auto-approval launches.
+	const suggested = opts.suggested ?? (isCoordinatorTask(task)
+		? coordinatorLaunchDefault(await getAllAgents(), await loadSettings())
+		: null);
+	if (isExternalSenderRequester(requester) && opts.launcherNote) {
+		throw new Error("--handoff-file does not apply with --as-sender: a sender's launch gets no handoff note.");
+	}
 	const push = getPushMessage();
 	if (!push) {
 		throw new Error("No app window is connected — cannot ask the user for approval");
@@ -214,15 +228,19 @@ export async function requestAgentLaunchApproval(opts: {
 	const defaultPriority = await resolveLaunchPriority(task, requester);
 	const autoApproveAfterMs = agentLaunchAutoApproveMs(await loadSettings());
 	const joining = getAgentRequestState("launch", task.id).state === "pending";
+	const subject = buildTaskDialogSubject(task, project);
+	const asker = isExternalSenderRequester(requester)
+		? { taskId: null, seq: null, title: requester.label, senderId: requester.senderId }
+		: { taskId: requester.taskId, seq: requester.seq, title: requester.title ?? null, senderId: null };
 	const { requestId, decision, autoApproveAt } = createAgentRequest(
 		"launch",
 		task.id,
 		project.id,
-		{ autoApproveAfterMs },
+		{ autoApproveAfterMs, dialog: { taskTitle: getTaskTitle(task), subject, requester: asker } },
 	);
 	// Seeds what an unwatched auto-approval launches. A joined retry must not
 	// overwrite a pick the user may already have made in the open dialog.
-	if (opts.suggested && !joining) setAgentRequestLaunchChoice(requestId, { variants: [opts.suggested] });
+	if (suggested && !joining) setAgentRequestLaunchChoice(requestId, { variants: [suggested] });
 	// Pushed on EVERY attempt, joined retries included — see the note on
 	// `task.requestCancellation`. Clients dedup by `requestId`, so a dialog that
 	// is already on screen is untouched and nothing here re-arms the countdown.
@@ -233,15 +251,16 @@ export async function requestAgentLaunchApproval(opts: {
 		taskTitle: getTaskTitle(task),
 		targetStatus,
 		scratch: task.scratch === true,
-		requesterSeq: requester.seq,
-		requesterTitle: requester.title,
+		...(isExternalSenderRequester(requester)
+			? { requesterSeq: 0, requesterTitle: requester.label, requesterSender: requester }
+			: { requesterSeq: requester.seq, requesterTitle: requester.title }),
 		// Same read-only context card as the completion dialog, so the user
 		// recognizes which task an agent wants to set running.
-		subject: buildTaskDialogSubject(task, project),
+		subject,
 		defaultPriority,
 		canAddVariants: canSpawnAsVariants(task),
 		autoApproveAt,
-		...(opts.suggested ? { suggested: opts.suggested } : {}),
+		...(suggested ? { suggested } : {}),
 	});
 
 	const answer = await decision;
@@ -265,11 +284,15 @@ export async function requestAgentLaunchApproval(opts: {
 	// far longer than the requesting agent should sit blocked on a socket. Every
 	// variant gets its own note — each one is a separate agent that has to know
 	// who started it.
-	for (const child of launched) {
+	// A sender gets no handoff note: it has no task to report back to, and its own
+	// first `--as-sender` message carries the reply command.
+	const taskRequester = isExternalSenderRequester(requester) ? null : requester;
+	for (const child of taskRequester ? launched : []) {
+		if (!taskRequester) break;
 		void deliverLaunchHandoff({
 			projectId: project.id,
 			childTaskId: child.id,
-			source: requester,
+			source: taskRequester,
 			launcherNote: opts.launcherNote ?? null,
 		});
 	}
@@ -277,27 +300,41 @@ export async function requestAgentLaunchApproval(opts: {
 	// Read the board AFTER the launch: launching with variants mints the siblings
 	// that decide whether `seq:<N>` is still an unambiguous address.
 	const head = launched[0]!;
+	// Answer only once preparation settles: replying at dispatch told the
+	// requester "started" for runs that then failed (2026-11-01 incident).
+	const preparations = await Promise.all(launched.map((child) => awaitLaunchPreparation(project, child.id)));
 	const boardTasks = await loadBoardTasks(project);
 
 	return {
 		approved: true,
 		seq: head.seq,
 		title: getTaskTitle(head),
-		launched: launched.map((child) => ({
+		launched: launched.map((child, i) => ({
 			variantIndex: child.variantIndex ?? null,
+			preparation: preparations[i]!,
 			// The requester may live on another board (it launched a task in a
 			// different project), and then the bare `--task` form would resolve
 			// against its own.
-			replyCommand: agentReplyCommand({
-				target: {
-					...child,
-					seqShared: boardTasks ? seqIsShared(child, boardTasks) : child.variantIndex != null,
-				},
-				fromProjectId: requester.projectId ?? child.projectId,
-				quoted: "your message",
-			}),
+			replyCommand: launchReplyCommand(child, requester, boardTasks),
 		})),
 	};
+}
+
+/**
+ * How the requester reaches a launched task. A sender has no board of its own, so
+ * its command always names the project and speaks as that sender.
+ */
+function launchReplyCommand(child: Task, requester: AgentMessageSource | ExternalSenderRequester, boardTasks: Task[] | null): string {
+	const sender = isExternalSenderRequester(requester) ? requester : null;
+	const command = agentReplyCommand({
+		target: {
+			...child,
+			seqShared: boardTasks ? seqIsShared(child, boardTasks) : child.variantIndex != null,
+		},
+		fromProjectId: sender ? "" : (requester as AgentMessageSource).projectId ?? child.projectId,
+		quoted: "your message",
+	});
+	return sender ? command.replace("dev3 message ", `dev3 message --as-sender ${sender.senderId} `) : command;
 }
 
 /**

@@ -7,6 +7,7 @@ import { HELP_ATTRACTOR_DISMISS_EVENT } from "../help";
 import { MASK_CLASS, useProjectPrivacy } from "../sensitive-projects";
 import { useSpaces } from "../useSpaces";
 import { groupProjectsForSwitcher } from "../utils/spaceGroups";
+import { projectLastActivityMs } from "../utils/projectActivity";
 import { fuzzyScore } from "../utils/fuzzyMatch";
 import { projectSearchHaystack } from "../utils/projectSearchHaystack";
 import { HighlightedText } from "./PaletteShell";
@@ -27,6 +28,7 @@ import GitPullButton from "./GitPullButton";
 import PreventSleepToggle from "./PreventSleepToggle";
 import RateLimitIndicator from "./RateLimitIndicator";
 import MemoryHeadroomIndicator from "./MemoryHeadroomIndicator";
+import SystemLoadRows from "./SystemLoadRows";
 import AgentTrafficIndicator from "./agent-traffic/AgentTrafficIndicator";
 import { OPEN_AGENT_TRAFFIC_LOG_EVENT } from "../agent-traffic-events";
 import ConnectionQualityIndicator from "./ConnectionQualityIndicator";
@@ -167,6 +169,12 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	const countsCacheTimeRef = useRef<number>(0);
 	const projectTerminalShortcut = PROJECT_TERMINAL_SHORTCUT ? shortcutKeysFor(PROJECT_TERMINAL_SHORTCUT) : "";
 	const projectTerminalTooltip = t("projectTerminal.tooltipWithShortcut", { shortcut: projectTerminalShortcut });
+	// Last task activity per project, fetched with the counts. The open menu ranks
+	// Home by ONE snapshot per opening: a first fetch may still fill an untouched
+	// menu, but nothing reshuffles rows once ranked or once the user steers.
+	const projectActivityRef = useRef<Record<string, number>>({});
+	const [switcherActivity, setSwitcherActivity] = useState<Record<string, number>>({});
+	const switcherRankFrozenRef = useRef(false);
 
 	// Open Remote Access instantly: fetch only the local QR (never the blocking
 	// tunnel-start path) so the modal opens on the first click, then flag the
@@ -244,11 +252,13 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		let cancelled = false;
 		async function fetchCounts() {
 			const counts: Record<string, number> = {};
+			const activity: Record<string, number> = {};
 			await Promise.all(
 				projects.filter((p) => !p.deleted).map(async (p) => {
 					try {
 						const fetchedTasks = await api.request.getTasks({ projectId: p.id });
 						counts[p.id] = fetchedTasks.filter((ft) => ACTIVE_STATUSES.includes(ft.status)).length;
+						activity[p.id] = projectLastActivityMs(fetchedTasks);
 					} catch {
 						counts[p.id] = 0;
 					}
@@ -256,6 +266,11 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 			);
 			if (!cancelled) {
 				setProjectTaskCounts(counts);
+				projectActivityRef.current = activity;
+				if (!switcherRankFrozenRef.current) {
+					switcherRankFrozenRef.current = true;
+					setSwitcherActivity(activity);
+				}
 				countsCacheTimeRef.current = Date.now();
 			}
 		}
@@ -275,6 +290,8 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		setProjectQuery("");
 		setSwitcherIndex(0);
 		setSwitcherKeyNav(false);
+		switcherRankFrozenRef.current = Object.keys(projectActivityRef.current).length > 0;
+		setSwitcherActivity(projectActivityRef.current);
 	}, [showProjectDropdown]);
 
 	const handleProjectNameClick = useCallback(() => {
@@ -448,7 +465,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 	// Spaces group the switcher exactly as they group the dashboard, except the
 	// current project's own space is hoisted first. null = no space holds a
 	// visible project, and the flat list below stays byte-identical to today's.
-	const switcherGroups = groupProjectsForSwitcher(availableProjects, spacesFile, currentProjectId);
+	const switcherGroups = groupProjectsForSwitcher(availableProjects, spacesFile, currentProjectId, switcherActivity);
 
 	// ---- The switcher's search ----
 	// Same matcher and same haystack as the ⇧⌘K palette (name first, then the
@@ -500,6 +517,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
 			e.preventDefault();
 			if (switcherRows.length === 0) return;
+			switcherRankFrozenRef.current = true;
 			setSwitcherKeyNav(true);
 			const step = e.key === "ArrowDown" ? 1 : -1;
 			setSwitcherIndex((switcherActive + step + switcherRows.length) % switcherRows.length);
@@ -539,8 +557,8 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 					navigate({ screen: "project", projectId: p.id });
 				}}
 				className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
-					isCurrent ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-elevated hover:text-fg"
-				} ${highlighted ? "ring-1 ring-inset ring-accent/60 bg-elevated" : ""}`}
+					isCurrent ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-overlay-hover hover:text-fg"
+				} ${highlighted ? "ring-1 ring-inset ring-accent/60 bg-overlay-hover" : ""}`}
 			>
 				{isBuiltin && (
 					<span className="text-accent flex-shrink-0 text-sm-plus" style={{ fontFamily: "'JetBrainsMono Nerd Font Mono'" }}>{"\u{F0E7}"}</span>
@@ -778,7 +796,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 													onClick={() => zoomOutTo(sp.id)}
 													aria-current={here ? "true" : undefined}
 													className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
-														here ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-elevated hover:text-fg"
+														here ? "bg-accent/10 text-accent" : "text-fg-2 hover:bg-overlay-hover hover:text-fg"
 													}`}
 												>
 													<SpaceIcon className={`w-3.5 h-3.5 flex-shrink-0 ${here ? "text-accent" : "text-fg-muted"}`} />
@@ -819,6 +837,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 														setProjectQuery(e.target.value);
 														setSwitcherIndex(0);
 														setSwitcherKeyNav(false);
+														switcherRankFrozenRef.current = true;
 													}}
 													onKeyDown={handleSwitcherSearchKeyDown}
 													placeholder={t("projectSwitch.placeholder")}
@@ -892,7 +911,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 																	role="menuitem"
 																	onClick={() => openSpaceBoardFromSwitcher(group.space as Space)}
 																	title={t("spaces.openBoard")}
-																	className="group/space w-full px-3 pb-1 pt-0.5 flex items-center gap-2 text-left rounded-md hover:bg-raised-hover"
+																	className="group/space w-full px-3 pb-1 pt-0.5 flex items-center gap-2 text-left rounded-md hover:bg-overlay-hover"
 																	data-testid={`switcher-space-${group.space.id}`}
 																>
 																	<SpaceIcon className="w-3.5 h-3.5 flex-shrink-0 text-accent/90" />
@@ -967,6 +986,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 								<TaskTitleHoverCard
 									task={seg.task}
 									project={projects.find((p) => p.id === seg.task?.projectId) ?? null}
+									agents={agents}
 								>
 									<NativeBackendMark
 										task={seg.task}
@@ -1027,6 +1047,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 								    itself (icon state, session count, memory number) is the answer. */}
 								<PreventSleepToggle variant="row" />
 								<MemoryHeadroomIndicator navigate={navigate} variant="menu" />
+								<SystemLoadRows navigate={navigate} />
 								<AgentTrafficIndicator
 									projectId={currentProjectId}
 									onOpenLog={() => {
@@ -1043,7 +1064,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 										setShowOverflowMenu(false);
 										window.dispatchEvent(new CustomEvent("menu:open-quick-shell"));
 									}}
-									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 									aria-label={t("quickShell.tooltipWithShortcut")}
 								>
 									<QuickShellIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
@@ -1057,7 +1078,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 											setShowOverflowMenu(false);
 											navigate({ screen: "stats" });
 										}}
-										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 									>
 										<StatsIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 										<span className="text-sm">{t("header.statsLabel")}</span>
@@ -1070,7 +1091,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 											setShowOverflowMenu(false);
 											openSessions();
 										}}
-										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 									>
 										<SessionsIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 										<span className="text-sm">{t("sessions.title")}</span>
@@ -1082,7 +1103,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 										setShowOverflowMenu(false);
 										window.open("https://h0x91b.github.io/dev-3.0/", "_blank");
 									}}
-									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 								>
 									<GitHubIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 									<span className="text-sm">{t("header.githubLabel")}</span>
@@ -1093,7 +1114,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 										setShowOverflowMenu(false);
 										window.open("https://github.com/h0x91b/dev-3.0/issues", "_blank");
 									}}
-									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+									className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 								>
 									<ReportBugIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 									<span className="text-sm">{t("header.reportLabel")}</span>
@@ -1105,7 +1126,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 											setShowOverflowMenu(false);
 											navigate({ screen: "changelog" });
 										}}
-										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+										className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 									>
 										<ChangelogIcon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 										<span className="text-sm">{t("header.changelogLabel")}</span>
@@ -1127,7 +1148,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 													key={id}
 													role="menuitem"
 													onClick={() => restoreControl(id)}
-													className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-elevated hover:text-fg transition-colors"
+													className="header-anim w-full text-left px-3 py-2 flex items-center gap-2.5 text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 												>
 													<row.Icon className="w-[1.125rem] h-[1.125rem] flex-shrink-0" />
 													<span className="text-sm flex-1">{row.label}</span>
@@ -1167,6 +1188,8 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 				    menu instead (the component decides — see its `variant`). Folds into
 				    the kebab sheet on narrow, where the breakdown is a BottomSheet. */}
 				{!isNarrow && <MemoryHeadroomIndicator navigate={navigate} />}
+				{/* CPU and disk earn a pill only at warn/critical (Settings → System levels). */}
+				{!isNarrow && <SystemLoadRows navigate={navigate} variant="bar" />}
 
 				{/* Ambient agent rate-limit indicator — hidden until any limit data exists
 				    (folded into the kebab bottom sheet on narrow). */}
@@ -1270,7 +1293,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 								onClick={() => window.dispatchEvent(new CustomEvent(HELP_ATTRACTOR_DISMISS_EVENT))}
 								aria-label={t("header.helpCallout.dismiss")}
 								data-testid="help-attractor-dismiss"
-								className="absolute top-1.5 right-1.5 text-fg-muted hover:text-fg transition-colors px-1.5 py-0.5 rounded-md hover:bg-raised-hover text-sm leading-none"
+								className="absolute top-1.5 right-1.5 text-fg-muted hover:text-fg transition-colors px-1.5 py-0.5 rounded-md hover:bg-elevated-hover text-sm leading-none"
 							>
 								×
 							</button>
@@ -1359,6 +1382,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 						)}
 						<TmuxSessionManager navigate={navigate} />
 					</div>
+					<SystemLoadRows navigate={navigate} />
 					{/* Agent traffic is the phone's only way in, so it is a row here — and it
 					    takes the same shape as the rows below it, not the chip row above. */}
 					<AgentTrafficIndicator
@@ -1380,7 +1404,7 @@ function GlobalHeader({ route, projects, tasks, agents, navigate, goBack, goForw
 							className={`w-full text-left px-2 py-3 rounded-lg transition-colors text-sm ${
 								row.danger
 									? "text-danger hover:bg-danger/10"
-									: "text-fg-2 hover:bg-elevated hover:text-fg"
+									: "text-fg-2 hover:bg-overlay-hover hover:text-fg"
 							}`}
 						>
 							{row.label}

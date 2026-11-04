@@ -1,4 +1,4 @@
-import { buildClaudeUsageDays, buildCodexUsageDays, finalizeUsage, foldClaudeEntry, newUsageState } from "../agent-usage-parse";
+import { beginCodexRollout, buildClaudeUsageDays, buildCodexUsageDays, finalizeUsage, foldClaudeEntry, foldCodexEntry, mergeUsageRecord, newUsageState } from "../agent-usage-parse";
 
 // Midday-UTC timestamps so local-day bucketing is stable across test-runner timezones.
 function assistant(
@@ -12,6 +12,28 @@ function assistant(
 }
 
 describe("buildClaudeUsageDays", () => {
+	it("ignores an invalid first snapshot and moves a completed response into its final local day", () => {
+		const start = new Date(2026, 6, 1, 23, 59).toISOString();
+		const end = new Date(2026, 6, 2, 0, 1).toISOString();
+		const { days } = buildClaudeUsageDays([
+			assistant("m", "r", "unknown", "invalid", { input_tokens: 99 }),
+			assistant("m", "r", "unknown", start, { input_tokens: 1_000_000, output_tokens: 10 }),
+			assistant("m", "r", "claude-sonnet-4-6", end, { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+		]);
+		expect(days).toHaveLength(1);
+		expect(days[0]).toMatchObject({ date: "2026-07-02", inputTokens: 1_000_000, outputTokens: 1_000_000, costUsd: 18, fullyPriced: true });
+	});
+
+	it.each([false, true])("counts the final streamed response once across transcript copies (reversed: %s)", (reversed) => {
+		const entries = [
+			assistant("streamed", "request", "claude-sonnet-4-6", "2026-07-01T12:00:00Z", { input_tokens: 1_000_000, output_tokens: 10 }),
+			assistant("streamed", "request", "claude-sonnet-4-6", "2026-07-01T12:00:01Z", { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+		];
+		const { days } = buildClaudeUsageDays(reversed ? entries.reverse() : entries);
+		expect(days).toHaveLength(1);
+		expect(days[0]).toMatchObject({ inputTokens: 1_000_000, outputTokens: 1_000_000, costUsd: 18 });
+	});
+
 	it("buckets by local day, dedups by message+request id, and prices per model", () => {
 		const entries = [
 			assistant("m1", "r1", "claude-opus-4-8", "2026-06-30T12:00:00Z", { input_tokens: 1_000_000, output_tokens: 0 }),
@@ -108,6 +130,79 @@ describe("buildClaudeUsageDays", () => {
 	});
 });
 
+describe("cumulative usage checkpoints", () => {
+	function checkpoint(input: number, timestamp: string, model = "gpt-6-sol", scope = "session") {
+		return { model, timestamp: Date.parse(timestamp), cumulativeScope: scope, counts: {
+			inputTokens: input, outputTokens: input / 2, cacheReadInputTokens: input / 4, cacheCreationInputTokens: 0,
+		} };
+	}
+
+	it("differences retained checkpoints before bucketing across month boundaries", () => {
+		const state = newUsageState();
+		mergeUsageRecord(state, "copilot:one", checkpoint(20, "2026-10-31T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:two", checkpoint(30, "2026-11-01T12:00:00Z"));
+		expect(finalizeUsage(state, "copilot").days).toMatchObject([
+			{ date: "2026-10-31", inputTokens: 20, outputTokens: 10, cacheReadInputTokens: 5 },
+			{ date: "2026-11-01", inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 2.5 },
+		]);
+	});
+
+	it("sorts out-of-order checkpoints and ignores lower or repeated cumulative snapshots", () => {
+		const state = newUsageState();
+		mergeUsageRecord(state, "copilot:latest", checkpoint(40, "2026-11-03T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:first", checkpoint(20, "2026-11-01T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:lower", checkpoint(10, "2026-11-02T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:duplicate", checkpoint(40, "2026-11-04T12:00:00Z"));
+		expect(finalizeUsage(state, "copilot").days).toMatchObject([
+			{ date: "2026-11-01", inputTokens: 20 }, { date: "2026-11-03", inputTokens: 20 },
+		]);
+	});
+
+	it("keeps cumulative scopes and models independent", () => {
+		const state = newUsageState();
+		for (const [key, model, scope] of [["one", "gpt-6-sol", "session"], ["two", "gpt-6-astra", "session"], ["three", "gpt-6-sol", "other-session"]]) {
+			mergeUsageRecord(state, key, checkpoint(20, "2026-11-01T12:00:00Z", model, scope));
+		}
+		expect(finalizeUsage(state, "copilot").days[0].inputTokens).toBe(60);
+	});
+
+	it("replaces repeated checkpoint identities without resumming prior totals", () => {
+		const state = newUsageState();
+		mergeUsageRecord(state, "copilot:one", checkpoint(20, "2026-10-31T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:one", checkpoint(40, "2026-10-31T12:00:00Z"));
+		mergeUsageRecord(state, "copilot:two", checkpoint(60, "2026-11-01T12:00:00Z"));
+		expect(finalizeUsage(state, "copilot").days.map((day) => day.inputTokens)).toEqual([40, 20]);
+	});
+
+	it("keeps Cursor generation usage on its original day across fuller later snapshots", () => {
+		const state = newUsageState();
+		const first = checkpoint(20, "2026-10-31T12:00:00Z");
+		const later = checkpoint(40, "2026-11-01T12:00:00Z");
+		mergeUsageRecord(state, "cursor:generation", { ...first, cumulativeScope: undefined });
+		mergeUsageRecord(state, "cursor:generation", { ...later, cumulativeScope: undefined });
+		expect(finalizeUsage(state, "cursor").days).toMatchObject([{ date: "2026-10-31", inputTokens: 40 }]);
+	});
+
+	it("keeps Cursor per-counter maxima when later stop events and retained rescans report smaller snapshots", () => {
+		const state = newUsageState();
+		const first = {
+			model: "gpt-6-sol", timestamp: Date.parse("2026-10-31T12:00:00Z"),
+			counts: { inputTokens: 100, outputTokens: 80, cacheReadInputTokens: 200, cacheCreationInputTokens: 50 },
+		};
+		mergeUsageRecord(state, "cursor:generation", first);
+		mergeUsageRecord(state, "cursor:generation", {
+			...first, timestamp: Date.parse("2026-11-01T12:00:00Z"),
+			counts: { inputTokens: 60, outputTokens: 10, cacheReadInputTokens: 300, cacheCreationInputTokens: 20 },
+		});
+		const rescanned = newUsageState();
+		mergeUsageRecord(rescanned, "cursor:generation", state.records.get("cursor:generation")!);
+		mergeUsageRecord(rescanned, "cursor:generation", { ...first, counts: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 1, cacheCreationInputTokens: 1 } });
+		expect(finalizeUsage(rescanned, "cursor").days).toMatchObject([{
+			date: "2026-10-31", inputTokens: 100, outputTokens: 80, cacheReadInputTokens: 300, cacheCreationInputTokens: 50,
+		}]);
+	});
+});
+
 function codexModel(model: string, timestamp: string) {
 	return { type: "turn_context", timestamp, payload: { model } };
 }
@@ -124,6 +219,131 @@ function codexUsage(timestamp: string, last: Record<string, unknown>, total: Rec
 }
 
 describe("buildCodexUsageDays", () => {
+	it.each(["legacy-first", "native-first", "alternating"])("reconciles matching legacy/native cumulative snapshots: %s", (order) => {
+		const one = { input_tokens: 1_000_000, output_tokens: 0 };
+		const two = { input_tokens: 500_000, output_tokens: 0 };
+		const total = { input_tokens: 1_500_000, output_tokens: 0 };
+		const legacy = [codexUsage("2026-07-01T12:01:00Z", one, one), codexUsage("2026-07-01T12:02:00Z", two, total)];
+		const native = [
+			{ type: "token_usage_record", timestamp: "2026-07-01T12:01:00Z", payload: { response_id: "one", usage: one, thread_token_usage: one } },
+			{ type: "token_usage_record", timestamp: "2026-07-01T12:02:00Z", payload: { response_id: "two", usage: two, thread_token_usage: total } },
+		];
+		const state = newUsageState();
+		beginCodexRollout(state);
+		const entries = order === "legacy-first" ? [...legacy, ...native]
+			: order === "native-first" ? [...native, ...legacy] : [legacy[0], native[0], legacy[1], native[1]];
+		for (const entry of [
+			{ type: "session_meta", payload: { id: "session" } },
+			codexModel("gpt-6-sol", "2026-07-01T12:00:00Z"),
+			...entries,
+		]) foldCodexEntry(state, entry);
+		expect(finalizeUsage(state, "codex").days[0]).toMatchObject({ inputTokens: 1_500_000, costUsd: 3 });
+		expect(state.superseded.size).toBe(2);
+	});
+
+	it("resets native cumulative tracking for copied rollout files without recounting responses", () => {
+		const state = newUsageState();
+		const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+		const native = { type: "token_usage_record", timestamp: "2026-07-01T12:00:00Z", payload: { response_id: "one", usage } };
+		for (const entries of [[native], [codexUsage(native.timestamp, usage, usage), native]]) {
+			beginCodexRollout(state);
+			foldCodexEntry(state, { type: "session_meta", payload: { id: "session" } });
+			foldCodexEntry(state, codexModel("gpt-6-sol", native.timestamp));
+			for (const entry of entries) foldCodexEntry(state, entry);
+		}
+		expect(finalizeUsage(state, "codex").days[0]).toMatchObject({ inputTokens: 1_000_000, costUsd: 2 });
+		expect(state.superseded.size).toBe(1);
+	});
+
+	it("uses running native response totals when thread cumulative usage is absent", () => {
+		const one = { input_tokens: 1_000_000, output_tokens: 0 };
+		const { days } = buildCodexUsageDays([
+			codexModel("gpt-6-sol", "2026-07-01T12:00:00Z"),
+			codexUsage("2026-07-01T12:01:00Z", one, one),
+			{ type: "token_usage_record", timestamp: "2026-07-01T12:01:00Z", payload: { response_id: "one", usage: one } },
+		]);
+		expect(days[0]).toMatchObject({ inputTokens: 1_000_000, costUsd: 2 });
+	});
+
+	it("retains unmatched historical legacy usage before a native upgrade", () => {
+		const old = { input_tokens: 1_000_000, output_tokens: 0 };
+		const { days } = buildCodexUsageDays([
+			codexModel("gpt-6-sol", "2026-07-01T12:00:00Z"),
+			codexUsage("2026-07-01T12:01:00Z", old, old),
+			{ type: "token_usage_record", timestamp: "2026-07-01T12:02:00Z", payload: {
+				response_id: "new", usage: old, thread_token_usage: { input_tokens: 2_000_000, output_tokens: 0 },
+			} },
+		]);
+		expect(days[0]).toMatchObject({ inputTokens: 2_000_000, costUsd: 4 });
+	});
+
+	it("keeps the original day and model when copied legacy snapshots replay next month", () => {
+		const state = newUsageState();
+		const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+		for (const [timestamp, model] of [["2026-07-01T12:00:00Z", "gpt-6-sol"], ["2026-08-01T12:00:00Z", "gpt-6-astra"]]) {
+			beginCodexRollout(state);
+			foldCodexEntry(state, { type: "session_meta", payload: { id: "session" } });
+			foldCodexEntry(state, codexModel(model, timestamp));
+			foldCodexEntry(state, codexUsage(timestamp, usage, usage));
+		}
+		expect(finalizeUsage(state, "codex").days).toMatchObject([{ date: "2026-07-01", inputTokens: 1_000_000, costUsd: 2 }]);
+	});
+
+	it("marks covered identities superseded even when their old log is absent from the next scan", () => {
+		const state = newUsageState();
+		const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+		beginCodexRollout(state);
+		foldCodexEntry(state, { type: "session_meta", payload: { id: "session" } });
+		foldCodexEntry(state, codexUsage("2026-07-01T12:00:00Z", usage, usage));
+		const oldKey = [...state.records.keys()][0];
+		beginCodexRollout(state);
+		foldCodexEntry(state, { type: "session_meta", payload: { id: "session" } });
+		foldCodexEntry(state, { type: "token_usage_record", timestamp: "2026-07-01T12:00:00Z", payload: {
+			response_id: "one", usage, thread_token_usage: usage,
+		} });
+		expect(state.superseded.has(oldKey)).toBe(true);
+		expect(state.records.has(oldKey)).toBe(false);
+		beginCodexRollout(state);
+		foldCodexEntry(state, { type: "session_meta", payload: { id: "session" } });
+		foldCodexEntry(state, codexUsage("2026-08-01T12:00:00Z", usage, usage));
+		expect(state.records.has(oldKey)).toBe(false);
+	});
+
+	it("retains the legacy prefix and then counts native response snapshots without their legacy echo", () => {
+		const native = (output: number, timestamp: string) => ({
+			type: "token_usage_record", timestamp,
+			payload: { response_id: "response-1", usage: { input_tokens: 1_000_000, cached_input_tokens: 500_000, cache_write_input_tokens: 100_000, output_tokens: output } },
+		});
+		const { days } = buildCodexUsageDays([
+			codexModel("gpt-5.1-codex", "2026-07-01T12:00:00Z"),
+			codexUsage("2026-07-01T12:01:00Z", { input_tokens: 1_000_000, output_tokens: 0 }),
+			native(10, "2026-07-01T12:02:00Z"),
+			native(100_000, "2026-07-01T12:03:00Z"),
+			codexUsage("2026-07-01T12:04:00Z", { input_tokens: 1_000_000, cached_input_tokens: 500_000, output_tokens: 100_000 }),
+		]);
+		expect(days).toHaveLength(1);
+		expect(days[0]).toMatchObject({ inputTokens: 1_400_000, cacheReadInputTokens: 500_000, cacheCreationInputTokens: 100_000, outputTokens: 100_000 });
+		expect(days[0].costUsd).toBeCloseTo(2.96875, 6);
+	});
+
+	it("ignores repeated cumulative snapshots at new timestamps, even after a model change", () => {
+		const last = { input_tokens: 1_000_000, cached_input_tokens: 500_000, output_tokens: 100_000 };
+		const total = { ...last };
+		const { days } = buildCodexUsageDays([
+			codexModel("gpt-5.1-codex", "2026-07-01T12:00:00Z"),
+			codexUsage("2026-07-01T12:01:00Z", last, total),
+			codexUsage("2026-07-01T12:02:00Z", last, total),
+			codexModel("gpt-5.4-mini", "2026-07-02T12:00:00Z"),
+			codexUsage("2026-07-02T12:01:00Z", last, total),
+			codexUsage("2026-07-02T12:02:00Z", last, { input_tokens: 2_000_000, cached_input_tokens: 1_000_000, output_tokens: 200_000 }),
+		]);
+		expect(days).toHaveLength(2);
+		expect(days[0]).toMatchObject({ inputTokens: 500_000, cacheReadInputTokens: 500_000, outputTokens: 100_000 });
+		expect(days[1]).toMatchObject({ inputTokens: 500_000, cacheReadInputTokens: 500_000, outputTokens: 100_000 });
+		expect(days[0].costUsd).toBeCloseTo(1.6875);
+		expect(days[1].costUsd).toBeCloseTo(0.8625);
+	});
+
 	it("sums per-turn deltas, tracks model changes, and dedups repeated rollout events", () => {
 		const duplicate = codexUsage(
 			"2026-07-01T12:05:00Z",

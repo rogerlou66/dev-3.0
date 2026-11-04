@@ -1,4 +1,5 @@
 import type { AgentLaunchChoice, AgentLaunchRequest, TaskDialogSubject } from "../shared/types";
+import type { PendingApprovalSummary } from "../shared/agent-approval";
 import { createLogger } from "./logger";
 import { getPushMessage } from "./rpc-handlers/shared-pure";
 
@@ -26,6 +27,16 @@ export interface AgentRequestDecision {
 export interface AgentRequestDialog {
 	taskTitle: string;
 	subject: TaskDialogSubject;
+	/** `launch` only: who asked, for `dev3 approvals list`. */
+	requester?: AgentRequestRequester;
+}
+
+/** A task asked (`taskId` set) or a registered external sender did (`senderId` set). */
+export interface AgentRequestRequester {
+	taskId: string | null;
+	seq: number | null;
+	title: string | null;
+	senderId: string | null;
 }
 
 interface PendingAgentRequest {
@@ -33,6 +44,8 @@ interface PendingAgentRequest {
 	kind: AgentRequestKind;
 	taskId: string;
 	projectId: string;
+	/** Epoch ms the request was created. */
+	createdAt: number;
 	decision: Promise<AgentRequestDecision>;
 	resolve: (decision: AgentRequestDecision) => void;
 	/** Present when the caller supplied one; absent kinds are not replayable. */
@@ -131,7 +144,7 @@ export function createAgentRequest(
 	const autoApproveAfterMs = opts.autoApproveAfterMs ?? 0;
 	const autoApproveAt = autoApproveAfterMs > 0 ? Date.now() + autoApproveAfterMs : null;
 	const entry: PendingAgentRequest = {
-		requestId, kind, taskId, projectId, decision, resolve, autoApproveAt,
+		requestId, kind, taskId, projectId, createdAt: Date.now(), decision, resolve, autoApproveAt,
 		autoApproveMs: autoApproveAfterMs,
 		...(opts.dialog ? { dialog: opts.dialog } : {}),
 	};
@@ -244,6 +257,29 @@ export function listPendingAgentRequests(
 		out.push({ requestId: entry.requestId, taskId: entry.taskId, projectId: entry.projectId, dialog: entry.dialog });
 	}
 	return out;
+}
+
+/** Every pending request of every kind, oldest first, for `dev3 approvals list`. */
+export function listPendingApprovalSummaries(): PendingApprovalSummary[] {
+	return [...pendingByRequestId.values()].map((entry) => {
+		const { dialog } = entry;
+		return {
+			requestId: entry.requestId,
+			kind: entry.kind,
+			taskId: entry.taskId,
+			projectId: entry.projectId,
+			taskTitle: dialog?.taskTitle ?? null,
+			seqLabel: dialog?.subject.seqLabel ?? null,
+			projectName: dialog?.subject.projectName ?? null,
+			requesterTaskId: dialog?.requester?.taskId ?? null,
+			requesterSeq: dialog?.requester?.seq ?? null,
+			requesterTitle: dialog?.requester?.title ?? null,
+			requesterSenderId: dialog?.requester?.senderId ?? null,
+			createdAt: new Date(entry.createdAt).toISOString(),
+			autoApproveAt: entry.autoApproveAt === null ? null : new Date(entry.autoApproveAt).toISOString(),
+			heldByUser: entry.heldByUser === true,
+		};
+	}).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export function setAgentLaunchDialog(request: AgentLaunchRequest): void {

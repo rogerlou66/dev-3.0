@@ -204,6 +204,7 @@ const defaultDevServerStatus: DevServerStatus = {
 		publishedPorts: [],
 		portConflicts: [],
 		extraEnvKeys: [],
+		scriptArgs: [],
 	}],
 };
 
@@ -1392,6 +1393,38 @@ describe("TaskInfoPanel", () => {
 			expect(mockedApi.request.runDevServer).not.toHaveBeenCalled();
 		});
 
+		it("shows the script args of the running dev server in the menu", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			mockedApi.request.checkDevServer.mockResolvedValue({ running: true });
+			mockedApi.request.getDevServerStatus.mockResolvedValue({
+				...defaultDevServerStatus,
+				servers: [{ ...defaultDevServerStatus.servers[0], scriptArgs: ["--own-db", "a b"] }],
+			});
+
+			await act(async () => {
+				renderPanel(makeTask(), { project: { ...project, devScript: "bun run dev" } });
+			});
+			await user.click(screen.getAllByText("Dev Server")[0].closest("button")!);
+
+			const line = await screen.findByTestId("dev-server-args");
+			expect(line.textContent).toBe("--own-db 'a b'");
+			expect(line.getAttribute("title")).toBe("Started with arguments: --own-db 'a b'");
+		});
+
+		it("shows no args line in the menu when the server runs without args", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			mockedApi.request.checkDevServer.mockResolvedValue({ running: true });
+			mockedApi.request.getDevServerStatus.mockResolvedValue(defaultDevServerStatus);
+
+			await act(async () => {
+				renderPanel(makeTask(), { project: { ...project, devScript: "bun run dev" } });
+			});
+			await user.click(screen.getAllByText("Dev Server")[0].closest("button")!);
+
+			await screen.findByText("Dev server is already running");
+			expect(screen.queryByTestId("dev-server-args")).toBeNull();
+		});
+
 		it("restarts dev server via restartDevServer (stop → delay → start)", async () => {
 			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 			mockedApi.request.checkDevServer.mockResolvedValue({ running: true });
@@ -1549,6 +1582,27 @@ describe("TaskInfoPanel", () => {
 			expect(screen.getByTestId("dev-server-row-dev").textContent).toContain("Start");
 		});
 
+		it("shows a running server's script args under its row, and nothing for one without", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			mockedApi.request.checkDevServer.mockResolvedValue({ running: false });
+			mockedApi.request.getDevServerStatus.mockResolvedValue({
+				...multiStatus,
+				servers: [
+					{ ...multiStatus.servers[0], running: true },
+					{ ...multiStatus.servers[1], scriptArgs: ["--verbose", "x y"] },
+				],
+			});
+
+			await act(async () => {
+				renderPanel(makeTask(), { project: multiProject });
+			});
+			await user.click(screen.getAllByText("Dev Server")[0].closest("button")!);
+
+			const line = await screen.findByTestId("dev-server-args-api");
+			expect(line.textContent).toBe("--verbose 'x y'");
+			expect(screen.queryByTestId("dev-server-args-dev")).toBeNull();
+		});
+
 		it("starts only the server whose row was clicked", async () => {
 			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 			mockedApi.request.checkDevServer.mockResolvedValue({ running: false });
@@ -1565,6 +1619,94 @@ describe("TaskInfoPanel", () => {
 			expect(mockedApi.request.runDevServer).toHaveBeenCalledWith(
 				expect.objectContaining({ server: "dev" }),
 			);
+		});
+
+		async function openList(user: ReturnType<typeof userEvent.setup>) {
+			mockedApi.request.checkDevServer.mockResolvedValue({ running: false });
+			mockedApi.request.getDevServerStatus.mockResolvedValue(multiStatus);
+			mockedApi.request.runDevServer.mockResolvedValue(multiStatus);
+			await act(async () => {
+				renderPanel(makeTask(), { project: multiProject });
+			});
+			const trigger = screen.getAllByText("Dev Server")[0].closest("button")!;
+			await user.click(trigger);
+			const list = await screen.findByTestId("dev-server-list");
+			await waitFor(() => expect(screen.getByTestId("dev-server-row-api").textContent).toContain("Stop"));
+			return { trigger, list };
+		}
+
+		// The user had to hit the small "Start" word exactly; the row text was
+		// selectable instead. A stopped row is now one button, name included.
+		it("a stopped server's whole row is its Start button, and the panel text is not selectable", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			const { list } = await openList(user);
+
+			const devRow = screen.getByTestId("dev-server-row-dev");
+			expect(devRow.tagName).toBe("BUTTON");
+			expect(list.className).toContain("select-none");
+			await user.click(within(devRow).getByText("dev"));
+
+			expect(mockedApi.request.runDevServer).toHaveBeenCalledWith(expect.objectContaining({ server: "dev" }));
+		});
+
+		it("a running server's row is not a button, so a stray click never stops it", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			await openList(user);
+
+			const apiRow = screen.getByTestId("dev-server-row-api");
+			expect(apiRow.tagName).not.toBe("BUTTON");
+			await user.click(within(apiRow).getByText("api"));
+
+			expect(mockedApi.request.stopDevServer).not.toHaveBeenCalled();
+			expect(mockedApi.request.restartDevServer).not.toHaveBeenCalled();
+		});
+
+		// A document mousedown listener never saw clicks on the terminal, which
+		// captures its own mousedown — so nothing outside the panel closed it.
+		it("a click outside the panel lands on a backdrop that closes it and refocuses the trigger", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			const { trigger } = await openList(user);
+
+			await user.click(screen.getByTestId("dev-server-backdrop"));
+
+			expect(screen.queryByTestId("dev-server-list")).toBeNull();
+			expect(document.activeElement).toBe(trigger);
+		});
+
+		it("pressing the toolbar button again closes the panel instead of reopening it", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			const { trigger } = await openList(user);
+			expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+			await user.click(trigger);
+
+			expect(screen.queryByTestId("dev-server-list")).toBeNull();
+			expect(trigger.getAttribute("aria-expanded")).toBe("false");
+		});
+
+		it("Escape closes the panel and returns focus to the toolbar button", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			const { trigger } = await openList(user);
+
+			await user.keyboard("{Escape}");
+
+			expect(screen.queryByTestId("dev-server-list")).toBeNull();
+			expect(document.activeElement).toBe(trigger);
+		});
+
+		it("is keyboard-driven: focus lands on the first row, arrows move, Enter starts", async () => {
+			const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+			await openList(user);
+			const devRow = screen.getByTestId("dev-server-row-dev");
+			await waitFor(() => expect(document.activeElement).toBe(devRow));
+
+			await user.keyboard("{ArrowDown}");
+			expect(document.activeElement?.textContent).toBe(":55930");
+			await user.keyboard("{ArrowUp}");
+			expect(document.activeElement).toBe(devRow);
+			await user.keyboard("{Enter}");
+
+			expect(mockedApi.request.runDevServer).toHaveBeenCalledWith(expect.objectContaining({ server: "dev" }));
 		});
 
 		it("Stop all takes down every server in one action", async () => {
@@ -2835,6 +2977,58 @@ describe("TaskInfoPanel", () => {
 			}
 		});
 
+		it.each(["MERGED", "CLOSED"])("replaces an earlier open push when refresh reports %s", async (prState) => {
+			const pr = { prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" };
+			mockedApi.request.getBranchStatus.mockResolvedValue({ ...defaultBranchStatus, ...pr, prState: "OPEN", ahead: 3 });
+			await act(async () => { renderPanel(makeTask(pr)); });
+			act(() => {
+				window.dispatchEvent(new CustomEvent("rpc:taskPrStatus", { detail: {
+					projectId: "p1", taskId: "t1", ...pr, ciStatus: "success", reviewState: null,
+					unresolvedCount: 0, mergeState: { mergeable: "MERGEABLE", status: "CLEAN", state: "OPEN" },
+					checks: [], prTitle: "Earlier open status", isDraft: false,
+				} }));
+			});
+			mockedApi.request.getBranchStatus.mockResolvedValue({ ...defaultBranchStatus, prNumber: null, prUrl: null, prState: null, ahead: 3 });
+			mockedApi.request.refreshTaskPrStatus.mockImplementationOnce(async () => {
+				window.dispatchEvent(new CustomEvent("rpc:taskPrStatus", { detail: {
+					projectId: "p1", taskId: "t1", ...pr, ciStatus: "success", reviewState: null,
+					unresolvedCount: 0, mergeState: { mergeable: "UNKNOWN", status: "UNKNOWN", state: prState },
+					checks: [], prTitle: "Refreshed status", isDraft: false,
+				} }));
+				return { outcome: "updated" };
+			});
+			await act(async () => { fireEvent.click(screen.getAllByLabelText("Refresh branch status")[0]); });
+			await waitFor(() => {
+				for (const node of screen.getAllByRole("button").filter((button) => button.textContent?.includes("PR #42"))) {
+					expect(node).toHaveTextContent(`PR #42 — ${prState === "MERGED" ? "Merged" : "Closed"}`);
+				}
+			});
+		});
+
+		it("updates PR state and CI while the inspector stays open", async () => {
+			mockViewport(1440);
+			const pr = { prNumber: 42, prUrl: "https://github.com/test/repo/pull/42" };
+			mockedApi.request.getBranchStatus.mockResolvedValue({ ...defaultBranchStatus, ...pr, prState: "OPEN" });
+			await act(async () => { renderPanel(makeTask(pr)); });
+			for (const [state, ciStatus] of [["OPEN", "failure"], ["OPEN", "success"], ["MERGED", "success"]] as const) {
+				act(() => {
+					window.dispatchEvent(new CustomEvent("rpc:taskPrStatus", { detail: {
+						projectId: "p1", taskId: "t1", ...pr, ciStatus, reviewState: null, unresolvedCount: 0,
+						mergeState: { mergeable: "MERGEABLE", status: ciStatus === "failure" ? "UNSTABLE" : "CLEAN", state },
+						checks: [{ name: "build", status: "COMPLETED", conclusion: ciStatus === "failure" ? "FAILURE" : "SUCCESS", detailsUrl: null }],
+						prTitle: "Status changes", isDraft: false,
+					} }));
+				});
+				for (const node of screen.getAllByRole("button").filter((button) => button.textContent?.includes("PR #42"))) {
+					expect(node).toHaveTextContent(`PR #42 — ${state === "MERGED" ? "Merged" : "Open"}`);
+				}
+				await userEvent.hover(screen.getAllByText(/PR #42/)[0].closest("button")!);
+				const popover = await screen.findByTestId("pr-status-popover");
+				expect(within(popover).getByText("build").closest("li")).toHaveTextContent(ciStatus === "failure" ? "Failed" : "Passed");
+				await userEvent.unhover(screen.getAllByText(/PR #42/)[0].closest("button")!);
+			}
+		});
+
 		it("keeps the PR #42 badge neutral while nothing reports its state", async () => {
 			mockedApi.request.getBranchStatus.mockResolvedValue({
 				...defaultBranchStatus,
@@ -3057,7 +3251,7 @@ describe("TaskInfoPanel", () => {
 				renderPanel(makeTask());
 			});
 
-			expect(mockedApi.request.refreshTaskPrStatus).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1" });
+			expect(mockedApi.request.refreshTaskPrStatus).toHaveBeenCalledWith({ taskId: "t1", projectId: "p1", force: false });
 		});
 
 		it("opens PR URL in new tab when Open PR is clicked", async () => {

@@ -66,6 +66,12 @@ export const DEFAULT_STALL_MS = 6000;
 export const DEFAULT_CHECK_INTERVAL_MS = 2000;
 /** Report the first failures, then only every Nth — a broken frame repeats at 60 fps. */
 const ERROR_REPORT_STRIDE = 60;
+/**
+ * A check this many intervals late means timers were not running — a throttled
+ * hidden stretch can pass with no tick at all, so the page cannot be trusted to
+ * have been able to paint in that gap.
+ */
+const LATE_TICK_FACTOR = 2;
 
 export function installRenderGuard(renderer: GuardableRenderer, opts: RenderGuardOptions): RenderGuard {
 	const target = renderer as WrappedRenderer;
@@ -114,13 +120,18 @@ export function installRenderGuard(renderer: GuardableRenderer, opts: RenderGuar
 		};
 	}
 
+	const checkIntervalMs = opts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
+	let lastTickAt = lastFrameAt;
+
 	const handle = setTimer(() => {
 		const tick = now();
+		const late = tick - lastTickAt > checkIntervalMs * LATE_TICK_FACTOR;
+		lastTickAt = tick;
 		if (!isVisible()) {
 			visibleSince = null;
 			return;
 		}
-		if (visibleSince === null) {
+		if (visibleSince === null || late) {
 			visibleSince = tick;
 			return;
 		}
@@ -129,7 +140,7 @@ export function installRenderGuard(renderer: GuardableRenderer, opts: RenderGuar
 		if (quietFor < stallMs || stallReported) return;
 		stallReported = true;
 		opts.onStalled(quietFor);
-	}, opts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS);
+	}, checkIntervalMs);
 
 	return {
 		framesPainted: () => frames,

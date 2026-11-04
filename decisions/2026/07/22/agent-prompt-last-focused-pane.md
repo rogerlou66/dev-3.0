@@ -1,5 +1,7 @@
 # 154 — Route agent hand-offs to the last-focused agent pane
 
+> Partly superseded on 2026-10-26 by `decisions/2026/10/26/agent-addressed-messages-and-replies.md`: held `dev3 message` traffic (immediate and scheduled) now goes to the task's main agent or an addressed one, never the last-focused pane. Hand-offs still follow this record.
+
 ## Context
 
 `resolveAgentPromptTargetPane` (`src/bun/agent-prompt.ts`) picks the pane every

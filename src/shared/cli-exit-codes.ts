@@ -33,6 +33,18 @@ export const CLI_EXIT_CODE_RESUME_ALREADY_RUNNING = 31;
 export const CLI_EXIT_CODE_RESUME_UNAVAILABLE = 32;
 export const CLI_EXIT_CODE_PROJECT_ALREADY_REGISTERED = 33;
 export const CLI_EXIT_CODE_SPACE_REF_INVALID = 34;
+export const CLI_EXIT_CODE_HIBERNATE_NOTHING_TO_FREE = 35;
+export const CLI_EXIT_CODE_HIBERNATE_DECLINED = 36;
+export const CLI_EXIT_CODE_TASK_NOT_HIBERNATED = 37;
+export const CLI_EXIT_CODE_PR_WATCH_NO_PR = 38;
+export const CLI_EXIT_CODE_EXTERNAL_SENDER_UNKNOWN = 39;
+export const CLI_EXIT_CODE_SENDER_INBOX_BUSY = 40;
+export const CLI_EXIT_CODE_LIVE_REV_CONFLICT = 41;
+export const CLI_EXIT_CODE_LIVE_READ_ONLY = 42;
+export const CLI_EXIT_CODE_PR_WATCH_PR_FINISHED = 43;
+export const CLI_EXIT_CODE_EPIC_REF_INVALID = 44;
+export const CLI_EXIT_CODE_EPIC_CREATE_FORBIDDEN = 45;
+export const CLI_EXIT_CODE_LAUNCH_PREPARATION_FAILED = 46;
 
 export const CLI_EXIT_CODE_DEFINITIONS = [
 	{
@@ -100,7 +112,7 @@ export const CLI_EXIT_CODE_DEFINITIONS = [
 		constant: "CLI_EXIT_CODE_DELIVERY_UNCONFIRMED",
 		code: CLI_EXIT_CODE_DELIVERY_UNCONFIRMED,
 		description:
-			"`dev3 message` sent the text but no backend could confirm it arrived (the native terminal host cannot acknowledge input, or a tmux send stopped mid-program). The message may well have landed, so DO NOT re-send it — a re-send is a second submit into a live agent. Distinct from exit 1, which means nothing was sent.",
+			"`dev3 message` sent the text but no backend could confirm it arrived (the native terminal host cannot acknowledge input, or a tmux send stopped mid-program), or any `dev3 message` form (immediate, `--in`/`--at`, `--to-sender`) lost its connection to the app after the request was sent (reset, broken pipe, empty or unreadable response, timeout). The message may well have landed, so DO NOT re-send it — a re-send is a second submit into a live agent. Distinct from exit 1, which means nothing was sent.",
 	},
 	{
 		constant: "CLI_EXIT_CODE_PRUNE_INCOMPLETE",
@@ -233,5 +245,77 @@ export const CLI_EXIT_CODE_DEFINITIONS = [
 		code: CLI_EXIT_CODE_SPACE_REF_INVALID,
 		description:
 			"A `dev3 projects add|clone` or `dev3 spaces …` command named a space it cannot use, so NOTHING was added, cloned, created or changed: a `--space` / positional space matched no space or more than one (a name two spaces share — pass the id), or `--new-space` / `spaces create` named a space that already exists (names compare case-insensitively). The message lists the existing spaces with their ids. Distinct from exit 1 so a caller can fall back to creating the space (`--new-space`, `dev3 spaces create`) or to joining the existing one, instead of treating it as a failed registration.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_HIBERNATE_NOTHING_TO_FREE",
+		code: CLI_EXIT_CODE_HIBERNATE_NOTHING_TO_FREE,
+		description:
+			"`dev3 task hibernate` found nothing running to free, so NOTHING was stopped: the task is already hibernated, a draft, not in an active column, has no worktree, or has no live terminal. With `--json` the result carries a `reason` (`already-hibernated`, `draft`, `not-active`, `no-worktree`, `not-running`). A task whose terminal is gone after a restart can be brought back with `dev3 agent resume`. Distinct from exit 1 so a coordinator parking many tasks can treat an already-parked one as done.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_HIBERNATE_DECLINED",
+		code: CLI_EXIT_CODE_HIBERNATE_DECLINED,
+		description:
+			"`dev3 task hibernate` was run from inside a task (an agent asked) and the user did NOT approve it in the app: they declined, or the task's run ended before anyone answered. NOTHING was stopped — the agent, terminal and dev server keep running. An unanswered dialog approves itself after the configured launch auto-approval delay, so this code always means a human said no, or the run was gone. Distinct from exit 10, which a declined launch, resume or plain-shell wake returns.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_TASK_NOT_HIBERNATED",
+		code: CLI_EXIT_CODE_TASK_NOT_HIBERNATED,
+		description:
+			"`dev3 task wake` was aimed at a task that is not hibernated, so NOTHING was launched or changed. A live task needs no wake; a task whose terminal died without being hibernated is resumed with `dev3 agent resume`. Distinct from exit 1 so a coordinator waking several tasks can treat an already-awake one as done.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_PR_WATCH_NO_PR",
+		code: CLI_EXIT_CODE_PR_WATCH_NO_PR,
+		description:
+			"`dev3 pr watch` found no pull request to watch, so NOTHING was subscribed: without `--pr` the task's branch has no open PR, with `--pr <N>` the project's repository has no PR N (or, either way, GitHub did not answer in time). Open the PR first (`dev3 pr create`) or check the number, then run it again. Distinct from exit 1 so an agent that opened a PR a moment ago can retry once GitHub lists it instead of treating this as a failed command.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_EXTERNAL_SENDER_UNKNOWN",
+		code: CLI_EXIT_CODE_EXTERNAL_SENDER_UNKNOWN,
+		description:
+			"`--as-sender <id>` or `--to-sender <id>` named an external sender that is not registered in `~/.dev3.0/external-senders.json`, so NOTHING was sent, written or started. Senders are added by hand to that file (`{\"senders\": {\"<id>\": {\"label\": \"…\"}}}`); the app never writes it. Distinct from exit 1 so a sender can tell \"I am not registered\" from a failed send.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_SENDER_INBOX_BUSY",
+		code: CLI_EXIT_CODE_SENDER_INBOX_BUSY,
+		description:
+			"`dev3 sender inbox --client <cid>` or `dev3 sender ack` found another client holding that sender's reader lease, so NOTHING was read into a lease or acknowledged. The lease lapses 10 s after its holder's last wait. Do not take it over automatically: `--take-over` is for a person who knows the other reader is gone. Distinct from exit 1 so a second reader can back off instead of retrying in a loop.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_LIVE_REV_CONFLICT",
+		code: CLI_EXIT_CODE_LIVE_REV_CONFLICT,
+		description:
+			"`dev3 live set|patch|delete --if-rev <n>` found the document at a different revision than the one passed (someone — usually the user on the live page — changed it since it was read), so NOTHING was written. The message names the current revision; re-read the document with `dev3 live get`, merge, and retry. Distinct from exit 1 so an agent can tell a lost race from a failed write.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_LIVE_READ_ONLY",
+		code: CLI_EXIT_CODE_LIVE_READ_ONLY,
+		description:
+			"A `dev3 live` write (`publish`, `adopt`, `set`, `patch`, `delete`, `clear`) targeted a task that is completed or cancelled, so NOTHING changed: a finished task's live artifact is kept read-only, with its page and data still readable through `dev3 live status|get|list|events`. Distinct from exit 1 so an agent does not retry a write that can never succeed.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_PR_WATCH_PR_FINISHED",
+		code: CLI_EXIT_CODE_PR_WATCH_PR_FINISHED,
+		description:
+			"`dev3 pr watch --pr <N>` named a pull request that is already merged or closed, so NOTHING was subscribed: there is no CI run or merge left to wait for. The message says which. Distinct from exit 38 (no such PR) so a coordinator following a PR it handed off can treat an already-merged one as done instead of retrying.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_EPIC_REF_INVALID",
+		code: CLI_EXIT_CODE_EPIC_REF_INVALID,
+		description:
+			"`--epic <name|id>` (on `task create`, `task update`, `tasks list`) or the epic named by `dev3 epic update|archive|unarchive` matches no epic, matches more than one, or — on `task create` and `task update` — names an archived epic the task is not already in. NOTHING was created or changed, and no epic is ever created from a typo. Run `dev3 epic list` for the valid names and ids. Distinct from exit 1 so an agent can tell a wrong epic name from a failed command.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_EPIC_CREATE_FORBIDDEN",
+		code: CLI_EXIT_CODE_EPIC_CREATE_FORBIDDEN,
+		description:
+			"`dev3 epic create` ran inside a task that is not a coordinator. Epics are a global registry shared by every project, so only the user (outside any task) and coordinator tasks may add one; NOTHING was created. Attach an existing epic instead with `dev3 task update --epic <name|id>`.",
+	},
+	{
+		constant: "CLI_EXIT_CODE_LAUNCH_PREPARATION_FAILED",
+		code: CLI_EXIT_CODE_LAUNCH_PREPARATION_FAILED,
+		description:
+			"An agent-initiated launch (`dev3 task move --task <other> --status in-progress`, or `dev3 task create --scratch --run`) was approved, but the launched task's preparation failed (worktree, setup or agent start), so NO agent is running for it: the task is back in To Do and the message carries its preparation error. Read the error before retrying — a refused leftover folder needs the user, not a retry. Distinct from exit 10 (declined) so a launcher can tell \"the user said no\" from \"it broke\".",
 	},
 ] as const;

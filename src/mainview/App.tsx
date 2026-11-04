@@ -4,14 +4,15 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAppState, canGoBack, routeTaskId, routeShowsTaskWorkspace, projectIdForRoute, routeSpaceId, routeAfterTaskClosed, taskOpenRoute, getTaskOpenMode, OPEN_SETTINGS_SECTION_EVENT, type AppAction, type OpenSettingsSectionDetail, type Route } from "./state";
 import { lastProjectForSpace, rememberProjectForSpace } from "./utils/spaceBoardMemory";
 import { api, isElectrobun, getRpcConnectionState } from "./rpc";
+import { ignoreStartupReadFailure, startupRead } from "./startup-read";
 import { setWebNotificationsSuppressed, showWebNotificationOrToast, type WebNotificationDetail } from "./utils/webNotification";
-import { useT, useLocale } from "./i18n";
+import { useT, useLocale, type TranslationKey } from "./i18n";
 import { useStreamerMode } from "./streamer-mode";
 import { isProjectSilencedForDisplay, setSensitiveProjectIds } from "./sensitive-projects";
 import { statusKey } from "./i18n/status";
 import { columnAgentFailureCopy } from "./utils/columnAgentFailureToast";
 import { handleMenuAction } from "./menuRouter";
-import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus } from "../shared/types";
+import type { AgentLaunchChoice, AgentLaunchRequest, AppRPCSchema, BoardCopyFailureReason, GlobalSettings as GlobalSettingsType, Project, RemoteAccessStatus, RemoteNetInterface, RequirementCheckResult, RosettaWarningInfo, LiveArtifact, SharedArtifact, SharedImage, Task, TaskDialogSubject, TaskStatus } from "../shared/types";
 import { ACTIVE_STATUSES, orderProjectsForDisplay, getTaskTitle } from "../shared/types";
 import { useGlobalShortcut } from "./hooks/useGlobalShortcut";
 import { useAgents } from "./hooks/useAgents";
@@ -48,6 +49,7 @@ import SessionsScreen from "./components/SessionsScreen";
 import ViewportLab from "./components/ViewportLab";
 import NativePaneLayoutLab from "./labs/native-pane/NativePaneLayoutLab";
 import { setToastSuppressed, taskToastContext, ToastHost, toast, type ToastEntry, type ToastOrigin } from "./toast";
+import { toastClearanceRef } from "./toast-clearance";
 import { agentMessageToast, type AgentMessageDetail, type AgentToastEnd } from "./agent-message-toast";
 import { useSpaces } from "./useSpaces";
 import AgentTrafficScreen from "./components/agent-traffic/AgentTrafficScreen";
@@ -62,6 +64,7 @@ import { useAgentTrafficEnabled } from "./hooks/useAgentTrafficEnabled";
 import { isControlHidden, syncHiddenControlsFromGlobalSettings } from "./hidden-controls";
 import { useIsControlHidden } from "./hooks/useIsControlHidden";
 import { syncGlobalSettingsCache } from "./global-settings-cache";
+import { DEFAULT_GLOBAL_SETTINGS } from "./components/global-settings/utils";
 import StuckPreparationPopover from "./components/StuckPreparationPopover";
 import FolderPickerHost from "./components/FolderPickerModal";
 import KeyboardShortcutsModal, { type ShortcutsTab } from "./components/KeyboardShortcutsModal";
@@ -70,6 +73,8 @@ import RemoteAccessDownNotice from "./components/RemoteAccessDownNotice";
 import RemoteSignIn from "./components/RemoteSignIn";
 import RemoteAccessExposedPorts from "./components/RemoteAccessExposedPorts";
 import { ConfirmHost, confirm, whenConfirmHostMounted } from "./confirm";
+import SecretRequestModal from "./components/SecretRequestModal";
+import type { SecretRequest } from "../shared/secret-request";
 import AgentLaunchRequestModal from "./components/AgentLaunchRequestModal";
 import AboutModal from "./components/AboutModal";
 import FilePreviewModal from "./components/FilePreviewModal";
@@ -109,6 +114,7 @@ import { getAdjacentAliveVariant } from "./utils/variantGroups";
 import { isTaskTerminalRoute } from "./utils/terminalFullscreen";
 import WorkspaceTaskOverlay from "./components/WorkspaceTaskOverlay";
 import { closeTopBackLayer } from "./back-navigation";
+import { sharedArrivalNoun, type SharedArrivalKind } from "./utils/sharedArrivalNoun";
 import PushEnrollmentInvite from "./components/PushEnrollmentInvite";
 import ArtifactFreezeNotice from "./components/ArtifactFreezeNotice";
 
@@ -396,8 +402,10 @@ function App() {
 	const dontShowAgainRef = useRef(dontShowAgain);
 	dontShowAgainRef.current = dontShowAgain;
 
-	// Pending agent-initiated launch requests; only the head is on screen.
-	const [launchRequests, setLaunchRequests] = useState<AgentLaunchRequest[]>([]);
+	// Pending agent requests; only the head is on screen.
+	const [agentRequests, setAgentRequests] = useState<(AgentLaunchRequest | SecretRequest)[]>([]);
+	const [confirmBusy, setConfirmBusy] = useState(false);
+	const pendingAgentRequest = agentRequests[0];
 
 	// The bun `before-quit` gate asks us to confirm before the app actually quits
 	// (Cmd+Q, menu Quit, dock Quit). We just open the dialog; the real quit
@@ -520,7 +528,7 @@ function App() {
 	// `paneless`: opened from a surface that has no workspace pane behind it (the
 	// task detail modal). Such a viewer is a popup for its whole life — it neither
 	// docks nor hides with the route, because there is no task screen it belongs to.
-	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; projectId?: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number; paneless?: boolean } | null>(null);
+	const [artifactViewer, setArtifactViewer] = useState<{ taskId: string; projectId?: string; taskStatus?: TaskStatus; artifacts: SharedArtifact[]; index: number; paneless?: boolean; live?: LiveArtifact } | null>(null);
 	const markSharedItemsRead = useCallback((
 		projectId: string,
 		taskId: string,
@@ -572,11 +580,7 @@ function App() {
 	// every visit to Settings and every provider connect, so a fetch-once
 	// snapshot hid presets seeded or renamed after the first New Task modal.
 	const agents = useAgents();
-	const [globalSettings, setGlobalSettings] = useState<GlobalSettingsType>({
-		defaultAgentId: "builtin-claude",
-		defaultConfigId: "claude-auto",
-		taskSortOrder: "oldest-first",
-	});
+	const [globalSettings, setGlobalSettings] = useState<GlobalSettingsType>(DEFAULT_GLOBAL_SETTINGS);
 	// Which task's workspace pane may dock the artifact panel. Docking is the
 	// default; the popup is the explicit opt-in. Every surface with no pane of its
 	// own — the archived task modal, immersive fullscreen, a toast for a task that
@@ -626,26 +630,52 @@ function App() {
 	// Guarded on by the guided tour: acting on default settings would replay a
 	// finished tour on every launch.
 	const [settingsLoaded, setSettingsLoaded] = useState(false);
+	const settingsLoadedRef = useRef(false);
+	const adoptHostSettings = useCallback((next: GlobalSettingsType) => {
+		syncAppearanceSettings(next);
+		syncGlobalSettingsCache(next);
+		syncHiddenControlsFromGlobalSettings(next);
+		settingsLoadedRef.current = true;
+		setGlobalSettings(next);
+		setSettingsLoaded(true);
+	}, []);
 	useEffect(() => {
 		let alive = true;
-		api.request.getGlobalSettings()
-			.then((next) => { if (alive) { syncAppearanceSettings(next); syncGlobalSettingsCache(next); syncHiddenControlsFromGlobalSettings(next); setGlobalSettings(next); setSettingsLoaded(true); } })
-			.catch(() => {});
+		startupRead("global settings", () => api.request.getGlobalSettings(), { isCancelled: () => !alive })
+			.then((next) => { if (alive) adoptHostSettings(next); })
+			.catch(ignoreStartupReadFailure);
 		return () => { alive = false; };
-	}, []);
+	}, [adoptHostSettings]);
+
+	// Every save sends the WHOLE object, so it is built from the host's settings —
+	// never from the placeholder. Saving the placeholder (a lost load, then the
+	// first `?`) overwrote settings.json and flipped the default preset to Fable 5.
+	const persistAppSettings = useCallback((update: (prev: GlobalSettingsType) => GlobalSettingsType | null) => {
+		const persist = () => setGlobalSettings((prev) => {
+			const next = update(prev);
+			if (!next) return prev;
+			api.request.saveGlobalSettings(next).catch(() => {});
+			return next;
+		});
+		if (settingsLoadedRef.current) {
+			persist();
+			return;
+		}
+		startupRead("global settings", () => api.request.getGlobalSettings())
+			.then((loaded) => {
+				if (!settingsLoadedRef.current) adoptHostSettings(loaded);
+				persist();
+			})
+			.catch(ignoreStartupReadFailure);
+	}, [adoptHostSettings]);
 
 	// The header's `?` wears a dismissible callout on the main screens until help
 	// mode has been opened once. Recorded here rather than at each entry point, so
 	// the shortcut, the menu, the palette, a HelpCard link and the button itself
 	// all count as discovery. One-way — never written back to false.
 	const markHelpDiscovered = useCallback(() => {
-		setGlobalSettings((prev) => {
-			if (prev.helpModeDiscovered) return prev;
-			const next = { ...prev, helpModeDiscovered: true };
-			api.request.saveGlobalSettings(next).catch(() => {});
-			return next;
-		});
-	}, []);
+		persistAppSettings((prev) => (prev.helpModeDiscovered ? null : { ...prev, helpModeDiscovered: true }));
+	}, [persistAppSettings]);
 
 	useEffect(() => {
 		if (helpMode) markHelpDiscovered();
@@ -663,13 +693,12 @@ function App() {
 	const finishTour = useCallback((tourId: string, completed: boolean) => {
 		setTour(null);
 		if (!completed) return;
-		setGlobalSettings((prev) => {
-			if (prev.completedTours?.includes(tourId)) return prev;
-			const next = { ...prev, completedTours: [...(prev.completedTours ?? []), tourId] };
-			api.request.saveGlobalSettings(next).catch(() => {});
-			return next;
-		});
-	}, []);
+		persistAppSettings((prev) => (
+			prev.completedTours?.includes(tourId)
+				? null
+				: { ...prev, completedTours: [...(prev.completedTours ?? []), tourId] }
+		));
+	}, [persistAppSettings]);
 
 	useEffect(() => {
 		function onStart(e: Event) {
@@ -764,6 +793,17 @@ function App() {
 			.getRosettaWarning()
 			.then(setRosettaWarning)
 			.catch((err) => console.error("Failed to check Rosetta status:", err));
+	}, []);
+
+	// A tmux server an older dev3 started outside launchd can still lose folder
+	// access (decisions/2026/10/26/tmux-server-as-launchd-job.md). Once per launch.
+	useEffect(() => {
+		api.request
+			.getTmuxServerNotice()
+			.then(({ predatesLaunchd }) => {
+				if (predatesLaunchd) toast.warning(t("terminal.legacyTmuxServer"), { source: "terminal", durationMs: 15_000 });
+			})
+			.catch((err) => console.error("Failed to check the tmux server:", err));
 	}, []);
 
 	// Navigation guard for unsaved-changes prompts (e.g. ProjectSettings, diff viewer)
@@ -1839,14 +1879,11 @@ function App() {
 
 	useEffect(() => {
 		function onGlobalSettingsUpdated(e: Event) {
-			const next = (e as CustomEvent<GlobalSettingsType>).detail;
-			syncGlobalSettingsCache(next);
-			syncHiddenControlsFromGlobalSettings(next);
-			setGlobalSettings(next);
+			adoptHostSettings((e as CustomEvent<GlobalSettingsType>).detail);
 		}
 		window.addEventListener("rpc:globalSettingsUpdated", onGlobalSettingsUpdated);
 		return () => window.removeEventListener("rpc:globalSettingsUpdated", onGlobalSettingsUpdated);
-	}, []);
+	}, [adoptHostSettings]);
 
 	// Terminal panes read the BiDi flag from a module cache, not from React state —
 	// one effect here covers every path that lands settings (initial load, push,
@@ -1860,6 +1897,16 @@ function App() {
 	useEffect(() => {
 		syncAgentTrafficFromGlobalSettings(globalSettings);
 	}, [globalSettings]);
+
+	// The hidden-controls set (§5.10) — same reasoning, plus it needs the FULL
+	// settings object cached so hide/restore/preset actions fired from anywhere
+	// (a right-click on a task card, say) can patch-and-save without owning
+	// Settings screen state.
+	useEffect(() => {
+		// The cache is a save base, so it never holds the pre-load placeholder.
+		if (settingsLoaded) syncGlobalSettingsCache(globalSettings);
+		syncHiddenControlsFromGlobalSettings(globalSettings);
+	}, [globalSettings, settingsLoaded]);
 
 	useEffect(() => {
 		function onProjectUpdated(e: Event) {
@@ -1921,10 +1968,11 @@ function App() {
 	// is clickable and opens that task, honoring the user's task-open-mode.
 	useEffect(() => {
 		function onCliToast(e: Event) {
-			const { taskId, projectId, message, level, durationMs, taskSeq, taskTitle, projectName } = (e as CustomEvent).detail as {
+			const { taskId, projectId, message, messageKey, level, durationMs, taskSeq, taskTitle, projectName } = (e as CustomEvent).detail as {
 				taskId: string | null;
 				projectId: string | null;
 				message: string;
+				messageKey?: "kanban.launchAccountRemoved";
 				level: "info" | "success" | "error";
 				durationMs?: number;
 				taskSeq?: number;
@@ -1938,11 +1986,11 @@ function App() {
 					? () => openTaskFromNotification(taskId, projectId)
 					: undefined;
 			const context = taskToastContext(taskSeq, projectName, taskTitle);
-			toast[level](message, { durationMs, onClick, context, taskId: taskId ?? undefined });
+			toast[level](messageKey ? t(messageKey) : message, { durationMs, onClick, context, taskId: taskId ?? undefined });
 		}
 		window.addEventListener("rpc:cliToast", onCliToast);
 		return () => window.removeEventListener("rpc:cliToast", onCliToast);
-	}, [openTaskFromNotification]);
+	}, [openTaskFromNotification, t]);
 
 	// One agent wrote into another task's agent (`dev3 message` from a worktree).
 	// Its own violet variant and a two-identity source line — the only toast whose
@@ -2070,7 +2118,7 @@ function App() {
 				projectId: string;
 				images: SharedImage[];
 				newCount: number;
-				newKind?: "image" | "video";
+				newKind?: SharedArrivalKind;
 				taskSeq?: number;
 				taskTitle?: string;
 				projectName?: string;
@@ -2078,7 +2126,7 @@ function App() {
 			if (!taskId || !images?.length) return;
 
 			// Attention badge (the reducer self-suppresses it when already viewing the task).
-			const noun = newKind === "video" ? "showVideo" : "showImage";
+			const noun = sharedArrivalNoun(newKind);
 			addBellUnlessFocused(taskId, t.plural(`${noun}.attention`, newCount ?? 1));
 
 			const viewingThisTask = effectiveTaskId === taskId;
@@ -2172,21 +2220,22 @@ function App() {
 
 	useEffect(() => {
 		function onOpenArtifactViewer(e: Event) {
-			const { taskId, taskStatus, projectId, artifacts, index, paneless } = (e as CustomEvent).detail as {
+			const { taskId, taskStatus, projectId, artifacts, index, paneless, live } = (e as CustomEvent).detail as {
 				taskId: string;
 				taskStatus?: TaskStatus;
 				projectId: string;
 				artifacts: SharedArtifact[];
 				index?: number;
 				paneless?: boolean;
+				live?: LiveArtifact;
 			};
-			if (!taskId || !projectId || !artifacts?.length) return;
+			if (!taskId || !projectId || (!artifacts?.length && !live)) return;
 			markSharedItemsRead(projectId, taskId, "artifacts", artifacts);
 			// Opened for a task that is not on screen, or from over its diff? Then no
 			// pane offers a slot for it, so it lives as a popup — only a viewer that
 			// started docked may later hide itself when the route walks away from it.
 			const noPane = paneless === true || !(workspaceTaskTargetRef.current?.taskId === taskId || routeShowsTaskWorkspace(routeRef.current, taskId));
-			setArtifactViewer({ taskId, projectId, taskStatus, artifacts, index: index ?? artifacts.length - 1, paneless: noPane });
+			setArtifactViewer({ taskId, projectId, taskStatus, artifacts: artifacts ?? [], index: index ?? (artifacts?.length ?? 0) - 1, paneless: noPane, live });
 		}
 		window.addEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
 		return () => window.removeEventListener("dev3:openArtifactViewer", onOpenArtifactViewer);
@@ -2548,7 +2597,7 @@ function App() {
 		function onAgentLaunchRequested(e: Event) {
 			const request = (e as CustomEvent).detail as AgentLaunchRequest;
 			if (resolvedRequestIds.has(request.requestId)) return;
-			setLaunchRequests((queue) => (
+			setAgentRequests((queue) => (
 				queue.some((r) => r.requestId === request.requestId) ? queue : [...queue, request]
 			));
 		}
@@ -2557,13 +2606,13 @@ function App() {
 		function onAgentRequestResolved(e: Event) {
 			const { requestId } = (e as CustomEvent).detail as { requestId: string };
 			resolvedRequestIds.add(requestId);
-			setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
+			setAgentRequests((queue) => queue.filter((r) => r.requestId !== requestId));
 		}
 		let cancelled = false;
 		function restoreLaunchRequests() {
-			api.request.getPendingAgentLaunchRequests({}).then((requests) => {
-				if (!cancelled) setLaunchRequests((queue) => [...queue, ...requests.filter((r) => !resolvedRequestIds.has(r.requestId) && !queue.some((q) => q.requestId === r.requestId))]);
-			}).catch(() => {});
+			startupRead("pending agent launch requests", () => api.request.getPendingAgentLaunchRequests({}), { isCancelled: () => cancelled }).then((requests) => {
+				if (!cancelled) setAgentRequests((queue) => [...queue, ...requests.filter((r) => !resolvedRequestIds.has(r.requestId) && !queue.some((q) => q.requestId === r.requestId))]);
+			}).catch(ignoreStartupReadFailure);
 		}
 		window.addEventListener(RPC_STATUS_EVENT, restoreLaunchRequests);
 		restoreLaunchRequests();
@@ -2577,13 +2626,42 @@ function App() {
 		};
 	}, []);
 
+	useEffect(() => {
+		let cancelled = false;
+		const resolved = new Set<string>();
+		const add = (requests: SecretRequest[]) => setAgentRequests((queue) => [
+			...queue, ...requests.filter((request) => !resolved.has(request.requestId) && !queue.some((item) => item.requestId === request.requestId)),
+		]);
+		const restore = () => {
+			void startupRead("pending secret requests", () => api.request.listSecretRequests({}), { isCancelled: () => cancelled })
+				.then((requests) => { if (!cancelled) add(requests); })
+				.catch(ignoreStartupReadFailure);
+		};
+		const requested = (event: Event) => add([(event as CustomEvent<SecretRequest>).detail]);
+		const finished = (event: Event) => {
+			const { requestId } = (event as CustomEvent<{ requestId: string }>).detail;
+			resolved.add(requestId);
+			setAgentRequests((queue) => queue.filter((request) => request.requestId !== requestId));
+		};
+		window.addEventListener("rpc:secretRequested", requested);
+		window.addEventListener("rpc:secretRequestResolved", finished);
+		window.addEventListener(RPC_STATUS_EVENT, restore);
+		restore();
+		return () => {
+			cancelled = true;
+			window.removeEventListener("rpc:secretRequested", requested);
+			window.removeEventListener("rpc:secretRequestResolved", finished);
+			window.removeEventListener(RPC_STATUS_EVENT, restore);
+		};
+	}, []);
+
 	const respondToLaunchRequest = useCallback((
 		request: AgentLaunchRequest,
 		approved: boolean,
 		launch?: AgentLaunchChoice,
 	) => {
 		const { requestId } = request;
-		setLaunchRequests((queue) => queue.filter((r) => r.requestId !== requestId));
+		setAgentRequests((queue) => queue.filter((r) => r.requestId !== requestId));
 		api.request.respondToAgentLaunchRequest({
 			requestId,
 			approved,
@@ -2691,6 +2769,25 @@ function App() {
 		}
 		window.addEventListener("rpc:columnAgentFailed", onColumnAgentFailed);
 		return () => window.removeEventListener("rpc:columnAgentFailed", onColumnAgentFailed);
+	}, []);
+
+	// A board-copy write failed. The backend sends this once per failure streak.
+	useEffect(() => {
+		const keys = {
+			"missing-folder": "boardCopy.failed.missingFolder",
+			"not-writable": "boardCopy.failed.notWritable",
+			"disk-full": "boardCopy.failed.diskFull",
+			"kept-copy": "boardCopy.failed.keptCopy",
+			"unsupported-copy": "boardCopy.failed.unsupportedCopy",
+			other: "boardCopy.failed.other",
+		} as const satisfies Record<BoardCopyFailureReason, TranslationKey>;
+		function onBoardCopyFailed(e: Event) {
+			const payload = (e as CustomEvent).detail as AppRPCSchema["bun"]["messages"]["boardCopyFailed"];
+			if (isProjectSilencedForDisplay(payload.projectId)) return;
+			toast.error(t(keys[payload.reason] ?? keys.other, { name: payload.projectName }), { projectId: payload.projectId });
+		}
+		window.addEventListener("rpc:boardCopyFailed", onBoardCopyFailed);
+		return () => window.removeEventListener("rpc:boardCopyFailed", onBoardCopyFailed);
 	}, []);
 
 	// Notify user when background worktree/PTY preparation fails (e.g. empty repo,
@@ -3069,7 +3166,7 @@ function App() {
 			{terminalImmersiveVisible ? (
 				<TerminalImmersiveChrome onExit={() => setTerminalImmersiveActive(false)} />
 			) : (
-					<header aria-label={t("nav.appHeader")} inert={workspaceTaskTarget ? true : undefined}>
+					<header ref={toastClearanceRef} aria-label={t("nav.appHeader")} inert={workspaceTaskTarget ? true : undefined}>
 					{!isElectrobun && <AppMenuBar context={menuContext} onAction={handleMenuBarAction} />}
 					<GlobalHeader
 						route={route}
@@ -3276,7 +3373,7 @@ function App() {
 						<div className="flex justify-end gap-2 pt-1">
 							<button
 								onClick={() => setPendingNavigation(null)}
-								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
+								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-overlay-hover transition-colors"
 							>
 								{t("unsavedChanges.cancel")}
 							</button>
@@ -3338,7 +3435,7 @@ function App() {
 							)}
 							<button
 								onClick={() => setShowQuitDialog(false)}
-								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
+								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-overlay-hover transition-colors"
 							>
 								{t("quit.cancel")}
 							</button>
@@ -3402,7 +3499,7 @@ function App() {
 							<button
 								type="button"
 								onClick={closeRemoteQR}
-								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-elevated transition-colors"
+								className="px-4 py-2 text-sm rounded-lg text-fg-2 hover:text-fg hover:bg-overlay-hover transition-colors"
 							>
 								{t("remote.close")}
 							</button>
@@ -3712,20 +3809,24 @@ function App() {
 				onTabChange={(tab) => setShortcutsModal((s) => ({ ...s, tab }))}
 				onClose={() => setShortcutsModal((s) => ({ ...s, open: false }))}
 			/>
-			<ConfirmHost />
-			{launchRequests[0] && (
+			<ConfirmHost onBusyChange={setConfirmBusy} />
+			{!confirmBusy && pendingAgentRequest && ("env" in pendingAgentRequest ? (
+				<SecretRequestModal key={pendingAgentRequest.requestId} request={pendingAgentRequest}
+					onDone={() => setAgentRequests((queue) => queue.filter((request) => request.requestId !== pendingAgentRequest.requestId))} />
+			) : (
 				<AgentLaunchRequestModal
-					key={launchRequests[0].requestId}
-					request={launchRequests[0]}
-					onRespond={(approved, launch) => respondToLaunchRequest(launchRequests[0]!, approved, launch)}
+					key={pendingAgentRequest.requestId}
+					request={pendingAgentRequest}
+					onRespond={(approved, launch) => respondToLaunchRequest(pendingAgentRequest, approved, launch)}
 				/>
-			)}
+			))}
 			{artifactViewer && (
 				<TaskArtifactViewer
 					taskId={artifactViewer.taskId}
 					projectId={artifactViewer.projectId}
 					task={findViewerTask(artifactViewer.taskId)}
 					taskStatus={artifactViewer.taskStatus}
+					live={state.currentProjectTasks.find((candidate) => candidate.id === artifactViewer.taskId)?.liveArtifact ?? artifactViewer.live}
 					artifacts={artifactViewer.artifacts}
 					initialIndex={artifactViewer.index}
 					offscreen={artifactOffscreen}

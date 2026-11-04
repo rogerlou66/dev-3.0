@@ -8,6 +8,7 @@ import { useT } from "../i18n";
 import { useProjectPrivacy } from "../sensitive-projects";
 import LabelChip from "./LabelChip";
 import LabelPicker from "./LabelPicker";
+import EpicSelect from "./EpicSelect";
 import PriorityBadge from "./PriorityBadge";
 import { ImageAttachmentsStrip } from "./ImageAttachmentsStrip";
 import { useClipboardPaste } from "../hooks/useClipboardPaste";
@@ -35,7 +36,7 @@ type SubmitMode = "save" | "run" | "scratch" | "draft";
  */
 type PresetTaskType = TaskType;
 type TaskTypeChoice = "standard" | PresetTaskType;
-const PRESET_TASK_TYPES: readonly TaskTypeChoice[] = ["standard", "coordinator", "pr-review"];
+const PRESET_TASK_TYPES: readonly TaskTypeChoice[] = ["standard", "coordinator", "pr-review", "board-cleanup"];
 
 interface ProjectCurrentBranchInfo {
 	branch: string | null;
@@ -88,6 +89,7 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 	const [description, setDescription] = useState(draftTask?.description ?? initialText ?? "");
 	const [creating, setCreating] = useState(false);
 	const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>(draftTask?.labelIds ?? []);
+	const [epicId, setEpicId] = useState<string | null>(draftTask?.epicId ?? null);
 	const [priority, setPriority] = useState<TaskPriority>(draftTask?.priority ?? DEFAULT_PRIORITY);
 	const [labelPickerOpen, setLabelPickerOpen] = useState(false);
 	const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -101,7 +103,7 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 	const [checkedProjectCurrentBranch, setCheckedProjectCurrentBranch] = useState(false);
 	const [pendingBranchChoice, setPendingBranchChoice] = useState<string | null>(null);
 	const [pendingSubmitMode, setPendingSubmitMode] = useState<SubmitMode | null>(null);
-	const [taskType, setTaskType] = useState<TaskTypeChoice>("standard");
+	const [taskType, setTaskType] = useState<TaskTypeChoice>(draftTask?.taskType ?? "standard");
 	const [dismissedPrUrl, setDismissedPrUrl] = useState<string | null>(null);
 	const [prApplying, setPrApplying] = useState(false);
 	// Bumped when a save is blocked on the missing PR link, so the field explains why.
@@ -305,13 +307,13 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 	 * the user's own text below it — otherwise every coordinator task is called
 	 * "You are the COORDINATOR of this board: a manager who owns an outcome...".
 	 */
-	const activePresetPrompt = taskType !== "standard" && presetSettings
+	const activePresetPrompt = taskType !== "standard"
 		? presetPrompt(taskType, presetSettings)
 		: null;
 	const titleSource = activePresetPrompt ? withoutPresetPrompt(description, activePresetPrompt) : description;
 	const generatedTitle = titleSource.trim()
 		? titleFromDescription(titleSource)
-		: "";
+		: taskType === "board-cleanup" ? t("createTask.taskTypeCleanup") : "";
 
 	useEffect(() => {
 		textareaRef.current?.focus();
@@ -346,14 +348,17 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 	const hasAnyInput = !!description.trim()
 		|| !!customTitle
 		|| selectedLabelIds.length > 0
+		|| epicId !== null
 		|| priority !== DEFAULT_PRIORITY
 		|| branchTouched;
 
 	const draftDirty = !!draftTask && (
 		description !== (draftTask.description ?? "")
+		|| taskType !== (draftTask.taskType ?? "standard")
 		|| (customTitle ?? null) !== (draftTask.customTitle ?? null)
 		|| priority !== (draftTask.priority ?? DEFAULT_PRIORITY)
 		|| !sameLabelIds(selectedLabelIds, draftTask.labelIds ?? [])
+		|| epicId !== (draftTask.epicId ?? null)
 		|| (selectedBranch ?? null) !== (draftTask.existingBranch ?? null)
 	);
 
@@ -401,16 +406,22 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 		if (creating) return;
 		setCreating(true);
 		try {
-			const updated = await api.request.editTask({
+			let updated = await api.request.editTask({
 				taskId: draftTask.id,
 				projectId: draftTask.projectId,
 				description: trimmed,
+				...(!customTitle && activePresetPrompt && generatedTitle ? { title: generatedTitle } : {}),
 				customTitle,
 				priority,
 				labelIds: selectedLabelIds,
 				existingBranch: branch,
 				draft: keepDraft,
+				...((taskType === "standard" ? null : taskType) !== (draftTask.taskType ?? null)
+					? { taskType: taskType === "standard" ? null : taskType } : {}),
 			});
+			if (epicId !== (draftTask.epicId ?? null)) {
+				updated = await api.request.setTaskEpic({ projectId: draftTask.projectId, taskId: draftTask.id, epicId });
+			}
 			dispatch({ type: "updateTask", task: updated });
 			if (mode === "run" && onCreateAndRun) {
 				onCreateAndRun(updated, project);
@@ -444,9 +455,9 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 				...(branch ? { existingBranch: branch } : {}),
 				...(isVirtual && opsFolder ? { opsWorkDir: opsFolder } : {}),
 				...(priority !== DEFAULT_PRIORITY ? { priority } : {}),
-				// Only the coordinator preset is a persisted task type — PR review changes
-				// the prompt and nothing about the task (see TASK_TYPES).
-				...(taskType !== "standard" ? { taskType } : {}),
+				// Persist the role alongside its standing brief.
+				...(mode !== "scratch" && taskType !== "standard" ? { taskType } : {}),
+				...(epicId ? { epicId } : {}),
 			});
 			// Display the persisted task before non-fatal title and label updates.
 			dispatch({ type: "addTask", task: created });
@@ -655,7 +666,7 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 									disabled={attachUploading}
 									aria-label={t("images.attachFiles")}
 									title={t("images.attachFiles")}
-									className="flex items-center justify-center w-7 h-7 rounded-lg text-fg-3 hover:text-fg hover:bg-elevated transition-colors disabled:opacity-40"
+									className="flex items-center justify-center w-7 h-7 rounded-lg text-fg-3 hover:text-fg hover:bg-overlay-hover transition-colors disabled:opacity-40"
 									data-testid="create-task-attach"
 								>
 									{attachUploading ? (
@@ -893,6 +904,16 @@ function CreateTaskModal({ project: initialProject, projects, dispatch, initialT
 								onToggle={toggleLabelId}
 							/>
 						)}
+					</div>
+				</div>
+
+				{/* Epic — optional; a GUI task joins none unless the user picks one. */}
+				<div className="space-y-2">
+					<label htmlFor="create-task-epic" className="text-fg-2 text-sm font-medium">
+						{t("epic.row")}
+					</label>
+					<div className="max-w-xs" data-testid="create-task-epic">
+						<EpicSelect id="create-task-epic" value={epicId} onChange={setEpicId} />
 					</div>
 				</div>
 
@@ -1136,11 +1157,13 @@ function TaskTypePicker({ value, onChange, reviewAvailable }: TaskTypePickerProp
 		standard: "createTask.taskTypeStandard",
 		coordinator: "createTask.taskTypeCoordinator",
 		"pr-review": "createTask.taskTypeReview",
+		"board-cleanup": "createTask.taskTypeCleanup",
 	} as const;
 	const hintKey = {
 		standard: "createTask.taskTypeStandardHint",
 		coordinator: "createTask.taskTypeCoordinatorHint",
 		"pr-review": "createTask.reviewModeHint",
+		"board-cleanup": "createTask.taskTypeCleanupHint",
 	} as const;
 
 	return (
@@ -1152,7 +1175,7 @@ function TaskTypePicker({ value, onChange, reviewAvailable }: TaskTypePickerProp
 			<div
 				role="radiogroup"
 				aria-label={t("createTask.taskType")}
-				className="inline-flex items-center gap-0.5 rounded-lg border border-edge bg-raised p-0.5"
+				className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-edge bg-raised p-0.5"
 				onKeyDown={(event) => handleRadioGroupKeys(event, options, value, onChange)}
 			>
 				{options.map((type) => {
@@ -1207,6 +1230,8 @@ function prFailureMessage(result: PrResolveResponse, t: ReturnType<typeof useT>)
 			return t("createTask.prFailForeignRepo", { prRepo: result.prRepo ?? "", projectRepo: result.projectRepo ?? "" });
 		case "fork-fetch":
 			return t("createTask.prFailForkFetch");
+		case "origin-fetch":
+			return t("createTask.prFailOriginFetch", { error: result.error ?? "" });
 		case "not-found":
 			return t("createTask.prFailNotFound");
 		default:

@@ -3,6 +3,7 @@ import Tooltip from "./components/Tooltip";
 import { useNarrowViewport } from "./hooks/useNarrowViewport";
 import { useT } from "./i18n";
 import type { TranslationKey } from "./i18n";
+import { clearanceListeners, clearanceNodes } from "./toast-clearance";
 
 /**
  * `agent` is not a severity — it marks traffic between two agents with no human
@@ -308,6 +309,54 @@ const VARIANT: Record<ToastVariant, { icon: string; border: string; text: string
 	agent: { icon: "\uf0e0", border: "border-agent/40", text: "text-agent", bar: "bg-agent" },
 };
 
+/** Card width plus the stack's side padding: the band of the window toasts occupy. */
+const TOAST_COLUMN_REM = 28;
+/** Room the stack always keeps for one card, even when toolbars fill a short window. */
+const MIN_STACK_ROOM_REM = 8;
+
+/** Bottom edge, in px, of the lowest registered chrome that reaches into the toast column. */
+function toastStackTop(): number {
+	if (typeof window === "undefined") return 0;
+	const rootPx = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+	const columnLeft = window.innerWidth - TOAST_COLUMN_REM * rootPx;
+	let bottom = 0;
+	for (const node of clearanceNodes) {
+		const rect = node.getBoundingClientRect();
+		if (rect.height <= 0 || rect.right <= columnLeft) continue;
+		bottom = Math.max(bottom, rect.bottom);
+	}
+	return Math.max(0, Math.min(bottom, window.innerHeight - MIN_STACK_ROOM_REM * rootPx));
+}
+
+/** Re-measured on every stack change too: chrome can move without resizing. */
+function useToastStackTop(stackVersion: unknown): number {
+	const [top, setTop] = useState(0);
+	useLayoutEffect(() => {
+		setTop(Math.round(toastStackTop()));
+	}, [stackVersion]);
+	useLayoutEffect(() => {
+		let observer: ResizeObserver | null = null;
+		const measure = () => setTop(Math.round(toastStackTop()));
+		const observe = () => {
+			observer?.disconnect();
+			if (typeof ResizeObserver !== "undefined") {
+				observer = new ResizeObserver(measure);
+				for (const node of clearanceNodes) observer.observe(node);
+			}
+			measure();
+		};
+		clearanceListeners.add(observe);
+		window.addEventListener("resize", measure);
+		observe();
+		return () => {
+			clearanceListeners.delete(observe);
+			window.removeEventListener("resize", measure);
+			observer?.disconnect();
+		};
+	}, []);
+	return top;
+}
+
 function rendererIsActive(): boolean {
 	if (typeof document === "undefined") return true;
 	const focused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
@@ -319,6 +368,7 @@ export function ToastHost({ onTaskOverflow, resolveOrigin, isTaskInView }: Toast
 	const narrow = useNarrowViewport(NARROW_VIEWPORT_PX);
 	const maxVisibleToasts = narrow ? NARROW_MAX_VISIBLE_TOASTS : MAX_VISIBLE_TOASTS;
 	const [toasts, setToasts] = useState<RenderedToast[]>([]);
+	const stackTop = useToastStackTop(toasts);
 	const toastsRef = useRef<RenderedToast[]>([]);
 	const runtimesRef = useRef(new Map<number, ToastRuntime>());
 	const activeRef = useRef(rendererIsActive());
@@ -532,7 +582,11 @@ export function ToastHost({ onTaskOverflow, resolveOrigin, isTaskInView }: Toast
 	}, []);
 
 	return (
-		<div className="fixed top-14 right-4 z-[55] flex flex-col gap-5 pointer-events-none">
+		<div
+			data-toast-stack=""
+			className="fixed right-0 z-[55] flex flex-col gap-5 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-2 pb-4 pointer-events-none"
+			style={{ top: stackTop, maxHeight: `calc(100dvh - ${stackTop}px)` }}
+		>
 			{toasts.length > 0 && (
 			<div className="flex flex-col gap-2.5">
 			{toasts.map(({ entry, paused, context, onClick, slotId, earlier }) => {

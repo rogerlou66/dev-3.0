@@ -233,6 +233,24 @@ describe("rendering", () => {
 		expect(text).toMatch(/pane-1 zsh \[you, active\]/);
 		expect(text).toMatch(/pane-2 dev3 __pane-run \[run run-0123456789ab\]/);
 	});
+
+	it("marks each agent pane with its role and the handle `dev3 message --agent` takes", () => {
+		const text = renderPaneRunListing({
+			backend: "tmux",
+			screenReadable: true,
+			screenReadableDetail: "",
+			selfPaneId: "%1",
+			panes: [
+				{ paneId: "%1", index: 1, label: "bash cmd.sh", active: false, self: true, alive: null, runId: null, agentRole: "main", agentHandle: "AiEB" },
+				{ paneId: "%3", index: 2, label: "bash col-agent.sh", active: false, self: false, alive: null, runId: null, agentRole: "review", agentHandleUnavailable: "the agent in pane %3 has exited" },
+				{ paneId: "%4", index: 3, label: "zsh", active: false, self: false, alive: null, runId: null },
+			],
+			runs: [],
+		});
+		expect(text).toContain("1. %1 bash cmd.sh [main agent, you]\n     message it: --agent AiEB\n");
+		expect(text).toContain("2. %3 bash col-agent.sh [AI Review agent]\n     no --agent handle: the agent in pane %3 has exited\n");
+		expect(text).toMatch(/3\. %4 zsh\n\nruns:/);
+	});
 });
 
 describe("paneRunShell — the one place a shell dialect genuinely differs", () => {

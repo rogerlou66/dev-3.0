@@ -11,8 +11,10 @@ const t = Object.assign((key: string) => key, {
 
 function renderSection(settings: Partial<GlobalSettings> = {}) {
 	const onRemoteTunnelChange = vi.fn();
+	const onResourceLevelsChange = vi.fn();
 	const onStaticAccessCodeChange = vi.fn();
 	const onRemotePortChange = vi.fn();
+	const onAutoCleanupTaskHistoryToggle = vi.fn();
 	const tree = (next: Partial<GlobalSettings>) => (
 		<I18nProvider>
 			<SystemSettingsSection
@@ -23,15 +25,45 @@ function renderSection(settings: Partial<GlobalSettings> = {}) {
 				onRemotePortChange={onRemotePortChange}
 				onStaticAccessCodeChange={onStaticAccessCodeChange}
 				onPreventSleepToggle={vi.fn()}
+				onResourceLevelsChange={onResourceLevelsChange}
 				onConfirmBeforeQuitToggle={vi.fn()}
+				onAutoCleanupTaskHistoryToggle={onAutoCleanupTaskHistoryToggle}
 			/>
 		</I18nProvider>
 	);
 	const { rerender } = render(tree(settings));
 	/** Settings arrive asynchronously; this is the second render carrying them. */
 	const settingsArrive = (next: Partial<GlobalSettings>) => rerender(tree(next));
-	return { onRemoteTunnelChange, onRemotePortChange, onStaticAccessCodeChange, settingsArrive };
+	return { onRemoteTunnelChange, onRemotePortChange, onStaticAccessCodeChange, onResourceLevelsChange, onAutoCleanupTaskHistoryToggle, settingsArrive };
 }
+
+describe("SystemSettingsSection — automatic cleanup", () => {
+	it("starts off with no saved preference and explicitly opts in", async () => {
+		const { onAutoCleanupTaskHistoryToggle } = renderSection();
+		const toggle = screen.getByRole("switch", { name: "settings.autoCleanupTaskHistory" });
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		expect(onAutoCleanupTaskHistoryToggle).toHaveBeenCalledWith(true);
+	});
+
+	it("shows an explicit opt-in and allows disabling it", async () => {
+		const { onAutoCleanupTaskHistoryToggle } = renderSection({ autoCleanupTaskHistory: true });
+		const toggle = screen.getByRole("switch", { name: "settings.autoCleanupTaskHistory" });
+		expect(toggle).toBeChecked();
+		await userEvent.click(toggle);
+		expect(onAutoCleanupTaskHistoryToggle).toHaveBeenCalledWith(false);
+	});
+});
+
+describe("SystemSettingsSection — resource levels", () => {
+	it("shows the defaults and stores only the sparse override on change", async () => {
+		const { onResourceLevelsChange } = renderSection({ resourceLevels: { diskWarnGb: 50 } });
+		expect((screen.getByTestId("resource-level-cpuBusyWarnPercent") as HTMLSelectElement).value).toBe("80");
+		expect((screen.getByTestId("resource-level-diskWarnGb") as HTMLSelectElement).value).toBe("50");
+		await userEvent.selectOptions(screen.getByTestId("resource-level-diskCriticalGb"), "10");
+		expect(onResourceLevelsChange).toHaveBeenCalledWith({ diskWarnGb: 50, diskCriticalGb: 10 });
+	});
+});
 
 describe("SystemSettingsSection — tunnel provider", () => {
 	it("defaults to the built-in provider and hides the custom fields", () => {

@@ -38,13 +38,13 @@ const help = {
 	// ── Board chrome ──
 	"help.board.filterBar.title": "Búsqueda y filtros",
 	"help.board.filterBar.body":
-		"Una sola caja busca y filtra el tablero. Escribe texto libre para una búsqueda difusa por título/descripción, o filtra con tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" is:attention is:blocked is:home is:hidden is:hibernated has:port. Los chips de prioridad P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens, así que escribir y hacer clic nunca se contradicen. La × lo borra todo. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
+		"Una sola caja busca y filtra el tablero. Escribe texto libre para una búsqueda difusa por título/descripción, o filtra con tokens — priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" epic:\"Payments v2\" children:1801 is:attention is:blocked is:home is:hidden is:hibernated is:keepalive is:stalled has:port has:pr pr:open pr:merged pr:closed. Los chips de prioridad P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens, así que escribir y hacer clic nunca se contradicen. La × lo borra todo. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
 	"help.board.priorityFilter.title": "Filtro de prioridad",
 	"help.board.priorityFilter.body":
 		"Cada tarea tiene una prioridad P0 (la más alta) … P4 (la más baja, P3 por defecto). Las columnas siempre se ordenan por ella, así lo más importante queda arriba. Haz clic en un chip para mostrar solo esa prioridad; arrastra una tarjeta a otra banda para recategorizarla.",
 	"help.filters.dsl.title": "Búsqueda y filtros",
 	"help.filters.dsl.body":
-		"Escribe para una búsqueda difusa por títulos y descripciones, o filtra con tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" is:attention is:blocked is:home is:hidden is:hibernated has:port. Entrecomilla los valores con espacios. Combina facetas (Y); repite una faceta para ampliar (O). Los chips P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
+		"Escribe para una búsqueda difusa por títulos y descripciones, o filtra con tokens: priority:P0 label:\"Bug Fix\" agent:Codex status:review type:coordinator space:\"Client X\" epic:\"Payments v2\" children:1801 is:attention is:blocked is:home is:hidden is:hibernated is:keepalive is:stalled has:port has:pr pr:open pr:merged pr:closed. Entrecomilla los valores con espacios. children:1801 (o children:proyecto/1801) muestra esa tarea con las tareas que creó. is:stalled encuentra tareas en curso o en revisión por IA sin cambio de estado en 4 horas; pr:open/merged/closed filtran por el estado del pull request actual. epic:\"Payments v2\" muestra las tareas de una épica — o haz clic en el chip de épica de una tarjeta. Combina facetas (Y); repite una faceta para ampliar (O). Los chips P0–P4, los chips de etiquetas y el embudo editan estos mismos tokens. Gestiona las etiquetas en Configuración del proyecto → Etiquetas.",
 	"help.board.taskCard.title": "Tarjeta de tarea",
 	"help.board.taskCard.body":
 		"Los puntos de colores son variantes paralelas de agentes (cada una en su worktree), la campana significa que el agente te llama, y la insignia #123 es el PR de la tarea con su estado de CI y revisión. Clic derecho para todas las acciones.",
@@ -190,7 +190,7 @@ const help = {
 		"N variantes significa N agentes independientes resolviendo la misma tarea en paralelo, cada uno en su propio worktree y rama. Compara los resultados y quédate con el mejor — el resto se cancela.",
 	"help.modal.addProject.title": "Añadir un proyecto",
 	"help.modal.addProject.body":
-		"Apunta dev3 a un repo git local, clona uno remoto primero, o crea un tablero de Operaciones — un proyecto virtual cuyas tareas ejecutan agentes en carpetas gestionadas, sin git.",
+		"Apunta dev3 a un repo git local, clona uno remoto primero, o crea un tablero de Operaciones — un proyecto virtual cuyas tareas ejecutan agentes en carpetas gestionadas, sin git. Activa la configuración automática para guardar en .dev3/config.local.json los comandos de instalación y de desarrollo que encuentre dev3.",
 	"help.modal.importConversations.title": "Importar conversaciones",
 	"help.modal.importConversations.body":
 		"Las conversaciones de Claude Code y Codex que se ejecutaron en la carpeta de este proyecto fuera de dev3 se convierten en tareas normales: un título, un resumen de la conversación como descripción y la etiqueta «imported». Claude titula sus propias conversaciones; una de Codex se titula con la primera petición. Lo reciente conserva un worktree; lo antiguo llega a Completado.",
@@ -213,7 +213,7 @@ const help = {
 	// ── Viewers & workspace ──
 	"help.viewer.images.title": "Imágenes compartidas",
 	"help.viewer.images.body":
-		"Capturas y renders que un agente compartió con `dev3 show-image`, las más nuevas primero. Recorre el historial, descarga una imagen (también con clic derecho), copia su ruta o revela el archivo original en disco. Un vídeo compartido con `dev3 show-video` se reproduce aquí mismo: reproducir, pausar, buscar y volumen están en el reproductor, y nunca arranca solo.",
+		"Capturas y renders que un agente compartió con `dev3 show-image`, las más nuevas primero. Recorre el historial, descarga una imagen (también con clic derecho), copia su ruta o revela el archivo original en disco. El vídeo y el audio compartidos con `dev3 show-media` se reproducen aquí mismo: reproducir, pausar, buscar y volumen están en el reproductor, y nada empieza por sí solo.",
 	"help.viewer.artifact.title": "Artefacto",
 	"help.viewer.artifact.body":
 		"Un informe HTML interactivo que un agente construyó con `dev3 show-artifact`, aislado y abierto como una ventana emergente sobre la tarea, igual que las imágenes. Ponlo a pantalla completa, recorre artefactos pasados o descárgalo como HTML (o un ZIP cuando incluye imágenes). Escape lo cierra.",
@@ -256,6 +256,8 @@ const help = {
 	"help.header.connectionQuality.body":
 		"Solo cuando ves dev3 desde otro dispositivo: es la ida y vuelta de una petición real por la misma conexión que usa la aplicación. Sube a la cabecera cuando el enlace deja de ser rápido; el resto del tiempo espera en este menú. Pasa el cursor para ver cuánto se gastó en tu ordenador y cuánto en la red.",
 	"help.header.memory.body": "El número es memoria libre, no usada. Pasa el cursor para ver quién se llevó el resto: dev-3.0 en sí ocupa unos cientos de megabytes; los gigabytes son de los agentes que lanzaste y de lo demás que esté corriendo.",
+	"help.header.systemLoad.title": "Las píldoras de CPU y disco avisan de que va justo",
+	"help.header.systemLoad.body": "Solo aparecen mientras la carga de CPU o el disco libre cruzan tus niveles (Ajustes → Sistema). Pasa el cursor para ver quién los usa.",
 	"help.sidebar.scope.title": "Qué proyectos entran en la lista",
 	"help.sidebar.scope.body":
 		"Tres iconos, tres tamaños de lista. La carpeta muestra solo las tareas de este proyecto. El anillo muestra todos los proyectos del mismo espacio, y aparece tachado cuando este proyecto no está en ninguno. El globo muestra todas las tareas de la máquina: así encuentras trabajo que dejaste en otro sitio.",

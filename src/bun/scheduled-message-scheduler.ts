@@ -15,10 +15,12 @@ import type { AgentPromptDelivery } from "../shared/agent-prompt-delivery";
 import type { AgentMessageOrigin } from "../shared/agent-message-log";
 import { deliverAgentPrompt } from "./agent-prompt-delivery";
 import { coordinatorBoardEpilogue } from "./coordinator-board";
-import { wrapAgentMessage } from "../shared/agent-message-envelope";
+import { type ExternalSenderStamp, wrapAgentMessage, wrapExternalSenderMessage } from "../shared/agent-message-envelope";
+import type { ExternalSender } from "../shared/external-senders";
 import { spillOversizedAgentMessage } from "./agent-message-spill";
 import { appendAgentMessageLog } from "./agent-message-log";
 import { resolveScheduledMessageAuthorPane } from "./scheduled-message-author";
+import { type AgentPaneRole, agentPaneRoles, isSoleMainAgent } from "./agent-message-target";
 // Import push via the barrel (not ./rpc-handlers/shared) so tests that mock
 // `../rpc-handlers` — e.g. the cli-socket lost-update race suites, which reach
 // this module through cli-socket-server — don't load the real Electrobun-backed
@@ -71,19 +73,56 @@ function messagePreview(text: string): string {
  * CLI or a queue waits for the pane to go quiet; text the user just clicked "Send to
  * agent" on does not — see {@link sendMessageImmediately}.
  */
-async function deliverToTarget(task: Task, message: ScheduledMessage, hold: boolean): Promise<AgentPromptDelivery> {
+/** A delivery verdict plus which of the task's agents it went to, when the pane is one. */
+export type MessageDelivery = AgentPromptDelivery & { agentRole?: AgentPaneRole };
+
+async function recipientRole(task: Task, paneId: string | undefined): Promise<AgentPaneRole | undefined> {
+	if (!paneId) return undefined;
+	try {
+		return (await agentPaneRoles(task)).get(paneId);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Is the sending agent its task's only agent, and the main one? Then the reply
+ * command needs no `--agent`. Asked at delivery, the latest moment before the
+ * receiver reads it; an agent added after that still leaves the reply on the main
+ * agent, which is the sender.
+ */
+async function senderIsAlone(source: AgentMessageSource): Promise<boolean> {
+	if (!source.agent) return false;
+	try {
+		const { resolveTaskAcrossProjects } = await import("./cli-socket/task-resolution");
+		const sender = (await resolveTaskAcrossProjects(source.taskId))?.task;
+		return sender ? await isSoleMainAgent(sender, source.agent) : false;
+	} catch {
+		return false;
+	}
+}
+
+async function deliverToTarget(
+	task: Task,
+	message: ScheduledMessage,
+	hold: boolean,
+	sender?: ExternalSenderStamp,
+): Promise<MessageDelivery> {
 	// Agent-to-agent traffic is wrapped at delivery time, so the queue (and the
 	// card chip that previews it) keeps the plain text the sender wrote. The spill
-	// already measured this exact envelope at queue time, so it fits one pty read.
-	const text = message.source
-		? wrapAgentMessage(message.text, message.source, task.projectId, message.subject)
-		: message.text;
+	// measured it at queue time with `--agent`, the longest it gets, so it fits one pty read.
+	const text = sender
+		? wrapExternalSenderMessage(message.text, sender, message.subject)
+		: message.source
+			? wrapAgentMessage(message.text, message.source, task.projectId, message.subject, await senderIsAlone(message.source))
+			: message.text;
 	// A coordinator's picture of the board goes stale between the messages it
 	// receives: things moved while it was not being spoken to. So every message
 	// reaching one ends on a fresh board snapshot — once per burst, built when the
 	// text is actually typed. Empty for every task that is not a coordinator.
 	const epilogue = () => coordinatorBoardEpilogue(task);
-	// A self-reminder goes back to the agent that wrote it, never to a sibling.
+	// A self-reminder goes back to the agent that wrote it, and an addressed message
+	// to the agent it names, never to a sibling. The hold checks it again at release.
 	let target = message.target;
 	if (message.author) {
 		const resolved = await resolveScheduledMessageAuthorPane(task, message.author);
@@ -94,9 +133,10 @@ async function deliverToTarget(task: Task, message: ScheduledMessage, hold: bool
 	// writing three in a row, or several peers reporting at once) then become one
 	// agent turn, and no text lands in the middle of the user's own line. See
 	// agent-message-hold.ts.
-	const delivery = await deliverAgentPrompt(task, text, target, { hold, epilogue });
+	const delivery = await deliverAgentPrompt(task, text, target, { hold, epilogue, author: message.author ?? null });
 	if (message.source) announceAgentMessage(task, message, delivery);
-	return delivery;
+	const agentRole = await recipientRole(task, delivery.paneId);
+	return agentRole ? { ...delivery, agentRole } : delivery;
 }
 
 /**
@@ -109,15 +149,22 @@ async function deliverToTarget(task: Task, message: ScheduledMessage, hold: bool
  * user reconstructing a silence needs to find. Every attempt is logged,
  * `not-delivered` included, and the row carries the real verdict, never an intent.
  */
-async function recordMessageAttempt(task: Task, message: ScheduledMessage, delivery: AgentPromptDelivery): Promise<void> {
+async function recordMessageAttempt(
+	task: Task,
+	message: ScheduledMessage,
+	delivery: MessageDelivery,
+	sender?: ExternalSender,
+): Promise<void> {
 	try {
 		const project = await data.getProject(task.projectId);
 		const source = message.source;
 		appendAgentMessageLog(project, {
 			at: new Date().toISOString(),
+			...(message.id ? { messageId: message.id } : {}),
 			fromTaskId: source?.taskId ?? null,
 			fromSeq: source?.seq ?? null,
 			...(source?.title ? { fromTitle: source.title } : {}),
+			...(sender ? { fromSender: sender.id, fromTitle: sender.label } : {}),
 			...(source?.projectId ? { fromProjectId: source.projectId } : {}),
 			toTaskId: task.id,
 			toSeq: task.seq,
@@ -133,6 +180,8 @@ async function recordMessageAttempt(task: Task, message: ScheduledMessage, deliv
 			body: message.text,
 			bodyKind: message.spilledPath ? "spill-pointer" : "text",
 			...(message.spilledPath ? { spillPath: message.spilledPath } : {}),
+			...(delivery.paneId ? { toPaneId: delivery.paneId } : {}),
+			...(delivery.agentRole ? { toAgentRole: delivery.agentRole } : {}),
 			status: delivery.status,
 			...(delivery.reason ? { reason: delivery.reason } : {}),
 			...(delivery.detail ? { detail: delivery.detail } : {}),
@@ -218,7 +267,7 @@ export async function fireScheduledMessage(
 	message: ScheduledMessage,
 	opts: { late: boolean; hold?: boolean },
 ): Promise<{ delivery: AgentPromptDelivery; task: Task }> {
-	let delivery: AgentPromptDelivery = { status: "not-delivered", reason: "pane-absent", detail: "the task is finished" };
+	let delivery: MessageDelivery = { status: "not-delivered", reason: "pane-absent", detail: "the task is finished" };
 	if (!isTerminal(task.status)) {
 		try {
 			// A fire on the clock is message traffic and waits for a quiet pane. The chip's
@@ -233,7 +282,7 @@ export async function fireScheduledMessage(
 	const updated = await removeFromQueue(project, task, message.id);
 	const preview = messagePreview(message.text);
 	if (delivery.status === "not-delivered") {
-		const who = message.author ? "the agent that scheduled it is gone" : "no live agent";
+		const who = !message.author ? "no live agent" : message.source ? "the addressed agent is gone" : "the agent that scheduled it is gone";
 		notifyOutcome(project, task, {
 			toast: `Scheduled message not delivered — ${who}: "${preview}"`,
 			level: "error",
@@ -398,33 +447,47 @@ export async function sendMessageImmediately(
 	text: string,
 	target?: ScheduledMessageTarget | null,
 	source?: AgentMessageSource | null,
-	opts: { hold?: boolean; subject?: string | null; origin?: AgentMessageOrigin } = {},
-): Promise<AgentPromptDelivery & { spilledPath: string | null }> {
+	opts: {
+		hold?: boolean;
+		subject?: string | null;
+		origin?: AgentMessageOrigin;
+		author?: ScheduledMessageAuthor | null;
+		/** A registered external sender wrote it (`--as-sender`); wins over `source`. */
+		externalSender?: ExternalSender | null;
+	} = {},
+): Promise<MessageDelivery & { spilledPath: string | null; messageId: string }> {
 	const trimmed = validateText(text);
 	if (isTerminal(task.status)) {
 		throw new Error("Cannot send a message to a completed or cancelled task");
 	}
+	const id = crypto.randomUUID();
+	const external = opts.externalSender ?? null;
+	const stamp = external ? { id: external.id, label: external.label, messageId: id } : undefined;
 	const { text: payload, spilledPath } = await spillOversizedAgentMessage(
 		task,
 		trimmed,
-		source ? { source, subject: opts.subject } : null,
+		stamp ? { sender: stamp, subject: opts.subject } : source ? { source, subject: opts.subject } : null,
 	);
+	const origin: AgentMessageOrigin | undefined = external ? "external-sender" : opts.origin;
 	const message: ScheduledMessage = {
-		id: "",
+		id,
 		text: payload,
 		...(opts.subject ? { subject: opts.subject } : {}),
 		at: "",
 		target: normalizeTarget(target),
-		...(source ? { source } : {}),
-		...(opts.origin ? { origin: opts.origin } : {}),
+		...(source && !external ? { source } : {}),
+		...(origin ? { origin } : {}),
 		...(spilledPath ? { spilledPath } : {}),
+		...(opts.author ? { author: opts.author } : {}),
 	};
-	const delivery = await deliverToTarget(task, message, opts.hold !== false);
-	await recordMessageAttempt(task, message, delivery);
+	const delivery = await deliverToTarget(task, message, opts.hold !== false, stamp);
+	await recordMessageAttempt(task, message, delivery, external ?? undefined);
 	if (delivery.status === "not-delivered") {
-		throw new Error("Could not deliver the message — the task has no live agent session.");
+		// A bound message says which agent is gone; a bare refusal keeps the old wording.
+		const why = message.author || delivery.reason === "pane-absent" ? delivery.detail : undefined;
+		throw new Error(`Could not deliver the message — ${why ?? "the task has no live agent session."}`);
 	}
-	return { ...delivery, spilledPath };
+	return { ...delivery, spilledPath, messageId: id };
 }
 
 /**

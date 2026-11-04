@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import type { Project, Task, TaskHistoryChange, TaskHistoryEntry, TaskMovement, TaskPriority, TaskStatus, TaskType, TipState } from "../shared/types";
+import type { Project, Task, TaskHistoryChange, TaskHistoryEntry, TaskMovement, TaskOrigin, TaskPriority, TaskStatus, TaskType, TipState } from "../shared/types";
 import { appendTaskMovement, DEFAULT_PRIORITY, DEFAULT_REVIEW_AGENT_ID, DEFAULT_REVIEW_CONFIG_ID, getTaskOverview, getTaskTitle, isStatusGuardBlocked, remapColumnAgents, titleFromDescription } from "../shared/types";
 import {
 	decodeTerminalBackend,
@@ -32,7 +32,30 @@ const TASK_BACKUPS_DIR = "tasks-backups";
 const TASK_BACKUP_RETENTION_HOURS = 72;
 // `name` is display-only: `path` is deliberately absent, so a rename never moves
 // a data dir, worktree dir or slug (AGENTS.md on-disk invariants).
-type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "autoAccountExclusions" | "reviewModePrompt" | "coordinatorPrompt" | "prReviewPrompt" | "artifactTemplate" | "artifactTemplatePath" | "env" | "conversationImportOfferedAt">>;
+type ProjectUpdates = Partial<Pick<Project, "name" | "setupScript" | "setupScriptLaunchMode" | "devScript" | "cleanupScript" | "defaultBaseBranch" | "githubAuthHost" | "githubAuthLogin" | "clonePaths" | "labels" | "customColumns" | "columnOrder" | "autoReviewEnabled" | "peerReviewEnabled" | "sparseCheckoutEnabled" | "sparseCheckoutPaths" | "builtinColumnAgents" | "customStatusLabels" | "sensitive" | "autoAccountExclusions" | "reviewModePrompt" | "coordinatorPrompt" | "prReviewPrompt" | "artifactTemplate" | "artifactTemplatePath" | "env" | "conversationImportOfferedAt" | "boardCopy" | "boardCopyMessages">>;
+
+type BoardChangeListener = (projectId: string | null) => void;
+const boardChangeListeners = new Set<BoardChangeListener>();
+
+/**
+ * Called after every task-store save (with its project id) and every
+ * project-list save (null: any project may have changed). The board copy
+ * follows the board through this; a listener's error never reaches a save.
+ */
+export function onBoardChanged(listener: BoardChangeListener): () => void {
+	boardChangeListeners.add(listener);
+	return () => boardChangeListeners.delete(listener);
+}
+
+function notifyBoardChanged(projectId: string | null): void {
+	for (const listener of boardChangeListeners) {
+		try {
+			listener(projectId);
+		} catch (err) {
+			log.warn("Board change listener failed", { error: String(err) });
+		}
+	}
+}
 
 export class DataFileReadError extends Error {
 	override name = "DataFileReadError";
@@ -223,6 +246,7 @@ async function rawSaveProjects(projects: Project[]): Promise<void> {
 	await atomicWriteFile(PROJECTS_FILE, JSON.stringify(projects, null, 2));
 	projectsCache.delete(PROJECTS_FILE);
 	log.info(`Saved ${projects.length} project(s)`);
+	notifyBoardChanged(null);
 }
 
 /**
@@ -772,6 +796,7 @@ async function rawSaveTasks(
 	await atomicWriteFile(file, JSON.stringify(split.tasks));
 	tasksCache.delete(file);
 	log.info(`Saved ${tasks.length} task(s)`, { projectId: project.id });
+	notifyBoardChanged(project.id);
 }
 
 async function writeHourlyTasksBackup(project: Project, filePath: string): Promise<void> {
@@ -790,6 +815,21 @@ export async function saveTasks(
 ): Promise<void> {
 	const file = tasksFile(project);
 	await withFileLock(file, () => rawSaveTasks(project, tasks));
+}
+
+/**
+ * Write `tasks` as the whole board, but only while the board is empty — the
+ * check and the write share one lock, so a task created in between makes this
+ * return false instead of being overwritten. Used by the board-copy restore.
+ */
+export async function restoreTasksIntoEmptyBoard(project: Project, tasks: Task[]): Promise<boolean> {
+	const file = tasksFile(project);
+	return withFileLock(file, async () => {
+		const existing = await rawLoadTasks(project, { strict: true });
+		if (existing.length > 0) return false;
+		await rawSaveTasks(project, tasks);
+		return true;
+	});
 }
 
 /**
@@ -852,6 +892,7 @@ export async function addTask(
 		foreignCode?: boolean;
 		/** Behaviour-carrying task kind picked at creation — see Task.taskType. */
 		taskType?: TaskType | null;
+		reviewedPr?: Task["reviewedPr"];
 		customTitle?: string | null;
 		titleEditedByUser?: boolean;
 		labelIds?: string[];
@@ -866,6 +907,10 @@ export async function addTask(
 		baseBranch?: string;
 		/** See Task.importedSessionId. */
 		importedSessionId?: string;
+		/** Who created the task; a user origin is stored as the absent field. See Task.origin. */
+		origin?: TaskOrigin;
+		/** See Task.epicId. */
+		epicId?: string;
 	},
 ): Promise<Task> {
 	const file = tasksFile(project);
@@ -930,6 +975,7 @@ export async function addTask(
 			...(extras?.draft ? { draft: true } : {}),
 			...(extras?.foreignCode ? { foreignCode: true } : {}),
 			...(extras?.taskType ? { taskType: extras.taskType } : {}),
+			...(extras?.reviewedPr ? { reviewedPr: extras.reviewedPr } : {}),
 			...(extras?.importedSessionId ? { importedSessionId: extras.importedSessionId } : {}),
 			...(extras?.customTitle ? { customTitle: extras.customTitle } : {}),
 			...(extras?.titleEditedByUser ? { titleEditedByUser: true } : {}),
@@ -938,6 +984,8 @@ export async function addTask(
 			...(extras?.overview ? { overview: extras.overview } : {}),
 			...(extras?.userOverview ? { userOverview: extras.userOverview } : {}),
 			...(extras?.automationId ? { automationId: extras.automationId } : {}),
+			...(extras?.origin && extras.origin.kind !== "user" ? { origin: extras.origin } : {}),
+			...(extras?.epicId ? { epicId: extras.epicId } : {}),
 			...(hidden ? { hidden: true } : {}),
 			...(newBackend ? { [TERMINAL_BACKEND_FIELD]: newBackend } : {}),
 		};
@@ -1264,6 +1312,11 @@ function applyTaskUpdate(
 	},
 ): { task: Task; changed: boolean } {
 	const currentTask = tasks[idx];
+	// Origin is a creation-time fact: no update path may set, change or clear it.
+	if ("origin" in updates) {
+		const { origin: _origin, ...rest } = updates;
+		updates = rest;
+	}
 	// Authoritative guard check (runs inside the file lock).
 	if (isStatusGuardBlocked(currentTask.status, options)) {
 		return { task: currentTask, changed: false };
@@ -1297,7 +1350,13 @@ function applyTaskUpdate(
 		(currentTask.status === "completed" || currentTask.status === "cancelled" || !currentTask.lifecycleStartedAt)
 			? now
 			: undefined;
-	const updatesWithLifecycle = lifecycleStartedAt ? { ...updates, lifecycleStartedAt } : updates;
+	// A finished task has nobody left to message: its `dev3 pr watch` subscriptions end with it.
+	const endsTask = statusChanged && (updates.status === "completed" || updates.status === "cancelled");
+	const updatesWithLifecycle: Partial<Task> = {
+		...updates,
+		...(lifecycleStartedAt ? { lifecycleStartedAt } : {}),
+		...(endsTask ? { prWatches: null } : {}),
+	};
 
 	// Status transitions and hold boundaries finalize the current timing bucket.
 	// Blocked time is separate; custom-column-only moves do not split a bucket.

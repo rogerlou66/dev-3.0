@@ -1,3 +1,4 @@
+import { structuredPatch } from "diff";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent, type MutableRefObject, type ReactElement, type ReactNode } from "react";
 import type { NavigationGuard } from "../navigation-guard";
 import type {
@@ -22,6 +23,7 @@ import { useResolvedTheme } from "../hooks/useResolvedTheme";
 import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { formatBytes } from "../utils/formatBytes";
 import { anchorScrollRegion } from "../utils/scroll-anchor";
+import { clearFindHighlights, collectJoinedFindRanges, foldCase, MAX_FIND_MATCHES, paintFindRanges } from "../utils/find-in-dom";
 import BottomSheet from "./BottomSheet";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
 import { resolveAutoDiffViewMode, resolveDiffViewMode } from "./global-settings/utils";
@@ -135,6 +137,7 @@ type DiffInstance = {
 	initSyntax: () => void;
 	buildSplitDiffLines: () => void;
 	buildUnifiedDiffLines: () => void;
+	onAllExpand: (mode: "split" | "unified") => void;
 };
 
 type DiffLibrary = {
@@ -199,10 +202,14 @@ interface InlineReviewExportEntry {
 	sentAt: string | null;
 }
 
+/** How a line sits in the diff: removed, added, or unchanged context (present on both sides). */
+type DiffSearchLineChange = "+" | "-" | " ";
+
 interface DiffSearchLineCandidate {
 	side: InlineCommentSideKey;
 	lineNumber: number | null;
 	text: string;
+	change: DiffSearchLineChange;
 }
 
 interface DiffSearchMatch {
@@ -213,6 +220,17 @@ interface DiffSearchMatch {
 	text: string;
 	lineNumber: number | null;
 	side: InlineCommentSideKey | null;
+	change: DiffSearchLineChange | null;
+	/** Position in the file's candidate list for the view mode (-1 for a path hit); old and new line numbers are not comparable. */
+	candidateIndex: number;
+}
+
+/** The current content hit, handed to its file section so it can expand collapsed context. */
+interface DiffSearchReveal {
+	fileId: string;
+	side: InlineCommentSideKey;
+	line: number;
+	nonce: number;
 }
 
 interface TaskDiffViewerProps {
@@ -231,6 +249,7 @@ interface TaskDiffFileSectionProps {
 	viewMode: DiffViewMode;
 	searchQuery: string;
 	isCurrentPathMatch: boolean;
+	searchReveal: DiffSearchReveal | null;
 	comments: InlineDiffCommentFileData;
 	eager: boolean;
 	expanded: boolean;
@@ -360,49 +379,113 @@ function getReviewCommentPreview(value: string, maxLength = 100): string {
 	return `${normalized.slice(0, maxLength)}...`;
 }
 
-function collectDiffSearchCandidates(file: TaskDiffFile): DiffSearchLineCandidate[] {
-	const candidates: DiffSearchLineCandidate[] = [];
-	const seen = new Set<string>();
+/**
+ * Above this edit distance the line diff is skipped: it costs seconds on a rewritten file.
+ * The fallback then lists every line on both sides, so unchanged lines count twice (accepted).
+ */
+export const DIFF_SEARCH_MAX_EDIT_LENGTH = 2000;
 
-	const addCandidate = (side: InlineCommentSideKey, lineNumber: number | null, text: string) => {
-		const trimmedText = text.trim();
-		if (!trimmedText) {
-			return;
-		}
-		const key = `${side}:${lineNumber ?? "?"}:${trimmedText}`;
-		if (seen.has(key)) {
-			return;
-		}
-		seen.add(key);
-		candidates.push({
-			side,
-			lineNumber,
-			text: trimmedText,
-		});
-	};
-
-	if (file.hunks && file.hunks.length > 0) {
-		for (const hunk of file.hunks) {
-			for (const line of parseDiffHunkLines(hunk)) {
-				if (line.kind === "-") {
-					addCandidate("oldFile", line.oldLine, line.content);
-				} else {
-					addCandidate("newFile", line.newLine, line.content);
-				}
-			}
-		}
-		if (candidates.length > 0) {
-			return candidates;
-		}
-	}
-
-	file.oldContent.split("\n").forEach((line, index) => addCandidate("oldFile", index + 1, line));
-	file.newContent.split("\n").forEach((line, index) => addCandidate("newFile", index + 1, line));
-	return candidates;
+interface DiffSearchCacheEntry {
+	/** Unified order, blank lines kept: split row pairing counts them. */
+	lines: DiffSearchLineCandidate[];
+	byMode: Partial<Record<DiffViewMode, DiffSearchLineCandidate[]>>;
 }
 
-function buildDiffSearchMatches(files: TaskDiffFile[], query: string): DiffSearchMatch[] {
-	const needle = query.trim().toLocaleLowerCase();
+const diffSearchCache = new WeakMap<TaskDiffFile, DiffSearchCacheEntry>();
+
+function collectDiffSearchLines(file: TaskDiffFile): DiffSearchLineCandidate[] {
+	const lines: DiffSearchLineCandidate[] = [];
+
+	const addLine = (change: DiffSearchLineChange, lineNumber: number | null, text: string) => {
+		lines.push({
+			side: change === "-" ? "oldFile" : "newFile",
+			lineNumber,
+			text: text.trim(),
+			change,
+		});
+	};
+	// Keeps a change block from merging with the next hunk's one.
+	const addHunkBreak = () => addLine(" ", null, "");
+
+	for (const hunk of file.hunks ?? []) {
+		for (const line of parseDiffHunkLines(hunk)) {
+			addLine(line.kind, line.kind === "-" ? line.oldLine : line.newLine, line.content);
+		}
+		addHunkBreak();
+	}
+
+	// The backend ships hunks: null, so the whole file is diffed here with enough
+	// context to keep collapsed lines searchable too. Identical content has no hunks
+	// and the viewer renders nothing for it, so it yields no content hits.
+	if (!lines.some((line) => line.text)) {
+		const context = Math.max(file.oldContent.split("\n").length, file.newContent.split("\n").length);
+		const patch = structuredPatch("a", "b", file.oldContent, file.newContent, undefined, undefined, {
+			context,
+			maxEditLength: DIFF_SEARCH_MAX_EDIT_LENGTH,
+		});
+		if (!patch) {
+			// A near-total rewrite reads as every old line removed, then every new line added.
+			file.oldContent.split("\n").forEach((line, index) => addLine("-", index + 1, line));
+			file.newContent.split("\n").forEach((line, index) => addLine("+", index + 1, line));
+		}
+		for (const hunk of patch?.hunks ?? []) {
+			let oldLine = hunk.oldStart;
+			let newLine = hunk.newStart;
+			for (const line of hunk.lines) {
+				const change = line[0];
+				if (change === "-") {
+					addLine("-", oldLine++, line.slice(1));
+				} else if (change === "+") {
+					addLine("+", newLine++, line.slice(1));
+				} else if (change === " ") {
+					addLine(" ", newLine++, line.slice(1));
+					oldLine++;
+				}
+			}
+			addHunkBreak();
+		}
+	}
+	return lines;
+}
+
+/** Split view pairs the removed and added lines of a change block row by row: old 1, new 1, old 2, new 2, then the longer side's rest. */
+function interleaveChangeBlocks(lines: DiffSearchLineCandidate[]): DiffSearchLineCandidate[] {
+	const ordered: DiffSearchLineCandidate[] = [];
+	for (let i = 0; i < lines.length; ) {
+		if (lines[i].change === " ") {
+			ordered.push(lines[i++]);
+			continue;
+		}
+		const removed: DiffSearchLineCandidate[] = [];
+		const added: DiffSearchLineCandidate[] = [];
+		for (; i < lines.length && lines[i].change !== " "; i++) {
+			(lines[i].change === "-" ? removed : added).push(lines[i]);
+		}
+		for (let row = 0; row < Math.max(removed.length, added.length); row++) {
+			if (removed[row]) ordered.push(removed[row]);
+			if (added[row]) ordered.push(added[row]);
+		}
+	}
+	return ordered;
+}
+
+/** Every non-blank line of the file in on-screen order for the view mode; context appears once. */
+export function collectDiffSearchCandidates(file: TaskDiffFile, viewMode: DiffViewMode = "unified"): DiffSearchLineCandidate[] {
+	let entry = diffSearchCache.get(file);
+	if (!entry) {
+		entry = { lines: collectDiffSearchLines(file), byMode: {} };
+		diffSearchCache.set(file, entry);
+	}
+	const cached = entry.byMode[viewMode];
+	if (cached) {
+		return cached;
+	}
+	const lines = viewMode === "split" ? interleaveChangeBlocks(entry.lines) : entry.lines;
+	return (entry.byMode[viewMode] = lines.filter((line) => line.text));
+}
+
+function buildDiffSearchMatches(files: TaskDiffFile[], query: string, viewMode: DiffViewMode): DiffSearchMatch[] {
+	const needle = foldCase(query.trim());
 	if (!needle) {
 		return [];
 	}
@@ -410,7 +493,7 @@ function buildDiffSearchMatches(files: TaskDiffFile[], query: string): DiffSearc
 	const matches: DiffSearchMatch[] = [];
 	for (const file of files) {
 		const filePath = getReviewFilePath(file);
-		if (filePath.toLocaleLowerCase().includes(needle)) {
+		if (foldCase(filePath).includes(needle)) {
 			matches.push({
 				id: `${file.id}:path`,
 				fileId: file.id,
@@ -419,12 +502,14 @@ function buildDiffSearchMatches(files: TaskDiffFile[], query: string): DiffSearc
 				text: filePath,
 				lineNumber: null,
 				side: null,
+				change: null,
+				candidateIndex: -1,
 			});
 		}
 
-		for (const candidate of collectDiffSearchCandidates(file)) {
-			if (!candidate.text.toLocaleLowerCase().includes(needle)) {
-				continue;
+		collectDiffSearchCandidates(file, viewMode).forEach((candidate, candidateIndex) => {
+			if (!foldCase(candidate.text).includes(needle)) {
+				return;
 			}
 			matches.push({
 				id: `${file.id}:${candidate.side}:${candidate.lineNumber ?? "?"}:${candidate.text}`,
@@ -434,8 +519,10 @@ function buildDiffSearchMatches(files: TaskDiffFile[], query: string): DiffSearc
 				text: candidate.text,
 				lineNumber: candidate.lineNumber,
 				side: candidate.side,
+				change: candidate.change,
+				candidateIndex,
 			});
-		}
+		});
 	}
 
 	return matches;
@@ -496,13 +583,9 @@ function clearDiffSearchDecorations(root: ParentNode | null) {
 	}
 }
 
-function lineContainsQuery(container: HTMLElement, query: string): boolean {
-	const needle = query.trim().toLocaleLowerCase();
-	if (!needle) {
-		return false;
-	}
-	return (container.textContent ?? "").toLocaleLowerCase().includes(needle);
-}
+const DIFF_FIND_HIGHLIGHTS = { rest: "dev3-diff-find", active: "dev3-diff-find-active" };
+const DIFF_OPERATOR_SELECTOR = "[data-operator]";
+const DIFF_CODE_CELL_SELECTOR = ".diff-line-content, .diff-line-old-content, .diff-line-new-content, [data-testid='mock-search-line-content']";
 
 /**
  * The per-file / per-side / per-anchor-line map the diff widget API is keyed by,
@@ -846,7 +929,7 @@ function MarkdownPreviewReview({
 						}}
 						onClick={() => setComposerAnchor(selection)}
 						style={{ top: `${selection.top + 6}px`, left: `${selection.left}px` }}
-						className="absolute z-10 inline-flex h-8 items-center gap-1.5 rounded-md border border-edge bg-overlay px-2.5 text-xs font-semibold text-fg shadow-lg transition-colors hover:border-edge-active hover:bg-elevated-hover"
+						className="absolute z-10 inline-flex h-8 items-center gap-1.5 rounded-md border border-edge bg-overlay px-2.5 text-xs font-semibold text-fg shadow-lg transition-colors hover:border-edge-active hover:bg-overlay-hover"
 					>
 						<span
 							aria-hidden="true"
@@ -1264,6 +1347,7 @@ function TaskDiffFileSection({
 	viewMode,
 	searchQuery,
 	isCurrentPathMatch,
+	searchReveal,
 	comments,
 	eager,
 	expanded,
@@ -1497,6 +1581,25 @@ function TaskDiffFileSection({
 		return () => observer.disconnect();
 	}, [activated]);
 
+	// Search covers lines folded inside collapsed context, so the current hit
+	// expands the file when its line is not rendered.
+	const searchRevealRef = useRef(searchReveal);
+	searchRevealRef.current = searchReveal;
+	const revealSearchHit = useCallback(() => {
+		const instance = diffInstanceRef.current;
+		const reveal = searchRevealRef.current;
+		if (!instance || !reveal || !builtModesRef.current.has(viewMode)) {
+			return;
+		}
+		if (isLineRenderedInDiff(instance, viewMode, diffLib.SplitSide, reveal.side, reveal.line)) {
+			return;
+		}
+		instance.onAllExpand(viewMode);
+	}, [diffLib, viewMode]);
+	useEffect(() => {
+		revealSearchHit();
+	}, [diffFile, searchReveal, revealSearchHit]);
+
 	useEffect(() => {
 		if (!activated) {
 			return;
@@ -1538,6 +1641,7 @@ function TaskDiffFileSection({
 					builtModesRef.current.add(viewMode);
 				}
 				if (!cancelled) {
+					revealSearchHit();
 					setBuildError(null);
 					setDiffFile(nextDiffFile);
 				}
@@ -1909,6 +2013,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 	const resolvedTheme = useResolvedTheme();
 	const toolbarRef = useRef<HTMLDivElement | null>(null);
 	const scrollRegionRef = useRef<HTMLDivElement | null>(null);
+	const sectionsRootRef = useRef<HTMLDivElement | null>(null);
 	const scrollAnchorRef = useRef<ReturnType<typeof anchorScrollRegion> | null>(null);
 	const searchInputRef = useRef<HTMLInputElement | null>(null);
 	const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -1917,6 +2022,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 	const scrollSpyFrameRef = useRef<number | null>(null);
 	const pendingCommentScrollFrameRef = useRef<number | null>(null);
 	const pendingSearchScrollFrameRef = useRef<number | null>(null);
+	const activeSearchMatchRef = useRef<DiffSearchMatch | null>(null);
 	const commentRefs = useRef<Record<string, HTMLDivElement | null>>({});
 	const [diffLib, setDiffLib] = useState<DiffLibrary | null>(null);
 	const [payload, setPayload] = useState<TaskDiffResponse | null>(null);
@@ -1972,7 +2078,8 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 	const prFetchSeqRef = useRef(0);
 	const [isSearchOpen, setIsSearchOpen] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
-	const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+	const [activeSearchId, setActiveSearchId] = useState<string | null>(null);
+	const [searchActivation, setSearchActivation] = useState(0);
 	const [filesCollapsed, setFilesCollapsed] = useState<boolean>(() => readFilesCollapsed());
 	// Narrow (phone / narrow window): the 22rem files aside cannot sit beside the
 	// diff — it would starve the diff to a sliver. Instead the diff owns the full
@@ -2131,10 +2238,18 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		threadFocusPendingRef.current = !!currentRequest.focusFirstUnresolvedThread;
 	}, [currentRequest]);
 	const searchMatches = useMemo(
-		() => (payload ? buildDiffSearchMatches(visibleFiles, searchQuery) : []),
-		[payload, searchQuery, visibleFiles],
+		() => (payload ? buildDiffSearchMatches(orderedVisibleFiles, searchQuery, viewMode ?? "unified") : []),
+		[payload, searchQuery, orderedVisibleFiles, viewMode],
 	);
+	// Keyed by id, not index: a new query yields a new list, and a stale index would point at a foreign hit.
+	const activeSearchIndex = searchMatches.findIndex((match) => match.id === activeSearchId);
 	const currentSearchMatch = searchMatches[activeSearchIndex] ?? null;
+	// A fresh object per activation, so stepping back onto a hit re-expands a file the user folded again.
+	const searchReveal = useMemo<DiffSearchReveal | null>(() => (
+		currentSearchMatch?.kind === "content" && currentSearchMatch.side && currentSearchMatch.lineNumber !== null
+			? { fileId: currentSearchMatch.fileId, side: currentSearchMatch.side, line: currentSearchMatch.lineNumber, nonce: searchActivation }
+			: null
+	), [currentSearchMatch, searchActivation]);
 
 	// The inline review is persisted on the task record, so leaving the viewer
 	// never discards anything — close immediately without a
@@ -2224,7 +2339,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 				event.stopImmediatePropagation?.();
 				if (searchQuery.trim()) {
 					setSearchQuery("");
-					setActiveSearchIndex(0);
+					setActiveSearchId(null);
 				} else {
 					setIsSearchOpen(false);
 				}
@@ -2672,17 +2787,33 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 
 	useEffect(() => {
 		if (!searchQuery.trim()) {
-			setActiveSearchIndex(0);
+			setActiveSearchId(null);
+			activeSearchMatchRef.current = null;
 			cancelPendingSearchScroll();
 			return;
 		}
 		if (searchMatches.length === 0) {
-			setActiveSearchIndex(0);
 			cancelPendingSearchScroll();
 			return;
 		}
-		activateSearchMatch(0);
-		// Search should jump to the first match whenever the query changes.
+		// Typing keeps the current hit when it survives, else moves to the next one in diff order.
+		const previous = activeSearchMatchRef.current;
+		if (!previous) {
+			activateSearchMatch(0);
+			return;
+		}
+		const survivor = searchMatches.find((match) => match.id === previous.id);
+		if (survivor) {
+			activeSearchMatchRef.current = survivor;
+			return;
+		}
+		// Positions are recomputed against the current files: the list may come from a reload or a filter change.
+		const fileIndex = new Map(orderedVisibleFiles.map((file, index) => [file.id, index]));
+		const previousFile = fileIndex.get(previous.fileId);
+		const next = previousFile === undefined ? -1 : searchMatches.findIndex((match) => (
+			(fileIndex.get(match.fileId) ?? -1) - previousFile || match.candidateIndex - previous.candidateIndex
+		) >= 0);
+		activateSearchMatch(Math.max(next, 0));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [searchMatches, searchQuery]);
 
@@ -2693,25 +2824,66 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 			return;
 		}
 
-		const currentElement = currentSearchMatch ? findSearchMatchElement(currentSearchMatch) : null;
-		const containers = Array.from(root.querySelectorAll<HTMLElement>(
-			".diff-line-content, .diff-line-old-content, .diff-line-new-content, .diff-line-hunk-content, [data-testid='mock-search-line-content']",
-		));
+		const paint = () => {
+			clearDiffSearchDecorations(root);
+			const currentElement = currentSearchMatch ? findSearchMatchElement(currentSearchMatch) : null;
+			const currentCell = currentElement
+				? (currentElement.matches(DIFF_CODE_CELL_SELECTOR) ? currentElement : currentElement.querySelector<HTMLElement>(DIFF_CODE_CELL_SELECTOR))
+				: null;
+			currentElement?.classList.add("dev3-diff-search-current-line");
 
-		for (const container of containers) {
-			const targetLine = container.closest<HTMLElement>("[data-line], tr, .diff-line");
-			if (!targetLine || !lineContainsQuery(container, searchQuery)) {
-				continue;
+			// The current row goes first so a hit past the cap still gets its (active) highlight.
+			const ranges: Range[] = [];
+			const collect = (cell: HTMLElement) => {
+				const found = collectJoinedFindRanges(cell, searchQuery, DIFF_OPERATOR_SELECTOR, MAX_FIND_MATCHES - ranges.length);
+				if (found.length > 0) {
+					cell.closest<HTMLElement>("[data-line], tr, .diff-line")?.classList.add("dev3-diff-search-match-line");
+					ranges.push(...found);
+				}
+			};
+			if (currentCell) {
+				collect(currentCell);
 			}
-			targetLine.classList.add("dev3-diff-search-match-line");
-		}
+			const activeIndex = ranges.length > 0 ? 0 : -1;
+			for (const cell of root.querySelectorAll<HTMLElement>(DIFF_CODE_CELL_SELECTOR)) {
+				if (ranges.length >= MAX_FIND_MATCHES) {
+					break;
+				}
+				if (cell !== currentCell) {
+					collect(cell);
+				}
+			}
+			paintFindRanges(ranges, activeIndex, DIFF_FIND_HIGHLIGHTS);
+		};
+		// A bad range must never reach the error boundary and take the window down.
+		const decorate = () => {
+			try {
+				paint();
+			} catch (error) {
+				console.warn("[diff-search] highlight failed", error);
+			}
+		};
 
-		if (currentElement) {
-			currentElement.classList.add("dev3-diff-search-current-line");
-		}
+		decorate();
+		// Lazy build, "expand all" and view-mode switches replace the rows after this effect ran.
+		let frame: number | null = null;
+		const observer = new MutationObserver(() => {
+			frame ??= window.requestAnimationFrame(() => {
+				frame = null;
+				decorate();
+			});
+		});
+		observer.observe(sectionsRootRef.current ?? root, { childList: true, subtree: true });
 
-		return () => clearDiffSearchDecorations(root);
-	}, [currentSearchMatch, searchQuery, expandedFiles]);
+		return () => {
+			observer.disconnect();
+			if (frame !== null) {
+				window.cancelAnimationFrame(frame);
+			}
+			clearDiffSearchDecorations(root);
+			clearFindHighlights(DIFF_FIND_HIGHLIGHTS);
+		};
+	}, [currentSearchMatch, searchQuery, expandedFiles, viewMode]);
 
 	function getScrollOffset(fileId: string): number | null {
 		const scrollRegion = scrollRegionRef.current;
@@ -2841,37 +3013,61 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 			return null;
 		}
 
-		const query = match.text.toLocaleLowerCase();
-		const candidates = Array.from(section.querySelectorAll<HTMLElement>(
-			".diff-line-content, .diff-line-old-content, .diff-line-new-content, .diff-line-hunk-content, [data-testid='mock-search-line-content']",
-		)).filter((element) => (
-			(element.textContent ?? "").toLocaleLowerCase().includes(query)
-		));
-		if (candidates.length === 0) {
-			return null;
+		if (match.lineNumber === null || !match.side) {
+			const query = match.text.toLocaleLowerCase();
+			const textTarget = Array.from(section.querySelectorAll<HTMLElement>(DIFF_CODE_CELL_SELECTOR))
+				.find((element) => (element.textContent ?? "").toLocaleLowerCase().includes(query));
+			return textTarget?.closest<HTMLElement>("[data-line], tr, .diff-line") ?? textTarget ?? null;
 		}
 
-		const lineSpecificCandidate = match.lineNumber === null
-			? null
-			: candidates.find((element) => {
-				const lineRoot = element.closest<HTMLElement>("[data-line], tr, .diff-line");
-				return (lineRoot?.textContent ?? "").includes(String(match.lineNumber));
-			});
-		const target = lineSpecificCandidate ?? candidates[0];
-		return target.closest<HTMLElement>("[data-line], tr, .diff-line") ?? target;
+		const sideName = match.side === "oldFile" ? "old" : "new";
+		const gutter = viewMode === "unified"
+			? `[data-line-${sideName}-num="${match.lineNumber}"]`
+			: `.diff-line-${sideName}-num [data-line-num="${match.lineNumber}"]`;
+		const target = section.querySelector<HTMLElement>(gutter);
+		return target?.closest<HTMLElement>("[data-line], tr, .diff-line") ?? null;
+	}
+
+	/** Brings the hit word into view only when it is not already fully visible; false when its row is not rendered. */
+	function scrollSearchHitIntoView(match: DiffSearchMatch): boolean {
+		const row = findSearchMatchElement(match);
+		if (!row) {
+			return false;
+		}
+		const cell = row.matches(DIFF_CODE_CELL_SELECTOR) ? row : row.querySelector<HTMLElement>(DIFF_CODE_CELL_SELECTOR);
+		const range = cell ? collectJoinedFindRanges(cell, searchQuery, DIFF_OPERATOR_SELECTOR, 1)[0] : undefined;
+		const target = range?.startContainer.parentElement ?? row;
+		const region = scrollRegionRef.current;
+		const box = target.closest(".diff-table-scroll-container") ?? region;
+		const rect = range?.getBoundingClientRect?.();
+		if (region && box && rect && (rect.width > 0 || rect.height > 0)) {
+			const regionRect = region.getBoundingClientRect();
+			const boxRect = box.getBoundingClientRect();
+			// The line-number cell is sticky, so a word scrolled under it is hidden even inside the box.
+			const gutterRight = row.querySelector(".diff-line-num, .diff-line-old-num, .diff-line-new-num")?.getBoundingClientRect().right ?? 0;
+			const left = Math.max(boxRect.left, gutterRight);
+			const top = regionRect.top + (toolbarRef.current?.getBoundingClientRect().height ?? 0);
+			// Instant and measured from the word: a long token would never be centred by scrolling its span.
+			// It goes first so the smooth vertical scroll below cannot override it.
+			if (rect.left < left || rect.right > boxRect.right) {
+				box.scrollLeft += (rect.left + rect.right) / 2 - (left + boxRect.right) / 2;
+			}
+			if (rect.top < top || rect.bottom > regionRect.bottom) {
+				target.scrollIntoView({ behavior: "smooth", block: "center" });
+				scrollAnchorRef.current?.reanchor();
+			}
+			return true;
+		}
+		target.scrollIntoView({ behavior: "smooth", block: "center" });
+		scrollAnchorRef.current?.reanchor();
+		return true;
 	}
 
 	function queueSearchMatchScroll(match: DiffSearchMatch) {
 		cancelPendingSearchScroll();
-		let attemptsLeft = 12;
+		let attemptsLeft = 60;
 		const tryScroll = () => {
-			const element = findSearchMatchElement(match);
-			if (element) {
-				element.scrollIntoView({
-					behavior: "smooth",
-					block: "center",
-				});
-				scrollAnchorRef.current?.reanchor();
+			if (scrollSearchHitIntoView(match)) {
 				pendingSearchScrollFrameRef.current = null;
 				return;
 			}
@@ -2890,17 +3086,23 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 			return;
 		}
 		const nextIndex = ((index % searchMatches.length) + searchMatches.length) % searchMatches.length;
-		setActiveSearchIndex(nextIndex);
 		const match = searchMatches[nextIndex];
 		if (!match) {
 			return;
 		}
+		setActiveSearchId(match.id);
+		setSearchActivation((current) => current + 1);
+		activeSearchMatchRef.current = match;
 		// A content hit only exists in the source diff DOM — a file left in
 		// markdown preview mode flips back so the hit can be decorated and scrolled to.
 		if (match.kind === "content") {
 			const matchFile = payload?.files.find((candidate) => candidate.id === match.fileId);
 			if (matchFile) {
 				setMdPreviewFiles((current) => (resolveMdPreview(matchFile, current) ? { ...current, [matchFile.id]: false } : current));
+			}
+			cancelPendingSearchScroll();
+			if (scrollSearchHitIntoView(match)) {
+				return;
 			}
 		}
 		scrollToFile(match.fileId, {
@@ -3087,7 +3289,10 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		: false;
 	const hasSearchQuery = searchQuery.trim().length > 0;
 	const searchStatusLabel = hasSearchQuery
-		? (searchMatches.length > 0 ? `${activeSearchIndex + 1} / ${searchMatches.length}` : t("infoPanel.diffSearchNoMatches"))
+		? (searchMatches.length > 0 ? `${Math.max(activeSearchIndex, 0) + 1} / ${searchMatches.length}` : t("infoPanel.diffSearchNoMatches"))
+		: null;
+	const searchSideLabel = searchMatches.length > 0 && currentSearchMatch?.kind === "content" && currentSearchMatch.change
+		? t(currentSearchMatch.change === "-" ? "infoPanel.diffSearchSideOld" : currentSearchMatch.change === "+" ? "infoPanel.diffSearchSideNew" : "infoPanel.diffSearchSideBoth")
 		: null;
 
 	function renderFileTreeNode(node: DiffTreeNode, depth = 0, onFileClick?: () => void): ReactElement {
@@ -3277,7 +3482,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 									aria-checked={selected}
 									onClick={() => selectRecentCount(preset)}
 									className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-micro font-medium transition-colors ${
-										selected ? "text-accent" : "text-fg-2 hover:bg-raised-hover"
+										selected ? "text-accent" : "text-fg-2 hover:bg-elevated-hover"
 									}`}
 									data-testid={`diff-recent-preset-${preset}`}
 								>
@@ -3490,7 +3695,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 		if (isSearchOpen) {
 			setIsSearchOpen(false);
 			setSearchQuery("");
-			setActiveSearchIndex(0);
+			setActiveSearchId(null);
 			return;
 		}
 		setIsSearchOpen(true);
@@ -3553,7 +3758,6 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 						value={searchQuery}
 						onChange={(event) => {
 							setSearchQuery(event.target.value);
-							setActiveSearchIndex(0);
 						}}
 						onKeyDown={(event) => {
 							if (event.key === "Enter") {
@@ -3567,7 +3771,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 								event.stopPropagation();
 								if (searchQuery.trim()) {
 									setSearchQuery("");
-									setActiveSearchIndex(0);
+									setActiveSearchId(null);
 								} else {
 									setIsSearchOpen(false);
 								}
@@ -3586,6 +3790,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 						}`}
 					>
 						{searchStatusLabel}
+						{searchSideLabel && <span className="ml-1 text-fg-muted">{` · ${searchSideLabel}`}</span>}
 					</span>
 				)}
 				<div className="inline-flex shrink-0 items-center gap-1">
@@ -3615,7 +3820,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 					onClick={() => {
 						setIsSearchOpen(false);
 						setSearchQuery("");
-						setActiveSearchIndex(0);
+						setActiveSearchId(null);
 					}}
 					aria-label={t("infoPanel.diffSearchClose")}
 					title={t("infoPanel.diffSearchClose")}
@@ -4130,7 +4335,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 				)}
 
 				{!error && !isBusy && payload && diffLib && viewMode && visibleFiles.length > 0 && (
-					<div className="space-y-5">
+					<div ref={sectionsRootRef} className="space-y-5">
 						{orderedVisibleFiles.map((file, index) => (
 							<TaskDiffFileSection
 								key={file.id}
@@ -4141,6 +4346,7 @@ function TaskDiffViewer({ task, project, request, onBack, navigationGuardRef }: 
 								viewMode={viewMode}
 								searchQuery={searchQuery}
 								isCurrentPathMatch={currentSearchMatch?.kind === "path" && currentSearchMatch.fileId === file.id}
+								searchReveal={searchReveal?.fileId === file.id ? searchReveal : null}
 								comments={inlineComments[file.id] ?? createEmptyInlineCommentFileData()}
 								eager={index < EAGER_FILE_COUNT}
 								expanded={expandedFiles[file.id] ?? true}

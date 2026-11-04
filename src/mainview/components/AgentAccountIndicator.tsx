@@ -72,7 +72,7 @@ export function agentAccountKindForCommand(baseCommand: string): AgentAccountKin
 	return null;
 }
 
-function useAgentAccountsState(enabled: boolean): AgentAccountsState | null {
+export function useAgentAccountsState(enabled: boolean): AgentAccountsState | null {
 	const [state, setState] = useState<AgentAccountsState | null>(null);
 	const reload = useCallback(() => {
 		api.request
@@ -417,7 +417,7 @@ function SwitcherPopover({
 					return (
 						<div
 							key={row.key}
-							className={`flex items-start ${inert ? "" : "hover:bg-elevated-hover"} transition-colors`}
+							className={`flex items-start ${inert ? "" : "hover:bg-overlay-hover"} transition-colors`}
 						>
 							<button
 								type="button"

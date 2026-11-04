@@ -1,5 +1,5 @@
-import type { Task, TaskHistoryEntry, TaskNote } from "../shared/types";
-import { DEFAULT_PRIORITY, STATUS_LABELS, getTaskOverview, getTaskTitle, taskCompletesManually } from "../shared/types";
+import type { PRCIStatus, PRMergeState, PRReviewDecision, Task, TaskEpicRef, TaskHistoryEntry, TaskNote, TaskOriginParent } from "../shared/types";
+import { DEFAULT_PRIORITY, STATUS_LABELS, getTaskOverview, getTaskTitle, taskCompletesManually, taskOrigin } from "../shared/types";
 import { allPullRequests } from "../shared/task-pull-requests";
 
 /**
@@ -39,15 +39,93 @@ export interface TaskShowJson {
 	prUrl: string | null;
 	/** Every PR the task has had, newest first; `prNumber` is the current one. */
 	pullRequests: Array<{ number: number; url: string; title: string | null; state: string | null }>;
+	/**
+	 * The PR poller's last reading, or null before its first one. `number` says
+	 * which PR it describes — compare it with `prNumber` before trusting it.
+	 */
+	prStatus: {
+		number: number;
+		ciStatus: PRCIStatus | null;
+		reviewDecision: PRReviewDecision | null;
+		mergeState: PRMergeState | null;
+		isDraft: boolean | null;
+		autoMergeEnabled: boolean | null;
+		unresolvedCount: number | null;
+		cachedAt: string;
+	} | null;
+	/** The agent, terminal and dev server are stopped until the task is woken. */
+	hibernated: boolean;
+	/** `status` is the watchdog state: watching, reviving or gave-up. */
+	keepAlive: { enabled: boolean; status: string } | null;
 	createdAt: string;
 	updatedAt: string;
 	movedAt: string | null;
 	noteCount: number;
+	/**
+	 * Who created the task. For `task`, `parent` is resolved at read time and is
+	 * null when the parent was deleted.
+	 */
+	origin:
+		| { kind: "user" }
+		| { kind: "task"; taskId: string; projectId: string; parent: TaskOriginParent | null }
+		| { kind: "automation"; automationId: string | null }
+		| { kind: "import" };
+	/** The task's epic, or null for none. `name` is null when the epic no longer exists. */
+	epic: { id: string; name: string | null; archived: boolean } | null;
 	notes?: Array<Pick<TaskNote, "id" | "source" | "content" | "createdAt" | "updatedAt">>;
 	history?: Array<Pick<TaskHistoryEntry, "at" | "changed" | "title" | "overview">>;
 }
 
-export function buildTaskShowJson(task: Task, opts: { notes?: boolean; history?: boolean } = {}): TaskShowJson {
+/** The task as `task.show` returns it: the stored task plus its resolved parent. */
+export type ShownTask = Task & { originParent?: TaskOriginParent | null; epic?: TaskEpicRef | null };
+
+function epicJson(task: ShownTask): TaskShowJson["epic"] {
+	if (!task.epicId) return null;
+	return { id: task.epicId, name: task.epic?.name ?? null, archived: task.epic?.archived ?? false };
+}
+
+/** The "Epic" line, or null for a task in no epic. */
+export function describeTaskEpic(task: ShownTask): string | null {
+	if (!task.epicId) return null;
+	if (!task.epic) return `${task.epicId.slice(0, 8)} (unknown epic)`;
+	return `${task.epic.name} (${task.epic.id.slice(0, 8)})${task.epic.archived ? " — archived" : ""}`;
+}
+
+function originJson(task: ShownTask): TaskShowJson["origin"] {
+	const origin = taskOrigin(task);
+	if (origin.kind === "task") return { ...origin, parent: task.originParent ?? null };
+	if (origin.kind === "automation") return { kind: "automation", automationId: task.automationId ?? null };
+	return origin;
+}
+
+/** The "Created by" line for a non-user origin, or null for a task the user created. */
+export function describeTaskOrigin(task: ShownTask): string | null {
+	const origin = taskOrigin(task);
+	if (origin.kind === "user") return null;
+	if (origin.kind === "automation") return task.automationId ? `automation ${task.automationId.slice(0, 8)}` : "an automation";
+	if (origin.kind === "import") return "a conversation import";
+	const parent = task.originParent;
+	if (!parent) return `a task (deleted) — ${origin.taskId.slice(0, 8)}`;
+	const seq = parent.variantIndex !== null ? `${parent.seq}-${parent.variantIndex}` : String(parent.seq);
+	return `#${seq} · ${parent.projectName} — ${parent.title} (seq:${parent.seq}, ${parent.id.slice(0, 8)})`;
+}
+
+function prStatusJson(task: Task): TaskShowJson["prStatus"] {
+	const cache = task.prStatusCache;
+	if (!cache) return null;
+	return {
+		number: cache.number,
+		ciStatus: cache.ciStatus,
+		reviewDecision: cache.reviewDecision ?? null,
+		mergeState: cache.mergeState,
+		isDraft: cache.isDraft,
+		autoMergeEnabled: cache.autoMergeEnabled ?? null,
+		unresolvedCount: cache.unresolvedCount,
+		cachedAt: cache.cachedAt,
+	};
+}
+
+export function buildTaskShowJson(task: ShownTask, opts: { notes?: boolean; history?: boolean } = {}): TaskShowJson {
 	const json: TaskShowJson = {
 		schemaVersion: TASK_SHOW_JSON_SCHEMA_VERSION,
 		id: task.id,
@@ -75,10 +153,15 @@ export function buildTaskShowJson(task: Task, opts: { notes?: boolean; history?:
 		pullRequests: allPullRequests(task).map(({ number, url, title, state }) => ({
 			number, url, title: title ?? null, state: state ?? null,
 		})),
+		prStatus: prStatusJson(task),
+		hibernated: task.hibernated === true,
+		keepAlive: task.keepAlive ? { enabled: task.keepAlive.enabled, status: task.keepAlive.status ?? "watching" } : null,
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
 		movedAt: task.movedAt ?? null,
 		noteCount: task.notes?.length ?? 0,
+		origin: originJson(task),
+		epic: epicJson(task),
 	};
 	if (opts.notes) {
 		json.notes = (task.notes ?? []).map(({ id, source, content, createdAt, updatedAt }) => ({

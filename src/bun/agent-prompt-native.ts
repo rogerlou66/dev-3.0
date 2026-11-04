@@ -132,6 +132,7 @@ function performNativeDelivery(
 	prompt: string,
 	hold: boolean,
 	task?: Task,
+	verify?: () => Promise<string | null>,
 ): AgentPromptDelivery {
 	if (!hold) {
 		terminal.write(prompt);
@@ -153,6 +154,7 @@ function performNativeDelivery(
 			// is the whole cost of the message; the burst cap applies the same way.
 			bytes: utf8Length(prompt),
 			...(task ? { batch: nativeBatch(terminal, task) } : {}),
+			...(verify ? { verify } : {}),
 			// The same gap a hand-off leaves: a CR written straight after the last paste
 			// is read as part of it, and the burst never gets submitted.
 			submit: () => {
@@ -162,7 +164,7 @@ function performNativeDelivery(
 		},
 		{ taskId: taskId.slice(0, 8), paneId },
 	);
-	return agentPromptHeld(delayMs);
+	return { ...agentPromptHeld(delayMs), paneId };
 }
 
 /**
@@ -252,7 +254,7 @@ export async function sendPromptToNativePane(
 	task: Task,
 	paneId: string,
 	prompt: string,
-	opts: { hold?: boolean } = {},
+	opts: { hold?: boolean; verify?: () => Promise<string | null> } = {},
 ): Promise<AgentPromptDelivery> {
 	const hold = opts.hold === true;
 	const terminal = await bindPane(task, paneId);
@@ -263,18 +265,22 @@ export async function sendPromptToNativePane(
 
 	switch (owner.kind) {
 		case "local":
-			return performNativeDelivery(terminal, task.id, paneId, prompt, hold, task);
+			return performNativeDelivery(terminal, task.id, paneId, prompt, hold, task, opts.verify);
 
 		case "vacant": {
 			// Nobody is typing — take the lease and deliver here.
 			if ((await terminal.claimHostWriter()) === "writer") {
-				return performNativeDelivery(terminal, task.id, paneId, prompt, hold, task);
+				return performNativeDelivery(terminal, task.id, paneId, prompt, hold, task, opts.verify);
 			}
 			log.info("Writer lease was taken while claiming it; not delivering", context);
 			return notDelivered("read-only", "another process took the pane's writer lease while claiming it");
 		}
 
 		case "peer": {
+			// The owner holds it without our closures, so a bound agent is checked
+			// here, right before the hand-over, and not again at release.
+			const refused = opts.verify ? await opts.verify() : null;
+			if (refused) return notDelivered("pane-absent", refused);
 			// Forward the WHOLE delivery, never the bytes, and never write locally
 			// as well — that is what keeps it exactly once.
 			const params: NativePromptDeliveryParams = { taskId: task.id, paneId, text: prompt, hold };

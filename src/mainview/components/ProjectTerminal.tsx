@@ -16,6 +16,7 @@ import { useNarrowViewport } from "../hooks/useNarrowViewport";
 import { subscribeTerminalPaste, terminalPasteTarget } from "../terminal-paste-request";
 import FileExplorerFrame from "./FileExplorerFrame";
 import { CAROUSEL_MAX_WIDTH } from "./MobileBoardCarousel";
+import { toastClearanceRef } from "../toast-clearance";
 
 const PROJECT_TERMINAL_SHORTCUT = APP_SHORTCUTS.find((shortcut) => shortcut.id === "toggle-project-terminal");
 
@@ -160,7 +161,7 @@ function ProjectTerminal({ projectId, projectPath, projectName, onBack }: Projec
 	return (
 		<div className="relative h-full w-full flex flex-col overflow-hidden">
 			{/* Back to board toolbar */}
-			<div className="flex items-center justify-between px-4 py-1.5 border-b border-edge flex-shrink-0 bg-raised" data-collapse-on-compose>
+			<div ref={toastClearanceRef} className="flex items-center justify-between px-4 py-1.5 border-b border-edge flex-shrink-0 bg-raised" data-collapse-on-compose>
 				<button
 					onClick={onBack}
 					className="header-anim flex items-center gap-1.5 text-fg-3 hover:text-fg transition-colors text-sm"

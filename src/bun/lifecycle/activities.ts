@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
 	PRCIStatus,
 	PRInfo,
@@ -8,9 +9,11 @@ import type {
 	TaskPRStatusCache,
 } from "../../shared/types";
 import { resolveTaskCompareBaseBranch, taskCompletesManually } from "../../shared/types";
+import { savedPrMergedFromBranch } from "../../shared/task-pull-requests";
 import * as data from "../data";
 import * as git from "../git";
 import * as github from "../github";
+import type { GitHubPullRequestSummary } from "../github-pr-status";
 import { loadSettings } from "../settings";
 import { resolvePolling, type ResolvedPolling } from "../../shared/polling-settings";
 import { getActiveContext, getPushMessage, isAppForeground, log } from "../rpc-handlers/shared";
@@ -30,11 +33,9 @@ import {
 import { getMergeCompletionFingerprint } from "./merge-fingerprint";
 import {
 	computeSignalKey,
-	countUnresolvedReviewThreads,
 	mapReviewDecision,
 	normalizeChecks,
 	parseAutoMergeEnabled,
-	parseGitHubPullRequestUrl,
 	parseReviewDecision,
 	reasonForSignal,
 	rollupCiStatus,
@@ -47,9 +48,10 @@ import {
 } from "./service";
 import { activitiesFor } from "./machine";
 import { lifecycleStateFromTask } from "./state";
+import { hasMergeOfferHold, mergeOfferHeld, runPrWatches } from "../pr-watch-runner";
+import { branchPrWatches, pinnedPrNumbers } from "../../shared/pr-watch";
 
-// Cap the PR-detection `gh` call: it holds a semaphore slot for its whole
-// duration, so a hung gh on a slow network must not stall branch-status globally.
+// Bound PR reads so a slow GitHub connection cannot stall status updates.
 export const PR_DETECTION_TIMEOUT_MS = 15_000;
 // Wall-clock of the previous tick, per poller, to detect host sleep gaps.
 let mergeLastTickAt = 0;
@@ -80,6 +82,10 @@ export async function prepareMergeCompletionPrompt(params: { taskId: string; pro
 	const fingerprint = params.fingerprint
 		? { fingerprint: params.fingerprint, precise: params.fingerprint.startsWith("v1:") }
 		: await getMergeCompletionFingerprint(task, task.branchName);
+	// Skipped without reserving, so a later check offers normally; force is the user's own refresh.
+	if (params.force !== true && mergeOfferHeld(task)) {
+		return { shouldPrompt: false, fingerprint: fingerprint.fingerprint, shouldNotify: false };
+	}
 	const promptedAt = new Date().toISOString();
 	const previousReservation = lifecycleActorRuntime(task.id).mergePromptReservation;
 	const updated = await dispatchLifecycleEvent(project.id, task.id, {
@@ -264,6 +270,7 @@ async function checkMergedBranches(): Promise<void> {
 					// once the branch has no commits of its own left (ahead === 0),
 					// otherwise post-merge work would read as merged.
 					merged = await git.isContentMergedInto(task.worktreePath!, ref, project)
+						|| (savedPrMergedFromBranch(task, branchName) && (await git.getBranchStatus(task.worktreePath!, ref)).ahead === 0)
 						|| await git.isBranchMergedViaGitHubPR(task.worktreePath!, project)
 						|| (task.prNumber != null
 							&& (await git.getBranchStatus(task.worktreePath!, ref)).ahead === 0
@@ -272,6 +279,8 @@ async function checkMergedBranches(): Promise<void> {
 					merged = await git.isContentMergedInto(task.worktreePath!, ref, project);
 				}
 				if (!merged) continue;
+				// Skipped without reserving: a watching agent handles the merge first.
+				if (mergeOfferHeld(task)) continue;
 
 				log.info("Branch merge detected", { taskId: task.id.slice(0, 8), branch: branchName });
 				await dispatchLifecycleFinding(project, task, {
@@ -311,19 +320,101 @@ export function _resetMergePollerState(): void {
 
 let prPollerInterval: ReturnType<typeof setInterval> | null = null;
 
+/** One task's whole poll (git reads, the bounded GitHub read, dispatch) may not hold the tick longer than this. */
+export const PR_TASK_POLL_TIMEOUT_MS = 60_000;
+/** A tick still running after this long is abandoned and a fresh one starts. */
+export const PR_TICK_STALL_MS = 5 * 60_000;
+/** How often the poller logs a heartbeat with its counters. */
+export const PR_POLLER_HEARTBEAT_MS = 10 * 60_000;
+
+/** Where a poll currently waits; named in the timeout and watchdog logs so a hang points at its await. */
+export interface PollTrace { stage: string }
+
+export interface PrTickInFlight extends PollTrace { generation: number; startedAt: number; taskId?: string }
+
+const prTick = {
+	generation: 0,
+	inFlight: null as PrTickInFlight | null,
+	lastHeartbeatAt: 0,
+	lastCompletedAt: 0,
+	lastTickMs: 0,
+	ticks: 0,
+	tasksPolled: 0,
+	taskTimeouts: 0,
+	watchdogRestarts: 0,
+};
+// A task whose earlier poll timed out but has not settled is not polled again on top of it.
+const prTaskInFlight = new Map<string, PollTrace & { startedAt: number }>();
+
+class PollTimeoutError extends Error {}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+	let timer: ReturnType<typeof setTimeout>;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new PollTimeoutError(`timed out after ${ms}ms`)), ms);
+	});
+	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
+}
+
 export function startPRDetectionPoller(): void {
 	stopPRDetectionPoller();
 	const POLL_INTERVAL = PR_POLL_INTERVAL_MS;
 
-	prPollerInterval = setInterval(async () => {
-		try {
-			await checkOpenPRsForPromotion();
-		} catch (err) {
-			log.error("PR detection poller error", { error: String(err) });
-		}
-	}, POLL_INTERVAL);
+	prPollerInterval = setInterval(() => void runPRDetectionTick(), POLL_INTERVAL);
 
 	log.info("PR detection poller started", { intervalMs: POLL_INTERVAL });
+}
+
+/**
+ * One timer tick: never two at once, and a tick stuck past {@link PR_TICK_STALL_MS}
+ * is abandoned (it stops at its next task boundary) so detection resumes.
+ */
+export async function runPRDetectionTick(): Promise<void> {
+	const now = Date.now();
+	logPRPollerHeartbeat(now);
+	const running = prTick.inFlight;
+	if (running) {
+		const stalledMs = now - running.startedAt;
+		if (stalledMs < PR_TICK_STALL_MS) return;
+		prTick.watchdogRestarts++;
+		const taskStage = running.taskId ? prTaskInFlight.get(running.taskId)?.stage : undefined;
+		log.error("PR detection tick stalled; starting a fresh one", {
+			stalledMs, stage: running.stage,
+			...(running.taskId ? { taskId: running.taskId.slice(0, 8) } : {}),
+			...(taskStage ? { taskStage } : {}),
+		});
+	}
+	const generation = ++prTick.generation;
+	const tick: PrTickInFlight = { generation, startedAt: now, stage: "start" };
+	prTick.inFlight = tick;
+	prTick.ticks++;
+	try {
+		await checkOpenPRsForPromotion(tick);
+	} catch (err) {
+		log.error("PR detection poller error", { error: String(err) });
+	} finally {
+		if (prTick.inFlight === tick) {
+			prTick.inFlight = null;
+			prTick.lastCompletedAt = Date.now();
+			prTick.lastTickMs = prTick.lastCompletedAt - now;
+		}
+	}
+}
+
+function logPRPollerHeartbeat(now: number): void {
+	if (prTick.lastHeartbeatAt === 0) { prTick.lastHeartbeatAt = now; return; }
+	if (now - prTick.lastHeartbeatAt < PR_POLLER_HEARTBEAT_MS) return;
+	prTick.lastHeartbeatAt = now;
+	log.info("PR detection poller heartbeat", {
+		ticks: prTick.ticks,
+		tasksPolled: prTick.tasksPolled,
+		taskTimeouts: prTick.taskTimeouts,
+		watchdogRestarts: prTick.watchdogRestarts,
+		lastTickMs: prTick.lastTickMs,
+		sinceLastTickMs: prTick.lastCompletedAt ? now - prTick.lastCompletedAt : null,
+		tickInFlight: prTick.inFlight !== null,
+		tasksStuck: prTaskInFlight.size,
+	});
 }
 
 export function stopPRDetectionPoller(): void {
@@ -342,26 +433,16 @@ export function _resetPRPollerState(): void {
 	});
 	prLastTickAt = 0;
 	scheduleRandom = Math.random;
+	Object.assign(prTick, {
+		generation: 0, inFlight: null, lastHeartbeatAt: 0, lastCompletedAt: 0, lastTickMs: 0,
+		ticks: 0, tasksPolled: 0, taskTimeouts: 0, watchdogRestarts: 0,
+	});
+	prTaskInFlight.clear();
+	pinnedPrReadFailures.clear();
 }
-
-interface GitHubPullRequestSummary {
-	number?: unknown;
-	isDraft?: unknown;
-	autoMergeRequest?: unknown;
-	url?: unknown;
-	title?: unknown;
-	state?: unknown;
-	mergeable?: unknown;
-	mergeStateStatus?: unknown;
-	statusCheckRollup?: unknown;
-	reviewDecision?: unknown;
-	headRefName?: unknown;
-	headRefOid?: unknown;
-}
-
-const PR_STATUS_JSON_FIELDS = "number,isDraft,autoMergeRequest,url,statusCheckRollup,reviewDecision,mergeable,mergeStateStatus,state,title,headRefName,headRefOid";
 
 interface PolledPRStatus {
+	checkedAt?: number;
 	found: boolean;
 	ciStatus: PRCIStatus | null;
 	/** True when a PR's status was read and dispatched; false when GitHub reports no PR for this branch. */
@@ -398,90 +479,12 @@ export async function persistProjectPrIdentities(project: Project, prs: PRInfo[]
 	}
 }
 
-function prPollInterval(polling: ResolvedPolling, isActiveForeground: boolean, taskId: string): number {
+function prPollInterval(polling: ResolvedPolling, isActiveForeground: boolean, task: Task): number {
 	const { intervalMs } = polling;
-	return lifecycleActorRuntime(taskId).prPending
+	if ((task.prWatches?.length ?? 0) > 0) return intervalMs.prPendingActive;
+	return lifecycleActorRuntime(task.id).prPending
 		? intervalForTask(isActiveForeground, intervalMs.prPendingActive, intervalMs.prPendingBackground)
 		: intervalForTask(isActiveForeground, intervalMs.prActive, intervalMs.prBackground);
-}
-
-const REVIEW_THREADS_QUERY = `
-query($owner: String!, $name: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
-        nodes { isResolved }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}`;
-
-async function fetchUnresolvedReviewThreadCount(
-	project: Project,
-	worktreePath: string,
-	prUrl: string,
-	prNumber: number,
-): Promise<number | null> {
-	const repository = parseGitHubPullRequestUrl(prUrl);
-	if (!repository) return null;
-	const selectedHost = project.githubAuthHost?.trim().toLowerCase();
-	if (selectedHost && selectedHost !== repository.host.toLowerCase()) {
-		log.warn("PR review-thread lookup skipped because project and PR hosts differ", {
-			projectHost: selectedHost,
-			prHost: repository.host,
-			pr: prNumber,
-		});
-		return null;
-	}
-
-	let after: string | null = null;
-	let count = 0;
-	try {
-		for (let page = 0; page < 100; page++) {
-			const args = [
-				"api",
-				"graphql",
-				"--hostname",
-				repository.host,
-				"-f",
-				`query=${REVIEW_THREADS_QUERY}`,
-				"-F",
-				`owner=${repository.owner}`,
-				"-F",
-				`name=${repository.repo}`,
-				"-F",
-				`number=${prNumber}`,
-				"-F",
-				`after=${after ?? "null"}`,
-			];
-			const result = await github.runGitHub(project, worktreePath, args, { timeoutMs: PR_DETECTION_TIMEOUT_MS });
-			if (!result.ok || !result.stdout) return null;
-
-			const payload = JSON.parse(result.stdout) as {
-				data?: {
-					repository?: {
-						pullRequest?: {
-							reviewThreads?: {
-								nodes?: unknown;
-								pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
-							};
-						} | null;
-					};
-				};
-				errors?: unknown;
-			};
-			if (payload.errors) return null;
-			const threads = payload.data?.repository?.pullRequest?.reviewThreads;
-			if (!threads) return null;
-			count += countUnresolvedReviewThreads(threads.nodes);
-			if (!threads.pageInfo?.hasNextPage || !threads.pageInfo.endCursor) return count;
-			after = threads.pageInfo.endCursor;
-		}
-	} catch (err) {
-		log.warn("PR review-thread lookup failed (non-fatal)", { pr: prNumber, error: String(err) });
-	}
-	return null;
 }
 
 /**
@@ -501,92 +504,103 @@ async function mergedPrCoversHead(project: Project, task: Task, pr: GitHubPullRe
 	return status != null && !status.baseUnreachable && status.ahead === 0;
 }
 
-async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion: boolean): Promise<PolledPRStatus | null> {
+async function pollTaskPrStatus(
+	project: Project, task: Task, suggestCompletion: boolean, force = false, trace: PollTrace = { stage: "" },
+): Promise<PolledPRStatus | null> {
 	if (!task.worktreePath) return null;
+	trace.stage = "current-branch";
 	const branchName = await git.getCurrentBranch(task.worktreePath);
 	if (!branchName) return NO_PR;
 
+	trace.stage = "unpushed-count";
 	const unpushed = await git.getUnpushedCount(task.worktreePath, branchName);
 	// A missing remote branch means "never pushed" only when the task has no
 	// sticky PR. After auto-merge, GitHub may delete the branch while the task
 	// still needs the exact PR fetched by number.
 	if (unpushed === -1 && task.prNumber == null) return NO_PR;
+	// A forced refresh, an active pr watch or a pending merge-offer hold keeps the full read of the saved PR.
+	const savedMerged = !force && branchPrWatches(task.prWatches).length === 0 && !hasMergeOfferHold(task.id)
+		&& savedPrMergedFromBranch(task, branchName);
 
-	const ghResult = await github.runGitHub(
-		project,
-		task.worktreePath,
-		[
-			"pr",
-			"list",
-			"--head",
-			branchName,
-			"--state",
-			"open",
-			"--json",
-			PR_STATUS_JSON_FIELDS,
-			"--limit",
-			"1",
-		],
-		{ timeoutMs: PR_DETECTION_TIMEOUT_MS },
-	);
-	if (!ghResult.ok || !ghResult.stdout) return null;
+	trace.stage = "github-read";
+	const result = await github.readTaskPullRequest(project, task.worktreePath, branchName, savedMerged ? null : task.prNumber, {
+		force, timeoutMs: PR_DETECTION_TIMEOUT_MS,
+	});
+	if (!result) return null;
+	const pr = result.pr;
+	if (!pr) return { ...NO_PR, checkedAt: result.checkedAt };
+	return { ...await reportTaskPrStatus(project, task, branchName, pr, suggestCompletion, result.checkedAt, false, trace), checkedAt: result.checkedAt };
+}
 
-	let prs: GitHubPullRequestSummary[];
-	try {
-		prs = JSON.parse(ghResult.stdout);
-	} catch {
-		return null;
-	}
-	let pr = Array.isArray(prs) && prs.length > 0 ? prs[0] : null;
-	let isOpenPr = pr !== null;
-	if (!pr && task.prNumber != null) {
-		// An open-list lookup stops finding the PR after merge. Use the sticky
-		// number to fetch that exact PR so its URL and terminal state remain
-		// visible, even if the branch has since disappeared from GitHub.
-		const knownPrResult = await github.runGitHub(
-			project,
-			task.worktreePath,
-			["pr", "view", String(task.prNumber), "--json", PR_STATUS_JSON_FIELDS],
-			{ timeoutMs: PR_DETECTION_TIMEOUT_MS },
-		);
-		if (knownPrResult.ok && knownPrResult.stdout) {
-			try {
-				const parsed = JSON.parse(knownPrResult.stdout);
-				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-					const known = parsed as GitHubPullRequestSummary;
-					// The stored number survives a branch rename, and a task grown out
-					// of a review task inherits the reviewed PR's number. Either way it
-					// can name somebody else's PR — take it only if its head is us.
-					if (typeof known.headRefName === "string" && known.headRefName !== branchName) {
-						log.info("Ignoring stored PR from a different branch", {
-							taskId: task.id.slice(0, 8), pr: task.prNumber, prHead: known.headRefName, branch: branchName,
-						});
-						return NO_PR;
-					}
-					pr = known;
-					isOpenPr = typeof pr.state === "string" && pr.state.toUpperCase() === "OPEN";
-				}
-			} catch {
-				return null;
+/** Failed reads of one followed PR tolerated at the normal cadence before backing off. */
+export const PINNED_PR_READ_FAILURES_BEFORE_BACKOFF = 3;
+const PINNED_PR_BACKOFF_BASE_MS = 5 * 60_000;
+const PINNED_PR_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+// `${taskId}#${prNumber}` -> consecutive failed reads and when the last one happened.
+const pinnedPrReadFailures = new Map<string, { failures: number; at: number }>();
+
+/** How long a followed PR is left alone after `failures` failed reads in a row; 0 = read it now. */
+export function pinnedPrBackoffMs(failures: number): number {
+	const over = failures - PINNED_PR_READ_FAILURES_BEFORE_BACKOFF;
+	return over < 0 ? 0 : Math.min(PINNED_PR_BACKOFF_BASE_MS * 2 ** over, PINNED_PR_BACKOFF_MAX_MS);
+}
+
+/**
+ * Read every PR the task follows by `--pr` and judge its pinned watches. These PRs are
+ * not the task's own: nothing here touches its PR identity, badge or completion offer.
+ * A PR that keeps failing to read (lost access, gone) backs off instead of costing a read a minute.
+ */
+async function pollPinnedPrWatches(project: Project, task: Task): Promise<void> {
+	const worktree = task.worktreePath;
+	if (!worktree) return;
+	await Promise.all(pinnedPrNumbers(task.prWatches).map(async (prNumber) => {
+		const key = `${task.id}#${prNumber}`;
+		const failed = pinnedPrReadFailures.get(key);
+		if (failed && Date.now() - failed.at < pinnedPrBackoffMs(failed.failures)) return;
+		const result = await github.readTaskPullRequest(project, worktree, "", prNumber, { timeoutMs: PR_DETECTION_TIMEOUT_MS });
+		const pr = result?.pr;
+		if (!pr || pr.number !== prNumber) {
+			const failures = (failed?.failures ?? 0) + 1;
+			pinnedPrReadFailures.set(key, { failures, at: Date.now() });
+			if (failures === PINNED_PR_READ_FAILURES_BEFORE_BACKOFF) {
+				log.warn("Followed PR keeps failing to read; backing off", { taskId: task.id.slice(0, 8), pr: prNumber, nextCheckMin: pinnedPrBackoffMs(failures) / 60_000 });
 			}
-		} else {
-			// GitHub did not answer for a PR we know exists: that is an outage, not "no PR".
-			return null;
+			return;
 		}
-	}
-	if (!pr) return NO_PR;
+		pinnedPrReadFailures.delete(key);
+		const sample = {
+			number: prNumber,
+			state: typeof pr.state === "string" ? pr.state.toUpperCase() : null,
+			headRefOid: typeof pr.headRefOid === "string" ? pr.headRefOid : null,
+			checks: normalizeChecks(pr.statusCheckRollup),
+		};
+		startPrWatchRun(task.id, runPrWatches(project, task.id, sample, typeof pr.url === "string" ? pr.url : "", result.checkedAt, false, prNumber));
+	}));
+}
+
+/** Watch delivery types into a pane and must never hold the poll tick, so it runs detached. */
+function startPrWatchRun(taskId: string, run: Promise<void>): void {
+	void run.catch((err) => {
+		log.warn("PR watch evaluation failed", { taskId: taskId.slice(0, 8), error: String(err) });
+	});
+}
+
+export async function reportTaskPrStatus(
+	project: Project, task: Task, branchName: string, pr: GitHubPullRequestSummary,
+	suggestCompletion: boolean, checkedAt: number, skipUnchanged = false, trace: PollTrace = { stage: "" },
+): Promise<PolledPRStatus> {
+	const matchesBranch = pr.headRefName === branchName;
+	const isOpenPr = matchesBranch && pr.state === "OPEN";
 
 	const prNumber = typeof pr.number === "number" ? pr.number : task.prNumber ?? null;
 	const prUrl = typeof pr.url === "string" ? pr.url : task.prUrl ?? null;
-	if (prNumber === null) return null;
+	if (prNumber === null) throw new Error("PR status is missing its number");
 
 	const ciStatus = rollupCiStatus(pr.statusCheckRollup);
 	const reviewDecision = parseReviewDecision(pr.reviewDecision);
 	const reviewState = mapReviewDecision(pr.reviewDecision);
 	const checks = normalizeChecks(pr.statusCheckRollup);
-	const unresolvedCount = prUrl
-		? await fetchUnresolvedReviewThreadCount(project, task.worktreePath, prUrl, prNumber)
-		: null;
+	const unresolvedCount = pr.unresolvedCount;
 	const mergeState: PRMergeState = {
 		mergeable: typeof pr.mergeable === "string" ? pr.mergeable.toUpperCase() : null,
 		status: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus.toUpperCase() : null,
@@ -608,7 +622,13 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 		checks,
 		prTitle,
 		isDraft,
+		headRefName: typeof pr.headRefName === "string" ? pr.headRefName : null,
 	};
+	if (skipUnchanged && task.prStatusCache) {
+		const { cachedAt: _, ...saved } = task.prStatusCache;
+		if (isDeepStrictEqual(saved, freshStatus)) return { found: isOpenPr, ciStatus, reported: true };
+	}
+
 	const payload = {
 		projectId: project.id,
 		taskId: task.id,
@@ -627,7 +647,7 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 
 	// Raise the bell / native notification only on a *transition* to a new
 	// worthy signal. Unresolved-thread changes deliberately stay passive.
-	const signalKey = computeSignalKey(ciStatus, reviewState);
+	const signalKey = matchesBranch ? computeSignalKey(ciStatus, reviewState) : null;
 	const signalReason = signalKey ? reasonForSignal(ciStatus, reviewState) : undefined;
 	const isOpenNonDraft = isOpenPr && isDraft === false;
 	if (isOpenNonDraft && task.status === "review-by-user") {
@@ -637,6 +657,7 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 			pr: prNumber,
 		});
 	}
+	trace.stage = "dispatch-pr-detected";
 	await dispatchLifecycleFinding(project, task, {
 		type: "prDetected",
 		openNonDraft: isOpenNonDraft,
@@ -651,7 +672,15 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 		signalKey,
 		...(signalReason ? { signalReason } : {}),
 	});
-	if (mergeState.state === "MERGED" && await mergedPrCoversHead(project, task, pr)) {
+	trace.stage = "merge-covers-head";
+	const mergeCoversHead = matchesBranch && mergeState.state === "MERGED" ? await mergedPrCoversHead(project, task, pr) : undefined;
+	if (branchPrWatches(task.prWatches).length > 0) {
+		const headRefOid = typeof pr.headRefOid === "string" ? pr.headRefOid : null;
+		startPrWatchRun(task.id, runPrWatches(project, task.id, { number: prNumber, state: mergeState.state, headRefOid, checks }, prUrl ?? "", checkedAt, mergeCoversHead === true));
+	}
+	// Fresh read: the poll's snapshot may predate a watch added since.
+	trace.stage = "merge-offer";
+	if (mergeCoversHead && !mergeOfferHeld(await data.getTask(project, task.id))) {
 		const fingerprint = await getMergeCompletionFingerprint(task, branchName);
 		await dispatchLifecycleFinding(project, task, {
 			type: "mergeDetected",
@@ -667,10 +696,58 @@ async function pollTaskPrStatus(project: Project, task: Task, suggestCompletion:
 }
 
 
-export async function checkOpenPRsForPromotion(): Promise<void> {
-	if (!getPushMessage()) return;
+/** Does the task's own branch PR get polled (detection, badge, merge offer)? */
+function ownsPrPoll(project: Project, task: Task): boolean {
+	return activitiesFor(lifecycleStateFromTask(project, task)).includes("prWatch");
+}
 
+/** A live task that follows another PR with `dev3 pr watch --pr` is polled for it, PR of its own or not. */
+function followsPinnedPrs(task: Task): boolean {
+	return !!task.worktreePath && !TERMINAL_TASK_STATUSES.has(task.status) && pinnedPrNumbers(task.prWatches).length > 0;
+}
+
+/**
+ * Poll one task under {@link PR_TASK_POLL_TIMEOUT_MS}. A timed-out poll keeps
+ * running detached; until it settles the task is skipped rather than stacked.
+ */
+async function pollTaskWithinDeadline(project: Project, task: Task, suggestCompletion: boolean, tick?: PrTickInFlight): Promise<PolledPRStatus | null | "skipped"> {
+	const stuck = prTaskInFlight.get(task.id);
+	if (stuck) {
+		log.warn("PR check skipped: the previous poll of this task has not finished", {
+			taskId: task.id.slice(0, 8), stage: stuck.stage, pendingMs: Date.now() - stuck.startedAt,
+		});
+		return "skipped";
+	}
+	const trace = { stage: "start", startedAt: Date.now() };
+	if (tick) tick.taskId = task.id;
+	prTaskInFlight.set(task.id, trace);
+	const pinned = pollPinnedPrWatches(project, task).catch((err) => {
+		log.warn("Pinned PR watch read failed", { taskId: task.id.slice(0, 8), error: String(err) });
+	});
+	const own = ownsPrPoll(project, task) ? pollTaskPrStatus(project, task, suggestCompletion, false, trace) : Promise.resolve(null);
+	const poll = Promise.all([own, pinned]).then(([result]) => result);
+	const settle = () => { if (prTaskInFlight.get(task.id) === trace) prTaskInFlight.delete(task.id); };
+	poll.then(settle, settle);
+	prTick.tasksPolled++;
+	try {
+		return await withTimeout(poll, PR_TASK_POLL_TIMEOUT_MS);
+	} catch (err) {
+		if (!(err instanceof PollTimeoutError)) throw err;
+		prTick.taskTimeouts++;
+		log.warn("PR check timed out for task", { taskId: task.id.slice(0, 8), stage: trace.stage, timeoutMs: PR_TASK_POLL_TIMEOUT_MS });
+		return null;
+	}
+}
+
+export async function checkOpenPRsForPromotion(tick?: PrTickInFlight): Promise<void> {
+	if (!getPushMessage()) return;
+	// An abandoned tick (watchdog started a newer one) stops at the next boundary.
+	const abandoned = () => tick !== undefined && tick.generation !== prTick.generation;
+	const stage = (name: string) => { if (tick) tick.stage = name; };
+
+	stage("load-projects");
 	const projects = await data.loadProjects();
+	stage("load-settings");
 	const settings = await loadSettings();
 	const polling = resolvePolling(settings);
 	// Same as the merge poller: off means no `gh` call, and re-enabling re-spreads.
@@ -684,20 +761,20 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 
 	const liveTaskIds = new Set<string>();
 	for (const project of projects) {
+		if (abandoned()) return;
+		stage("load-tasks");
 		const tasks = await data.loadTasks(project);
 		// Detection remains limited to review statuses, but a task with a persisted
 		// PR identity stays sticky through every non-terminal status so CI/review
 		// state remains visible while an agent fixes reviewer feedback.
-		const candidates = tasks.filter((task) => (
-			activitiesFor(lifecycleStateFromTask(project, task)).includes("prWatch")
-		));
+		const candidates = tasks.filter((task) => ownsPrPoll(project, task) || followsPinnedPrs(task));
 
 		if (candidates.length === 0) continue;
 
 		const isActiveFg = foreground && project.id === activeProjectId;
 		const dueTasks = candidates.filter((task) => {
 			liveTaskIds.add(task.id);
-			const interval = prPollInterval(polling, isActiveFg, task.id);
+			const interval = prPollInterval(polling, isActiveFg, task);
 			const runtime = lifecycleActorRuntime(task.id);
 			let scheduled = runtime.prNextDue;
 			if (scheduled === undefined) {
@@ -714,13 +791,21 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
 		if (dueTasks.length === 0) continue;
 
 		for (const task of dueTasks) {
+			if (abandoned()) return;
+			stage("poll-task");
+			let checkedAt = now;
 			try {
-				const result = await pollTaskPrStatus(project, task, suggestCompletion);
-				if (result) lifecycleActorRuntime(task.id).prPending = result.found && result.ciStatus === "pending";
+				const result = await pollTaskWithinDeadline(project, task, suggestCompletion, tick);
+				if (result === "skipped") continue;
+				if (result) {
+					lifecycleActorRuntime(task.id).prPending = result.found && result.ciStatus === "pending";
+					checkedAt = result.checkedAt ?? now;
+				}
 			} catch (err) {
 				log.warn("PR check failed for task", { taskId: task.id.slice(0, 8), error: String(err) });
 			} finally {
-				lifecycleActorRuntime(task.id).prNextDue = nextDueAfterRun(now, prPollInterval(polling, isActiveFg, task.id), scheduleRandom);
+				// Schedule from the shared sample so a cache hit cannot defer the next fetch by another minute.
+				lifecycleActorRuntime(task.id).prNextDue = checkedAt + prPollInterval(polling, isActiveFg, task);
 			}
 		}
 	}
@@ -736,14 +821,14 @@ export async function checkOpenPRsForPromotion(): Promise<void> {
  * One on-demand poll. The outcome tells the popover whether it now shows fresh
  * GitHub data, or still the last known status because GitHub did not answer.
  */
-export async function refreshTaskPrStatus(params: { taskId: string; projectId: string }): Promise<RefreshTaskPrStatusResult> {
+export async function refreshTaskPrStatus(params: { taskId: string; projectId: string; force?: boolean }): Promise<RefreshTaskPrStatusResult> {
 	if (!getPushMessage()) return { outcome: "skipped" };
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
 	if (project.kind === "virtual" || !task.worktreePath || TERMINAL_TASK_STATUSES.has(task.status)) return { outcome: "skipped" };
 	const settings = await loadSettings();
 	const suggestCompletion = settings.suggestCompletingTasksAfterMerge !== false;
-	const result = await pollTaskPrStatus(project, task, suggestCompletion);
+	const result = await pollTaskPrStatus(project, task, suggestCompletion, params.force !== false);
 	const runtime = lifecycleActorRuntime(task.id);
 	if (result) runtime.prPending = result.found && result.ciStatus === "pending";
 	delete runtime.prNextDue;

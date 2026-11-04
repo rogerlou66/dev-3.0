@@ -30,6 +30,8 @@ export interface AgentPromptDelivery {
 	 */
 	readonly reason?: string;
 	readonly detail?: string;
+	/** The pane the input went to (or waits for), where the arm knows it. */
+	readonly paneId?: string;
 }
 
 /**

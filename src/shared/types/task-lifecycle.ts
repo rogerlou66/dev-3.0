@@ -40,6 +40,13 @@ export function getPreparingStageProgress(stage: PreparingStage): number {
  */
 export const STUCK_PREPARATION_FETCH_THRESHOLD_MS = 60 * 1000;
 
+/** The launch attribution of one "+ Agent" or bug-hunter pane on a native task. */
+export type NativeAgentAttribution = Pick<PaneSessionEntry, "agentCmd" | "agentId" | "configId" | "accountId" | "agentFamily">;
+
+export interface NativeTaskAgent extends NativeAgentAttribution {
+	paneId: string;
+}
+
 /** Per-pane session info for recovery. */
 export interface PaneSessionEntry {
 	/** tmux pane ID (e.g. "%0", "%5") — stable within a tmux server lifetime, unique across sessions. */
@@ -74,6 +81,10 @@ export interface PaneSessionEntry {
 	 *  recovery must look there, not in the task's own worktree store. Absent on every
 	 *  pane whose session began where the task lives. */
 	sessionOriginCwd?: string | null;
+	/** Saved for a later resume while no live pane runs it — a task woken with a
+	 *  plain shell. The pane reconciler never adopts or drops a parked entry; a
+	 *  resume of this pane clears the flag. */
+	parked?: boolean;
 }
 
 /** Captured session state for agent recovery after tmux death / app restart. */

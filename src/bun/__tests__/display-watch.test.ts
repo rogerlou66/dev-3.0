@@ -1,13 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
 import { displaySignature, startDisplayWatch, DISPLAY_WATCH_INTERVAL_MS } from "../display-watch";
 import type { DisplayLike } from "../window-state";
+import type { LateTickCause } from "../host-sleep-probe";
 
 const laptop: DisplayLike = { id: 1, bounds: { x: 0, y: 0, width: 1728, height: 1117 }, scaleFactor: 2 };
 const laptopLowRes: DisplayLike = { id: 1, bounds: { x: 0, y: 0, width: 1280, height: 800 }, scaleFactor: 2 };
 const laptopScaled: DisplayLike = { id: 1, bounds: { x: 0, y: 0, width: 1728, height: 1117 }, scaleFactor: 1 };
 
 /** Drives the watcher tick by tick with a clock the test owns. */
-function harness(displaysPerTick: DisplayLike[][], clockPerTick?: number[]) {
+async function harness(
+	displaysPerTick: DisplayLike[][],
+	clockPerTick?: number[],
+	sleepCause: LateTickCause = "slept",
+) {
 	const events: { reason: string; signature: string }[] = [];
 	let tick = -1;
 	// A holder, not a bare `let`: TS cannot see that the mocked setInterval assigns
@@ -26,6 +31,7 @@ function harness(displaysPerTick: DisplayLike[][], clockPerTick?: number[]) {
 		clearInterval: () => {
 			timer.fire = null;
 		},
+		sleepProbe: async () => sleepCause,
 	});
 
 	for (let i = 1; i < displaysPerTick.length; i++) {
@@ -33,6 +39,8 @@ function harness(displaysPerTick: DisplayLike[][], clockPerTick?: number[]) {
 		clock += clockPerTick?.[i] ?? DISPLAY_WATCH_INTERVAL_MS;
 		timer.fire?.();
 	}
+	// The sleep probe answers asynchronously; let its verdict land.
+	await new Promise((resolve) => setTimeout(resolve, 0));
 	return { events, stop, isRunning: () => timer.fire !== null };
 }
 
@@ -52,36 +60,51 @@ describe("displaySignature", () => {
 });
 
 describe("startDisplayWatch", () => {
-	it("reports a resolution change once, not on every tick after it", () => {
-		const { events } = harness([[laptop], [laptopLowRes], [laptopLowRes]]);
+	it("reports a resolution change once, not on every tick after it", async () => {
+		const { events } = await harness([[laptop], [laptopLowRes], [laptopLowRes]]);
 		expect(events).toHaveLength(1);
 		expect(events[0]!.reason).toBe("displays");
 	});
 
-	it("stays silent while the layout is stable", () => {
-		const { events } = harness([[laptop], [laptop], [laptop]]);
+	it("stays silent while the layout is stable", async () => {
+		const { events } = await harness([[laptop], [laptop], [laptop]]);
 		expect(events).toEqual([]);
 	});
 
-	it("reports a wake even when the layout came back identical", () => {
-		const { events } = harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 60]);
+	it("reports a wake even when the layout came back identical", async () => {
+		const { events } = await harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 60]);
 		expect(events).toHaveLength(1);
 		expect(events[0]!.reason).toBe("wake");
 	});
 
-	it("does not call a stalled event loop a wake", () => {
-		const { events } = harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 2]);
+	it("does not call a host starved while awake a wake", async () => {
+		const { events } = await harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 60], "starved");
 		expect(events).toEqual([]);
 	});
 
-	it("prefers the layout change over the wake when both land on one tick", () => {
-		const { events } = harness([[laptop], [laptopLowRes]], [0, DISPLAY_WATCH_INTERVAL_MS * 60]);
+	it("still reports the wake when no sleep signal exists, as before", async () => {
+		const { events } = await harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 60], "unknown");
+		expect(events.map((e) => e.reason)).toEqual(["wake"]);
+	});
+
+	it("reports a real layout change even from a starved host", async () => {
+		const { events } = await harness([[laptop], [laptopLowRes]], [0, DISPLAY_WATCH_INTERVAL_MS * 60], "starved");
+		expect(events.map((e) => e.reason)).toEqual(["displays"]);
+	});
+
+	it("does not call a stalled event loop a wake", async () => {
+		const { events } = await harness([[laptop], [laptop]], [0, DISPLAY_WATCH_INTERVAL_MS * 2]);
+		expect(events).toEqual([]);
+	});
+
+	it("prefers the layout change over the wake when both land on one tick", async () => {
+		const { events } = await harness([[laptop], [laptopLowRes]], [0, DISPLAY_WATCH_INTERVAL_MS * 60]);
 		expect(events).toHaveLength(1);
 		expect(events[0]!.reason).toBe("displays");
 	});
 
-	it("stops polling when stopped", () => {
-		const h = harness([[laptop], [laptop]]);
+	it("stops polling when stopped", async () => {
+		const h = await harness([[laptop], [laptop]]);
 		h.stop();
 		expect(h.isRunning()).toBe(false);
 	});

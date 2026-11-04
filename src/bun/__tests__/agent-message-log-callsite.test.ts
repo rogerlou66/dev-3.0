@@ -25,11 +25,14 @@ vi.mock("../data", () => ({
 		return { task: makeTask(), result: undefined };
 	}),
 }));
+vi.mock("../agent-message-target", () => ({
+	resolveMainAgentTarget: vi.fn(async () => ({ ok: true, paneId: "%1", author: null })),
+	addressedAgentRefusal: vi.fn(async () => null),
+	agentPaneRoles: vi.fn(async () => new Map([["%1", "main"]])),
+}));
 vi.mock("../agent-prompt", () => ({
 	sendPromptToAgentPane: vi.fn(async () => true),
 	sendPromptToPane: vi.fn(async () => true),
-	// A message is held, never typed on arrival — the two the message paths use.
-	holdMessageForAgentPane: vi.fn(async () => ({ status: "held" })),
 	holdMessageForPane: vi.fn(async () => ({ status: "held" })),
 }));
 vi.mock("../agent-prompt-native", () => ({
@@ -168,5 +171,32 @@ describe("a queued fire", () => {
 		const { rows } = readAgentMessageLog(project);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({ status: "not-delivered", body: "too late", toSeq: 1650 });
+	});
+});
+
+describe("message ids and external senders", () => {
+	it("gives every immediate send a fresh id and stores it on the row", async () => {
+		const first = await sendMessageImmediately(makeTask(), "one", null, source);
+		const second = await sendMessageImmediately(makeTask(), "two", null, source);
+		expect(first.messageId).toMatch(/^[0-9a-f-]{36}$/);
+		expect(second.messageId).not.toBe(first.messageId);
+		const { rows } = readAgentMessageLog(project);
+		expect(rows.map((r) => r.messageId).sort()).toEqual([first.messageId, second.messageId].sort());
+	});
+
+	it("records an external sender as its own origin, never as a task or the user", async () => {
+		const sent = await sendMessageImmediately(makeTask(), "status?", null, source, {
+			subject: "status check",
+			externalSender: { id: "openclaw:home:main", label: "OpenClaw main" },
+		});
+		const { rows } = readAgentMessageLog(project);
+		expect(rows[0]).toMatchObject({
+			messageId: sent.messageId,
+			origin: "external-sender",
+			fromSender: "openclaw:home:main",
+			fromTitle: "OpenClaw main",
+			fromTaskId: null,
+			fromSeq: null,
+		});
 	});
 });

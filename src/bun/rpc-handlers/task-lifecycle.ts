@@ -1,8 +1,10 @@
-import type { AgentCancellationRequest, AgentCompletionRequest, AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
+import type { ReviewedPullRequest, AgentCancellationRequest, AgentCompletionRequest, AgentLaunchChoice, LaunchVariant, NativeTerminalAvailability, Project, Task, TaskOrigin, TaskPriority, TaskResetConsent, TaskResetResult, TaskStatus, TaskTerminalBackendInfo, TaskType } from "../../shared/types";
 import type { TerminalBackendIdentity } from "../../shared/terminal-backend-identity";
 import { isTaskSoundEnabled } from "../../shared/task-sound-statuses";
-import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, reviewTaskTitle } from "../../shared/types";
+import { ACTIVE_STATUSES, BUILTIN_OPS_BOARD_NAME, DRAFT_TASK_ACTIVATION_ERROR, normalizeTaskType, reviewTaskTitle } from "../../shared/types";
 import * as data from "../data";
+import { loadTaskLineage } from "../task-lineage";
+import { epicForNewTask } from "../task-epics";
 import * as git from "../git";
 import * as github from "../github";
 import { pendingAgentLaunchDialogs, holdAgentRequestAutoApprove as holdAutoApprove, listPendingAgentRequests, markAgentRequestShown as markShown, resolveAgentRequest, setAgentRequestLaunchChoice } from "../agent-requests";
@@ -13,6 +15,7 @@ import { autoLaunchDeferral } from "../account-router";
 import { dispatchLifecycleEvent, removeLifecycleActor } from "../lifecycle/service";
 import { assertKnownLabelIds } from "../board-operations/labels";
 import { isScratchPlaceholderDescription, planTitleAndDescription, updateTaskMetadata, withoutUnchanged } from "../board-operations/task-metadata";
+import { nextKeepAliveState } from "../../shared/keep-alive";
 import { boardPorts } from "../board-operations/runtime";
 import { USER_ACTOR } from "../board-operations/types";
 import { getResourceUsage } from "../resource-monitor";
@@ -40,20 +43,36 @@ function scratchPlaceholder(now: Date = new Date()): string {
  * "Save" remains unavailable until the user actually writes the prompt.
  */
 /**
- * A DRAFT name for a PR-review task, at creation, from what dev3 already knows
- * about the branch. The reviewing agent owns the final title — the preset prompt
- * tells it to replace this one once it has read the diff, which dev3 never does.
- * This exists because the card must not be anonymous in the meantime, and because
- * the prompt is overridable per project and app-wide: a naming rule that lived
- * only there would silently skip every user who customised it.
- * Best-effort; "" means "keep the description-derived title".
+ * The pull request a review ref belongs to, from the repository the ref came
+ * from — a fork remote's `owner/x` asks for that owner's PR, never a namesake
+ * branch on another fork. Null when there is none or gh cannot answer.
  */
-async function reviewTitleForBranch(project: Project, existingBranch: string): Promise<string> {
+async function pullRequestForReviewRef(project: Project, existingBranch: string) {
+	const branch = await git.localBranchNameForRef(project.path, existingBranch);
+	const forkOwner = await git.forkRemoteOf(project.path, existingBranch);
+	const pr = await github.findPullRequestForHead(project, project.path, branch, { forkOwner, timeoutMs: 15_000 });
+	return { branch, pr };
+}
+
+function reviewedPrOf(pr: { number: number; url: string } | null): ReviewedPullRequest | null {
+	return pr?.url ? { number: pr.number, url: pr.url } : null;
+}
+
+/**
+ * A DRAFT name for a PR-review task, at creation, from what dev3 already knows
+ * about the branch, plus the PR it reviews. The reviewing agent owns the final
+ * title — the preset prompt tells it to replace this one once it has read the
+ * diff, which dev3 never does. This exists because the card must not be
+ * anonymous in the meantime, and because the prompt is overridable per project
+ * and app-wide: a naming rule that lived only there would silently skip every
+ * user who customised it.
+ * Best-effort; title "" means "keep the description-derived title".
+ */
+async function reviewIdentityForBranch(project: Project, existingBranch: string): Promise<{ title: string; reviewedPr: ReviewedPullRequest | null }> {
 	try {
-		const branch = await git.localBranchNameForRef(project.path, existingBranch);
-		const probe = await github.findOpenPullRequest(project, project.path, branch, { timeoutMs: 15_000 });
-		let author = probe.pr?.author ?? null;
-		let topic = probe.pr?.title ?? null;
+		const { branch, pr } = await pullRequestForReviewRef(project, existingBranch);
+		let author = pr?.author ?? null;
+		let topic = pr?.title ?? null;
 		// No pull request, or one gh could not fully describe: the branch tip still
 		// knows who wrote it and what they called it.
 		if (!author || !topic) {
@@ -61,11 +80,45 @@ async function reviewTitleForBranch(project: Project, existingBranch: string): P
 			author ??= tip.author;
 			topic ??= tip.subject;
 		}
-		return reviewTaskTitle({ prNumber: probe.pr?.number ?? null, branch, author, topic });
+		return { title: reviewTaskTitle({ prNumber: pr?.number ?? null, branch, author, topic }), reviewedPr: reviewedPrOf(pr) };
 	} catch (err) {
-		log.warn("reviewTitleForBranch failed, keeping the derived title", { error: String(err) });
-		return "";
+		log.warn("reviewIdentityForBranch failed, keeping the derived title", { error: String(err) });
+		return { title: "", reviewedPr: null };
 	}
+}
+
+const reviewedPrLookups = new Map<string, Promise<ReviewedPullRequest | null>>();
+
+/**
+ * The PR a review task reviews, for tasks created before `reviewedPr` was
+ * stored: looked up once from `existingBranch` and persisted, so every surface
+ * reads the same stored identity afterwards. Not found is NOT persisted — the
+ * renderer asks at most once per session, and a later session may find it.
+ */
+export async function resolveReviewedPr(params: { projectId: string; taskId: string }): Promise<ReviewedPullRequest | null> {
+	const project = await data.getProject(params.projectId);
+	const task = await data.getTask(project, params.taskId);
+	if (task.reviewedPr) return task.reviewedPr;
+	if (project.kind === "virtual" || !task.existingBranch || (task.taskType !== "pr-review" && !task.foreignCode)) return null;
+	const pending = reviewedPrLookups.get(task.id);
+	if (pending) return pending;
+	const lookup = (async () => {
+		try {
+			const reviewedPr = reviewedPrOf((await pullRequestForReviewRef(project, task.existingBranch!)).pr);
+			if (!reviewedPr) return null;
+			const updated = await data.updateTask(project, task.id, { reviewedPr });
+			getPushMessage()?.("taskUpdated", { projectId: project.id, task: updated });
+			log.info("resolveReviewedPr: stored", { taskId: task.id.slice(0, 8), pr: reviewedPr.number });
+			return reviewedPr;
+		} catch (err) {
+			log.warn("resolveReviewedPr failed", { taskId: task.id.slice(0, 8), error: String(err) });
+			return null;
+		} finally {
+			reviewedPrLookups.delete(task.id);
+		}
+	})();
+	reviewedPrLookups.set(task.id, lookup);
+	return lookup;
 }
 
 function draftPlaceholderTitle(now: Date = new Date()): string {
@@ -160,7 +213,7 @@ async function getWorkspaceBoardTasks(): Promise<{ projectId: string; tasks: Tas
  * too — a second creation path is how `foreignCode` came to be set in the GUI
  * and nowhere else.
  */
-export async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType; reservationId?: string }): Promise<Task> {
+export async function createTask(params: { projectId: string; description: string; title?: string; status?: TaskStatus; existingBranch?: string; scratch?: boolean; draft?: boolean; opsWorkDir?: string; priority?: TaskPriority; taskType?: TaskType; reservationId?: string; origin?: TaskOrigin; epicId?: string }): Promise<Task> {
 	log.info("→ createTask", {
 		projectId: params.projectId,
 		requestedStatus: params.status ?? "todo",
@@ -171,6 +224,8 @@ export async function createTask(params: { projectId: string; description: strin
 		hasOpsWorkDir: Boolean(params.opsWorkDir),
 		priority: params.priority,
 		taskType: params.taskType,
+		origin: params.origin?.kind ?? "user",
+		hasEpic: Boolean(params.epicId),
 	});
 	const project = await data.getProject(params.projectId);
 	const isScratch = params.scratch === true;
@@ -200,9 +255,10 @@ export async function createTask(params: { projectId: string; description: strin
 	// description leads with the review preamble, so every review card otherwise
 	// reads the same. A title the USER typed still wins — the modal sends that as
 	// `customTitle` after creation, which getTaskTitle prefers over this one.
-	const reviewTitle = params.taskType === "pr-review" && params.existingBranch && project.kind !== "virtual" && !isScratch
-		? await reviewTitleForBranch(project, params.existingBranch)
-		: "";
+	const reviewIdentity = params.taskType === "pr-review" && params.existingBranch && project.kind !== "virtual" && !isScratch
+		? await reviewIdentityForBranch(project, params.existingBranch)
+		: null;
+	const reviewTitle = reviewIdentity?.title ?? "";
 	const extras: Parameters<typeof data.addTask>[3] = {
 		...(params.reservationId ? { reservationId: params.reservationId } : {}),
 		...(params.existingBranch ? { existingBranch: params.existingBranch } : {}),
@@ -219,6 +275,9 @@ export async function createTask(params: { projectId: string; description: strin
 		...(params.opsWorkDir ? { opsWorkDir: params.opsWorkDir } : {}),
 		...(params.priority ? { priority: params.priority } : {}),
 		...(params.taskType ? { taskType: params.taskType } : {}),
+		...(reviewIdentity?.reviewedPr ? { reviewedPr: reviewIdentity.reviewedPr } : {}),
+		...(params.origin ? { origin: params.origin } : {}),
+		...(params.epicId ? { epicId: params.epicId } : {}),
 	};
 	const initialStatus = isActive(status) ? "todo" : status;
 	const createdTask = await data.addTask(project, description, initialStatus, Object.keys(extras).length ? extras : undefined);
@@ -257,9 +316,9 @@ export async function createTask(params: { projectId: string; description: strin
  * to the agent. A scratch task has no prompt by definition — whoever asked for it
  * drives it with messages afterwards.
  */
-export async function createScratchTask(projectId: string): Promise<Task> {
+export async function createScratchTask(projectId: string, origin?: TaskOrigin, epicId?: string): Promise<Task> {
 	const project = await data.getProject(projectId);
-	const task = await data.addTask(project, scratchPlaceholder(), "todo", { scratch: true });
+	const task = await data.addTask(project, scratchPlaceholder(), "todo", { scratch: true, ...(origin ? { origin } : {}), ...(epicId ? { epicId } : {}) });
 	getPushMessage()?.("taskUpdated", { projectId: project.id, task });
 	log.info("← createScratchTask", { taskId: task.id.slice(0, 8) });
 	return task;
@@ -457,7 +516,7 @@ async function setTaskHidden(params: { taskId: string; projectId: string; hidden
  * from the resource monitor's last poll (up to 10s stale), which is why the
  * toast quoting it says "about".
  */
-async function hibernateTask(params: { taskId: string; projectId: string }): Promise<{ task: Task; freedRssBytes: number | null }> {
+export async function hibernateTask(params: { taskId: string; projectId: string }): Promise<{ task: Task; freedRssBytes: number | null }> {
 	log.info("→ hibernateTask", params);
 	const project = await data.getProject(params.projectId);
 	const task = await data.getTask(project, params.taskId);
@@ -613,6 +672,7 @@ async function spawnVariants(params: {
 				// Whose code the group is about is a property of the branch, so every
 				// sibling inherits it — never re-derived per variant.
 				foreignCode: sourceTask.foreignCode,
+				reviewedPr: sourceTask.reviewedPr,
 				watched: sourceTask.watched,
 				// Scratch tasks keep the `Scratch — HH:mm` placeholder as title
 				// on every variant, but the flag tells the launch path (see
@@ -634,6 +694,10 @@ async function spawnVariants(params: {
 				// New variants start at the source's priority — without the copy a
 				// P0 launch would spawn P3 siblings. Each changes independently after.
 				priority: sourceTask.priority,
+				// A variant group is one node in the lineage: siblings share the parent.
+				origin: sourceTask.origin,
+				// Variants start in the original's epic; each one changes independently after.
+				epicId: sourceTask.epicId,
 				// Virtual ("Operations") tasks: carry the chosen working folder onto
 				// each variant so the worktree-less launch path targets it instead
 				// of falling back to a managed dir.
@@ -746,6 +810,7 @@ async function addAttempts(params: {
 				// Whose code the group is about is a property of the branch, so every
 				// sibling inherits it — never re-derived per variant.
 				foreignCode: sourceTask.foreignCode,
+				reviewedPr: sourceTask.reviewedPr,
 				watched: sourceTask.watched,
 				// Carry the scratch flag onto every added attempt — otherwise the
 				// launch path keeps the `Scratch — HH:mm` placeholder as the prompt
@@ -760,6 +825,9 @@ async function addAttempts(params: {
 				// Attempts start at the source task's priority, otherwise re-running a
 				// P0 task spawns a P3 sibling. Each changes independently after.
 				priority: sourceTask.priority,
+				// Same parent as the original — an attempt is never a child of it.
+				origin: sourceTask.origin,
+				epicId: sourceTask.epicId,
 				// NOTE: notes/overview are intentionally NOT copied here — addAttempts
 				// keeps the source task (returns it alongside the new attempts), so its
 				// notes are not lost; copying them would duplicate them across siblings.
@@ -832,11 +900,13 @@ async function editTask(params: {
 	taskId: string;
 	projectId: string;
 	description?: string;
+	title?: string;
 	customTitle?: string | null;
 	priority?: TaskPriority;
 	labelIds?: string[];
 	existingBranch?: string | null;
 	draft?: boolean;
+	taskType?: TaskType | null;
 }): Promise<Task> {
 	log.info("→ editTask", { taskId: params.taskId, draft: params.draft });
 	const project = await data.getProject(params.projectId);
@@ -853,6 +923,9 @@ async function editTask(params: {
 		throw new Error("A draft needs a description before it can become a runnable task");
 	}
 	if (params.labelIds !== undefined) await assertKnownLabelIds(project, task, params.labelIds);
+	if (params.taskType != null && normalizeTaskType(params.taskType) !== params.taskType) {
+		throw new Error(`Invalid task type "${params.taskType}"`);
+	}
 
 	const { task: updated, result: applied } = await data.updateTaskWith(project, task.id, (current) => {
 		// Only the UI reaches this RPC, so a typed title is a real user edit and
@@ -861,6 +934,8 @@ async function editTask(params: {
 			...(params.customTitle !== undefined ? { title: { value: params.customTitle } } : {}),
 			...(params.description !== undefined ? { description: params.description } : {}),
 		}, USER_ACTOR, { fallbackTitle: () => draftPlaceholderTitle() });
+		const customTitle = params.customTitle === undefined ? current.customTitle : params.customTitle;
+		if (!customTitle && params.title?.trim()) updates.title = params.title.trim();
 		if (params.priority !== undefined) updates.priority = params.priority;
 		if (params.labelIds !== undefined) updates.labelIds = params.labelIds;
 		if (params.existingBranch !== undefined) {
@@ -868,6 +943,7 @@ async function editTask(params: {
 			updates.baseBranch = data.deriveTaskBaseBranch(project, params.existingBranch);
 		}
 		if (params.draft !== undefined) updates.draft = params.draft;
+		if (params.taskType !== undefined) updates.taskType = params.taskType;
 		const changed = withoutUnchanged(current, updates);
 		return { updates: changed, result: Object.keys(changed).length > 0 };
 	});
@@ -930,6 +1006,14 @@ async function setTaskManualCompletion(params: { taskId: string; projectId: stri
 	const project = await data.getProject(params.projectId);
 	const { task, verdict } = await updateTaskMetadata(boardPorts, project, params.taskId, { manualCompletion: params.manualCompletion }, USER_ACTOR);
 	log.info("← setTaskManualCompletion done", { taskId: task.id, verdict });
+	return task;
+}
+
+async function setTaskKeepAlive(params: { taskId: string; projectId: string; enabled: boolean }): Promise<Task> {
+	log.info("→ setTaskKeepAlive", { taskId: params.taskId, enabled: params.enabled });
+	const project = await data.getProject(params.projectId);
+	const { task, verdict } = await updateTaskMetadata(boardPorts, project, params.taskId, { keepAlive: nextKeepAliveState(params.enabled) }, USER_ACTOR);
+	log.info("← setTaskKeepAlive done", { taskId: task.id, verdict });
 	return task;
 }
 
@@ -1119,6 +1203,7 @@ export async function createAutomationTask(
 		agentId: automation.agentId,
 		configId: automation.configId,
 		automationId: automation.id,
+		origin: { kind: "automation" },
 		customTitle: `${automation.name} · ${now.toISOString().slice(0, 10)}`,
 	});
 	const task = { ...createdTask, status: "todo" as const };
@@ -1274,8 +1359,16 @@ export const taskLifecycleHandlers = {
 	getTasks,
 	getAllProjectTasks,
 	getWorkspaceBoardTasks,
+	getTaskLineage: () => loadTaskLineage(),
 	openQuickShell,
-	createTask,
+	// A GUI create is the user's by definition; only the CLI socket records a parent.
+	// A picked epic is re-checked here: the picker may be stale, and an archived epic takes no new work.
+	// The push lets every window's epic counts see the new member; a plain To Do create sends none.
+	createTask: async ({ origin: _origin, epicId, ...params }: Parameters<typeof createTask>[0]) => {
+		const task = await createTask({ ...params, epicId: await epicForNewTask({ epic: epicId, creator: null }) });
+		if (task.epicId) getPushMessage()?.("taskUpdated", { projectId: task.projectId, task });
+		return task;
+	},
 	moveTask,
 	setTaskBlocked,
 	debugEmitTaskSound,
@@ -1293,7 +1386,9 @@ export const taskLifecycleHandlers = {
 	clearUserOverview,
 	toggleTaskWatch,
 	setTaskForeignCode,
+	resolveReviewedPr,
 	setTaskManualCompletion,
+	setTaskKeepAlive,
 	scheduleTaskLaunch,
 	cancelScheduledLaunch,
 	startScheduledLaunchNow,

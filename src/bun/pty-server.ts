@@ -23,7 +23,8 @@ import type { NativeStreamRole } from "../shared/native-terminal-stream";
 import { NativeBridgeJournal, NativeClientLease } from "./native-terminal-bridge";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "./logger";
-import { SHARED_VIDEO_ROUTE, serveSharedVideo } from "./shared-video-stream";
+import { SHARED_MEDIA_ROUTE, serveSharedMedia } from "./shared-media-stream";
+import { FILE_LINK_ROUTE, serveFileLink } from "./file-links";
 import { spawn } from "./spawn";
 import { getUserShell } from "./shell-env";
 import {
@@ -264,6 +265,16 @@ function computeTmuxSessionName(key: string, type: PtySessionType): string {
 		return projectTerminalSessionName(projectId);
 	}
 	return taskSessionName(key);
+}
+
+/**
+ * Prefix a pane command with `env -u` for each key: a new session's first pane
+ * starts from the server-global env, and `-e` can set a variable but never remove it.
+ */
+export function withUnsetEnv(command: string, keys: readonly string[]): string {
+	const names = keys.filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+	if (names.length === 0) return command;
+	return `env ${names.map((key) => `-u ${key}`).join(" ")} ${command}`;
 }
 
 /**
@@ -930,14 +941,19 @@ export function getPtyPort(): number {
 	return ptyWsPort;
 }
 
-/** Returns active session info for port scanning. */
+/** Returns active session info for port scanning; native sessions carry an empty `tmuxSocket`. */
 export function getActiveSessionIds(): Array<{ taskId: string; tmuxSocket: string }> {
 	const result: Array<{ taskId: string; tmuxSocket: string }> = [];
+	const nativeTaskIds = new Set<string>();
 	for (const session of sessions.values()) {
 		if (session.proc) {
 			result.push({ taskId: session.taskId, tmuxSocket: session.tmuxSocket });
+		} else if (session.backend === "native" && session.native) {
+			nativeTaskIds.add(session.taskId);
 		}
 	}
+	// An empty socket marks a native session; extra panes share their task's id.
+	for (const taskId of nativeTaskIds) result.push({ taskId, tmuxSocket: "" });
 	return result;
 }
 
@@ -1987,10 +2003,14 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 		// split-windows. The post-spawn `set-environment` loop below stays
 		// as a fallback for the `-A` (attach to existing) path.
 		const envFlags: Record<string, string> = {};
+		const unsetKeys: string[] = [];
 		for (const [key, value] of Object.entries(session.env)) {
-			// ENV_UNSET entries can't ride on `-e` (it only sets); they are removed
-			// via `set-environment -r` below plus `unset` lines in the cmd script.
-			if (value === ENV_UNSET) continue;
+			// ENV_UNSET entries can't ride on `-e` (it only sets): the first pane
+			// drops them through `env -u`, later panes via `set-environment -r` below.
+			if (value === ENV_UNSET) {
+				unsetKeys.push(key);
+				continue;
+			}
 			envFlags[key] = value;
 		}
 		envFlags.DEV3_WORKTREE_ROOT = session.cwd;
@@ -2006,7 +2026,7 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 			cwd: session.cwd,
 			attachIfExists: true,
 			envFlags,
-			command: tmuxCmd,
+			command: withUnsetEnv(tmuxCmd, unsetKeys),
 			terminal: {
 				cols,
 				rows,
@@ -2030,6 +2050,9 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 					}
 				},
 			},
+			// No session env here: the client that happens to start the server makes
+			// its process env the server-global env every later session inherits —
+			// that is how one task's DEV3_TASK_SEQ reached every Repo terminal.
 			processEnv: {
 				TERM: "xterm-256color",
 				// Ensure tmux knows the client supports UTF-8.
@@ -2037,8 +2060,6 @@ function spawnPty(session: PtySession, cols: number, rows: number): void {
 				// without it tmux replaces non-ASCII chars with underscores.
 				LANG: process.env.LANG || "en_US.UTF-8",
 				HOME: process.env.HOME || "/",
-				// ENV_UNSET sentinels must never reach a real process env.
-				...Object.fromEntries(Object.entries(session.env).filter(([, v]) => v !== ENV_UNSET)),
 			},
 		});
 		log.debug("PTY: Bun.spawn returned", { taskId: shortId(session.taskId), pid: proc.pid, msSinceSpawn: Date.now() - spawnStartedAt });
@@ -2210,14 +2231,20 @@ const ptyServer = Bun.serve({
 				return new Response("ok");
 			}
 
-			if (url.pathname.startsWith(SHARED_VIDEO_ROUTE)) {
+			if (url.pathname.startsWith(SHARED_MEDIA_ROUTE)) {
 				// Loopback only: the server listens on every interface, the token is not the only guard.
 				if (!isLoopbackAddress(server.requestIP(req)?.address)) return new Response("Forbidden", { status: 403 });
 				// The desktop page is a different origin (views://); CORS lets its download fetch read the bytes.
-				return serveSharedVideo(req, url.pathname, { "Access-Control-Allow-Origin": "*" }).catch((err) => {
-					log.error("Shared video stream failed", { error: String(err) });
+				return serveSharedMedia(req, url.pathname, { "Access-Control-Allow-Origin": "*" }).catch((err) => {
+					log.error("Shared media stream failed", { error: String(err) });
 					return new Response("Internal error", { status: 500 });
 				});
+			}
+
+			if (url.pathname.startsWith(FILE_LINK_ROUTE)) {
+				// The desktop preview's audio/video: loopback only, media only (never a page on this origin).
+				if (!isLoopbackAddress(server.requestIP(req)?.address)) return new Response("Forbidden", { status: 403 });
+				return serveFileLink(req, url, { mediaOnly: true });
 			}
 
 			log.debug("PTY server fetch", { url: req.url });

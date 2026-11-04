@@ -23,7 +23,7 @@
 // Base tick of each poller's setInterval: the finest interval a setting can honor,
 // and the yardstick for wake detection.
 export const MERGE_POLL_INTERVAL_MS = 60_000;
-export const PR_POLL_INTERVAL_MS = 60_000;
+export const PR_POLL_INTERVAL_MS = 15_000;
 
 // Random drift added on top of the interval when rescheduling, so two checks
 // that once landed on the same tick gradually separate and never re-synchronise.

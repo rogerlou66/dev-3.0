@@ -1,11 +1,11 @@
 import type { DevServerSummary, DevServerSummaryEntry, PortInfo, Project, Task } from "../shared/types";
 import { resolveDevServers, type ResolvedDevServer } from "../shared/dev-servers";
-import { spawn } from "./spawn";
 import { tmux, TASK_SESSION_PREFIX, DEV_SERVER_SESSION_PREFIX, devServerSessionForTaskSession, devServerSessionName, taskSessionName, PANE_PID_FORMAT, ALL_PANE_PIDS_FORMAT } from "./tmux";
 import { getPortAssignments } from "./port-pool";
 import { resolveOperationalProjectConfig } from "./repo-config";
 import { createLogger } from "./logger";
 import { runProbeText } from "./probe-spawn";
+import { LISTEN_SCAN_TIMEOUT_MS, runLsof } from "./lsof-scan";
 import { cleanupTaskTunnels } from "./port-tunnels";
 import { classifyAgainstStartSnapshot, getTaskStartSnapshot, mergePortInfos } from "./dev-server-ports";
 
@@ -18,21 +18,6 @@ const log = createLogger("port-scanner");
 // resulting multi-second loop stalls froze the whole UI, including terminal
 // WebSocket upgrades ("Connecting..." forever). Do not reintroduce spawnSync
 // in any code reachable from a poller or an RPC handler.
-
-/**
- * Run a command asynchronously and return its stdout, or "" on failure.
- * Stdout is drained concurrently with awaiting exit (pipe-buffer deadlock).
- */
-async function runText(cmd: string[]): Promise<string> {
-	try {
-		const proc = spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-		const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-		if (exitCode !== 0) return "";
-		return stdout;
-	} catch {
-		return "";
-	}
-}
 
 /**
  * A healthy `ps -eo` over the whole table takes ~120 ms, and seconds under heavy
@@ -275,11 +260,29 @@ export async function waitForPortsFree(ports: number[], timeoutMs: number, pollM
 	return holders;
 }
 
+let listenScan: { promise: Promise<string | null>; abort: AbortController } | null = null;
+
 /**
- * Run lsof once and return raw stdout. Shared across all tasks in a poll cycle.
+ * Every listening TCP socket on the machine (`lsof -F pcn`), or null when the
+ * scan was not measured (timed out, aborted, lsof missing) — which is NOT "no
+ * ports". Single-flight: concurrent callers share the scan already running, and
+ * the next one starts only after that scan's process group is gone.
  */
-export function getLsofOutput(): Promise<string> {
-	return runText(["lsof", "-i", "-P", "-n", "-sTCP:LISTEN", "-F", "pcn"]);
+export function scanListeningSockets(): Promise<string | null> {
+	if (listenScan) return listenScan.promise;
+	const abort = new AbortController();
+	const promise = runLsof(["-i", "-P", "-n", "-sTCP:LISTEN", "-F", "pcn"], LISTEN_SCAN_TIMEOUT_MS, abort.signal)
+		.then((result) => (result === null ? null : result.exitCode === 0 ? result.stdout : ""))
+		.finally(() => {
+			listenScan = null;
+		});
+	listenScan = { promise, abort };
+	return promise;
+}
+
+/** {@link scanListeningSockets} for one-shot callers that read a failed scan as "no ports". */
+export async function getLsofOutput(): Promise<string> {
+	return (await scanListeningSockets()) ?? "";
 }
 
 /**
@@ -308,6 +311,63 @@ export function collectDescendants(pid: number, tree: Map<number, number[]>): nu
 		}
 	}
 	return descendants;
+}
+
+/**
+ * Native pane records, injected like {@link setNativeDevServerProbe}: the native
+ * registry sits behind `bun:ffi` and this file is reachable from the renderer's
+ * module graph. Without a reader, native tasks are skipped.
+ */
+export type NativePaneRecordsReader = {
+	listTaskIds: () => string[];
+	readPanes: (taskId: string) => Array<{ hostPid: number; shellPid: number; command: string[] }>;
+};
+
+let nativePaneRecordsReader: NativePaneRecordsReader | null = null;
+
+export function setNativePaneRecordsReader(reader: NativePaneRecordsReader): void {
+	nativePaneRecordsReader = reader;
+}
+
+type NativePaneRecord = { hostPid: number; shellPid: number; command: string[] };
+
+/** Ids of the tasks that own a native pane set on disk — read from records, no process spawned. */
+export function listNativeTaskIds(): string[] {
+	return nativePaneRecordsReader?.listTaskIds() ?? [];
+}
+
+function readNativePanes(taskId: string): NativePaneRecord[] {
+	return nativePaneRecordsReader?.readPanes(taskId) ?? [];
+}
+
+/**
+ * The live shell of every native pane a task owns, from the on-disk records only.
+ * A pane counts when its host (which spawns the shell directly) still has that
+ * shell as a child — no ownership recovery, so pollers can call it every tick.
+ * `panes` lets a caller that already read the records pass them in.
+ */
+export function nativeTaskPaneRoots(
+	taskId: string,
+	tree: Map<number, number[]>,
+	panes: NativePaneRecord[] = readNativePanes(taskId),
+): Array<{ shellPid: number; command: string[] }> {
+	return panes
+		.filter((pane) => tree.get(pane.hostPid)?.includes(pane.shellPid))
+		.map(({ shellPid, command }) => ({ shellPid, command }));
+}
+
+/** Every PID of a native task's panes: each live shell and all its descendants. */
+export function nativeTaskPids(
+	taskId: string,
+	tree: Map<number, number[]>,
+	panes?: NativePaneRecord[],
+): Set<number> {
+	const pids = new Set<number>();
+	for (const { shellPid } of nativeTaskPaneRoots(taskId, tree, panes)) {
+		pids.add(shellPid);
+		for (const d of collectDescendants(shellPid, tree)) pids.add(d);
+	}
+	return pids;
 }
 
 /**
@@ -398,6 +458,7 @@ export type NativeDevServerProbe = (
 	task: Task,
 	socket: string,
 	serverName: string,
+	tree: Map<number, number[]>,
 ) => Promise<{ alive: boolean; rootPid: number | null } | null>;
 
 let nativeDevServerProbe: NativeDevServerProbe | null = null;
@@ -443,7 +504,7 @@ export async function buildDevServerSummary(
 	const entries: DevServerSummaryEntry[] = [];
 	for (const server of declared) {
 		const devSession = devServerSessionName(task.id, server.name);
-		const nativeState = nativeDevServerProbe ? await nativeDevServerProbe(task, socket, server.name) : null;
+		const nativeState = nativeDevServerProbe ? await nativeDevServerProbe(task, socket, server.name, tree) : null;
 		const running = nativeState ? nativeState.alive : paneMap?.has(devSession) === true;
 		if (!running) {
 			entries.push({ name: server.name, isDefault: server.isDefault, running: false, ports: [] });
@@ -591,11 +652,20 @@ export function clearDevServerSummaryForTask(taskId: string): void {
 // ── Background poller ──────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 10_000;
+/** Cap of the backoff after consecutive unmeasured lsof scans. */
+const MAX_POLL_BACKOFF_MS = 120_000;
 
 type PushMessageFn = (name: string, payload: unknown) => void;
 type ActiveSessionsFn = () => Array<{ taskId: string; tmuxSocket: string }>;
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
+// Exactly one poll chain may exist. `pollGeneration` retires a chain on stop/start,
+// and a reschedule request while a cycle runs is folded into that cycle's finally —
+// never a second timer, which would become a second chain (and a second lsof) forever.
+let pollGeneration = 0;
+let runningGeneration: number | null = null;
+let pollSoonDelayMs: number | null = null;
+let failedLsofScans = 0;
 let pushMessageFn: PushMessageFn | null = null;
 let getActiveSessionsFn: ActiveSessionsFn | null = null;
 
@@ -604,11 +674,52 @@ const portCache = new Map<string, string>();
 // Cache: taskId → PortInfo[] (actual objects)
 const portData = new Map<string, PortInfo[]>();
 
-async function poll() {
+function nextPollDelayMs(): number {
+	if (failedLsofScans === 0) return POLL_INTERVAL_MS;
+	return Math.min(POLL_INTERVAL_MS * 2 ** failedLsofScans, MAX_POLL_BACKOFF_MS);
+}
+
+function armPoll(delayMs: number): void {
+	if (pollTimer) clearTimeout(pollTimer);
+	const generation = pollGeneration;
+	pollTimer = setTimeout(() => void poll(generation), delayMs);
+}
+
+async function poll(generation: number) {
+	if (generation !== pollGeneration || runningGeneration === generation) return;
+	pollTimer = null;
+	runningGeneration = generation;
 	try {
 		if (!getActiveSessionsFn || !pushMessageFn) return;
 
-		const sessions = getActiveSessionsFn();
+		// Native sessions are scanned with ps/lsof, which win32 does not have.
+		const bound = getActiveSessionsFn().filter((s) => s.tmuxSocket !== "" || process.platform !== "win32");
+		const sessions = [...bound];
+		// Pane records are read once per task per cycle. A native task whose primary
+		// shell exited keeps surviving aux panes (a dev server) but has no bound
+		// session, so it is found from the records instead.
+		const nativePanes = new Map<string, NativePaneRecord[]>();
+		if (process.platform !== "win32") {
+			for (const s of bound) if (s.tmuxSocket === "") nativePanes.set(s.taskId, readNativePanes(s.taskId));
+			for (const taskId of listNativeTaskIds()) {
+				if (nativePanes.has(taskId)) continue;
+				const panes = readNativePanes(taskId);
+				if (panes.length > 0) nativePanes.set(taskId, panes);
+			}
+		}
+		let processTree: Map<number, number[]> | undefined;
+		if (nativePanes.size > 0) {
+			processTree = (await collectProcessInfo()).tree;
+			// An empty table is a failed `ps`, and would make every native pane look dead.
+			if (processTree.size === 0) {
+				log.warn("Port scan skipped: process table is empty");
+				return;
+			}
+			for (const [taskId, panes] of nativePanes) {
+				if (bound.some((s) => s.taskId === taskId)) continue;
+				if (nativeTaskPaneRoots(taskId, processTree, panes).length > 0) sessions.push({ taskId, tmuxSocket: "" });
+			}
+		}
 		const activeTaskIds = new Set(sessions.map((s) => s.taskId));
 
 		// Clean up stale cache entries. Same hook tears down any port-tunnels
@@ -627,9 +738,18 @@ async function poll() {
 		// One ps + one lsof + one tmux list-panes -a for the whole cycle.
 		// collectProcessInfo is TTL-cached — shared with the resource-monitor
 		// poller firing in the same cycle.
-		const processTree = (await collectProcessInfo()).tree;
-		const lsofOutput = await getLsofOutput();
+		processTree ??= (await collectProcessInfo()).tree;
+		const lsofOutput = await scanListeningSockets();
+		if (lsofOutput === null) {
+			// Not measured is not "no ports": keep every task's last known ports.
+			failedLsofScans++;
+			log.warn("Port scan skipped: lsof did not answer", { failedScans: failedLsofScans, nextPollMs: nextPollDelayMs() });
+			return;
+		}
+		failedLsofScans = 0;
 		const socketNames = new Set(sessions.map((s) => s.tmuxSocket));
+		// "" marks a native session: it has no tmux server to ask.
+		socketNames.delete("");
 		const paneMaps = new Map<string, Map<string, number[]>>();
 		for (const socketName of socketNames) {
 			paneMaps.set(socketName, await getAllSessionPanePids(socketName));
@@ -638,7 +758,9 @@ async function poll() {
 		for (const { taskId, tmuxSocket } of sessions) {
 			const sessionName = taskSessionName(taskId);
 			try {
-				const owned = await scanTaskPorts(tmuxSocket, sessionName, lsofOutput, processTree, paneMaps.get(tmuxSocket));
+				const owned = tmuxSocket === ""
+					? parseLsofOutput(lsofOutput, nativeTaskPids(taskId, processTree, nativePanes.get(taskId)))
+					: await scanTaskPorts(tmuxSocket, sessionName, lsofOutput, processTree, paneMaps.get(tmuxSocket));
 				// A containerised devScript never owns its published socket — the
 				// container runtime's daemon does — so ownership alone leaves the UI
 				// showing no ports at all for such a task (issue #1427).
@@ -666,7 +788,12 @@ async function poll() {
 	} catch (err) {
 		log.error("Port scan poll cycle failed", { error: String(err) });
 	} finally {
-		pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+		if (runningGeneration === generation) runningGeneration = null;
+		if (generation === pollGeneration) {
+			const soon = pollSoonDelayMs;
+			pollSoonDelayMs = null;
+			armPoll(soon !== null && failedLsofScans === 0 ? soon : nextPollDelayMs());
+		}
 	}
 }
 
@@ -676,8 +803,10 @@ export function startPortScanPoller(
 ): void {
 	pushMessageFn = push;
 	getActiveSessionsFn = getActiveSessions;
+	stopPortScanPoller();
 	log.info("Port scan poller started", { intervalMs: POLL_INTERVAL_MS });
-	pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+	pollGeneration++;
+	armPoll(POLL_INTERVAL_MS);
 }
 
 /**
@@ -686,16 +815,23 @@ export function startPortScanPoller(
  * which reads as a dead button.
  */
 export function schedulePortScanSoon(delayMs = 400): void {
+	if (runningGeneration !== null && runningGeneration === pollGeneration) {
+		pollSoonDelayMs = Math.min(pollSoonDelayMs ?? delayMs, delayMs);
+		return;
+	}
 	if (!pollTimer) return;
-	clearTimeout(pollTimer);
-	pollTimer = setTimeout(poll, delayMs);
+	armPoll(delayMs);
 }
 
 export function stopPortScanPoller(): void {
+	pollGeneration++;
+	pollSoonDelayMs = null;
+	failedLsofScans = 0;
 	if (pollTimer) {
 		clearTimeout(pollTimer);
 		pollTimer = null;
 	}
+	listenScan?.abort.abort();
 }
 
 /**

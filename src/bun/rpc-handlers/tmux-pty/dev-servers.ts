@@ -7,8 +7,9 @@ import * as portPool from "../../port-pool";
 import { buildProcessTree, clearDevServerSummaryForTask, clearPortDataForTask, collectDescendants, collectTaskPids, findPortHolders, getLsofOutput, getPortsForTask, getSessionPanePids, parseLsofOutput, scanTaskPorts, schedulePortScanSoon, waitForPortsFree } from "../../port-scanner";
 import { classifyAgainstStartSnapshot, clearDevServerStart, clearDevServerStartsForTask, getDevServerStartSnapshot, mergePortInfos, recordDevServerStart } from "../../dev-server-ports";
 import { DEFAULT_DEV_SERVER_NAME, devServerPortCount, devServerScriptBase, resolveDevServerRef, resolveDevServers, splitAssignedPorts, type DevServerResolution, type ResolvedDevServer } from "../../../shared/dev-servers";
-import { clearDevServerEnv, readDevServerEnv, saveDevServerEnv } from "../../dev-server-env-store";
+import { clearDevServerArgs, clearDevServerEnv, readDevServerArgs, readDevServerEnv, saveDevServerArgs, saveDevServerEnv } from "../../dev-server-env-store";
 import { sanitizeDevServerEnv } from "../../../shared/dev-server-env";
+import { findWorktreeContainerPorts } from "../../container-ports";
 import { getPidCwd, terminatePidsVerified } from "../../process-reaper";
 import { getResourceUsage } from "../../resource-monitor";
 import { tmux, DEFAULT_TMUX_SOCKET, TmuxError, isTmuxSpawnError, taskSessionName, devServerSessionName, isDevServerSessionOfTask, parseDev3SessionName, PANE_START_COMMAND_FORMAT, SESSION_OVERVIEW_FORMAT } from "../../tmux";
@@ -18,7 +19,7 @@ import { nativeTaskPaneCommands } from "../../native-task-panes";
 import { auxPaneAlive, auxPaneTitle, closeAuxPane, findAuxPane, nativeAuxPaneShellPid, openAuxPane } from "../../task-aux-panes";
 import { buildTaskLifecycleEnv, shellQuote, generatedScriptLaunch, generatedScriptName, log, writeLaunchScript } from "../shared-pure";
 import { assertPosixLaunchDialect } from "../../../shared/platform-launch";
-import { buildDevServerScript } from "../../dev-server-script";
+import { buildDevServerScript, scriptArgsProblem } from "../../dev-server-script";
 import { resetDevServerLog } from "../../dev-server-log";
 import { devServerLogPath, DEV_SERVER_LOG_SINK_VERB } from "../../../shared/dev-server-log";
 import { dev3CliExecutable } from "../../task-pane-runs";
@@ -211,6 +212,9 @@ const DEV_SERVER_KILL_WAIT_MS = 2000;
 
 const DEV_SERVER_PORT_RELEASE_WAIT_MS = 3000;
 
+// Docker's default stop grace is 10s before it SIGKILLs the container.
+const CONTAINER_PORT_RELEASE_WAIT_MS = 15_000;
+
 /**
  * The dev-server process tree of a NATIVE task: the pane's own shell plus every
  * descendant, from the same single `ps` snapshot the tmux walk uses (see the
@@ -400,10 +404,18 @@ export async function killDevServerSession(
 
 	// "Stop returned" must mean "the next start can bind": wait for the stopped
 	// servers' ports to actually be released. Ports squatted by foreign processes
-	// are excluded — they will never free and are already reported above.
-	const foreignPorts = new Set(foreignHolders.map((h) => h.port));
+	// are excluded — they will never free and are already reported above. This
+	// worktree's own container is not foreign: its stop outlives the HUP, and a
+	// restart that skips the wait reads the old container as the new one ready.
+	const containerPorts = foreignHolders.length > 0 && worktreePath
+		? await findWorktreeContainerPorts(worktreePath)
+		: new Set<number>();
+	const foreignPorts = new Set(foreignHolders.filter((h) => !containerPorts.has(h.port)).map((h) => h.port));
 	const waitPorts = ownedPorts.filter((port) => !foreignPorts.has(port));
-	const stuckHolders = await waitForPortsFree(waitPorts, DEV_SERVER_PORT_RELEASE_WAIT_MS);
+	const releaseWaitMs = waitPorts.some((port) => containerPorts.has(port))
+		? CONTAINER_PORT_RELEASE_WAIT_MS
+		: DEV_SERVER_PORT_RELEASE_WAIT_MS;
+	const stuckHolders = await waitForPortsFree(waitPorts, releaseWaitMs);
 	if (stuckHolders.length > 0) {
 		log.warn("Assigned ports still held after teardown", { taskId: taskId.slice(0, 8), stuckHolders });
 	}
@@ -564,6 +576,7 @@ function emptyEntry(ctx: DevServerContext, server: ResolvedDevServer): DevServer
 		publishedPorts: [],
 		portConflicts: [],
 		extraEnvKeys: Object.keys(readDevServerEnv(ctx.task.id, server.name)).sort(),
+		scriptArgs: readDevServerArgs(ctx.task.id, server.name),
 	};
 }
 
@@ -693,6 +706,19 @@ async function devServerViewerTarget(ctx: DevServerContext, exclude: string): Pr
 }
 
 /**
+ * `args` come from the CLI, the renderer or any socket client, so the shape is
+ * checked here. A NUL cannot live in a process argument. One argument list
+ * cannot mean the same thing to several servers, hence no `all`.
+ */
+function assertScriptArgs(args: unknown, all: boolean | undefined): asserts args is string[] | undefined {
+	if (args === undefined) return;
+	if (!Array.isArray(args) || args.some((item) => typeof item !== "string" || item.includes("\0"))) {
+		throw new Error("Script arguments must be a list of strings without NUL characters");
+	}
+	if (all) throw new Error("Script arguments go to one dev server — name it instead of using all");
+}
+
+/**
  * `env` is the caller's own extra environment (`dev3 dev-server start --env
  * KEY=VALUE`). Absent means "no extra env for this run" and CLEARS whatever the
  * previous run stored — a start defines its configuration whole. Only
@@ -701,12 +727,14 @@ async function devServerViewerTarget(ctx: DevServerContext, exclude: string): Pr
  * `server` names ONE declared server; `all` starts every one of them. Neither
  * means the default server, exactly as before.
  */
-export async function runDevServer(params: { taskId: string; projectId: string; opId?: string; env?: Record<string, string>; server?: string; all?: boolean }): Promise<DevServerStatus> {
+export async function runDevServer(params: { taskId: string; projectId: string; opId?: string; env?: Record<string, string>; args?: string[]; server?: string; all?: boolean }): Promise<DevServerStatus> {
 	// Echo the renderer's correlation id so a click that never reached a handler is
 	// distinguishable from one that did (seq 1407).
 	// Values redacted: an extra env pair can carry a secret and this log is a file.
-	log.info("→ runDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined });
+	// Args are logged as a count, like env as keys: either can carry a secret.
+	log.info("→ runDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined, args: params.args?.length });
 	try {
+		assertScriptArgs(params.args, params.all);
 		const ctx = await loadDevServerContext(params.projectId, params.taskId);
 		if (ctx.resolution.servers.length === 0) throw new Error("No dev script configured");
 		if (!ctx.task.worktreePath) throw new Error("Task has no worktree");
@@ -715,7 +743,7 @@ export async function runDevServer(params: { taskId: string; projectId: string; 
 		const targets = params.all ? ctx.resolution.servers : [pickServer(ctx, params.server)];
 		await ensureDevServerPorts(ctx);
 		for (const server of targets) {
-			await startOneDevServer(ctx, server, params.env, params.opId);
+			await startOneDevServer(ctx, server, params.env, params.args, params.opId);
 		}
 		refreshBoardDevServer(params.taskId);
 		return buildDevServerStatus(ctx);
@@ -733,6 +761,7 @@ async function startOneDevServer(
 	ctx: DevServerContext,
 	server: ResolvedDevServer,
 	env: Record<string, string> | undefined,
+	args: string[] | undefined,
 	opId?: string,
 ): Promise<void> {
 	const { task, project, native, socket } = ctx;
@@ -740,7 +769,11 @@ async function startOneDevServer(
 	// Never trust the caller: `devServer.start` is reachable from the CLI, the
 	// renderer, and any other socket client, and only the CLI validates.
 	const callerEnv = sanitizeDevServerEnv(env);
+	const scriptArgs = args ?? [];
+	const argsProblem = scriptArgs.length > 0 ? scriptArgsProblem(server.script) : null;
+	if (argsProblem) throw new Error(argsProblem);
 	saveDevServerEnv(task.id, server.name, callerEnv);
+	saveDevServerArgs(task.id, server.name, scriptArgs);
 
 	const devSession = devServerSessionName(task.id, server.name);
 	const devScriptPath = devServerScriptPath(task.id, server.name);
@@ -763,7 +796,11 @@ async function startOneDevServer(
 	// devScript to crash-loop on bind with only a downstream 502 as evidence.
 	// The start still proceeds (the script may not use the squatted port) —
 	// the conflict is logged here and returned in the status' portConflicts.
-	const preStartConflicts = await findPortHolders(ownPorts);
+	const preStartHolders = await findPortHolders(ownPorts);
+	// This worktree's own container, still up from the previous run, is not a
+	// squatter: its runtime daemon keeps the same PID across the recreate.
+	const ownContainerPorts = preStartHolders.length > 0 ? await findWorktreeContainerPorts(worktreePath) : new Set<number>();
+	const preStartConflicts = preStartHolders.filter((holder) => !ownContainerPorts.has(holder.port));
 	// The snapshot is what later lets status tell "published for this dev
 	// server by a container runtime" from "squatted by something else".
 	recordDevServerStart(task.id, server.name, ownPorts, preStartConflicts);
@@ -788,6 +825,7 @@ async function startOneDevServer(
 	if (logPath) resetDevServerLog(logPath);
 	const wrappedScript = buildDevServerScript({
 		devScript: server.script,
+		scriptArgs,
 		envGroups: [
 			ctx.resolved.env ?? {},
 			// This server's own env sits above the project's and below the caller's:
@@ -974,7 +1012,10 @@ export async function stopDevServer(params: { taskId: string; projectId: string;
 			: [pickServerToStop(ctx, params.server)];
 		// The run is over, so its extra env is too — a later plain `start` must not
 		// silently inherit it. `restartDevServer` reads the store before it calls us.
-		for (const name of targets) clearDevServerEnv(task.id, name);
+		for (const name of targets) {
+			clearDevServerEnv(task.id, name);
+			clearDevServerArgs(task.id, name);
+		}
 		// The pane border only exists to title the tmux viewer splits.
 		const clearPaneBorder = async () => {
 			if (native) return;
@@ -1036,10 +1077,11 @@ const DEV_SERVER_RESTART_DELAY_MS = 250;
  * `env` replaces the extra env of the run being restarted; omitting it REUSES
  * that run's env. This is what makes the UI's Restart button (and a bare `dev3
  * dev-server restart`) come back on the same configuration instead of quietly
- * dropping to the project defaults.
+ * dropping to the project defaults. `args` follow the same rule: omitted reuses, `[]` clears.
  */
-export async function restartDevServer(params: { taskId: string; projectId: string; env?: Record<string, string>; server?: string; all?: boolean }): Promise<DevServerStatus> {
-	log.info("→ restartDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined });
+export async function restartDevServer(params: { taskId: string; projectId: string; env?: Record<string, string>; args?: string[]; server?: string; all?: boolean }): Promise<DevServerStatus> {
+	log.info("→ restartDevServer", { ...params, env: params.env ? Object.keys(params.env).sort() : undefined, args: params.args?.length });
+	assertScriptArgs(params.args, params.all);
 	const ctx = await loadDevServerContext(params.projectId, params.taskId);
 	const targets = params.all ? ctx.resolution.servers : [pickServer(ctx, params.server)];
 	if (targets.some((server) => isSelfHostedByTask(params.taskId, server.name))) {
@@ -1060,6 +1102,10 @@ export async function restartDevServer(params: { taskId: string; projectId: stri
 		server.name,
 		params.env ?? readDevServerEnv(params.taskId, server.name),
 	]));
+	const argsByServer = new Map(targets.map((server) => [
+		server.name,
+		params.args ?? readDevServerArgs(params.taskId, server.name),
+	]));
 	await stopDevServer({
 		taskId: params.taskId,
 		projectId: params.projectId,
@@ -1068,7 +1114,7 @@ export async function restartDevServer(params: { taskId: string; projectId: stri
 	await new Promise((resolve) => setTimeout(resolve, DEV_SERVER_RESTART_DELAY_MS));
 	await ensureDevServerPorts(ctx);
 	for (const server of targets) {
-		await startOneDevServer(ctx, server, envs.get(server.name));
+		await startOneDevServer(ctx, server, envs.get(server.name), argsByServer.get(server.name));
 	}
 	refreshBoardDevServer(params.taskId);
 	log.info("← restartDevServer done");

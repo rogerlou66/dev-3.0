@@ -15,6 +15,12 @@ history, PRs and `decisions/`. Newest first.
 
 2026-10-23 — Polling is its own Settings category (yaml `settings_screen.grouping`): background git/gh cadence and off switches; manual refresh always runs. Rejected folding into System (updates, proxy, dev tools). Why: decisions/2026/10/23/configurable-polling-intervals.md.
 
+## 2026-10-27 — CPU and disk pills, earned by user-set levels
+- **Rule:** yaml `global_header.ambient_resource_readout`.
+- **Why:** user asked for pills; no OS verdict exists, so levels are a setting with defaults, and pills show only at warn/critical so a calm machine keeps a calm header.
+
+2026-10-20 — Keep-alive (auto-revive) is a task property, not a column (bible §3/§10): a monitored task keeps its real status; surfaced by a passive card marker + an `is:keepalive` filter and toggled from the context menu / `dev3 keep-alive`, never a column or lane. Why: decisions/2026/10/20/keep-alive-is-a-task-property-not-a-column.md.
+
 2026-10-16 — Account sign-in runs in a modal terminal, not a copied command (yaml `modal.observed`): Escape stays with the CLI, X hides, Cancel ends. Why: decisions/2026/10/16/embedded-account-login-terminal.md.
 
 ## 2026-10-14 — Agent toast bursts stack as a deck
@@ -33,7 +39,7 @@ Bible §5.7: card → sender (inert without one), traffic only via its action; a
 
 ## 2026-09-25 — Clips play inside the image viewer
 
-Bible §3 / yaml `task_image_viewer`: clips share image history and stage, without another viewer. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md.
+Bible §3 / yaml `task_image_viewer`: `show-media` audio/video share image history and stage. Why: decisions/2026/09/25/show-video-additive-shared-videos-field.md, decisions/2026/10/27/show-media-replaces-show-video.md.
 
 2026-09-22 — One task context menu for card and sidebar row; yaml `context_menu.task_menu`. Why: decisions/2026/09/22/one-task-context-menu-for-card-and-sidebar-row.md.
 
@@ -714,13 +720,13 @@ Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `
 
 **2026-09-08 — Touch terminal keys:** shortcut bar collapses behind a local disclosure. Why: `decisions/2026/09/08/collapsible-terminal-extra-keys.md`.
 
-## 2026-10-01 — Go to Project moves from ⌘K to ⇧⌘K; Find coordinator joins ⇧⌘P
-- **Rule:** the navigation palette is ⇧⌘K (Ctrl+Shift+K off-macOS); plain ⌘K stays free for the terminal (clear, tracked as its own task). Coordinators are found via the ⇧⌘P `Find coordinator…` picker on `PaletteShell`.
-- **Why:** terminal users expect ⌘K to clear; ⇧⌘K keeps the K mnemonic with the fewest conflicts found (Firefox Win/Linux Web Console caveat). Rejected ⌘P, ⌘E. User-approved. Evidence: `keymap.ts`, `decisions/2026/10/01/go-to-project-moves-to-shift-cmd-k.md`.
+2026-10-01 — Go to Project moves to ⇧⌘K; Find coordinator joins ⇧⌘P. Why: `decisions/2026/10/01/go-to-project-moves-to-shift-cmd-k.md`.
 
 ## 2026-10-03 — The dashboard pins every coordinator above the attention rows
 - **Rule:** each active coordinator gets its own navigation-only row in its project's dashboard card, whatever its status — yaml `dashboard-coordinator-rows`.
 - **Why:** a working coordinator vanished into the footer count, yet it is what the user opens to talk to a project. Rejected a global coordinators panel (new chrome; ⇧⌘P `Find coordinator…` already exists). Evidence: `DashboardCoordinatorRows.tsx`.
+
+2026-10-04 - Add Project auto-configure is an opt-in switch. Why: `decisions/2026/10/04/opt-in-project-auto-configure.md`.
 
 ## 2026-10-12 — The file explorer lives beside a terminal, never on the board
 - **Rule:** yaml `file_explorer`: task terminal or the Repo screen (`project-terminal`, renamed); on a board ⇧⌘E opens Repo; auto-hide overlays, never reflows.
@@ -732,3 +738,7 @@ Folded: screens, not URL routes (the `Route` union in `state.ts`) — owned by `
 
 ## 2026-10-16 — A hibernated rail trades ✓ for ✕ Cancel
 - **Rule/why:** a parked task is one the user walked away from; complete stays in Move to. Rejected ✓+✕ (weak) and the hover-only header ✕. yaml `lifecycle`.
+
+## 2026-10-31 — Epics: a global object with no destination of its own
+- **Rule:** chip above the card title (click filters `epic:`), an Epic row in the detail metadata grid, optional New Task field, management in Settings → Tasks & Board → Epics; a cross-board footnote reuses the lineage notice. Bible §3.
+- **Why:** a nav item or board header button would spend a budget for an occasional job. `decisions/2026/10/31/global-epics.md`.

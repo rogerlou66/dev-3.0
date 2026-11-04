@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type Dispatch } from "react";
 import type { AgentCheckResult, CodingAgent, GlobalSettings, Project, Task, TaskStatus } from "../../shared/types";
-import { getTaskTitle } from "../../shared/types";
+import { getTaskTitle, isCoordinatorTask } from "../../shared/types";
+import { coordinatorLaunchDefault } from "../../shared/coordinator-launch";
 import { launchFailureHintKey } from "../../shared/launch-failure";
 import { isAgentNotInstalledError } from "../../shared/agent-install";
 import { useEscapeKey } from "../hooks/useEscapeKey";
@@ -65,8 +66,9 @@ function LaunchVariantsModal({
 	const t = useT();
 
 	function makeDefaultVariant(): VariantRow {
-		// Try global default agent, fall back to first available
-		let agentId: string | null = globalSettings.defaultAgentId ?? null;
+		// Coordinators start on their own preset; everything else on the global default, then the first agent.
+		const coordinator = isCoordinatorTask(task) ? coordinatorLaunchDefault(agents, globalSettings) : null;
+		let agentId: string | null = coordinator?.agentId ?? globalSettings.defaultAgentId ?? null;
 		let agent = agentId ? agents.find((a) => a.id === agentId) : null;
 
 		// If agent not found (null, undefined, or removed), use first available
@@ -82,6 +84,7 @@ function LaunchVariantsModal({
 			!!globalSettings.defaultConfigId &&
 			!!agent?.configurations.some((c) => c.id === globalSettings.defaultConfigId);
 		const normalConfigId =
+			coordinator?.configId ??
 			(globalConfigMatchesAgent ? globalSettings.defaultConfigId : null) ??
 			agent?.defaultConfigId ??
 			agent?.configurations[0]?.id ??
@@ -346,7 +349,7 @@ function LaunchVariantsModal({
 								className={`task-anim flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors flex-shrink-0 ${
 									watched
 										? "text-accent bg-accent/10 border border-accent/25"
-										: "text-fg-3 hover:text-fg hover:bg-elevated border border-edge"
+										: "text-fg-3 hover:text-fg hover:bg-overlay-hover border border-edge"
 								}`}
 								aria-label={watched ? t("task.unwatchTooltip") : t("task.watchTooltip")}
 							>

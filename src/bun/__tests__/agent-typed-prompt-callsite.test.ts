@@ -17,10 +17,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
 vi.mock("../agent-hooks-refresh", () => ({ refreshClaudeHooksForTask: vi.fn(async () => {}) }));
+vi.mock("../agent-message-target", () => ({
+	resolveMainAgentTarget: vi.fn(async () => ({ ok: true, paneId: "%1", author: null })),
+	addressedAgentRefusal: vi.fn(async () => null),
+	agentPaneRoles: vi.fn(async () => new Map([["%1", "main"]])),
+}));
 vi.mock("../agent-prompt", () => ({
 	sendPromptToAgentPane: vi.fn(async () => ({ status: "delivered", deliveryId: "d", backend: "tmux", paneId: "%1", retryableAsNewDelivery: false })),
 	sendPromptToPane: vi.fn(async () => ({ status: "delivered", deliveryId: "d", backend: "tmux", paneId: "%1", retryableAsNewDelivery: false })),
-	holdMessageForAgentPane: vi.fn(async () => ({ status: "held" })),
 	holdMessageForPane: vi.fn(async () => ({ status: "held" })),
 }));
 vi.mock("../agent-prompt-native", () => ({

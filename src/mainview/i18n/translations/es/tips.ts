@@ -192,7 +192,7 @@ const tips = {
 	"tip.mobilePanePager.title": "Desliza entre paneles",
 	"tip.mobilePanePager.body": "En un teléfono la tarea muestra un panel a la vez: desliza el terminal hacia un lado o usa la barra ‹ › para cambiar entre ellos.",
 	"tip.statsTokenCost.title": "Mira tu gasto de tokens",
-	"tip.statsTokenCost.body": "Estadísticas de productividad muestra los tokens del agente y su coste equivalente en API — leído de transcripciones locales de Claude Code, sin llamadas a la API.",
+	"tip.statsTokenCost.body": "Estadísticas muestra los tokens registrados y el coste equivalente en API, con historial guardado y precios actualizados.",
 	"tip.agentShowImage.title": "Los agentes pueden mostrarte imágenes",
 	"tip.agentShowImage.body": "Ejecuta `dev3 show-image <path>` en una tarea y las capturas o renders se abren en un visor integrado con historial.",
 	"tip.mobileComposer.title": "Cuadro de prompts para móvil",
@@ -210,7 +210,7 @@ const tips = {
 	"tip.llmProvider.title": "Agentes en Amazon Bedrock",
 	"tip.llmProvider.body": "El ajuste «LLM Provider» apunta Claude o Codex a Amazon Bedrock — dev3 fija el modelo mapeado; las credenciales y la región quedan en tu propia configuración.",
 	"tip.filterTokens.title": "Filtra tareas con tokens",
-	"tip.filterTokens.body": "En la búsqueda escribe priority:P0 label:Bug agent:Codex status:review is:attention has:port — o usa el embudo para construirlo.",
+	"tip.filterTokens.body": "En la búsqueda escribe priority:P0 label:Bug agent:Codex status:review epic:Payments children:1801 is:attention pr:merged — o usa el embudo para construirlo.",
 	"tip.cycleTaskVariants.title": "Cambia entre variantes",
 	"tip.cycleTaskVariants.body": "Pulsa Shift+Cmd+[ o ] (Ctrl en Linux) para moverte entre variantes activas sin salir del terminal.",
 	"tip.mobileTaskGit.title": "Git desde tu móvil",
@@ -233,6 +233,8 @@ const tips = {
 	"tip.agentTrafficLog.body": "Pulsa ⇧⌘M para ver la última hora de mensajes entre agentes; pulsa Reproducir para repetirla o amplía el periodo.",
 	"tip.continueInAnotherAgent.title": "Cambia de agente a mitad de tarea",
 	"tip.continueInAnotherAgent.body": "En + Agente marca «Continuar la conversación de esta tarea»: el nuevo agente recibe un resumen narrado de la sesión y retoma el trabajo.",
+	"tip.renameTerminalWindow.title": "Pon nombre a tus pestañas",
+	"tip.renameTerminalWindow.body": "Haz doble clic en una pestaña sobre la terminal (o pulsa F2) para renombrarla; el nombre se queda hasta que lo borres.",
 };
 
 export default tips;

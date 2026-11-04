@@ -1,8 +1,12 @@
-import type { AgentMessageSource, Project, Task } from "../../shared/types";
+import type { AgentMessageSource, Project, Task, TaskEpicRef, TaskOriginParent } from "../../shared/types";
+import { getEpicById } from "../epics-data";
 import { seqIsShared } from "../../shared/agent-message-envelope";
-import { ID_PREFIX_MIN_LENGTH, getTaskTitle, isCoordinatorTask } from "../../shared/types";
+import { ID_PREFIX_MIN_LENGTH, getTaskTitle, isCoordinatorTask, parentTaskIdOf } from "../../shared/types";
 import * as data from "../data";
 import { loadEffectiveTaskHistory } from "../task-blobs";
+import { captureSenderAgent } from "../scheduled-message-author";
+import { requireExternalSender } from "../external-senders";
+import type { ExternalSenderRequester } from "../../shared/external-senders";
 
 const MIN_PREFIX_LENGTH = ID_PREFIX_MIN_LENGTH;
 
@@ -26,7 +30,7 @@ export function findByIdPrefix<T extends { id: string }>(items: T[], prefix: str
  * shown on every card; unlike the id it survives launches (all variants of one
  * logical task share it), so it is the safe handle for stored references.
  */
-function parseSeqRef(ref: string): number | null {
+export function parseSeqRef(ref: string): number | null {
 	const match = /^seq:(\d+)$/.exec(ref);
 	return match ? Number(match[1]) : null;
 }
@@ -154,6 +158,41 @@ export async function withArchivedHistory(project: Project, task: Task): Promise
 }
 
 /**
+ * `task.show` answers with the task's epic resolved, so `current` and `task show`
+ * can print its name. `epic` is null when the id points at no epic any more.
+ */
+export async function withEpic<T extends Task>(task: T): Promise<T & { epic?: TaskEpicRef | null }> {
+	if (!task.epicId) return task;
+	const epic = await getEpicById(task.epicId).catch(() => null);
+	return { ...task, epic: epic ? { id: epic.id, name: epic.name, color: epic.color, archived: epic.archived } : null };
+}
+
+/**
+ * `task.show` answers with the parent resolved, so `dev3 task show`/`current`
+ * can print "Created by" without a second request. `originParent` is null when
+ * the parent no longer exists, absent when the task has no task origin.
+ */
+export async function withOriginParent(task: Task): Promise<Task & { originParent?: TaskOriginParent | null }> {
+	const parentId = parentTaskIdOf(task);
+	if (!parentId) return task;
+	const found = await resolveTaskAcrossProjects(parentId).catch(() => null);
+	if (!found || found.task.id !== parentId) return { ...task, originParent: null };
+	const { project, task: parent } = found;
+	const isGroup = parent.groupId !== null && (await data.loadTasks(project)).some((t) => t.id !== parent.id && t.groupId === parent.groupId);
+	return {
+		...task,
+		originParent: {
+			id: parent.id,
+			projectId: project.id,
+			projectName: project.name,
+			seq: parent.seq,
+			variantIndex: isGroup ? parent.variantIndex : null,
+			title: getTaskTitle(parent),
+		},
+	};
+}
+
+/**
  * The task a `dev3 pane` call is about, WITH its project — a pane run needs the
  * task lifecycle env, which only the project can build. Unlike `task.peek` this is
  * never cross-project by intent: an agent drives its own terminal, not a peer's.
@@ -170,6 +209,30 @@ export async function requirePaneTask(params: Record<string, unknown>): Promise<
 	const found = await resolveTaskAcrossProjects(taskId);
 	if (!found) throw taskNotFoundError(taskId);
 	return found;
+}
+
+/**
+ * The task whose agent sent this request (`sourceTaskId`), or null for a person
+ * at a plain terminal. An id that resolves to nothing is an error rather than a
+ * silent "nobody asked", which would skip the user's approval entirely.
+ */
+export async function resolveRequesterTask(params: Record<string, unknown>, what = "request"): Promise<Task | null> {
+	const sourceId = typeof params.sourceTaskId === "string" ? params.sourceTaskId.trim() : "";
+	if (!sourceId) return null;
+	const found = await resolveTaskAcrossProjects(sourceId);
+	if (!found) throw new Error(`Unknown requesting task — cannot attribute the ${what}.`);
+	return found.task;
+}
+
+/**
+ * The external sender a request speaks for (`--as-sender`), or null. Unknown ids
+ * throw; a request from inside a task cannot also claim to be a sender.
+ */
+export function senderRequester(params: Record<string, unknown>): ExternalSenderRequester | null {
+	if (params.asSender === undefined) return null;
+	const sender = requireExternalSender(params.asSender);
+	if (params.sourceTaskId) throw new Error("--as-sender cannot be used from inside a task worktree.");
+	return { senderId: sender.id, label: sender.label };
 }
 
 /** A task for `dev3 review`: scoped to a project when the CLI knows it, else found across projects. */
@@ -324,6 +387,27 @@ export async function resolveAgentMessageSource(
 		projectId: found.task.projectId,
 		...(isCoordinatorTask(found.task) ? { role: "coordinator" as const } : {}),
 	};
+}
+
+/**
+ * Stamp the sending AGENT onto a source, from the pane and pid the CLI reported, so
+ * a reply can reach that agent and no sibling. When none can be proven the source
+ * says why instead, and the envelope then offers no reply command at all.
+ */
+export async function withSenderAgent(source: AgentMessageSource, params: Record<string, unknown>): Promise<AgentMessageSource> {
+	let sender: Task | null = null;
+	try {
+		sender = (await resolveTaskAcrossProjects(source.taskId))?.task ?? null;
+	} catch {
+		sender = null;
+	}
+	if (!sender) return { ...source, agentUnavailable: "the sending task could not be read" };
+	const identity = await captureSenderAgent(
+		sender,
+		typeof params.sourcePaneId === "string" ? params.sourcePaneId : null,
+		typeof params.sourcePid === "number" ? params.sourcePid : null,
+	);
+	return identity.ok ? { ...source, agent: identity.author } : { ...source, agentUnavailable: identity.detail };
 }
 
 /** {@link seqIsShared} against a project's live task list; pessimistic if it cannot be read. */

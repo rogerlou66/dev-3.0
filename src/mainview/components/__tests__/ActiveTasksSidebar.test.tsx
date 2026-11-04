@@ -39,6 +39,7 @@ vi.mock("../../rpc", () => ({
 			setTaskPriority: vi.fn(() => Promise.resolve([])),
 			setTaskHidden: vi.fn(() => Promise.resolve([])),
 			getProjectPRs: vi.fn(() => Promise.resolve([])),
+			resolveReviewedPr: vi.fn(() => Promise.resolve(null)),
 			refreshTaskPrStatus: vi.fn(() => Promise.resolve(undefined)),
 			// Feature-discovery tip rotation (useTipRotation).
 			getGlobalSettings: vi.fn(() => Promise.resolve({ tipsDisabled: true })),
@@ -612,8 +613,8 @@ function makeTask(overrides?: Partial<Task>): Task {
 		// instead of describing it. The name lives in the tooltip and aria-label.
 		expect(within(activeRail).getByRole("img", { name: "Stage 2 of 7" })).toBeInTheDocument();
 		expect(within(inactiveRail).getByRole("img", { name: "Stage 5 of 7" })).toBeInTheDocument();
-		expect(activeRail.querySelector("[class*=vertical-rl]")).toBeNull();
-		expect(inactiveRail.querySelector("[class*=vertical-rl]")).toBeNull();
+		expect(within(activeRail).queryByTestId("task-card-rail-word")).toBeNull();
+		expect(within(inactiveRail).queryByTestId("task-card-rail-word")).toBeNull();
 
 		// The busy sheen rides only the working row, never the review one.
 		expect(activeRail.querySelector(".animate-rail-flow")).not.toBeNull();
@@ -1268,7 +1269,7 @@ function makeTask(overrides?: Partial<Task>): Task {
 		expect(screen.getByText("Waiting task")).toBeInTheDocument();
 	});
 
-	it("resets the filter on unmount (ephemeral, component state)", async () => {
+	it("keeps the filter across a remount (navigating away and back)", async () => {
 		const user = userEvent.setup();
 		const tasks = [
 			makeTask({ id: "a", title: "Alpha task", description: "Alpha", status: "in-progress", groupId: null as unknown as string, variantIndex: null }),
@@ -1293,15 +1294,25 @@ function makeTask(overrides?: Partial<Task>): Task {
 		expect(screen.queryByText("Alpha task")).not.toBeInTheDocument();
 
 		unmount();
+		const { unmount: unmount2 } = render(
+			<I18nProvider>
+				<ActiveTasksSidebar {...props} />
+			</I18nProvider>,
+		);
+		// Coming back restores the filter; the clear control still resets it for good.
+		expect(screen.getByPlaceholderText("Search tasks...")).toHaveValue("agent:Codex");
+		expect(screen.queryByText("Alpha task")).not.toBeInTheDocument();
+		expect(screen.getByText("Beta task")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "×" }));
+		unmount2();
 		render(
 			<I18nProvider>
 				<ActiveTasksSidebar {...props} />
 			</I18nProvider>,
 		);
-		// Fresh mount → the search string is empty again, all tasks visible.
 		expect(screen.getByPlaceholderText("Search tasks...")).toHaveValue("");
 		expect(screen.getByText("Alpha task")).toBeInTheDocument();
-		expect(screen.getByText("Beta task")).toBeInTheDocument();
 	});
 
 	// A task that predates status-time tracking has no statusEnteredAt and no
@@ -1920,6 +1931,49 @@ describe("pull-request badges", () => {
 		await user.click(badge);
 		expect(open).toHaveBeenCalledWith("https://github.com/h0x91b/dev-3.0/pull/1591", "_blank");
 		open.mockRestore();
+	});
+
+	const reviewTask = (overrides?: Partial<Task>) => makeTask({
+		taskType: "pr-review",
+		foreignCode: true,
+		existingBranch: "mcaldas/fix/x",
+		reviewedPr: { number: 2067, url: "https://github.com/h0x91b/dev-3.0/pull/2067" },
+		...overrides,
+	});
+
+	it("links a review task's reviewed PR without opening the row", async () => {
+		const user = userEvent.setup();
+		const open = vi.spyOn(window, "open").mockReturnValue(null);
+		const navigate = vi.fn();
+		render(
+			<I18nProvider>
+				<ActiveTasksSidebar project={project} tasks={[reviewTask()]} dispatch={vi.fn()}
+					navigate={navigate} agents={[claudeAgent]} bellCounts={new Map()} taskPorts={new Map()} />
+			</I18nProvider>,
+		);
+
+		const link = screen.getByTestId("sidebar-task-reviewed-pr-t1");
+		expect(link).toHaveTextContent("#2067");
+		expect(link).toHaveAccessibleName("Open reviewed PR #2067");
+		await user.click(link);
+		expect(open).toHaveBeenCalledWith("https://github.com/h0x91b/dev-3.0/pull/2067", "_blank");
+		expect(navigate).not.toHaveBeenCalled();
+		open.mockRestore();
+	});
+
+	it("shows one chip when the task's own PR badge already opens the reviewed PR", () => {
+		renderWith([reviewTask({ prNumber: 2067, prUrl: "https://github.com/h0x91b/dev-3.0/pull/2067" })]);
+
+		expect(screen.getByLabelText("Open PR #2067")).toBeInTheDocument();
+		expect(screen.queryByTestId("sidebar-task-reviewed-pr-t1")).not.toBeInTheDocument();
+	});
+
+	it("asks once for a legacy review task's PR and renders nothing until it is known", async () => {
+		const { api } = await import("../../rpc");
+		renderWith([reviewTask({ id: "legacy-1", reviewedPr: undefined })]);
+
+		expect(screen.queryByTestId("sidebar-task-reviewed-pr-legacy-1")).not.toBeInTheDocument();
+		await waitFor(() => expect(api.request.resolveReviewedPr).toHaveBeenCalledWith({ projectId: "p1", taskId: "legacy-1" }));
 	});
 
 	it("renders merge state, review verdict and unresolved comments from the persisted cache", () => {

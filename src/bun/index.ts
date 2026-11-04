@@ -1,5 +1,7 @@
 import { presetForcesDark } from "../shared/appearance-preset";
 import { stopAgentMessageLogWatches } from "./agent-message-log-watch";
+import { startBoardCopy, stopBoardCopy } from "./board-copy";
+import { claudeSessionWatches } from "./claude-session-watch";
 import Electrobun, {
 	ApplicationMenu,
 	PATHS,
@@ -51,6 +53,8 @@ import { openLogsDirectory } from "./menu-actions";
 import { startLoopMonitor } from "./loop-monitor";
 import { configureHandoffWorker } from "./conversation-handoff-runner";
 import { configureClonefileWorker } from "./cow-clone";
+import { configureWorktreeCleanupWorker } from "./worktree-cleanup-scheduler";
+import { configureClipboardImageWorker } from "./clipboard-image-reader";
 import { shouldActivateLaunchWindow } from "./fresh-start";
 import { createAppWindow, focusFocusedWindow, getFocusedWindow, getWindowCount, handleDisplayConfigurationChange, loadWindowSession, sendToFocusedWindow, setOpenNewWindow, flushWindowState } from "./window-manager";
 import type { WindowState } from "./window-state";
@@ -60,6 +64,8 @@ import { BUILD_TIME } from "../shared/build-info.generated";
 import { existsSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { rehydrateTaskLifecycles } from "./lifecycle/rehydrate";
+import { decideLaunchActivation, handOffToRunningInstance, requestOverUnixSocket, setLaunchActivationHost, shouldTryLaunchHandoff } from "./launch-handoff";
+import { discoverPeerSockets } from "./instance-broadcast";
 
 const log = createLogger("main");
 
@@ -92,6 +98,17 @@ let lastBuildTime = BUILD_TIME;
 log.info(`=== dev-3.0 starting [${lastBuildTime}] ===`);
 log.info("All data at", { dir: DEV3_HOME });
 log.info("Log files", { dir: getLogPath() });
+
+// ── Linux: a relaunch hands off to the running instance (issue #2039) ──
+// Before anything writes shared state: a window-less instance left behind by
+// a closed window opens a window instead of a second backend starting.
+if (shouldTryLaunchHandoff({ platform: process.platform, env: process.env })) {
+	const takenOverBy = await handOffToRunningInstance({ peers: discoverPeerSockets, request: requestOverUnixSocket, bundle: PATHS.VIEWS_FOLDER });
+	if (takenOverBy) {
+		log.info("A running instance opened its window for this launch — exiting", { endpoint: takenOverBy });
+		await hardExit(0);
+	}
+}
 
 // ── Search PATH, before ANY binary lookup ──
 // Windows spells the variable `Path`; a JS env object need not fold the case, and
@@ -362,7 +379,7 @@ log.info("CLI socket server ready", { path: cliSocketPath });
 
 // Side-effect: starts the PTY WebSocket server (dynamic import so PATH is patched first)
 const { setOnPtyDied, setOnBell, setOnIdle, setOnPaneExited, setOnOsc52Copy, getActiveSessionIds } = await import("./pty-server");
-const { setNativeDevServerProbe, startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
+const { setNativeDevServerProbe, setNativePaneRecordsReader, startPortScanPoller, stopPortScanPoller } = await import("./port-scanner");
 const { startResourceMonitor, stopResourceMonitor } = await import("./resource-monitor");
 const { startRateLimitMonitor, stopRateLimitMonitor } = await import("./rate-limit-monitor");
 
@@ -405,6 +422,8 @@ const url = await getMainViewUrl();
 log.info("Loading URL", { url });
 configureHandoffWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "conversation-handoff-worker.js"));
 configureClonefileWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "clonefile-worker.js"));
+configureClipboardImageWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "clipboard-image-worker.js"));
+configureWorktreeCleanupWorker(resolve(PATHS.VIEWS_FOLDER, "..", "workers", "worktree-cleanup-worker.js"));
 configureFreezeDiagnostics({
 	workerPath: resolve(PATHS.VIEWS_FOLDER, "..", "freeze-diagnostics", "worker.ts"),
 	version: APP_VERSION, build: lastBuildTime,
@@ -508,6 +527,24 @@ setOpenNewWindow(() => {
 	void openMainWindow();
 });
 
+// The other half of the launch handoff above: a newcomer of this same install
+// asks us for a window. Bring one back if none is open, else raise the focused one.
+setLaunchActivationHost((bundle) => {
+	const decision = decideLaunchActivation({
+		platform: process.platform,
+		bundle,
+		ownBundle: PATHS.VIEWS_FOLDER,
+		hostTaskId: process.env.DEV3_TASK_ID || null,
+		windowCount: getWindowCount(),
+	});
+	if (decision.activated) {
+		log.info("Launch handoff accepted", { opening: decision.open === true });
+		if (decision.open) void openMainWindow();
+		else focusFocusedWindow();
+	}
+	return { activated: decision.activated, reason: decision.reason };
+});
+
 // Reopen every window the last session ended with, each on its own saved
 // screen/geometry. A first run (or fresh-start dev mode) has no session and
 // gets the usual single window.
@@ -591,6 +628,7 @@ await rehydrateTaskLifecycles();
 
 // Start background merge detection poller
 startMergeDetectionPoller();
+startBoardCopy();
 
 // Start background PR detection poller (auto-moves review-by-user → review-by-colleague)
 startPRDetectionPoller();
@@ -598,15 +636,9 @@ startPRDetectionPoller();
 // The board's dev-server read needs the native aux pane, which lives behind
 // `bun:ffi` — injected here instead of imported by the poller (see
 // `setNativeDevServerProbe`).
-setNativeDevServerProbe(async (task, socket, serverName) => {
-	const { taskTerminalBackendIdentity } = await import("./task-terminal-backend");
-	if (taskTerminalBackendIdentity(task) !== "native") return null;
-	const { auxPaneAlive, nativeAuxPaneShellPid } = await import("./task-aux-panes");
-	const { devServerScriptBase } = await import("../shared/dev-servers");
-	const slot = devServerScriptBase(serverName);
-	const alive = await auxPaneAlive(task, "devServer", socket, slot);
-	return { alive, rootPid: alive ? await nativeAuxPaneShellPid(task, "devServer", slot) : null };
-});
+const nativeScanReaders = await import("./native-scan-readers");
+setNativeDevServerProbe(nativeScanReaders.probeNativeDevServer);
+setNativePaneRecordsReader(nativeScanReaders.nativePaneRecordsReader);
 
 // Start background port scan poller (detects listening TCP ports per task)
 startPortScanPoller(
@@ -696,6 +728,16 @@ startScheduledLaunchScheduler();
 // came due while the app was offline (fires late + notifies).
 const { startScheduledMessageScheduler } = await import("./scheduled-message-scheduler");
 startScheduledMessageScheduler();
+
+// Start the keep-alive watchdog — auto-revives tasks the user opted into when
+// their agent conversation dies (exit / rate limit / network). Runs headless too.
+const { startTaskKeepAliveScheduler } = await import("./task-keep-alive-scheduler");
+startTaskKeepAliveScheduler();
+
+// Daily `doctor --worktrees --prune-older-than 14d` — first check an hour after
+// launch, never at startup; the last run is persisted so restarts do not repeat it.
+const { startWorktreeCleanupScheduler } = await import("./worktree-cleanup-scheduler");
+startWorktreeCleanupScheduler();
 
 // Start the focus tracker — accumulates real UI attention time per task (the
 // "your time" metric on the Productivity dashboard) from the foreground +
@@ -803,6 +845,8 @@ function runGlobalQuitCleanup(): void {
 	log.info("App is quitting, running global cleanup");
 	stopFreezeDiagnostics();
 	stopAgentMessageLogWatches();
+	stopBoardCopy();
+	claudeSessionWatches.close();
 	// Snapshot window geometry so the next launch reopens on the same screen.
 	try { flushWindowState(); } catch (err) { log.warn("flushWindowState failed", { error: String(err) }); }
 	try { stopPortScanPoller(); } catch (err) { log.warn("stopPortScanPoller failed", { error: String(err) }); }

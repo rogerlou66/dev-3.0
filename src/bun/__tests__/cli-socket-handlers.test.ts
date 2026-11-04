@@ -1,6 +1,6 @@
 import codexQuestionHookTrace from "./fixtures/codex-0.154-question-hooks.json";
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
-import { COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, TASK_REF_UNRESOLVED_PREFIX, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type TaskMovement, type SharedArtifact, type SharedImage } from "../../shared/types";
+import { BOARD_CLEANUP_PROMPT, COORDINATOR_PROMPT, DEFAULT_PR_REVIEW_PROMPT, TASK_REF_UNRESOLVED_PREFIX, getAllowedTransitions, withPresetPrompt, type Project, type Task, type CliRequest, type TaskNote, type TaskMovement, type SharedArtifact, type SharedImage } from "../../shared/types";
 
 // ---- Mocks ----
 
@@ -47,12 +47,12 @@ vi.mock("../shared-images", () => ({
 		createdAt: 1,
 		...(caption ? { caption } : {}),
 	})),
-	saveSharedVideos: vi.fn(async (_projectPath: string, items: { path: string; caption?: string }[]) => items.map(({ path: src, caption }) => ({
-		id: `vid-${src}`,
+	saveSharedClips: vi.fn(async (_projectPath: string, items: { path: string; caption?: string }[]) => items.map(({ path: src, caption }) => ({
+		id: `clip-${src}`,
 		storedPath: `/wt/shared-images/${src.split("/").pop()}`,
 		originalPath: src,
 		name: src.split("/").pop() ?? src,
-		mime: "video/mp4",
+		mime: src.endsWith(".mp3") ? "audio/mpeg" : "video/mp4",
 		bytes: 1,
 		createdAt: 1,
 		...(caption ? { caption } : {}),
@@ -176,6 +176,31 @@ vi.mock("../paths", () => ({
 	DEV3_HOME: "/tmp/test-dev3",
 }));
 
+// The global epic registry, in memory: the real one lives in ~/.dev3.0/epics.json
+// and has its own suite. Same ref rules as production (shared resolveEpicRef).
+const epicStore = vi.hoisted(() => ({ epics: [] as import("../../shared/types").Epic[] }));
+vi.mock("../epics-data", async () => {
+	const { resolveEpicRef, EPIC_REF_INVALID_PREFIX } = await import("../../shared/types");
+	const refError = (ref: string) => new Error(`${EPIC_REF_INVALID_PREFIX}No epic "${ref}"`);
+	return {
+		loadEpics: vi.fn(async () => epicStore.epics),
+		loadEpicsFile: vi.fn(async () => ({ version: 1, epics: epicStore.epics })),
+		getEpicById: vi.fn(async (id: string) => epicStore.epics.find((e) => e.id === id) ?? null),
+		findEpic: vi.fn(async (ref: string) => {
+			const result = resolveEpicRef(epicStore.epics, ref);
+			if (result.kind === "found") return result.epic;
+			throw refError(ref);
+		}),
+		createEpic: vi.fn(async (name: string, color?: string) => {
+			const epic = { id: `epic-${epicStore.epics.length + 1}-0000-1111-2222`, name, color: color ?? "#3b82f6", archived: false, createdAt: 0 };
+			epicStore.epics.push(epic);
+			return epic;
+		}),
+		updateEpic: vi.fn(),
+		epicRefError: refError,
+	};
+});
+
 vi.mock("../socket-backpressure", () => ({
 	flushAndEnd: vi.fn(),
 	drainSocket: vi.fn(),
@@ -199,8 +224,18 @@ vi.mock("../scheduled-message-scheduler", () => ({
 }));
 
 vi.mock("../scheduled-message-author", () => ({
+	AGENT_IDENTITY_UNSUPPORTED_DETAIL: "agent identity cannot be verified on Windows yet",
 	captureScheduledMessageAuthor: vi.fn(async (_task: unknown, paneId: string | null) =>
 		paneId ? { paneId, sessionId: "conv-a", paneToken: "gen-1", agentProcess: "101@x" } : null),
+	captureSenderAgent: vi.fn(async (_task: unknown, paneId: string | null) =>
+		paneId
+			? { ok: true, author: { paneId, sessionId: "conv-s", paneToken: "gen-9", agentProcess: "909@x" } }
+			: { ok: false, reason: "no-agent", detail: "dev3 was not run from a task terminal pane, so there is no sending agent" }),
+	resolveScheduledMessageAuthorPane: vi.fn(async (_task: unknown, author: { paneId: string }) => ({ ok: true, paneId: author.paneId })),
+}));
+
+vi.mock("../agent-message-target", () => ({
+	withAgentPanes: vi.fn(async (_task: unknown, listing: unknown) => listing),
 }));
 
 vi.mock("../vents", () => ({
@@ -251,11 +286,13 @@ import { flushAndEnd } from "../socket-backpressure";
 import { existsSync, readdirSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { addVent } from "../vents";
 import { getServerPort } from "../remote-access-server";
-import { saveSharedImage, saveSharedVideos } from "../shared-images";
+import { saveSharedClips, saveSharedImage } from "../shared-images";
 import { saveSharedArtifact } from "../shared-artifacts";
 import { closePaneRun, paneRunListing, readPaneRun, startPaneRun } from "../task-pane-runs";
 import { cancelScheduledMessageByRef, scheduleMessage, sendMessageImmediately } from "../scheduled-message-scheduler";
-import { captureScheduledMessageAuthor } from "../scheduled-message-author";
+import { captureScheduledMessageAuthor, resolveScheduledMessageAuthorPane } from "../scheduled-message-author";
+import { withAgentPanes } from "../agent-message-target";
+import { encodeAgentHandle } from "../../shared/agent-handle";
 
 // `task.open` imports the window layer lazily; mocking it keeps electrobun out.
 vi.mock("../window-manager", () => ({
@@ -457,6 +494,67 @@ describe("message.send / message.schedule — the subject gate", () => {
 	});
 });
 
+vi.mock("../external-senders", () => ({
+	requireExternalSender: vi.fn((id: string) => {
+		if (id !== "cli") throw new Error(`Unknown external sender "${id}".`);
+		return { id, label: "CLI" };
+	}),
+}));
+
+describe("message.send / message.sendAsSender — the sender guards", () => {
+	// These keep a sender's message out of tasks.json and away from a task's own
+	// identity; the CLI refuses the same shapes first, but other socket clients exist.
+	beforeEach(() => {
+		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
+		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([makeTask()]);
+	});
+	const base = () => ({ taskId: makeTask().id, projectId: "proj-1", text: "ping", subject: "s" });
+
+	it("sends as the sender only on message.sendAsSender", async () => {
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli" }));
+		expect(resp.ok).toBe(true);
+		const [, , target, source, opts] = vi.mocked(sendMessageImmediately).mock.calls[0]!;
+		expect(opts).toMatchObject({ externalSender: { id: "cli", label: "CLI" }, author: null });
+		// No task source and no bound agent: it goes to the main agent, and the only
+		// reply the envelope can offer is --to-sender.
+		expect(target).toBeNull();
+		expect(source).toBeNull();
+	});
+
+	it("refuses --as-sender with --agent: a sender's message goes to the main agent", async () => {
+		const handle = encodeAgentHandle({ paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" });
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli", agentHandle: handle }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--agent") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses asSender on plain message.send, so an app never drops it silently", async () => {
+		const resp = await handleRequest(makeRequest("message.send", { ...base(), asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("message.sendAsSender") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses a sender request that also carries a task's identity", async () => {
+		const resp = await handleRequest(makeRequest("message.sendAsSender", { ...base(), asSender: "cli", sourceTaskId: makeTask().id }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("inside a task worktree") });
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses asSender on plain agent.resume before resolving anything", async () => {
+		const resp = await handleRequest(makeRequest("agent.resume", { taskId: makeTask().id, asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("agent.resumeAsSender") });
+	});
+
+	it("never queues a sender's message into tasks.json", async () => {
+		const at = new Date(Date.now() + 60_000).toISOString();
+		const resp = await handleRequest(makeRequest("message.schedule", { ...base(), at, asSender: "cli" }));
+		expect(resp).toMatchObject({ ok: false, error: expect.stringContaining("--in or --at") });
+		expect(scheduleMessage).not.toHaveBeenCalled();
+	});
+});
+
 describe("message.scheduled.list / cancel — the CLI queue verbs", () => {
 	const queued = (id: string, at: string, extra: Record<string, unknown> = {}) =>
 		({ id, text: "wake   up\nplease", at, target: { kind: "agent" as const }, ...extra });
@@ -497,6 +595,35 @@ describe("message.scheduled.list / cancel — the CLI queue verbs", () => {
 		expect(resp.ok).toBe(true);
 		expect(captureScheduledMessageAuthor).not.toHaveBeenCalled();
 		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: null });
+	});
+
+	const ADDRESSED = { paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" };
+
+	it("binds a message scheduled with --agent to that agent, checked while the sender listens", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			agentHandle: encodeAgentHandle(ADDRESSED),
+		}));
+		expect(resp.ok).toBe(true);
+		expect(resolveScheduledMessageAuthorPane).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }), ADDRESSED);
+		expect(vi.mocked(scheduleMessage).mock.calls[0]?.[2]).toMatchObject({ author: ADDRESSED });
+	});
+
+	it("refuses to schedule for an addressed agent that is already gone, queueing nothing", async () => {
+		const task = makeTask();
+		vi.mocked(data.getProject).mockResolvedValue(makeProject());
+		vi.mocked(data.loadTasks).mockResolvedValue([task]);
+		vi.mocked(resolveScheduledMessageAuthorPane).mockResolvedValueOnce({ ok: false, detail: "the addressed agent (pane %3) is no longer running in this task; not sent to another pane" });
+		const resp = await handleRequest(makeRequest("message.schedule", {
+			taskId: task.id, projectId: "proj-1", text: "later", subject: "s", at: new Date(Date.now() + 60_000).toISOString(),
+			agentHandle: encodeAgentHandle(ADDRESSED),
+		}));
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("the addressed agent (pane %3) is no longer running");
+		expect(scheduleMessage).not.toHaveBeenCalled();
 	});
 
 	it("lists the queue earliest first, with sender seq and a flattened preview", async () => {
@@ -660,6 +787,8 @@ describe("pane.* — the CLI's own pane surface", () => {
 
 		expect((await handleRequest(makeRequest("pane.list", { taskId: makeTask().id, selfPaneId: "pane-1" }))).ok).toBe(true);
 		expect(vi.mocked(paneRunListing).mock.calls[0][1]).toBe("pane-1");
+		// Every listing is annotated with the agent panes and their handles.
+		expect(withAgentPanes).toHaveBeenCalledWith(expect.objectContaining({ id: makeTask().id }), await vi.mocked(paneRunListing).mock.results[0]?.value);
 
 		expect((await handleRequest(makeRequest("pane.close", { taskId: makeTask().id, runId: "run-0123456789ab" }))).ok).toBe(true);
 		expect(vi.mocked(closePaneRun).mock.calls[0][1]).toBe("run-0123456789ab");
@@ -953,6 +1082,24 @@ describe("task.agentHook", () => {
 
 		expect((response.data as Task).status).toBe("review-by-ai");
 	});
+
+	// #2127: a coordinator, an audit and a PR review have no diff of their own to review.
+	it.each(["coordinator", "pr-review", "board-cleanup"] as const)(
+		"keeps a %s task out of automatic AI review on Stop",
+		async (taskType) => {
+			const project = makeProject({ autoReviewEnabled: true });
+			const task = makeTask({ status: "in-progress", taskType });
+			mockAtomicHookUpdate(project, task);
+
+			const response = await handleRequest(makeRequest("task.agentHook", {
+				taskId: task.id,
+				projectId: project.id,
+				event: "Stop",
+			}));
+
+			expect((response.data as Task).status).toBe("review-by-user");
+		},
+	);
 
 	it("moves a review-agent Stop to review-by-user in one atomic mutation", async () => {
 		const project = makeProject({ autoReviewEnabled: true });
@@ -1829,6 +1976,218 @@ describe("task.create", () => {
 		expect(resp.ok).toBe(true);
 	});
 
+	describe("origin", () => {
+		const parentProject = makeProject({ id: "proj-2", name: "Coordinators" });
+		const parent = makeTask({ id: "parent-0000-1111-2222-333333333333", projectId: "proj-2", seq: 1801 });
+
+		function wireBoards() {
+			const project = makeProject();
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadProjects).mockResolvedValue([project, parentProject]);
+			vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [parent] : []));
+			vi.mocked(createTask).mockResolvedValue(makeTask({ status: "todo" }));
+			vi.mocked(getPushMessage).mockReturnValue(vi.fn());
+		}
+
+		it("records the creating task, resolved in another project, as the parent", async () => {
+			wireBoards();
+			const resp = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "parent-0" }));
+			expect(resp.ok).toBe(true);
+			expect(createTask).toHaveBeenCalledWith({
+				projectId: "proj-1",
+				description: "Child",
+				origin: { kind: "task", taskId: parent.id, projectId: "proj-2" },
+			});
+		});
+
+		it("records the exact variant that created the task", async () => {
+			wireBoards();
+			const variant2 = makeTask({ id: "variant2-1111-2222-3333-444444444444", projectId: "proj-2", seq: 1801, groupId: "g", variantIndex: 2 });
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [{ ...parent, groupId: "g", variantIndex: 1 }, variant2] : []));
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "variant2" }));
+			expect(vi.mocked(createTask).mock.calls[0]![0].origin).toEqual({ kind: "task", taskId: variant2.id, projectId: "proj-2" });
+		});
+
+		it("falls back to the user when the creator cannot be resolved, and still creates", async () => {
+			wireBoards();
+			const resp = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "gone-123" }));
+			expect(resp.ok).toBe(true);
+			expect(createTask).toHaveBeenCalledWith({ projectId: "proj-1", description: "Child" });
+		});
+
+		it("records the user outside any task context", async () => {
+			wireBoards();
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Mine" }));
+			expect(vi.mocked(createTask).mock.calls[0]![0]).not.toHaveProperty("origin");
+		});
+
+		it("task.show resolves the parent, and reports a deleted one as null", async () => {
+			wireBoards();
+			const child = makeTask({ id: "child-11-1111-2222-3333-444444444444", origin: { kind: "task", taskId: parent.id, projectId: "proj-2" } });
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [parent] : [child]));
+			const shown = await handleRequest(makeRequest("task.show", { taskId: "child-11", projectId: "proj-1" }));
+			expect(shown.data).toMatchObject({ originParent: { id: parent.id, projectName: "Coordinators", seq: 1801, variantIndex: null } });
+
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [] : [child]));
+			const orphan = await handleRequest(makeRequest("task.show", { taskId: "child-11", projectId: "proj-1" }));
+			expect(orphan.data).toMatchObject({ originParent: null });
+		});
+
+		it("task.show adds nothing for a task the user created", async () => {
+			wireBoards();
+			vi.mocked(data.loadTasks).mockResolvedValue([makeTask()]);
+			const shown = await handleRequest(makeRequest("task.show", { taskId: "task-abc", projectId: "proj-1" }));
+			expect(shown.data).not.toHaveProperty("originParent");
+		});
+
+		it("task.children lists direct children of the whole variant group across projects", async () => {
+			const project = makeProject();
+			const v1 = { ...parent, projectId: "proj-1", groupId: "g", variantIndex: 1 };
+			const v2 = makeTask({ id: "variant2-1111-2222-3333-444444444444", seq: 1801, groupId: "g", variantIndex: 2 });
+			const childA = makeTask({ id: "childA", seq: 5, status: "todo", origin: { kind: "task", taskId: v1.id, projectId: "proj-1" } });
+			const childB = makeTask({ id: "childB", projectId: "proj-2", seq: 9, origin: { kind: "task", taskId: v2.id, projectId: "proj-1" } });
+			const grandchild = makeTask({ id: "grand", projectId: "proj-2", seq: 10, origin: { kind: "task", taskId: "childB", projectId: "proj-2" } });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadProjects).mockResolvedValue([project, parentProject]);
+			vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-1" ? [v1, v2, childA] : [childB, grandchild]));
+
+			const resp = await handleRequest(makeRequest("task.children", { taskId: "seq:1801", projectId: "proj-1" }));
+			expect(resp.ok).toBe(true);
+			const result = resp.data as { parent: { seq: number }; children: Array<{ id: string; projectName: string }> };
+			expect(result.parent.seq).toBe(1801);
+			expect(result.children.map((c) => [c.id, c.projectName]).sort()).toEqual([["childA", "Test Project"], ["childB", "Coordinators"]]);
+		});
+	});
+
+	describe("epic", () => {
+		const parentProject = makeProject({ id: "proj-2", name: "Backend" });
+		const payments = { id: "epicpay1-0000-1111-2222-333333333333", name: "Payments v2", color: "#3b82f6", archived: false, createdAt: 0 };
+		const closed = { id: "epicold1-0000-1111-2222-333333333333", name: "Old effort", color: "#ef4444", archived: true, createdAt: 0 };
+
+		function wire(parentEpicId?: string) {
+			epicStore.epics = [{ ...payments }, { ...closed }];
+			const parent = makeTask({ id: "parent-0000-1111-2222-333333333333", projectId: "proj-2", seq: 7, ...(parentEpicId ? { epicId: parentEpicId } : {}) });
+			const project = makeProject();
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadProjects).mockResolvedValue([project, parentProject]);
+			vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [parent] : []));
+			vi.mocked(createTask).mockResolvedValue(makeTask({ status: "todo" }));
+			vi.mocked(getPushMessage).mockReturnValue(vi.fn());
+			return parent;
+		}
+		const created = () => vi.mocked(createTask).mock.calls[0]![0];
+
+		it("inherits the creating task's epic across projects", async () => {
+			wire(payments.id);
+			const resp = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "parent-0" }));
+			expect(resp.ok).toBe(true);
+			expect(created().epicId).toBe(payments.id);
+		});
+
+		it("does not inherit an archived epic, and still creates", async () => {
+			wire(closed.id);
+			const resp = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "parent-0" }));
+			expect(resp.ok).toBe(true);
+			expect(created()).not.toHaveProperty("epicId");
+		});
+
+		it("gives no epic outside a task context or when the creator is gone", async () => {
+			wire(payments.id);
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Mine" }));
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Orphan", sourceTaskId: "gone-123" }));
+			expect(vi.mocked(createTask).mock.calls.map((c) => c[0].epicId)).toEqual([undefined, undefined]);
+		});
+
+		it("--epic overrides inheritance by name, case-insensitively", async () => {
+			wire(undefined);
+			epicStore.epics.push({ id: "epicother-000-1111-2222-333333333333", name: "Other", color: "#14b8a6", archived: false, createdAt: 0 });
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "parent-0", epic: "other" }));
+			expect(created().epicId).toBe("epicother-000-1111-2222-333333333333");
+		});
+
+		it("--no-epic opts out of an inherited epic", async () => {
+			wire(payments.id);
+			await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Child", sourceTaskId: "parent-0", noEpic: true }));
+			expect(created()).not.toHaveProperty("epicId");
+		});
+
+		it("refuses an unknown or archived --epic with the coded error and creates nothing", async () => {
+			wire(undefined);
+			const unknown = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "X", epic: "Paymnts" }));
+			expect(unknown.error).toMatch(/^epic-ref-invalid: /);
+			const archived = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "X", epic: "Old effort" }));
+			expect(archived.error).toMatch(/^epic-ref-invalid: .*archived/);
+			const both = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "X", epic: "Payments v2", noEpic: true }));
+			expect(both.ok).toBe(false);
+			expect(createTask).not.toHaveBeenCalled();
+		});
+
+		it("lets the user and coordinators create epics, and refuses any other task", async () => {
+			const parent = wire(undefined);
+			const asUser = await handleRequest(makeRequest("epic.create", { name: "From the shell" }));
+			expect(asUser.ok).toBe(true);
+			const asAgent = await handleRequest(makeRequest("epic.create", { name: "Agent epic", sourceTaskId: "parent-0" }));
+			expect(asAgent.error).toMatch(/^epic-create-forbidden: /);
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [{ ...parent, taskType: "coordinator" }] : []));
+			const asCoordinator = await handleRequest(makeRequest("epic.create", { name: "Coordinated", sourceTaskId: "parent-0" }));
+			expect(asCoordinator.ok).toBe(true);
+			expect(epicStore.epics.map((e) => e.name)).toEqual(["Payments v2", "Old effort", "From the shell", "Coordinated"]);
+		});
+
+		it("task.update --epic changes only that task, --no-epic clears it, and children are untouched", async () => {
+			const parent = wire(undefined);
+			const child = makeTask({ id: "child-000-1111", projectId: "proj-2", seq: 8, origin: { kind: "task", taskId: parent.id, projectId: "proj-2" } });
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2" ? [parent, child] : []));
+			vi.mocked(data.updateTask).mockImplementation(async (_p, id, updates) => ({ ...(id === parent.id ? parent : child), ...updates }));
+
+			const set = await handleRequest(makeRequest("task.update", { taskId: parent.id, epic: "payments V2" }));
+			expect(set.ok).toBe(true);
+			expect((set.data as { task: { epicId?: string } }).task.epicId).toBe(payments.id);
+			const cleared = await handleRequest(makeRequest("task.update", { taskId: parent.id, noEpic: true }));
+			expect((cleared.data as { task: { epicId?: string } }).task.epicId).toBeUndefined();
+			expect(vi.mocked(data.updateTask).mock.calls.map((c) => c[1])).toEqual([parent.id, parent.id]);
+
+			const bad = await handleRequest(makeRequest("task.update", { taskId: parent.id, epic: "nope" }));
+			expect(bad.error).toMatch(/^epic-ref-invalid: /);
+		});
+
+		it("task.update refuses to put a task into an archived epic, but a member may keep it", async () => {
+			const parent = wire(undefined);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...parent, ...updates }));
+			const joined = await handleRequest(makeRequest("task.update", { taskId: parent.id, epic: "Old effort" }));
+			expect(joined.error).toMatch(/^epic-ref-invalid: .*archived/);
+			expect(data.updateTask).not.toHaveBeenCalled();
+
+			const member = wire(closed.id);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...member, ...updates }));
+			const kept = await handleRequest(makeRequest("task.update", { taskId: member.id, epic: "Old effort" }));
+			expect(kept.ok).toBe(true);
+		});
+
+		it("epic.tasks lists an epic's tasks from every project; task.show names the epic", async () => {
+			wire(payments.id);
+			const mine = makeTask({ id: "mine-0000-1111", seq: 3, status: "completed", epicId: payments.id });
+			const other = makeTask({ id: "other-000-1111", seq: 4 });
+			vi.mocked(data.loadTasks).mockImplementation(async (p) => (p.id === "proj-2"
+				? [makeTask({ id: "parent-0000-1111-2222-333333333333", projectId: "proj-2", seq: 7, epicId: payments.id })]
+				: [mine, other]));
+			const resp = await handleRequest(makeRequest("epic.tasks", { epic: "Payments v2" }));
+			const result = resp.data as { tasks: Array<{ id: string; projectName: string; status: string }> };
+			expect(result.tasks.map((t) => [t.id, t.projectName, t.status]).sort()).toEqual([
+				["mine-0000-1111", "Test Project", "completed"],
+				["parent-0000-1111-2222-333333333333", "Backend", "in-progress"],
+			].sort());
+
+			const shown = await handleRequest(makeRequest("task.show", { taskId: "mine-000", projectId: "proj-1" }));
+			expect(shown.data).toMatchObject({ epic: { id: payments.id, name: "Payments v2", archived: false } });
+			const list = await handleRequest(makeRequest("epic.list"));
+			expect((list.data as Array<{ name: string; taskCount: number }>).find((e) => e.name === "Payments v2")?.taskCount).toBe(2);
+		});
+	});
+
 	// The whole point of the flag: a task created with a type must carry the role
 	// brief in the description the agent reads, not just the badge on the card.
 	describe("--type", () => {
@@ -1875,6 +2234,13 @@ describe("task.create", () => {
 				.toBe(withPresetPrompt("Review PR 42", DEFAULT_PR_REVIEW_PROMPT));
 			// Without a customTitle every review card would be named after the preamble.
 			expect(data.updateTask).toHaveBeenCalledWith(expect.anything(), task.id, { customTitle: "Review PR 42" });
+		});
+
+		it("creates a cleanup role with its passive brief and preserves explicit scope", async () => {
+			wireCreate();
+			const resp = await handleRequest(makeRequest("task.create", { projectId: "proj-1", title: "Cleanup", description: "Audit all projects.", taskType: "board-cleanup" }));
+			expect(resp.ok).toBe(true);
+			expect(createTask).toHaveBeenCalledWith(expect.objectContaining({ taskType: "board-cleanup", description: withPresetPrompt("Audit all projects.", BOARD_CLEANUP_PROMPT) }));
 		});
 
 		it("carries a priority alongside the type", async () => {
@@ -2041,19 +2407,19 @@ describe("ui.show-image", () => {
 		expect(pushCliShowImage).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id, newCount: 1 }));
 	});
 
-	it("ui.show-video stores clips through the video path into the same history", async () => {
+	it("ui.show-media stores a video clip through the clip path into the same history", async () => {
 		const project = makeProject();
 		const existing = { id: "old", storedPath: "/wt/a.png", originalPath: "/tmp/a.png", name: "a.png", mime: "image/png", bytes: 1, createdAt: 0 };
 		const task = makeTask({ seq: 4, sharedImages: [existing] });
 		const pushFn = vi.fn();
 		wireShowImage(project, task, pushFn);
 		const imageSpy = vi.mocked(saveSharedImage);
-		const videoSpy = vi.mocked(saveSharedVideos);
+		const videoSpy = vi.mocked(saveSharedClips);
 		imageSpy.mockClear();
 		videoSpy.mockClear();
 
 		const resp = await handleRequest(
-			makeRequest("ui.show-video", { taskId: task.id, projectId: project.id, images: [{ path: "/tmp/demo.mp4", caption: "play me" }] }),
+			makeRequest("ui.show-media", { taskId: task.id, projectId: project.id, images: [{ path: "/tmp/demo.mp4", caption: "play me" }] }),
 		);
 
 		expect(resp.ok).toBe(true);
@@ -2069,6 +2435,52 @@ describe("ui.show-image", () => {
 		const { updates } = update(task);
 		expect(updates.sharedVideos?.map((v) => v.originalPath)).toEqual(["/tmp/demo.mp4"]);
 		expect("sharedImages" in updates).toBe(false);
+		expect("sharedAudio" in updates).toBe(false);
+	});
+
+	it("ui.show-media files audio in its own field, keeps captions, and labels the batch", async () => {
+		const project = makeProject();
+		const task = makeTask({ seq: 6 });
+		const pushFn = vi.fn();
+		wireShowImage(project, task, pushFn);
+
+		const resp = await handleRequest(
+			makeRequest("ui.show-media", { taskId: task.id, projectId: project.id, images: [{ path: "/tmp/voice.mp3", caption: "listen at 0:02" }] }),
+		);
+
+		expect(resp.ok).toBe(true);
+		const cliPush = pushFn.mock.calls.find((c) => c[0] === "cliShowImage");
+		expect(cliPush?.[1]).toMatchObject({ newKind: "audio", newCount: 1 });
+		expect(cliPush?.[1].images).toEqual([expect.objectContaining({ mime: "audio/mpeg", caption: "listen at 0:02" })]);
+		// Never into sharedVideos: versions that know it read any non-video entry as an image.
+		const calls = vi.mocked(data.updateTaskWith).mock.calls;
+		const update = calls[calls.length - 1]?.[2] as (t: Task) => { updates: Partial<Task> };
+		const { updates } = update(task);
+		expect(updates.sharedAudio?.map((a) => a.originalPath)).toEqual(["/tmp/voice.mp3"]);
+		expect("sharedVideos" in updates).toBe(false);
+		expect("sharedImages" in updates).toBe(false);
+	});
+
+	it("ui.show-media splits a mixed batch across both clip fields and calls it media", async () => {
+		const project = makeProject();
+		const task = makeTask({ seq: 7 });
+		const pushFn = vi.fn();
+		wireShowImage(project, task, pushFn);
+
+		await handleRequest(makeRequest("ui.show-media", { taskId: task.id, projectId: project.id, images: [{ path: "/tmp/a.mp4" }, { path: "/tmp/b.mp3" }] }));
+
+		const cliPush = pushFn.mock.calls.find((c) => c[0] === "cliShowImage");
+		expect(cliPush?.[1]).toMatchObject({ newKind: "media", newCount: 2 });
+		const calls = vi.mocked(data.updateTaskWith).mock.calls;
+		const update = calls[calls.length - 1]?.[2] as (t: Task) => { updates: Partial<Task> };
+		const { updates } = update(task);
+		expect(updates.sharedVideos?.map((v) => v.originalPath)).toEqual(["/tmp/a.mp4"]);
+		expect(updates.sharedAudio?.map((a) => a.originalPath)).toEqual(["/tmp/b.mp3"]);
+	});
+
+	it("no longer answers ui.show-video", async () => {
+		const resp = await handleRequest(makeRequest("ui.show-video", { taskId: "t", images: [{ path: "/tmp/a.mp4" }] }));
+		expect(resp.ok).toBe(false);
 	});
 
 	it("ui.show-image still labels its arrivals as images", async () => {
@@ -2938,6 +3350,19 @@ describe("task.update", () => {
 			expect(updates.description!.startsWith(DEFAULT_PR_REVIEW_PROMPT)).toBe(true);
 			expect(updates.description).not.toContain(COORDINATOR_PROMPT);
 			expect(updates.description!.endsWith("look at this branch")).toBe(true);
+		});
+
+		it("replaces a coordinator brief with cleanup and delivers the correct new brief", async () => {
+			const project = makeProject();
+			const task = makeTask({ taskType: "coordinator", description: withPresetPrompt("Audit this board.", COORDINATOR_PROMPT) });
+			vi.mocked(data.getProject).mockResolvedValue(project);
+			vi.mocked(data.loadTasks).mockResolvedValue([task]);
+			vi.mocked(data.updateTask).mockImplementation(async (_p, _id, updates) => ({ ...task, ...updates }));
+			const resp = await handleRequest(makeRequest("task.update", { taskId: task.id, projectId: project.id, taskType: "board-cleanup" }));
+			expect(resp.ok).toBe(true);
+			const updates = vi.mocked(data.updateTask).mock.calls[0]![2] as Partial<Task>;
+			expect(updates.description).toBe(withPresetPrompt("Audit this board.", BOARD_CLEANUP_PROMPT));
+			expect(vi.mocked(deliverAgentPrompt).mock.calls[0]![1]).toContain("a BOARD CLEANUP adviser");
 		});
 
 		it("says plainly when there is no session to tell", async () => {
@@ -5387,7 +5812,7 @@ describe("message.send — the sender's role travels to the envelope", () => {
 	const SENDER = "cccccccc-1111-2222-3333-444444444444";
 	const TARGET = "dddddddd-1111-2222-3333-444444444444";
 
-	function sendFrom(sender: Task) {
+	function sendFrom(sender: Task, extra: Record<string, unknown> = {}) {
 		const tasks = [sender, makeTask({ id: TARGET, seq: 2 })];
 		vi.mocked(data.loadProjects).mockResolvedValue([makeProject()]);
 		vi.mocked(data.loadVirtualProjects).mockResolvedValue([]);
@@ -5395,7 +5820,7 @@ describe("message.send — the sender's role travels to the envelope", () => {
 		vi.mocked(data.loadTasks).mockResolvedValue(tasks);
 		vi.mocked(data.getTask).mockImplementation(async (_p, id) => tasks.find((t) => t.id === id)!);
 		return handleRequest(
-			makeRequest("message.send", { subject: "merge it", taskId: TARGET, projectId: "proj-1", sourceTaskId: SENDER, text: "merge" }),
+			makeRequest("message.send", { subject: "merge it", taskId: TARGET, projectId: "proj-1", sourceTaskId: SENDER, text: "merge", ...extra }),
 		);
 	}
 
@@ -5410,5 +5835,48 @@ describe("message.send — the sender's role travels to the envelope", () => {
 		const source = vi.mocked(sendMessageImmediately).mock.calls[0]?.[3];
 		expect(source).toMatchObject({ taskId: SENDER });
 		expect(source).not.toHaveProperty("role");
+	});
+
+	it("stamps the sending agent from the pane and pid the CLI reported, so a reply reaches it", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { sourcePaneId: "%5", sourcePid: 777 });
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[3]).toMatchObject({
+			taskId: SENDER,
+			agent: { paneId: "%5", agentProcess: "909@x" },
+		});
+		expect(resp.data).not.toHaveProperty("replyUnavailable");
+	});
+
+	it("tells the sender when no agent could be proven, and the source says why", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }));
+		expect(resp.ok).toBe(true);
+		const source = vi.mocked(sendMessageImmediately).mock.calls[0]?.[3];
+		expect(source).not.toHaveProperty("agent");
+		expect(source).toMatchObject({ agentUnavailable: expect.stringContaining("not run from a task terminal pane") });
+		expect(resp.data).toMatchObject({ replyUnavailable: expect.stringContaining("not run from a task terminal pane") });
+	});
+
+	it("addresses --agent to that one agent and reports the pane and role it went to", async () => {
+		const addressed = { paneId: "%3", sessionId: null, paneToken: "gen-1", agentProcess: "303@Mon Oct 26 09:00:00 2026" };
+		vi.mocked(sendMessageImmediately).mockResolvedValueOnce({ status: "held", paneId: "%3", agentRole: "review", spilledPath: null, messageId: "m-1" });
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: encodeAgentHandle(addressed) });
+		expect(resp.ok).toBe(true);
+		expect(vi.mocked(sendMessageImmediately).mock.calls[0]?.[4]).toMatchObject({ author: addressed });
+		expect(resp.data).toMatchObject({ status: "held", paneId: "%3", agentRole: "review" });
+	});
+
+	it("refuses an old a1. handle with what to do instead, sending nothing", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: "a1.WyIlMyIsbnVsbCwiZ2VuLTEiLCIzMDNAeCJd" });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("written by an older dev3");
+		expect(resp.error).toContain("dev3 pane list --task <id>");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
+	});
+
+	it("refuses a malformed --agent handle before anything is sent", async () => {
+		const resp = await sendFrom(makeTask({ id: SENDER, seq: 1 }), { agentHandle: "%3" });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toContain("not an agent handle");
+		expect(sendMessageImmediately).not.toHaveBeenCalled();
 	});
 });

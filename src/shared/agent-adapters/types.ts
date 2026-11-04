@@ -29,6 +29,7 @@ export type HooksSpec =
 	| { kind: "codex" }
 	| { kind: "copilot" }
 	| { kind: "antigravity" }
+	| { kind: "cursor" }
 	| { kind: "omp" }
 	| { kind: "pi" };
 

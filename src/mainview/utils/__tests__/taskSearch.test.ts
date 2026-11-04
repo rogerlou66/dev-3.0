@@ -57,6 +57,10 @@ function ctx(overrides: Partial<TaskQueryContext> = {}): TaskQueryContext {
 		isHidden: false,
 		isHibernated: false,
 		isAttention: false,
+		isKeptAlive: false,
+		isStalled: false,
+		hasPr: false,
+		prState: null,
 		prNumber: null,
 		...overrides,
 	};
@@ -260,6 +264,14 @@ describe("matchesTaskQuery — facets", () => {
 		expect(matchesTaskQuery(makeTask(), "is:hidden", ctx({ isHibernated: true }))).toBe(false);
 	});
 
+	it("is:keepalive matches only a kept-alive task", () => {
+		expect(matchesTaskQuery(makeTask(), "is:keepalive", ctx({ isKeptAlive: true }))).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "is:keepalive", ctx({ isKeptAlive: false }))).toBe(false);
+		// Its own axis: never implied by another flag.
+		expect(matchesTaskQuery(makeTask(), "is:keepalive", ctx({ isHibernated: true }))).toBe(false);
+		expect(matchesTaskQuery(makeTask(), "is:hibernated", ctx({ isKeptAlive: true }))).toBe(false);
+	});
+
 	it("is:hidden matches only a task hidden from the sidebar", () => {
 		expect(matchesTaskQuery(makeTask(), "is:hidden", ctx({ isHidden: true }))).toBe(true);
 		expect(matchesTaskQuery(makeTask(), "is:hidden", ctx({ isHidden: false }))).toBe(false);
@@ -276,6 +288,33 @@ describe("matchesTaskQuery — facets", () => {
 	it("has:port matches only when the context flag is set", () => {
 		expect(matchesTaskQuery(makeTask(), "has:port", ctx({ hasPort: true }))).toBe(true);
 		expect(matchesTaskQuery(makeTask(), "has:port", ctx({ hasPort: false }))).toBe(false);
+	});
+
+	it("has:pr matches only a task with a current PR", () => {
+		expect(parseTaskQuery("has:pr").facets.has).toEqual(["pr"]);
+		expect(matchesTaskQuery(makeTask(), "has:pr", ctx({ hasPr: true }))).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "has:pr", ctx({ hasPr: false, hasPort: true }))).toBe(false);
+	});
+
+	it("is:stalled matches only a stalled task", () => {
+		expect(parseTaskQuery("is:stalled").facets.is).toEqual(["stalled"]);
+		expect(matchesTaskQuery(makeTask(), "is:stalled", ctx({ isStalled: true }))).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "is:stalled", ctx({ isStalled: false, isHibernated: true }))).toBe(false);
+	});
+
+	it.each(["open", "merged", "closed"])("pr:%s matches exactly that PR state", (state) => {
+		expect(parseTaskQuery(`pr:${state.toUpperCase()}`).facets.pr).toEqual([state]);
+		expect(matchesTaskQuery(makeTask(), `pr:${state}`, ctx({ hasPr: true, prState: state }))).toBe(true);
+		const other = state === "open" ? "merged" : "open";
+		expect(matchesTaskQuery(makeTask(), `pr:${state}`, ctx({ hasPr: true, prState: other }))).toBe(false);
+		expect(matchesTaskQuery(makeTask(), `pr:${state}`, ctx({ hasPr: true, prState: null }))).toBe(false);
+	});
+
+	it("ORs pr: states and leaves an unknown state as free text", () => {
+		expect(matchesTaskQuery(makeTask(), "pr:open pr:merged", ctx({ prState: "merged" }))).toBe(true);
+		const parsed = parseTaskQuery("pr:draft");
+		expect(parsed.facets.pr).toEqual([]);
+		expect(parsed.freeText).toBe("pr:draft");
 	});
 
 	it("priority matches the task's effective level (case-insensitive)", () => {
@@ -478,5 +517,34 @@ describe("matchesTaskQuery — type facet", () => {
 	it("counts as a facet token, not free text", () => {
 		expect(parseTaskQuery("type:coordinator login").facets.type).toEqual(["coordinator"]);
 		expect(countActiveFacetTokens("type:coordinator login")).toBe(1);
+	});
+});
+
+describe("matchesTaskQuery — epic:", () => {
+	const payments = ctx({ epic: { id: "epic1234-0000-1111", name: "Оплата v2" }, labelNames: ["Bug"], priorityValue: "p0" });
+
+	it("matches the whole epic name in any case, quoted or bare", () => {
+		expect(matchesTaskQuery(makeTask(), 'epic:"оплата V2"', payments)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "epic:Оплата", payments)).toBe(false);
+		expect(matchesTaskQuery(makeTask(), 'epic:"Оплата v2"', ctx())).toBe(false);
+	});
+
+	it("matches an id prefix of four or more characters", () => {
+		expect(matchesTaskQuery(makeTask(), "epic:epic12", payments)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), "epic:epi", payments)).toBe(false);
+	});
+
+	it("matches nothing for a value that names no epic", () => {
+		expect(matchesTaskQuery(makeTask(), "epic:Paymnts", payments)).toBe(false);
+	});
+
+	it("ANDs with the other facets", () => {
+		expect(matchesTaskQuery(makeTask(), 'epic:"Оплата v2" label:bug priority:P0', payments)).toBe(true);
+		expect(matchesTaskQuery(makeTask(), 'epic:"Оплата v2" label:docs', payments)).toBe(false);
+	});
+
+	it("serialises a multi-word epic name as one quoted token", () => {
+		expect(facetToken("epic", "Payments v2")).toBe('epic:"Payments v2"');
+		expect(parseTaskQuery('epic:"Payments v2" fix').facets.epic).toEqual(["payments v2"]);
 	});
 });

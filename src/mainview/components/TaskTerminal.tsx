@@ -547,6 +547,24 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 		}
 	}
 
+	/** The wake screen's plain shell: no agent, and the saved panes stay resumable. */
+	async function handleWakeShell() {
+		setRestarting(true);
+		setRecoverable(null);
+		setHibernated(false);
+		try {
+			const url = await api.request.wakeTaskShell({ taskId });
+			if (isNative) await fetchPaneState(taskId);
+			else setPtyUrl(url);
+		} catch (err) {
+			console.error("[TaskTerminal] Wake with a plain shell failed:", err);
+			toast.error(err instanceof Error ? err.message : String(err));
+			await classifyAndSetError();
+		} finally {
+			setRestarting(false);
+		}
+	}
+
 	async function handleStartFresh() {
 		setRestarting(true);
 		setRecoverable(null);
@@ -750,7 +768,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 								</button>
 							)}
 							<button
-								onClick={handleStartFresh}
+								onClick={hibernated ? handleWakeShell : handleStartFresh}
 								disabled={restarting}
 								className="flex-1 px-4 py-2 bg-elevated text-fg-2 rounded text-sm font-medium hover:bg-elevated-hover transition-colors disabled:opacity-50"
 							>
@@ -980,6 +998,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 								if (isFocused) consumePendingFocus(handle);
 							}}
 							onNativeStatus={makePaneNativeStatusHandler(paneId)}
+							native={isNative}
 							onSessionLost={() => markPaneGone(paneId)}
 							onFocusDirection={(direction) => handleFocusDirection(paneId, direction)}
 							touchComposeMode={touchInput && !rawMode}
@@ -1014,6 +1033,7 @@ function TaskTerminal({ projectId, taskId, tasks, projects, navigate, dispatch, 
 						consumePendingFocus(handle);
 					}}
 					onNativeStatus={focusPaneId ? makePaneNativeStatusHandler(focusPaneId) : undefined}
+					native={isNative}
 					onSessionLost={focusPaneId ? () => markPaneGone(focusPaneId) : undefined}
 					onFocusDirection={focusPaneId ? (direction) => handleFocusDirection(focusPaneId, direction) : undefined}
 					touchComposeMode={touchInput && !rawMode}

@@ -1,10 +1,9 @@
 import { createPortal } from "react-dom";
 import { cloneElement, useEffect, useMemo, useRef, useState, type Dispatch, type ReactElement, type ReactNode } from "react";
 import type { BranchStatus, Project, Task, TaskPRBadgeInfo } from "../../../shared/types";
-import { earlierPullRequests } from "../../../shared/task-pull-requests";
+import { earlierPullRequests, trustedPrStatusCache } from "../../../shared/task-pull-requests";
 import type { AppAction, Route } from "../../state";
 import { useT } from "../../i18n";
-import { api } from "../../rpc";
 import { useTaskBranchStatus } from "./useTaskBranchStatus";
 import { useViewportClamp } from "../../hooks/useViewportClamp";
 import { useReducedMotion } from "../../utils/useReducedMotion";
@@ -14,7 +13,9 @@ import type { TaskInlineDiffRequest } from "../task-inline-diff";
 import { AutoMergeIcon, BranchIcon, CommitIcon, CreatePRIcon, MergeIcon, PushIcon, RebaseIcon } from "./GitIcons";
 import { RescanIcon } from "../HeaderIcons";
 import TaskPrStatusPopover from "../TaskPrStatusPopover";
-import { inspectorPRBadge, isLivePullRequest } from "../../utils/taskPrBadge";
+import { inspectorPRBadge, isLivePullRequest, reviewedPrLink } from "../../utils/taskPrBadge";
+import ReviewedPrLink from "../ReviewedPrLink";
+import { useReviewedPrBackfill } from "../../hooks/useReviewedPrBackfill";
 import { prBadgeDisplayState, prStateTone } from "../../utils/prStateTone";
 
 export interface TaskBranchStatusMeta {
@@ -120,11 +121,10 @@ export default function TaskGitActions({
 	const branchTriggerRef = useRef<HTMLButtonElement>(null);
 	const branchMenuRef = useRef<HTMLDivElement>(null);
 	const { position: branchMenuClamped, visible: branchMenuVisible } = useViewportClamp(branchMenuRef, branchMenuPos);
-	const [pushedPRStatus, setPushedPRStatus] = useState<TaskPRBadgeInfo | null>(null);
-	const initialPrRefreshTaskRef = useRef<string | null>(null);
 	const {
 		baseBranch,
 		branchStatus,
+		prStatus: pushedPRStatus,
 		committing,
 		compareRef,
 		creatingPR,
@@ -151,50 +151,6 @@ export default function TaskGitActions({
 		isTaskActive,
 	});
 
-	// Switching tasks reuses this component instance (no `key={task.id}`), and
-	// `rpc:taskPrStatus` pushes arrive only for the task being viewed — so a
-	// status pushed while viewing the previous task would keep rendering its PR
-	// badge on the next task forever (a task without its own PR never gets an
-	// overwriting push). Clear it eagerly on every task switch.
-	useEffect(() => {
-		setPushedPRStatus(null);
-	}, [task.id]);
-
-	useEffect(() => {
-		function onPrStatus(event: Event) {
-			const detail = (event as CustomEvent).detail as {
-				projectId?: string;
-				taskId?: string;
-				prNumber: number | null;
-				prUrl: string | null;
-				autoMergeEnabled?: TaskPRBadgeInfo["autoMergeEnabled"];
-				ciStatus: TaskPRBadgeInfo["ciStatus"];
-				reviewState: TaskPRBadgeInfo["reviewState"];
-				reviewDecision?: TaskPRBadgeInfo["reviewDecision"];
-				unresolvedCount: TaskPRBadgeInfo["unresolvedCount"];
-				mergeState: TaskPRBadgeInfo["mergeState"];
-				checks: TaskPRBadgeInfo["checks"];
-				prTitle: TaskPRBadgeInfo["prTitle"];
-				isDraft: TaskPRBadgeInfo["isDraft"];
-			};
-			if (detail.projectId !== project.id || detail.taskId !== task.id || detail.prNumber == null) return;
-			setPushedPRStatus({
-				number: detail.prNumber,
-				url: detail.prUrl ?? "",
-				autoMergeEnabled: detail.autoMergeEnabled,
-				ciStatus: detail.ciStatus,
-				reviewState: detail.reviewState,
-				reviewDecision: detail.reviewDecision,
-				unresolvedCount: detail.unresolvedCount,
-				mergeState: detail.mergeState,
-				checks: detail.checks ?? [],
-				prTitle: detail.prTitle,
-				isDraft: detail.isDraft,
-			});
-		}
-		window.addEventListener("rpc:taskPrStatus", onPrStatus);
-		return () => window.removeEventListener("rpc:taskPrStatus", onPrStatus);
-	}, [project.id, task.id]);
 
 	const prInfo = useMemo<TaskPRBadgeInfo | null>(
 		() => inspectorPRBadge(task, pushedPRStatus, branchStatus),
@@ -211,20 +167,6 @@ export default function TaskGitActions({
 		});
 	}, [branchStatus, compareRef, displayRef, onBranchStatusChange, prInfo, task.id]);
 
-	// A task can be opened after the background poller's last push. Once the
-	// branch check (or sticky task fields) identifies a PR, hydrate the inspector
-	// with the same rich status without requiring the user to press Refresh.
-	useEffect(() => {
-		if (!isTaskActive || !task.worktreePath || initialPrRefreshTaskRef.current === task.id) return;
-		const prNumber = task.prNumber ?? branchStatus?.prNumber;
-		const prUrl = task.prUrl ?? branchStatus?.prUrl;
-		if (prNumber == null || !prUrl) return;
-
-		initialPrRefreshTaskRef.current = task.id;
-		void api.request.refreshTaskPrStatus({ taskId: task.id, projectId: project.id }).catch(() => {
-			if (initialPrRefreshTaskRef.current === task.id) initialPrRefreshTaskRef.current = null;
-		});
-	}, [branchStatus?.prNumber, branchStatus?.prUrl, isTaskActive, project.id, task.id, task.prNumber, task.prUrl, task.worktreePath]);
 
 	/**
 	 * Copy feedback is a toast, not a tooltip swap: the old confirmation lived
@@ -318,7 +260,9 @@ export default function TaskGitActions({
 		})
 		: undefined;
 
-	const prState = prInfo ? prBadgeDisplayState(prInfo, branchStatus, task.prStatusCache) : null;
+	const prState = prInfo ? prBadgeDisplayState(prInfo, branchStatus, trustedPrStatusCache(task)) : null;
+	const reviewedPr = reviewedPrLink(task, prInfo);
+	useReviewedPrBackfill(useMemo(() => [task], [task]));
 	const prTone = prState ? prStateTone(prState) : null;
 	const prBadge = prInfo && prTone && prState ? (
 		<TaskPrStatusPopover prInfo={prInfo} projectId={project.id} taskId={task.id} onShowUnresolved={openUnresolvedInDiff} earlierPullRequests={earlierPullRequests(task)} displayState={prState}>
@@ -549,7 +493,7 @@ export default function TaskGitActions({
 				// Circular ring spinner: radially symmetric, so animate-spin rotates it perfectly
 				// around its own center — zero wobble.
 				<span
-					className={`w-2.5 h-2.5 rounded-full border-2 border-current/30 border-t-current${reducedMotion ? "" : " animate-spin"}`}
+					className={`w-2.5 h-2.5 rounded-full border-2 border-[color-mix(in_srgb,currentColor_30%,transparent)] border-t-current${reducedMotion ? "" : " animate-spin"}`}
 				/>
 			) : (
 				icon
@@ -779,7 +723,7 @@ export default function TaskGitActions({
 					role="menuitem"
 					type="button"
 					onClick={() => copyToClipboard(item.value, item.done)}
-					className="block w-full text-left px-3 py-1.5 text-micro text-fg-2 hover:bg-elevated-hover hover:text-fg transition-colors"
+					className="block w-full text-left px-3 py-1.5 text-micro text-fg-2 hover:bg-overlay-hover hover:text-fg transition-colors"
 				>
 					{item.label}
 				</button>
@@ -798,7 +742,7 @@ export default function TaskGitActions({
 							selectCompareRef(option.value);
 							setBranchMenuOpen(false);
 						}}
-						className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-micro transition-colors hover:bg-elevated-hover ${
+						className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-micro transition-colors hover:bg-overlay-hover ${
 							displayRef === option.ref ? "text-accent font-medium" : "text-fg-2 hover:text-fg"
 						}`}
 					>
@@ -849,6 +793,7 @@ export default function TaskGitActions({
 			)}
 
 			{prBadge}
+			{reviewedPr && <ReviewedPrLink pr={reviewedPr} labelled testId="git-bar-reviewed-pr" />}
 
 			{gitActionButtons && (
 				<>

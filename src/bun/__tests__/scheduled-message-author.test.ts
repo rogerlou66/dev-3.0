@@ -1,8 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../pane-input", () => ({ pinTaskPane: vi.fn() }));
 vi.mock("../port-scanner", () => ({ collectProcessInfo: vi.fn() }));
-vi.mock("../spawn", () => ({ spawn: vi.fn() }));
+vi.mock("../agent-process-signature", () => ({ readAgentProcessSignature: vi.fn(), isSameAgentProcess: vi.fn() }));
 vi.mock("../native-task-panes", () => ({ nativeTaskPanesState: vi.fn() }));
 vi.mock("../tmux", () => ({
 	DEFAULT_TMUX_SOCKET: "dev3",
@@ -13,11 +13,19 @@ vi.mock("../tmux", () => ({
 
 import { pinTaskPane } from "../pane-input";
 import { collectProcessInfo } from "../port-scanner";
-import { spawn } from "../spawn";
+import { isSameAgentProcess, readAgentProcessSignature } from "../agent-process-signature";
 import { nativeTaskPanesState } from "../native-task-panes";
 import { tmux } from "../tmux";
-import { captureScheduledMessageAuthor, resolveScheduledMessageAuthorPane } from "../scheduled-message-author";
+import {
+	captureScheduledMessageAuthor,
+	captureSenderAgent,
+	liveAgentPaneIds,
+	readPaneAgentIdentity,
+	resolveScheduledMessageAuthorPane,
+	taskMainAgentLiveness,
+} from "../scheduled-message-author";
 import type { PaneSessionEntry, Task } from "../../shared/types";
+import { decodeAgentHandle, encodeAgentHandle } from "../../shared/agent-handle";
 
 /** A synthetic machine: processes plus the tmux panes (root pid each) on one server generation. */
 type Proc = { pid: number; ppid: number; args: string; start?: string };
@@ -64,6 +72,12 @@ function agentExits(rootPid: number): void {
 	procs.find((p) => p.pid === rootPid)!.args = "-zsh";
 }
 
+/** The agent in `rootPid` exited, then the user typed the agent's command again into the leftover shell. */
+function agentRelaunchedByHand(rootPid: number, args: string): void {
+	agentExits(rootPid);
+	procs.push({ pid: rootPid + 70, ppid: rootPid, args, start: "Mon Oct  5 11:00:00 2026" });
+}
+
 function sig(pid: number): string {
 	const p = procs.find((x) => x.pid === pid);
 	return p ? `${pid}@${(p.start ?? "Mon Oct  5 09:00:00 2026").replace(/\s+/g, " ")}` : "";
@@ -95,11 +109,9 @@ beforeEach(() => {
 		}
 		return { tree, cmdlines, resources: new Map() };
 	});
-	// `ps -p PID -o lstart=` as the real binary answers it: the start time, or exit 1.
-	vi.mocked(spawn).mockImplementation(((cmd: string[]) => {
-		const start = sig(Number(cmd[2])).split("@")[1] ?? "";
-		return { stdout: new Response(start ? `${start}\n` : "").body, exited: Promise.resolve(start ? 0 : 1) };
-	}) as never);
+	// The start signature as the real reader answers it: "" once the process is gone.
+	vi.mocked(readAgentProcessSignature).mockImplementation(async (pid) => sig(pid));
+	vi.mocked(isSameAgentProcess).mockImplementation(async (signature) => sig(Number(signature.split("@")[0])) === signature);
 	vi.mocked(nativeTaskPanesState).mockResolvedValue(null);
 });
 
@@ -153,6 +165,92 @@ describe("captureScheduledMessageAuthor — who may own a self-reminder", () => 
 	});
 });
 
+describe("liveAgentPaneIds — which panes really run an agent", () => {
+	const nativePanes = (...rows: Array<[string, number, boolean]>) =>
+		vi.mocked(nativeTaskPanesState).mockResolvedValue({
+			taskId: "task-1", layout: "", activePaneId: "pane-1",
+			panes: rows.map(([paneId, shellPid, alive]) => ({ paneId, sessionId: `s-${paneId}`, hostPid: 90, shellPid, cols: 80, rows: 24, alive })),
+		});
+	const native = (extra: Partial<Task> = {}) => task([pane("pane-1", null)], { terminalBackend: "native", ...extra } as Partial<Task>);
+
+	it("tmux: counts recorded panes that exist and run an agent, not a stale record nor a shell split", async () => {
+		expect(await liveAgentPaneIds(task([pane("%1", "conv-a"), pane("%dead", "conv-x")]))).toEqual(["%1"]);
+	});
+
+	it("tmux: a stale record beside a live shell split means no agent pane at all", async () => {
+		expect(await liveAgentPaneIds(task([pane("%dead", "conv-x")]))).toEqual([]);
+	});
+
+	it("tmux: an agent that exited into a shell no longer counts", async () => {
+		agentExits(100);
+		expect(await liveAgentPaneIds(task([pane("%1", "conv-a")]))).toEqual([]);
+	});
+
+	it("tmux: a shell running a foreground program is not an agent, alone or beside one", async () => {
+		procs.push({ pid: 600, ppid: 50, args: "-zsh" }, { pid: 601, ppid: 600, args: "tail -f /tmp/dev-server.log" });
+		panes["%6"] = 600;
+
+		expect(await liveAgentPaneIds(task([pane("%6", null)]))).toEqual([]);
+		expect(await liveAgentPaneIds(task([pane("%1", "conv-a"), pane("%6", null)]))).toEqual(["%1"]);
+	});
+
+	it("native: a split's own shell (`$SHELL`, no argv) running a program is not an agent beside a real one", async () => {
+		procs.push({ pid: 600, ppid: 50, args: "/bin/zsh" }, { pid: 601, ppid: 600, args: "bun test" });
+		nativePanes(["pane-1", 100, true], ["pane-2", 600, true]);
+		expect(await liveAgentPaneIds(native())).toEqual(["pane-1"]);
+	});
+
+	it("tmux: the agent started again by hand in the leftover shell counts", async () => {
+		agentRelaunchedByHand(100, "claude");
+		expect(await liveAgentPaneIds(task([pane("%1", "conv-a")]))).toEqual(["%1"]);
+	});
+
+	it("tmux: both recorded agents count", async () => {
+		expect(await liveAgentPaneIds(task())).toEqual(["%1", "%2"]);
+	});
+
+	it("tmux: a recorded entry with no pane id yet makes the answer unknown", async () => {
+		expect(await liveAgentPaneIds(task([pane(null, null)]))).toBeNull();
+	});
+
+	it("native: counts extra agent panes that sessionState never recorded", async () => {
+		nativePanes(["pane-1", 100, true], ["pane-2", 200, true]);
+		expect(await liveAgentPaneIds(native())).toEqual(["pane-1", "pane-2"]);
+	});
+
+	it("native: a lone agent pane need not be called pane-1, and a shell split is not an agent", async () => {
+		procs.push({ pid: 500, ppid: 50, args: "-zsh" }); // an idle shell split
+		nativePanes(["pane-1", 500, true], ["pane-3", 200, true]);
+		expect(await liveAgentPaneIds(native())).toEqual(["pane-3"]);
+	});
+
+	it("native: a dead pane is skipped", async () => {
+		nativePanes(["pane-1", 100, false], ["pane-2", 200, true]);
+		expect(await liveAgentPaneIds(native())).toEqual(["pane-2"]);
+	});
+
+	it("is unknown when the process table cannot be read", async () => {
+		vi.mocked(collectProcessInfo).mockResolvedValue({ tree: new Map(), cmdlines: new Map(), resources: new Map() });
+		expect(await liveAgentPaneIds(task())).toBeNull();
+	});
+
+	describe("on Windows, which has no process table", () => {
+		const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+		beforeEach(() => Object.defineProperty(process, "platform", { value: "win32", configurable: true }));
+		afterEach(() => { if (realPlatform) Object.defineProperty(process, "platform", realPlatform); });
+
+		it("a lone coordinator pane is the agent", async () => {
+			nativePanes(["pane-1", 100, true]);
+			expect(await liveAgentPaneIds(native())).toEqual(["pane-1"]);
+		});
+
+		it("anything more is unknown rather than guessed", async () => {
+			nativePanes(["pane-1", 100, true], ["pane-2", 200, true]);
+			expect(await liveAgentPaneIds(native())).toBeNull();
+		});
+	});
+});
+
 describe("resolveScheduledMessageAuthorPane — where the reminder may land", () => {
 	const authorOf = async (paneId: string, cli: number, t = task()) => (await captureScheduledMessageAuthor(t, paneId, cli))!;
 
@@ -192,6 +290,19 @@ describe("resolveScheduledMessageAuthorPane — where the reminder may land", ()
 		expect((await resolveScheduledMessageAuthorPane(task(), a)).ok).toBe(false);
 	});
 
+	it("refuses, never relocates, while A still runs but its pane cannot be read — even through a handle", async () => {
+		const a = decodeAgentHandle(encodeAgentHandle(await authorOf("%1", 103)))!;
+		// A's process 101 is alive; its pane left the task session. %7 runs an agent on A's conversation.
+		delete panes["%1"];
+		panes["%7"] = 700;
+		procs.push({ pid: 700, ppid: 50, args: "/opt/homebrew/bin/zsh /tmp/dev3-task-cmd.sh" }, { pid: 701, ppid: 700, args: "/Users/me/.local/bin/claude --resume conv-a" });
+		const t = task([pane("%2", "conv-b"), pane("%7", "conv-a")]);
+		expect(await resolveScheduledMessageAuthorPane(t, a)).toMatchObject({ ok: false, detail: expect.stringContaining("no longer running") });
+		// Once A's process is really gone, the same handle follows the conversation to %7, as #2062 did.
+		procs = procs.filter((p) => p.pid !== 101 && p.ppid !== 101);
+		expect(await resolveScheduledMessageAuthorPane(t, a)).toEqual({ ok: true, paneId: "%7" });
+	});
+
 	it("follows A's conversation when it was resumed into a new pane after a tmux restart", async () => {
 		const a = await authorOf("%1", 103);
 		machine();
@@ -212,6 +323,28 @@ describe("resolveScheduledMessageAuthorPane — where the reminder may land", ()
 		serverToken = "gen-2";
 		panes = { "%7": 700 };
 		procs = [{ pid: 700, ppid: 50, args: "-zsh" }];
+		expect((await resolveScheduledMessageAuthorPane(task([pane("%7", "conv-a")]), a)).ok).toBe(false);
+	});
+
+	it.each(["-zsh", "/bin/ash"])("refuses a resumed pane whose agent exited and the user now runs a dev server in its shell (%s)", async (shell) => {
+		const a = await authorOf("%1", 103);
+		serverToken = "gen-2";
+		panes = { "%7": 700 };
+		procs = [
+			{ pid: 700, ppid: 50, args: shell },
+			{ pid: 701, ppid: 700, args: "bun run dev" },
+		];
+		expect((await resolveScheduledMessageAuthorPane(task([pane("%7", "conv-a")]), a)).ok).toBe(false);
+	});
+
+	it("refuses a resumed pane whose agent exited and the user started the agent again by hand", async () => {
+		const a = await authorOf("%1", 103);
+		serverToken = "gen-2";
+		panes = { "%7": 700 };
+		procs = [
+			{ pid: 700, ppid: 50, args: "-zsh" },
+			{ pid: 701, ppid: 700, args: "claude --resume conv-a" },
+		];
 		expect((await resolveScheduledMessageAuthorPane(task([pane("%7", "conv-a")]), a)).ok).toBe(false);
 	});
 
@@ -241,5 +374,295 @@ describe("resolveScheduledMessageAuthorPane — where the reminder may land", ()
 		expect(await resolveScheduledMessageAuthorPane(native, b)).toEqual({ ok: true, paneId: "pane-2" });
 		agentExits(200);
 		expect((await resolveScheduledMessageAuthorPane(native, b)).ok).toBe(false);
+	});
+});
+
+describe("taskMainAgentLiveness — what the keep-alive watchdog may conclude", () => {
+	it("sees the main agent running", async () => {
+		expect(await taskMainAgentLiveness(task())).toBe("alive");
+	});
+
+	it("proves an exit once the launch script handed the pane to a bare shell", async () => {
+		agentExits(100);
+		expect(await taskMainAgentLiveness(task())).toBe("exited");
+	});
+
+	it("still proves the exit when the leftover shell runs a prompt helper", async () => {
+		agentExits(100);
+		procs.push({ pid: 150, ppid: 100, args: "/Users/me/.cache/gitstatus/gitstatusd-darwin-arm64 -G v1.5.4" });
+		expect(await taskMainAgentLiveness(task())).toBe("exited");
+	});
+
+	it("sees the main agent alive when the user started it again by hand in the leftover shell", async () => {
+		agentRelaunchedByHand(100, "/Users/me/.local/bin/claude --resume conv-a");
+		expect(await taskMainAgentLiveness(task())).toBe("alive");
+	});
+
+	it("is unknown, never exited, while a setup script runs ahead of the agent", async () => {
+		procs = procs.filter((p) => p.ppid !== 100);
+		procs.find((p) => p.pid === 100)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-startup.sh";
+		procs.push({ pid: 160, ppid: 100, args: "/opt/homebrew/bin/zsh /tmp/dev3-task-setup.sh" });
+		expect(await taskMainAgentLiveness(task())).toBe("unknown");
+	});
+
+	it("is unknown when `ps` fails or times out (an empty table)", async () => {
+		vi.mocked(collectProcessInfo).mockResolvedValue({ tree: new Map(), cmdlines: new Map(), resources: new Map() });
+		expect(await taskMainAgentLiveness(task())).toBe("unknown");
+	});
+
+	it("is unknown when tmux cannot pin the pane or no pane id is stored", async () => {
+		vi.mocked(pinTaskPane).mockResolvedValue({ ok: false, reason: "pane-absent", detail: "gone" } as never);
+		expect(await taskMainAgentLiveness(task())).toBe("unknown");
+		expect(await taskMainAgentLiveness(task([pane(null, "conv-a")]))).toBe("unknown");
+	});
+
+	it("is unknown on Windows, which has no `ps` to read the process table from", async () => {
+		const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		Object.defineProperty(process, "platform", { value: "win32" });
+		try {
+			agentExits(100);
+			expect(await taskMainAgentLiveness(task())).toBe("unknown");
+		} finally {
+			Object.defineProperty(process, "platform", platform);
+		}
+	});
+});
+
+/** Run `body` as if on Windows, where `pid@start` cannot be read. */
+async function onWindows(body: () => Promise<void>): Promise<void> {
+	const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		await body();
+	} finally {
+		Object.defineProperty(process, "platform", platform);
+	}
+}
+
+describe("captureSenderAgent — the sender a reply must reach, or why there is none", () => {
+	it("names the sending agent's process", async () => {
+		expect(await captureSenderAgent(task(), "%2", 203)).toEqual({
+			ok: true,
+			author: { paneId: "%2", sessionId: "conv-b", paneToken: "gen-1", agentProcess: sig(201) },
+		});
+	});
+
+	it("says no agent sent it when a human typed it in a shell split", async () => {
+		for (const cliPid of [403, 411, 421]) {
+			expect(await captureSenderAgent(task(), "%4", cliPid)).toMatchObject({ ok: false, reason: "no-agent" });
+		}
+	});
+
+	it("says no agent sent it when dev3 ran outside a task pane", async () => {
+		expect(await captureSenderAgent(task(), null, 103)).toMatchObject({
+			ok: false,
+			reason: "no-agent",
+			detail: expect.stringContaining("not run from a task terminal pane"),
+		});
+	});
+
+	it("says it cannot tell when the pane is not there", async () => {
+		delete panes["%1"];
+		expect(await captureSenderAgent(task(), "%1", 103)).toMatchObject({ ok: false, reason: "unknown" });
+	});
+
+	it("is unsupported on Windows, and says so instead of guessing", async () => {
+		await onWindows(async () => {
+			expect(await captureSenderAgent(task(), "%1", 103)).toEqual({
+				ok: false,
+				reason: "unsupported",
+				detail: "agent identity cannot be verified on Windows yet",
+			});
+		});
+		expect(collectProcessInfo).not.toHaveBeenCalled();
+	});
+});
+
+describe("readPaneAgentIdentity — the agent a pane runs now", () => {
+	it("names the agent in each agent pane, the unregistered reviewer included", async () => {
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: true, author: { paneId: "%1", agentProcess: sig(101) } });
+		expect(await readPaneAgentIdentity(task(), "%3")).toMatchObject({ ok: true, author: { paneId: "%3", sessionId: null, agentProcess: sig(301) } });
+	});
+
+	it("proves the agent exited once its pane is the bare shell the script hands over to", async () => {
+		agentExits(100);
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "no-agent", detail: expect.stringContaining("has exited") });
+	});
+
+	it("names the agent the user started again by hand in the shell the script handed over to", async () => {
+		agentRelaunchedByHand(100, "claude");
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: true, author: { paneId: "%1", agentProcess: sig(170) } });
+	});
+
+	it("names a hand-started agent run through its script runtime (`node …/codex`)", async () => {
+		const codexTask = task([{ ...pane("%1", null), agentCmd: "/usr/local/bin/codex" }]);
+		agentRelaunchedByHand(100, "node /usr/local/bin/codex resume");
+		expect(await readPaneAgentIdentity(codexTask, "%1")).toMatchObject({ ok: true, author: { agentProcess: sig(170) } });
+	});
+
+	it("still proves the exit when the leftover shell runs some other program, even one naming the agent", async () => {
+		for (const args of ["vim notes.md", "less claude", "codex"]) {
+			machine();
+			agentRelaunchedByHand(100, args);
+			expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "no-agent" });
+			expect(await taskMainAgentLiveness(task())).toBe("exited");
+		}
+	});
+
+	it("names the NEW agent after a replacement in the same pane, and the old handle is refused", async () => {
+		const before = await readPaneAgentIdentity(task(), "%2");
+		if (!before.ok) throw new Error("expected agent B to be identified");
+		agentExits(200);
+		procs.find((p) => p.pid === 200)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-cmd.sh";
+		procs.push({ pid: 250, ppid: 200, args: "/Users/me/.local/bin/claude", start: "Mon Oct  5 10:00:00 2026" });
+
+		expect(await readPaneAgentIdentity(task(), "%2")).toMatchObject({ ok: true, author: { paneId: "%2", agentProcess: sig(250) } });
+		expect(await resolveScheduledMessageAuthorPane(task(), before.author)).toMatchObject({
+			ok: false,
+			detail: expect.stringContaining("the addressed agent (pane %2"),
+		});
+	});
+
+	it("is unknown, never no-agent, while a setup script runs or when `ps` fails", async () => {
+		procs = procs.filter((p) => p.ppid !== 100);
+		procs.find((p) => p.pid === 100)!.args = "/opt/homebrew/bin/zsh /tmp/dev3-task-startup.sh";
+		expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "unknown" });
+		vi.mocked(collectProcessInfo).mockResolvedValue({ tree: new Map(), cmdlines: new Map(), resources: new Map() });
+		expect(await readPaneAgentIdentity(task(), "%2")).toMatchObject({ ok: false, reason: "unknown" });
+	});
+
+	it("is unsupported on Windows", async () => {
+		await onWindows(async () => {
+			expect(await readPaneAgentIdentity(task(), "%1")).toMatchObject({ ok: false, reason: "unsupported" });
+		});
+	});
+});
+
+describe("resolveScheduledMessageAuthorPane on Windows", () => {
+	it("refuses an agent-bound message outright rather than delivering to a pane it cannot verify", async () => {
+		const author = { paneId: "%1", sessionId: "conv-a", paneToken: "gen-1", agentProcess: sig(101) };
+		await onWindows(async () => {
+			expect(await resolveScheduledMessageAuthorPane(task(), author)).toEqual({
+				ok: false,
+				detail: "agent identity cannot be verified on Windows yet; not sent to another pane",
+			});
+		});
+	});
+});
+
+describe("a native main agent that restarts keeps its scheduled messages", () => {
+	const nativeMain = (conversation = "conv-a") => task([pane(null, conversation)], { terminalBackend: "native" } as Partial<Task>);
+	const rootAt = (shellPid: number) =>
+		vi.mocked(nativeTaskPanesState).mockResolvedValue({
+			taskId: "task-1", layout: "", activePaneId: "pane-1",
+			panes: [
+				{ paneId: "pane-1", sessionId: "native-s1", hostPid: 90, shellPid, cols: 80, rows: 24, alive: true },
+				{ paneId: "pane-2", sessionId: "native-s2", hostPid: 91, shellPid: 200, cols: 80, rows: 24, alive: true },
+			],
+		});
+	/** The terminal is stopped and started again: a new root process, the same registry session id. */
+	function restartedAgent(): void {
+		procs = procs.filter((p) => ![100, 101, 102, 103].includes(p.pid));
+		procs.push(
+			{ pid: 150, ppid: 50, args: "/opt/homebrew/bin/zsh /tmp/dev3-task-cmd.sh" },
+			{ pid: 151, ppid: 150, args: "/Users/me/.local/bin/claude --resume conv-a" },
+		);
+		rootAt(150);
+	}
+	const authorOf = async () => (await captureScheduledMessageAuthor(nativeMain(), "pane-1", 103))!;
+	beforeEach(() => rootAt(100));
+
+	it("records the conversation and the root process generation of the main agent", async () => {
+		expect(await authorOf()).toEqual({
+			paneId: "pane-1", sessionId: "conv-a", paneToken: "native-s1", agentProcess: sig(101), paneGeneration: sig(100),
+		});
+	});
+
+	it("delivers to the resumed agent of the same conversation", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toEqual({ ok: true, paneId: "pane-1" });
+	});
+
+	it("still lands in pane-1 while the original agent runs", async () => {
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), await authorOf())).toEqual({ ok: true, paneId: "pane-1" });
+	});
+
+	it("drops it once the agent exited into its shell, even with a program running there", async () => {
+		const author = await authorOf();
+		agentExits(100);
+		procs.push({ pid: 170, ppid: 100, args: "bun test" });
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toMatchObject({ ok: false });
+	});
+
+	it("drops it when the resumed agent exited too and a program runs in the shell it left", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		agentExits(150);
+		procs.push({ pid: 170, ppid: 150, args: "bun run dev" });
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toMatchObject({ ok: false });
+	});
+
+	it("drops it for a task woken as a plain shell: the parked entry is not the agent", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		const parked = task([{ ...pane(null, "conv-a"), parked: true }], { terminalBackend: "native" } as Partial<Task>);
+		expect(await resolveScheduledMessageAuthorPane(parked, author)).toMatchObject({ ok: false });
+	});
+
+	it("drops it when only the signature text differs, not the root process", async () => {
+		const author = await authorOf();
+		procs = procs.filter((p) => ![101, 102, 103].includes(p.pid));
+		procs.push({ pid: 111, ppid: 100, args: "/Users/me/.local/bin/claude --resume conv-a", start: "Mon Oct  5 11:00:00 2026" });
+		vi.mocked(readAgentProcessSignature).mockImplementation(async (pid) => (pid === 100 ? "100@Mon Oct 5 08:00:00 2026" : sig(pid)));
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toMatchObject({ ok: false });
+	});
+
+	it("reads the generation only where it is stored or compared", async () => {
+		const sender = await captureSenderAgent(nativeMain(), "pane-1", 103);
+		expect(sender.ok && sender.author).not.toHaveProperty("paneGeneration");
+		const listed = await readPaneAgentIdentity(nativeMain(), "pane-1");
+		expect(listed.ok && listed.author).not.toHaveProperty("paneGeneration");
+		const held = await readPaneAgentIdentity(nativeMain(), "pane-1", { generation: true });
+		expect(held.ok && held.author).toHaveProperty("paneGeneration", sig(100));
+	});
+
+	it("drops it after Start Fresh: another conversation runs in pane-1", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		expect(await resolveScheduledMessageAuthorPane(nativeMain("conv-b"), author)).toMatchObject({ ok: false });
+	});
+
+	it("drops a record written before the generation existed", async () => {
+		const { paneGeneration: _unused, ...legacy } = await authorOf();
+		restartedAgent();
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), legacy)).toMatchObject({ ok: false });
+	});
+
+	it("drops it when the restarted pane runs no agent yet", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		procs = procs.filter((p) => p.pid !== 151);
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toMatchObject({ ok: false });
+	});
+
+	it("never rebinds an extra pane", async () => {
+		const extra = (await captureScheduledMessageAuthor(nativeMain(), "pane-2", 203))!;
+		expect(extra).not.toHaveProperty("paneGeneration");
+		procs = procs.filter((p) => ![200, 201, 202, 203].includes(p.pid));
+		procs.push({ pid: 250, ppid: 50, args: "/opt/homebrew/bin/zsh /tmp/dev3-task-cmd.sh" }, { pid: 251, ppid: 250, args: "claude" });
+		expect(await resolveScheduledMessageAuthorPane(nativeMain(), extra)).toMatchObject({ ok: false });
+	});
+
+	it("is unsupported on Windows, before any probe", async () => {
+		const author = await authorOf();
+		restartedAgent();
+		const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		try {
+			expect(await resolveScheduledMessageAuthorPane(nativeMain(), author)).toMatchObject({ ok: false });
+		} finally {
+			Object.defineProperty(process, "platform", realPlatform);
+		}
 	});
 });

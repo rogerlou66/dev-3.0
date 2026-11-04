@@ -3,8 +3,10 @@ import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { PATHS, Utils } from "../electrobun-platform";
-import type { AgentSkillInfo, ChangelogEntry, ExternalApp, FolderEntry, FolderListing, GitInitOffer, Project, SharedArtifact, TipState } from "../../shared/types";
+import { readHostClipboardImage } from "../clipboard-image-reader";
+import type { AgentSkillInfo, AutoConfigureResult, BoardCopyOffer, ChangelogEntry, ExternalApp, FolderEntry, FolderListing, GitInitOffer, Project, SharedArtifact, TipState } from "../../shared/types";
 import { BUILTIN_OPS_BOARD_NAME, DEFAULT_EXTERNAL_APPS, STUCK_PREPARATION_FETCH_THRESHOLD_MS, extractRepoName } from "../../shared/types";
+import { parseChangelogCredits } from "../../shared/changelog-credits";
 import * as data from "../data";
 import * as git from "../git";
 import * as pty from "../pty-server";
@@ -14,6 +16,8 @@ import { consumePendingTaskNavigation as consumeTaskNavigationPending } from "..
 import type { TaskNavigationTarget } from "../../shared/types";
 import { BUNDLED_CHANGELOG } from "../changelog-bundled";
 import * as repoConfig from "../repo-config";
+import { autoConfigureProject } from "../project-autoconfig";
+import { boardCopyOfferForNewProject, restoreBoardCopy } from "../board-copy";
 import { DEV3_HOME } from "../paths";
 import { createSandboxProject } from "../sandbox-project";
 import { IGNORED_FOLDER_JUNK, initGitInPlace, probeGitInit } from "../git-init-in-place";
@@ -32,7 +36,8 @@ import { mintFileLink } from "../file-links";
 import { isFullyQualifiedPath } from "../../shared/absolute-path";
 import { cloneDirNameProblem } from "../../shared/project-registration";
 import { clipboardImageToPng } from "../clipboard-image";
-import { sharedVideoUrlPath } from "../shared-video-stream";
+import { sharedMediaUrlPath } from "../shared-media-stream";
+import { mintPreviewMediaLink } from "./terminal-paths";
 
 async function updateMenuContext(params: MenuContext): Promise<void> {
 	applyMenuContext({
@@ -304,9 +309,9 @@ function isInsideDev3Home(path: string): boolean {
 }
 
 async function addProjectImpl(
-	params: { path: string; name?: string },
+	params: { path: string; name?: string; autoConfigure?: boolean; boardCopy?: boolean },
 	opts: { offerGitInit?: boolean } = {},
-): Promise<{ ok: true; project: Project } | { ok: false; error: string; gitInit?: GitInitOffer }> {
+): Promise<{ ok: true; project: Project; autoConfigured?: AutoConfigureResult; boardCopyOffer?: BoardCopyOffer } | { ok: false; error: string; gitInit?: GitInitOffer }> {
 	log.info("→ addProject", params);
 	try {
 		// Protect the synthetic virtual-project namespace: a real git repo must
@@ -329,7 +334,13 @@ async function addProjectImpl(
 		// A renderer cannot name a project from its path: in remote mode the browser
 		// may be macOS while the repo lives on a Windows drive.
 		const name = params.name?.trim() || pathBasename(params.path);
-		const project = await data.addProject(params.path, name);
+		const added = await data.addProject(params.path, name);
+		// Read before the copy is switched on: its first write must not become the offer.
+		const boardCopyOffer = await boardCopyOfferForNewProject(added).catch((err) => {
+			log.warn("Could not read the project's board copy", { id: added.id, error: String(err) });
+			return null;
+		});
+		const project = params.boardCopy && !added.boardCopy ? await data.updateProject(added.id, { boardCopy: true }) : added;
 		try {
 			const defaultBranch = await git.getDefaultBranch(params.path);
 			await data.updateProject(project.id, { defaultBaseBranch: defaultBranch });
@@ -337,6 +348,13 @@ async function addProjectImpl(
 		} catch (err) {
 			log.warn("Could not detect default branch, keeping 'main'", { error: String(err) });
 		}
+		// Written before resolveProjectConfig so the returned project already carries it.
+		const autoConfigured = params.autoConfigure
+			? await autoConfigureProject(project).catch((err) => {
+				log.warn("Auto-configure failed, project added without it", { id: project.id, error: String(err) });
+				return { written: [], failed: true as const };
+			})
+			: undefined;
 		// The renderer keeps whatever this returns until the next getProjects, and
 		// getProjects is not polled — so a raw record left `defaultCompareRef`
 		// unresolved for the whole session and the UI invented `origin/<base>`.
@@ -344,8 +362,13 @@ async function addProjectImpl(
 			log.warn("Failed to resolve config for the new project", { id: project.id, error: String(err) });
 			return project;
 		});
-		log.info("← addProject OK", { projectId: resolved.id, name: resolved.name });
-		return { ok: true, project: resolved };
+		log.info("← addProject OK", { projectId: resolved.id, name: resolved.name, autoConfigured, boardCopyOffer: boardCopyOffer?.status });
+		return {
+			ok: true,
+			project: resolved,
+			...(autoConfigured ? { autoConfigured } : {}),
+			...(boardCopyOffer ? { boardCopyOffer } : {}),
+		};
 	} catch (err) {
 		log.error("addProject failed", { error: String(err), params });
 		return { ok: false, error: String(err) };
@@ -368,7 +391,7 @@ async function addVirtualProject(params: { name: string }): Promise<{ ok: true; 
 /** How often clone output updates are pushed to the renderer. */
 const CLONE_PROGRESS_PUSH_INTERVAL_MS = 150;
 
-async function cloneAndAddProject(params: { url: string; baseDir: string; repoName?: string; progressId?: string }): Promise<{ ok: true; project: Project } | { ok: false; error: string }> {
+async function cloneAndAddProject(params: { url: string; baseDir: string; repoName?: string; progressId?: string; autoConfigure?: boolean; boardCopy?: boolean }): Promise<{ ok: true; project: Project; autoConfigured?: AutoConfigureResult; boardCopyOffer?: BoardCopyOffer } | { ok: false; error: string }> {
 	log.info("→ cloneAndAddProject", params);
 	try {
 		const name = params.repoName || extractRepoName(params.url);
@@ -380,7 +403,7 @@ async function cloneAndAddProject(params: { url: string; baseDir: string; repoNa
 			const isRepo = await git.isGitRepo(targetDir);
 			if (isRepo) {
 				log.info("Directory already exists and is a git repo, adding as project", { targetDir });
-				return addProjectImpl({ path: targetDir, name });
+				return addProjectImpl({ path: targetDir, name, autoConfigure: params.autoConfigure, boardCopy: params.boardCopy });
 			}
 			return { ok: false, error: `Directory already exists: ${targetDir}` };
 		}
@@ -414,7 +437,7 @@ async function cloneAndAddProject(params: { url: string; baseDir: string; repoNa
 			if (progressTimer) clearInterval(progressTimer);
 		}
 
-		return addProjectImpl({ path: targetDir, name });
+		return addProjectImpl({ path: targetDir, name, autoConfigure: params.autoConfigure, boardCopy: params.boardCopy });
 	} catch (err) {
 		log.error("cloneAndAddProject failed", { error: String(err), params });
 		return { ok: false, error: String(err) };
@@ -479,8 +502,8 @@ function isEffectivelyEmpty(path: string): boolean {
  *   the renderer sends after the user confirmed. Otherwise the reply carries
  *   `gitInit` describing what would happen. The user's files are never committed.
  */
-async function initAndAddProject(params: { path: string; name?: string; initNonEmpty?: boolean }): Promise<
-	{ ok: true; project: Project; gitInit?: GitInitOffer } | { ok: false; error: string; gitInit?: GitInitOffer }
+async function initAndAddProject(params: { path: string; name?: string; initNonEmpty?: boolean; autoConfigure?: boolean; boardCopy?: boolean }): Promise<
+	{ ok: true; project: Project; gitInit?: GitInitOffer; autoConfigured?: AutoConfigureResult; boardCopyOffer?: BoardCopyOffer } | { ok: false; error: string; gitInit?: GitInitOffer }
 > {
 	log.info("→ initAndAddProject", params);
 	try {
@@ -498,7 +521,7 @@ async function initAndAddProject(params: { path: string; name?: string; initNonE
 		if (!offer) {
 			if (await git.isGitRepo(params.path)) {
 				log.info("initAndAddProject: folder is already a git repo — registering as-is");
-				return addProjectImpl({ path: params.path, name: params.name });
+				return addProjectImpl({ path: params.path, name: params.name, autoConfigure: params.autoConfigure, boardCopy: params.boardCopy });
 			}
 			return { ok: false, error: "This folder cannot be initialized: Git could not read the repository it belongs to" };
 		}
@@ -518,7 +541,7 @@ async function initAndAddProject(params: { path: string; name?: string; initNonE
 		if (!initialized.ok) return initialized;
 
 		log.info("initAndAddProject: initial commit created, registering project");
-		const added = await addProjectImpl({ path: params.path, name: params.name });
+		const added = await addProjectImpl({ path: params.path, name: params.name, autoConfigure: params.autoConfigure, boardCopy: params.boardCopy });
 		return added.ok && !silent ? { ...added, gitInit: initialized.offer } : added;
 	} catch (err) {
 		log.error("initAndAddProject failed", { error: String(err), params });
@@ -598,26 +621,13 @@ async function getChangelogs(): Promise<ChangelogEntry[]> {
 					const slug = basename.slice(dashIdx + 1);
 					const content = await Bun.file(join(dayPath, file)).text();
 
-					let suggestedBy: string | undefined;
-					let issueUrl: string | undefined;
-					let issueRef: string | undefined;
-					const creditMatch = content.match(/Suggested by @(\S+)\s+\(([^)]+)\)/);
-					if (creditMatch) {
-						suggestedBy = creditMatch[1];
-						const ref = creditMatch[2];
-						const refMatch = ref.match(/^(.+?)#(\d+)$/);
-						if (refMatch) {
-							issueRef = `#${refMatch[2]}`;
-							issueUrl = `https://github.com/${refMatch[1]}/issues/${refMatch[2]}`;
-						}
-					}
+					const { credits, content: creditFree } = parseChangelogCredits(content);
 
 					const shortMatch = content.match(/^Short:\s*(.+)$/im);
 					const short = shortMatch ? shortMatch[1].trim() : undefined;
 
-					const cleanContent = content
+					const cleanContent = creditFree
 						.replace(/^Short:\s*.+$/im, "")
-						.replace(/\n*Suggested by @\S+\s+\([^)]+\)\s*$/, "")
 						.trim();
 					const firstSentence = cleanContent.split(/\.(?:\s|$)/)[0]?.trim() ?? slug;
 					const title = firstSentence.length > 120
@@ -632,9 +642,7 @@ async function getChangelogs(): Promise<ChangelogEntry[]> {
 						title: title || slug,
 						...(body && { body }),
 						...(short && { short }),
-						...(suggestedBy && { suggestedBy }),
-						...(issueUrl && { issueUrl }),
-						...(issueRef && { issueRef }),
+						...credits,
 					});
 				}
 			}
@@ -688,17 +696,17 @@ async function saveUploadedFile(
 	return { path: fullPath };
 }
 
+/** null = no image on the clipboard; throws when there is one that cannot be saved. */
 async function pasteClipboardImage(params: { projectId: string }): Promise<{ path: string } | null> {
 	log.info("→ pasteClipboardImage", { projectId: params.projectId.slice(0, 8) });
-	const formats = Utils.clipboardAvailableFormats();
+	const { formats, image: clipboardData } = await readHostClipboardImage();
 	if (!formats.includes("image")) {
 		log.info("← pasteClipboardImage: no image in clipboard");
 		return null;
 	}
-	const clipboardData = Utils.clipboardReadImage();
 	if (!clipboardData || clipboardData.length === 0) {
 		log.warn("← pasteClipboardImage: clipboardReadImage returned empty");
-		return null;
+		throw new Error("The clipboard reports an image but it could not be read");
 	}
 	// Windows hands back raw CF_DIB bytes, not PNG — convert before saving.
 	const converted = clipboardImageToPng(clipboardData);
@@ -708,7 +716,7 @@ async function pasteClipboardImage(params: { projectId: string }): Promise<{ pat
 			len: clipboardData.length,
 			head: Array.from(clipboardData.subarray(0, 8)),
 		});
-		return null;
+		throw new Error("The clipboard image is not in a format that can be saved");
 	}
 	return saveUploadedFile(params.projectId, converted.png, { mimeType: "image/png" });
 }
@@ -767,12 +775,17 @@ async function readImageBase64(params: { path: string }): Promise<{ dataUrl: str
 	}
 }
 
-async function getSharedVideoUrl(params: { path: string }): Promise<{ url: string; path: string } | null> {
-	const path = sharedVideoUrlPath(params.path);
+async function getSharedMediaUrl(params: { path: string }): Promise<{ url: string; path: string } | null> {
+	const path = sharedMediaUrlPath(params.path);
 	if (!path) {
-		log.warn("← getSharedVideoUrl: not a stored clip, rejected");
+		log.warn("← getSharedMediaUrl: not a stored clip, rejected");
 		return null;
 	}
+	return { url: `http://127.0.0.1:${pty.getPtyPort()}${path}`, path };
+}
+
+async function getFileMediaUrl(params: { path: string }): Promise<{ url: string; path: string }> {
+	const path = await mintPreviewMediaLink(params.path);
 	return { url: `http://127.0.0.1:${pty.getPtyPort()}${path}`, path };
 }
 
@@ -1006,7 +1019,8 @@ export const appHandlers = {
 	reorderProjects,
 	listDirectory,
 	listAgentSkills,
-	addProject: (params: { path: string; name?: string }) => addProjectImpl(params, { offerGitInit: true }),
+	addProject: (params: { path: string; name?: string; autoConfigure?: boolean; boardCopy?: boolean }) => addProjectImpl(params, { offerGitInit: true }),
+	restoreBoardCopy: (params: { projectId: string }) => restoreBoardCopy(params.projectId),
 	createSandboxProject,
 	addVirtualProject,
 	cloneAndAddProject,
@@ -1019,7 +1033,8 @@ export const appHandlers = {
 	uploadFileBase64,
 	uploadImageBase64,
 	readImageBase64,
-	getSharedVideoUrl,
+	getSharedMediaUrl,
+	getFileMediaUrl,
 	readArtifactContent,
 	readArtifactDownload,
 	createArtifactDownload,

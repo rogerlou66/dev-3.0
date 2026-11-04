@@ -4,6 +4,7 @@ import { writeClaudeHooks, writeCodexHooks } from "../../shared/agent-hooks";
 import { writeOmpStatusExtension } from "../../shared/omp-status-extension";
 import { writePiStatusExtension } from "../../shared/pi-status-extension";
 import { resolveDev3Home } from "../../shared/dev3-home";
+import { removeCursorUsageHooks, writeCursorUsageHooks } from "../../bun/cursor-usage-hooks";
 
 const WORKTREES_DIR = `${resolveDev3Home()}/worktrees`;
 
@@ -28,7 +29,14 @@ function detectWorktreePath(cwd: string): string | null {
 	return null;
 }
 
-export async function handleInstallHooks(): Promise<void> {
+export async function handleRemoveCursorUsageHooks(home?: string): Promise<void> {
+	const result = await removeCursorUsageHooks(home);
+	const action = result.status === "removed" ? "Removed" : result.status === "skipped" ? "Skipped" : "No installed";
+	process.stdout.write(`${action} Cursor usage hooks → ${result.path}${result.reason ? ` (${result.reason})` : ""}\n`);
+}
+
+export async function handleInstallHooks(options: { removeCursor?: boolean } = {}): Promise<void> {
+	if (options.removeCursor) return handleRemoveCursorUsageHooks();
 	const worktreePath = detectWorktreePath(process.cwd());
 	if (!worktreePath) {
 		exitError("Cannot detect worktree path", "Run this command from inside a dev-3.0 worktree.");
@@ -41,9 +49,11 @@ export async function handleInstallHooks(): Promise<void> {
 	const codexSymlink = writeCodexHooks(worktreePath);
 	const ompExtensionPath = writeOmpStatusExtension();
 	const piExtensionPath = writePiStatusExtension();
+	const cursorUsageHooks = await writeCursorUsageHooks();
 	for (const link of [claudeSymlink, codexSymlink]) {
 		if (link) process.stderr.write(`Warning: ${link} is a symlink; dev3 does not write through it, so the hooks under it were not installed.\n`);
 	}
+	process.stdout.write(`${cursorUsageHooks.status === "skipped" ? "Skipped" : "Installed"} Cursor usage hooks → ${cursorUsageHooks.path}${cursorUsageHooks.reason ? ` (${cursorUsageHooks.reason})` : ""}\n`);
 
 	if (claudeSymlink) {
 		process.stdout.write(`Skipped Claude Code hooks → ${claudeSettingsPath} (symlink)\n`);

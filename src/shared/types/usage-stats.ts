@@ -12,6 +12,8 @@ export interface ProductivityStatEvent {
 	blocked?: boolean;
 	blockedAt?: string | null;
 	taskId: string;
+	/** Per-project sequential id, as `dev3 task show <seq>` takes it. */
+	seq: number;
 	projectId: string;
 	projectName: string;
 	projectKind: "git" | "virtual";
@@ -63,11 +65,11 @@ export interface ProductivityStats {
 // ---- Agent usage (tokens & cost) ----
 
 /** Which coding agent a usage row was parsed from. */
-export type AgentUsageSource = "claude" | "codex";
+export type AgentUsageSource = "claude" | "codex" | "gemini" | "cursor" | "copilot" | "opencode" | "pi" | "omp";
 
 /**
  * One agent's token usage for a single local calendar day, as reconstructed from
- * on-disk agent state (Claude transcripts / Codex rollouts). No API calls.
+ * on-disk agent state or content-free usage hooks.
  * The renderer buckets these client-side per the selected dashboard range.
  */
 export interface AgentUsageDay {
@@ -92,4 +94,58 @@ export interface AgentUsageReport {
 	generatedAt: string;
 	/** True if some parsed usage referenced a model with no known price (costUsd is a lower bound). */
 	hasUnpricedModels: boolean;
+	/** Every raw model id seen in the retained usage, distinct and sorted. */
+	models: string[];
+}
+
+/** Token and cost totals for one task, or one model within it. */
+export interface TaskUsageTotals {
+	/** Assistant responses carrying usage, after deduplicating streaming snapshots. */
+	messages: number;
+	inputTokens: number;
+	outputTokens: number;
+	/** Every cache write. Codex reports no TTL, so its writes land here and in neither split. */
+	cacheWriteTokens: number;
+	/** The part of `cacheWriteTokens` the agent marked 5-minute / 1-hour (Claude). */
+	cacheWrite5mTokens: number;
+	cacheWrite1hTokens: number;
+	cacheReadTokens: number;
+	/** API-equivalent cost in USD, priced exactly as `AgentUsageReport` prices a record. */
+	costUsd: number;
+	/** False when a model had no known price, so `costUsd` is a lower bound. */
+	fullyPriced: boolean;
+}
+
+/** One task's agent usage, from the Claude/Codex transcripts of its working directory. */
+export interface TaskUsageReport {
+	taskId: string;
+	projectId: string;
+	seq: number;
+	title: string;
+	status: string;
+	/** Where the task ran; transcripts are keyed by it, so they outlive the worktree. */
+	workingDir: string;
+	worktreeExists: boolean;
+	totals: TaskUsageTotals;
+	models: Array<TaskUsageTotals & { model: string }>;
+	coverage: {
+		/** Native transcript files read, subagent transcripts included. */
+		transcriptFiles: number;
+		subagentTranscriptFiles: number;
+		/** Of those, files outside the task's folder that a pane resumed into it; only their
+		 *  records inside the task's lifetime count. */
+		resumedTranscriptFiles: number;
+		/** Sessions dev3 archived at completion whose transcript is gone (agent retention):
+		 *  NOT counted, so above zero the totals are a lower bound. */
+		uncoveredArchivedSessions: number;
+		/** Archived sessions of agents this report does not read (Cursor, …): never counted. */
+		unsupportedArchivedSessions: number;
+		/** An Operations task on a user-chosen folder: only records inside the task's lifetime
+		 *  count, which can still include other work run there at the same time. */
+		sharedWorkingDir: boolean;
+		sources: AgentUsageSource[];
+		/** ISO time of the first and last usage record seen, null when none. */
+		firstAt: string | null;
+		lastAt: string | null;
+	};
 }

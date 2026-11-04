@@ -13,7 +13,7 @@ import { sortTasksForColumn } from "./sortTasks";
 import { canBlockTask, effectiveTaskColumn, isTaskBlocked, type TaskBoardColumn } from "../../shared/task-blocking";
 import { setTaskBlocked } from "../utils/setTaskBlocked";
 import { matchesTaskQuery } from "../utils/taskSearch";
-import { isAttentionTask, isTaskNotRunning, taskStatusValues, taskTypeValue } from "../utils/taskFacets";
+import { isAttentionTask, isTaskNotRunning, isTaskStalled, taskPrState, taskStatusValues, taskTypeValue } from "../utils/taskFacets";
 import HelpSpot from "./HelpSpot";
 import TaskCard from "./TaskCard";
 import PriorityBadge from "./PriorityBadge";
@@ -143,6 +143,11 @@ function WorkspaceBoard({ projects, query, dispatch, navigate, bellCounts, onOpe
 			statusValues: isTaskBlocked(task) ? ["blocked", t("task.blocked")] : taskStatusValues(task, project.customColumns?.find((column) => column.id === task.customColumnId), t(statusKey(task.status))),
 			taskType: taskTypeValue(task),
 			isHibernated: isTaskNotRunning(task),
+			isKeptAlive: task.keepAlive?.enabled === true,
+			isStalled: isTaskStalled(task, Date.now()),
+			hasPr: task.prNumber != null,
+			prState: taskPrState(task, task.prNumber ?? null, null),
+			prNumber: task.prNumber ?? null,
 			priorityValue: task.priority?.toLowerCase() ?? "p3", hasPort: false, isHidden: task.hidden === true, isAttention: isAttentionTask(task), spaceNames: null,
 		});
 	}
